@@ -1,0 +1,12 @@
+{
+  "name": "anda-brain-worker-test",
+  "main": "../src/index.ts",
+  "compatibility_date": "2026-08-08",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [{ "name": "BRAIN", "class_name": "AndaBrain" }]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["AndaBrain"] }
+  ]
+}

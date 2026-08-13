@@ -32,6 +32,8 @@ private_key*
 .claude/
 .vscode/
 node_modules/
+.pnpm-store/
+.dev.vars
 dist/
 anda-brain-demo
 claw

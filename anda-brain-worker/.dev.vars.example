@@ -1,0 +1,5 @@
+# Leave unset to disable authentication during local development.
+BRAIN_API_KEY=replace-me
+
+# Optional; defaults to the model configured in wrangler.jsonc.
+AI_MODEL=@cf/meta/llama-3.3-70b-instruct-fp8-fast

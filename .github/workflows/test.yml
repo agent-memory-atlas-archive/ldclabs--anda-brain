@@ -81,3 +81,19 @@ jobs:
         run: pnpm -C anda-brain-openclaw run lint
       - name: Build
         run: pnpm -C anda-brain-openclaw run build
+  test-worker:
+    name: Test anda-brain-worker (TypeScript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Check
+        run: pnpm --filter @ldclabs/anda-brain-worker check

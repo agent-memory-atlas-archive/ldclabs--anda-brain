@@ -225,6 +225,8 @@ Anda Brain 是[开源软件](https://github.com/ldclabs/anda-brain)，面向**�
 
 > **注意：** 云端 SaaS 服务（`brain.anda.ai`）及其控制台（`anda.ai/brain`）已停止运营，请自行部署服务——只需几分钟。
 
+如果需要更轻量的边缘部署，可使用 [anda-brain-worker](./anda-brain-worker/README.md)：它在 Cloudflare Workers 上保留 Formation、Recall、Maintenance 与 KIP，并为每个记忆空间分配一个 SQLite Durable Object。
+
 👉 **[Anda Brain 快速开始](https://github.com/ldclabs/anda-brain/blob/main/deploy/quick_start_cn.md)**：提供一条从 0 到部署可用的最小流程。
 
 三步上手：

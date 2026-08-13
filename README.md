@@ -227,6 +227,8 @@ Anda Brain is [open-source software](https://github.com/ldclabs/anda-brain), des
 
 > **Note:** The hosted cloud service (`brain.anda.ai`) and its console (`anda.ai/brain`) have been discontinued. Deploy your own instance instead — it only takes a few minutes.
 
+For a smaller edge-native deployment, see [anda-brain-worker](./anda-brain-worker/README.md): it keeps Formation, Recall, Maintenance, and KIP on Cloudflare Workers using one SQLite Durable Object per memory space.
+
 👉 **[Anda Brain Quick Start](https://github.com/ldclabs/anda-brain/blob/main/deploy/quick_start.md)**: Provides a minimal viable deployment guide from 0 to 1.
 
 Get started in 3 steps:
