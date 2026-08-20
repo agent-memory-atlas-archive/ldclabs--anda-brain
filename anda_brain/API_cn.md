@@ -299,7 +299,7 @@ export interface WikiEventInfo {
 export interface WikiDigestReport {
   digested: number; // 本轮蒸馏进图谱的版本数
   facts: number; // 写入的命题数（metadata 携带 wiki:// 引用）
-  superseded: number; // 被标记 superseded 的旧命题数
+  superseded: number; // 因文档不再陈述而被 digest 撤回（retract）的断言数
   skipped: number;
   citations_checked: number; // 蒸馏后引用抽检
   citations_invalid: number;
@@ -472,27 +472,47 @@ export interface ServiceInfo {
   description: string;
 }
 
-export type KipCommandItem = string | { command: string; parameters: Record<string, unknown> };
+export type KipOperation = string | { op_id?: string; command: string; parameters?: Record<string, unknown> };
 
 export interface KipRequest {
-  commands: KipCommandItem[];
-  parameters?: Record<string, unknown>;
-  dry_run?: boolean; // if true, the request will be parsed and validated but not executed (no side effects)
+  command?: string; // 单条命令；与 `operations` 互斥
+  operations?: KipOperation[]; // 一次往返执行多条命令
+  read?: { snapshot_token?: string }; // 把所有操作绑定到同一读取坐标
+  parameters?: Record<string, unknown>; // 绑定到命令中 `:placeholder` 的值
+  dry_run?: boolean; // 仅校验与规划，不提交
 }
 
 export interface KipError {
-  code: string;
+  code: string; // 注册表名称，如 "NotFoundOrNotVisible"，不再是数字码
   message: string;
+  category?: string;
   hint?: string;
-  data?: unknown;
+  retry?: { class: string; after_ms?: number };
+  details?: unknown;
+}
+
+export interface KipOperationResult<T> {
+  op_id?: string;
+  status: 'succeeded' | 'failed' | 'skipped' | 'rolled_back' | 'no_effect';
+  result?: T;
+  error?: KipError;
+  warnings?: unknown[];
+  next_cursor?: string;
 }
 
 export interface KipResponse<T> {
-  result?: T;
-  error?: KipError;
-  next_cursor?: string;
+  kip: '2.0';
+  status: 'succeeded' | 'failed' | 'partial' | 'outcome_unknown';
+  results: KipOperationResult<T>[];
+  snapshot?: { seq?: number; token?: string };
+  warnings?: unknown[];
+  error?: KipError; // 仅当请求在进入 operations 之前就失败时才设置
 }
 ```
+
+> **KIP 2.0。** 普通错误在 operation 层，信封错误才在请求层，客户端两处都要读。
+> `outcome_unknown` 既不是成功也不是失败：写入可能已经提交，正确做法是按幂等键
+> 查事务，而不是当作没发生过重发一次。
 
 ---
 
@@ -583,8 +603,9 @@ MCP_AUTH_TOKEN="$SPACE_TOKEN" \
 
 - 作用：执行 KIP 请求（只读模式，适用于查询）
 - 鉴权：SpaceToken/CWT `read`（公开空间免鉴权，私有空间需有效 token）
-- 请求体：`KipRequest`
-- 响应：`KipResponse<T>`（根据请求中的命令不同，返回不同的结果类型）
+- 请求体：`KipRequest`，或直接一个 JSON 字符串（按单条命令解析）
+- 响应：`KipResponse<T>`（结果类型随命令而定）
+- 只读由命令**解析出的语义**决定：无论请求怎么标注，KML 变更都会在这里被拒绝
 
 ### POST `/v1/{space_id}/get_or_init_user`
 
@@ -719,7 +740,7 @@ Wiki 专属错误语义：`409` 提交冲突（`error.data.current_version` 为�
 
 ### POST `/v1/{space_id}/wiki/digest`
 
-- 作用：把待处理 wiki 版本蒸馏进 Cognitive Nexus（命题 metadata 携带 `wiki://` 引用）；新版本不再断言的旧命题被标记 superseded（需先 `update_space {"wiki_digest": true}` 开启）
+- 作用：把待处理 wiki 版本蒸馏进 Cognitive Nexus（每条事实写成 Proposition + 归属于 Brain 的 Assertion，并引用对应段落作为 Evidence）；新版本不再陈述的事实，digest 撤回它自己的 Assertion——Proposition 与他人的 Assertion 不受影响（需先 `update_space {"wiki_digest": true}` 开启）
 - 鉴权：SpaceToken/CWT `write`
 - 响应：`RpcResponse<WikiDigestReport>`
 

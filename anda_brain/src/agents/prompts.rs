@@ -10,9 +10,30 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock, RwLock};
 
 /// Compiled-in default prompts.
+///
+/// Each is one mode's policy and this deployment's contract — the KIP language
+/// itself is not in here. `anda_kip` ships the syntax card and the Cognitive
+/// Memory Profile alongside the protocol they describe, and
+/// [`language_reference`] puts them in the model's context at completion time.
+/// KIP 1.x taught the language from a copy pasted into each of these files;
+/// three hand-maintained copies of a protocol drift, and the one that drifts
+/// silently is the one a model then writes against.
 pub const FORMATION_DEFAULT: &str = include_str!("../../assets/BrainFormation.md");
 pub const RECALL_DEFAULT: &str = include_str!("../../assets/BrainRecall.md");
 pub const MAINTENANCE_DEFAULT: &str = include_str!("../../assets/BrainMaintenance.md");
+
+/// The KIP 2.0 language and memory ontology every mode prompt assumes is
+/// loaded, straight from the crate that implements them.
+pub fn language_reference() -> &'static str {
+    static REFERENCE: OnceLock<String> = OnceLock::new();
+    REFERENCE.get_or_init(|| {
+        format!(
+            "{}\n\n---\n\n{}",
+            anda_kip::KIP_SYNTAX,
+            anda_kip::COGNITIVE_MEMORY_PROFILE
+        )
+    })
+}
 
 /// Which agent prompt an override or optimizer edit targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]

@@ -205,6 +205,10 @@ pub struct GetOrInitUserToolInput {
     pub name: Option<String>,
 }
 
+/// One entry of [`ExecuteKipReadonlyInput::commands`].
+///
+/// A bare string or a command with its own parameter bindings, so a caller
+/// batching three reads does not have to spell out three objects to do it.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum McpKipCommandItem {
@@ -216,17 +220,14 @@ pub enum McpKipCommandItem {
     },
 }
 
-impl From<McpKipCommandItem> for anda_kip::CommandItem {
+impl From<McpKipCommandItem> for anda_kip::Operation {
     fn from(command: McpKipCommandItem) -> Self {
         match command {
-            McpKipCommandItem::Simple(command) => Self::Simple(command),
+            McpKipCommandItem::Simple(command) => anda_kip::Operation::new(command),
             McpKipCommandItem::WithParams {
                 command,
                 parameters,
-            } => Self::WithParams(anda_kip::ParameterizedCommand {
-                command,
-                parameters,
-            }),
+            } => anda_kip::Operation::new(command).with_parameters(parameters),
         }
     }
 }
@@ -248,19 +249,43 @@ pub struct ExecuteKipReadonlyInput {
 
 impl ExecuteKipReadonlyInput {
     fn into_request(self) -> Result<anda_kip::Request, ErrorData> {
-        if self.command.is_some() && !self.commands.is_empty() {
-            return Err(ErrorData::invalid_params(
-                "pass either command or commands, not both",
-                None,
-            ));
-        }
+        let operations: Vec<anda_kip::Operation> = match (self.command, self.commands) {
+            (Some(command), commands) if commands.is_empty() => {
+                vec![anda_kip::Operation::new(command)]
+            }
+            (None, commands) if !commands.is_empty() => {
+                commands.into_iter().map(Into::into).collect()
+            }
+            (Some(_), _) => {
+                return Err(ErrorData::invalid_params(
+                    "pass either command or commands, not both",
+                    None,
+                ));
+            }
+            (None, _) => {
+                return Err(ErrorData::invalid_params(
+                    "pass a command or a commands batch",
+                    None,
+                ));
+            }
+        };
+
+        // A KIP 2.0 request with more than one operation must say how they
+        // relate; these are reads, so they are independent of each other.
+        // There is no `readonly` flag to set: the read-only path decides by
+        // what each command parses to, which no envelope field can talk past.
+        let execution = (operations.len() > 1)
+            .then(|| anda_kip::Execution::new(anda_kip::ExecutionMode::Independent));
 
         Ok(anda_kip::Request {
-            command: self.command.unwrap_or_default(),
-            commands: self.commands.into_iter().map(Into::into).collect(),
-            parameters: self.parameters,
-            dry_run: self.dry_run,
-            readonly: true,
+            operations,
+            execution,
+            parameters: (!self.parameters.is_empty()).then_some(self.parameters),
+            options: self.dry_run.then(|| anda_kip::RequestOptions {
+                dry_run: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
         })
     }
 }

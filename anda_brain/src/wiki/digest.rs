@@ -2,15 +2,24 @@
 //! (PRD §7.3), the graph half of the "graph understands, wiki proves" story.
 //!
 //! Provenance-by-construction: the LLM only proposes structured facts
-//! (subject/predicate/object + section anchor); this module renders the KIP
-//! KML itself, attaching `source/citation/checksum/extractor/confidence`
-//! metadata to every proposition. A prompt can forget provenance — a
-//! renderer cannot. Superseding works the same way: when a new version is
-//! digested, facts the new extraction no longer asserts get their
-//! propositions marked `superseded` (graph maintenance owns any deeper
-//! contradiction resolution). Every digest is recorded as a
-//! `DigestExtracted` wiki event whose fact list doubles as the citation
-//! sample for verification.
+//! (subject/predicate/object + section anchor); this module builds the KIP
+//! itself, minting one Evidence per cited passage and attributing every claim
+//! to the brain's own semantic self with `mode: "inferred"`. A prompt can
+//! forget provenance — a builder cannot.
+//!
+//! Three things KIP 2.0 changed here. Extracted vocabulary can no longer be
+//! registered by the write: `$ConceptType` / `$PropositionType` nodes are gone,
+//! and the symbols a document introduces enter through a host-published Schema
+//! Package instead ([`super::vocabulary`]). A fact is now a truth-neutral
+//! Proposition plus the digest's Assertion about it, so the confidence lives on
+//! the stance rather than on the link. And when a new version drops a fact, the
+//! digest **retracts its own Assertion** rather than flagging the Proposition
+//! superseded — the document stopped saying it, which is a withdrawal, not a
+//! claim that the world changed. The Proposition and every other actor's
+//! Assertion about it survive untouched.
+//!
+//! Every digest is still recorded as a `DigestExtracted` wiki event whose fact
+//! list doubles as the citation sample for verification.
 
 use anda_core::{BoxError, CompletionFeatures, CompletionRequest, Usage};
 use anda_db::{
@@ -18,7 +27,7 @@ use anda_db::{
     schema::Json,
 };
 use anda_engine::{context::AgentCtx, memory::MemoryManagement, model::Models};
-use anda_kip::{parse_kml, parse_kql};
+use anda_kip::Request;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
@@ -34,6 +43,14 @@ use super::{
     WikiDocRecord, WikiError, WikiService, WikiVerifyInput, WikiVerifyStatus, WikiVersionRecord,
     chunk::chunk_checksum, citation_uri,
 };
+use crate::{kip, vocabulary::MemoryVocabulary};
+
+/// The `key` of the Person Concept the brain speaks as.
+///
+/// A digest claim is the brain's reading of a document, so it is attributed to
+/// the brain's semantic self — which is cognition, and grants the brain nothing
+/// it did not already have from Governance.
+const SELF_ACTOR_KEY: &str = "$self";
 
 /// Extractor fingerprint prefix written into proposition metadata; bump on
 /// prompt or renderer changes so maintenance can bulk-invalidate old
@@ -539,36 +556,71 @@ impl WikiDigest {
         };
         let extraction = self.extract(ctx, &doc, version, &chunks, report).await?;
         let extractor = self.extractor();
-        let (facts, alive) =
+        let (mut facts, alive) =
             normalize_facts(&self.wiki.space_id, &doc, version, &chunks, &extraction);
 
+        // What the previous digest of this document recorded. A fact in both
+        // is one this reader already claims: re-asserting it would put a second
+        // active Assertion by the same actor on the same Proposition, and two
+        // copies of one belief read as corroboration to a Projection. Repetition
+        // is not evidence — re-reading the same sentence in a new revision is
+        // the same observation, not a second one. `facts` stays the whole
+        // current set, because that is what the ledger event means by "what
+        // this document says"; only the write is narrowed.
+        let previous = self.previous_digest_facts(doc._id, version._id).await?;
+        let previously_claimed: BTreeSet<TripleKey> =
+            previous.iter().map(DigestedFact::triple_key).collect();
+        let mut to_assert: Vec<DigestedFact> = facts
+            .iter()
+            .filter(|fact| !previously_claimed.contains(&fact.triple_key()))
+            .cloned()
+            .collect();
+
         let mut proposition_ids: Vec<String> = Vec::new();
-        if !facts.is_empty() {
-            let kml = render_digest_kml(
-                &self.wiki.space_id,
-                &doc,
-                version,
-                &extraction,
-                &facts,
-                &extractor,
-            );
-            let response = self
-                .memory
-                .nexus()
-                .execute_kml(parse_kml(&kml)?, false)
-                .await?;
-            proposition_ids = response
-                .get("upsert_proposition_links")
-                .and_then(|v| v.as_array())
-                .map(|ids| {
-                    ids.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
+        if !to_assert.is_empty() {
+            // The Space's Schema Environment has to declare every symbol this
+            // extraction uses before the write can name one. Facts needing a
+            // symbol the vocabulary refused (it is at its cap) are dropped
+            // here rather than failing the whole document.
+            let known = self.ensure_vocabulary(&to_assert).await?;
+            to_assert.retain(|fact| {
+                known.covers(
+                    [fact.subject_type.as_str(), fact.object_type.as_str()],
+                    [fact.predicate.as_str()],
+                )
+            });
+            let unknown: BTreeSet<TripleKey> =
+                to_assert.iter().map(DigestedFact::triple_key).collect();
+            facts.retain(|fact| {
+                previously_claimed.contains(&fact.triple_key())
+                    || unknown.contains(&fact.triple_key())
+            });
+        }
+        if !to_assert.is_empty() {
+            let request =
+                digest_request(&doc, version, &extraction, &to_assert, &extractor, now_ms);
+            let response = anda_kip::execute_request(self.memory.nexus().as_ref(), &request).await;
+            if !kip::succeeded(&response) {
+                return Err(format!(
+                    "wiki digest write failed: {}",
+                    kip::error_message(&response)
+                )
+                .into());
+            }
+            proposition_ids = kip::ok_result(&response)
+                .and_then(|result| result.get("handles"))
+                .and_then(Json::as_object)
+                .map(|handles| {
+                    handles
+                        .iter()
+                        .filter(|(handle, _)| handle.starts_with("p"))
+                        .filter_map(|(_, id)| id.as_str().map(str::to_string))
                         .collect()
                 })
                 .unwrap_or_default();
         }
 
-        let superseded = self.supersede_stale(&doc, version, &alive, now_ms).await?;
+        let superseded = self.retract_facts(doc._id, &previous, &alive).await;
 
         self.wiki
             .write_event(
@@ -681,30 +733,6 @@ impl WikiDigest {
         unreachable!("extract_batch loops at most twice")
     }
 
-    /// Marks propositions asserted by this document's previous digest but
-    /// absent from the new one as superseded. Per-fact capsules keep one
-    /// missing endpoint (e.g. merged away by maintenance) from aborting the
-    /// rest. `alive` covers every valid extracted triple (not just the
-    /// persisted, capped prefix) so a large document never mis-supersedes
-    /// facts that were merely truncated away.
-    async fn supersede_stale(
-        &self,
-        doc: &WikiDocRecord,
-        version: &WikiVersionRecord,
-        alive: &BTreeSet<TripleKey>,
-        _now_ms: u64,
-    ) -> Result<usize, BoxError> {
-        let previous = self.previous_digest_facts(doc._id, version._id).await?;
-        if previous.is_empty() {
-            return Ok(0);
-        }
-        let superseded_by =
-            citation_uri(&self.wiki.space_id, doc._id, version._id, 0, version.size);
-        Ok(self
-            .supersede_facts(doc._id, &previous, alive, &superseded_by)
-            .await)
-    }
-
     /// Retracts the document's newest digest at or before `version`: every
     /// fact it recorded is marked superseded, and an empty `retracted`
     /// ledger entry becomes the document's digest head so later supersede
@@ -728,10 +756,8 @@ impl WikiDigest {
         if previous.is_empty() {
             return Ok(0);
         }
-        let superseded_by =
-            citation_uri(&self.wiki.space_id, doc._id, version._id, 0, version.size);
         let superseded = self
-            .supersede_facts(doc._id, &previous, &BTreeSet::new(), &superseded_by)
+            .retract_facts(doc._id, &previous, &BTreeSet::new())
             .await;
         self.wiki
             .write_event(
@@ -757,72 +783,80 @@ impl WikiDigest {
         Ok(superseded)
     }
 
-    /// Marks each fact's proposition superseded unless its triple is in
-    /// `alive`. Per-fact capsules keep one missing endpoint (e.g. merged
-    /// away by maintenance) from aborting the rest.
-    async fn supersede_facts(
+    /// Withdraws the digest's own claim about each fact not in `alive`.
+    ///
+    /// KIP 1.x flagged the Proposition `superseded`. That said the wrong thing
+    /// twice: a Proposition is truth-neutral and carries no stance to withdraw,
+    /// and the flag spoke for every actor rather than for the digest. What
+    /// actually happened is that this document stopped saying it — so the
+    /// digest retracts its own Assertion, leaving the Proposition and anyone
+    /// else's Assertions about it untouched. A retraction that finds nothing is
+    /// a no-op, so a Concept maintenance merged or archived in the meantime
+    /// costs one harmless statement instead of resurrecting anything.
+    ///
+    /// One statement per fact: a missing endpoint must not abort the rest.
+    async fn retract_facts(
         &self,
         doc_id: u64,
         facts: &[DigestedFact],
         alive: &BTreeSet<TripleKey>,
-        superseded_by: &str,
     ) -> usize {
-        let mut superseded = 0usize;
+        let mut retracted = 0usize;
         for fact in facts {
             if alive.contains(&fact.triple_key()) {
                 continue;
             }
-            // Graph maintenance may have metabolized the proposition away; a
-            // supersede UPSERT would then resurrect it as a tombstone. Only
-            // touch propositions that still exist.
-            if !self.proposition_exists(fact).await {
-                continue;
-            }
-            let kml = render_supersede_kml(fact, superseded_by);
-            match parse_kml(&kml) {
-                Ok(cmd) => match self.memory.nexus().execute_kml(cmd, false).await {
-                    Ok(_) => superseded += 1,
-                    Err(err) => {
-                        log::warn!(
-                            target: "brain",
-                            doc_id = doc_id;
-                            "supersede skipped for {:?}: {err:?}",
-                            fact.predicate
-                        );
-                    }
-                },
-                Err(err) => {
-                    log::warn!(target: "brain", doc_id = doc_id; "supersede kml parse failed: {err:?}");
-                }
+            let response =
+                anda_kip::execute_request(self.memory.nexus().as_ref(), &retract_request(fact))
+                    .await;
+            if kip::succeeded(&response) {
+                retracted += usize::try_from(kip::changed(&response, "retract")).unwrap_or(0);
+            } else {
+                log::warn!(
+                    target: "brain",
+                    doc_id = doc_id;
+                    "retracting the digest's claim about {:?} failed: {}",
+                    fact.predicate,
+                    kip::error_message(&response)
+                );
             }
         }
-        superseded
+        retracted
     }
 
-    /// Existence probe for one (subject, predicate, object) proposition.
-    /// Fails toward `true`: a redundant superseded marker is cheaper than a
-    /// stale fact staying active because the probe errored.
-    async fn proposition_exists(&self, fact: &DigestedFact) -> bool {
-        let kql = format!(
-            "FIND(?link) WHERE {{ ?link ({}, {}, {}) }} LIMIT 1",
-            concept_literal(&fact.subject_type, &fact.subject_name),
-            serde_json::to_string(&fact.predicate).unwrap_or_default(),
-            concept_literal(&fact.object_type, &fact.object_name),
-        );
-        let query = match parse_kql(&kql) {
-            Ok(query) => query,
-            Err(err) => {
-                log::warn!(target: "brain", "proposition existence kql parse failed: {err:?}");
-                return true;
-            }
-        };
-        match self.memory.nexus().execute_kql(query).await {
-            Ok((result, _)) => kql_has_rows(&result),
-            Err(err) => {
-                log::warn!(target: "brain", "proposition existence probe failed: {err:?}");
-                true
-            }
+    /// Publishes the Schema Package covering these facts' symbols, when the
+    /// digest has met a new one.
+    ///
+    /// Schema is protected control state: KML cannot declare a type, so the
+    /// host does it. Activation only happens when the vocabulary actually grew
+    /// — every activation mints a new Schema Environment version, and walking
+    /// that forward on every digest would invalidate clients' preconditions for
+    /// no change at all.
+    async fn ensure_vocabulary(
+        &self,
+        facts: &[DigestedFact],
+    ) -> Result<MemoryVocabulary, BoxError> {
+        let nexus = self.memory.nexus();
+        let mut vocabulary = MemoryVocabulary::load(nexus.as_ref()).await?;
+        let types: BTreeSet<&str> = facts
+            .iter()
+            .flat_map(|fact| [fact.subject_type.as_str(), fact.object_type.as_str()])
+            .collect();
+        let predicates: BTreeSet<&str> = facts.iter().map(|fact| fact.predicate.as_str()).collect();
+        if vocabulary.covers(types.iter().copied(), predicates.iter().copied()) {
+            return Ok(vocabulary);
         }
+
+        let rejected = vocabulary.extend(types.iter().copied(), predicates.iter().copied());
+        if !rejected.is_empty() {
+            log::warn!(
+                target: "brain",
+                space_id = self.wiki.space_id;
+                "the wiki digest proposed symbols this Space will not publish: {rejected:?}"
+            );
+        }
+        vocabulary.activate(nexus.as_ref()).await?;
+        Ok(vocabulary)
     }
 
     /// Facts recorded by the most recent digest of this document before the
@@ -1078,15 +1112,6 @@ async fn verify_recent_citations(
 }
 
 /// Whether a KQL FIND result contains any row.
-fn kql_has_rows(result: &Json) -> bool {
-    match result {
-        Json::Array(rows) => !rows.is_empty(),
-        Json::Object(map) => map.values().any(kql_has_rows),
-        Json::Null => false,
-        _ => true,
-    }
-}
-
 /// Parses the extraction JSON, tolerating markdown fences and surrounding
 /// prose (first `{` to last `}`).
 fn parse_extraction(content: &str) -> Result<Extraction, String> {
@@ -1114,10 +1139,17 @@ fn clean_ident(value: &str) -> Option<String> {
     Some(value.to_string())
 }
 
-/// Cleans an extracted concept-type name and normalizes it to the
-/// UpperCamelCase KIP requires (KIP §2.8.2) — extraction models emit
-/// `"drug"`, `"medical device"`, or `"works_at"`-style variants that would
-/// otherwise register as distinct (and `KIP_2001`-prone) schema entries.
+/// Cleans an extracted concept-type name and normalizes it to UpperCamelCase.
+///
+/// Extraction models emit `"drug"`, `"medical device"` and `"works_at"`-shaped
+/// variants of one type. In KIP 1.x those became three graph nodes somebody
+/// could merge later; in 2.0 each would be a symbol published into this Space's
+/// schema package, and a published symbol cannot be tidied away — so the
+/// normalization has to happen here, before the name reaches the vocabulary.
+///
+/// Bounded by the vocabulary's own limit rather than a second one of its own: a
+/// name this accepts and the vocabulary then refuses is a fact dropped between
+/// two caps that disagree.
 fn clean_type_ident(value: &str) -> Option<String> {
     let value = clean_ident(value)?;
     if value.chars().next().is_some_and(|c| c.is_ascii_uppercase())
@@ -1134,7 +1166,7 @@ fn clean_type_ident(value: &str) -> Option<String> {
         }
     }
     (out.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
-        && out.chars().count() <= MAX_IDENT_CHARS)
+        && out.chars().count() <= crate::vocabulary::MAX_SYMBOL_CHARS)
         .then_some(out)
 }
 
@@ -1168,7 +1200,7 @@ fn clean_predicate_ident(value: &str) -> Option<String> {
     }
     let out = out.trim_matches('_').to_string();
     (out.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
-        && out.chars().count() <= MAX_IDENT_CHARS)
+        && out.chars().count() <= crate::vocabulary::MAX_SYMBOL_CHARS)
         .then_some(out)
 }
 
@@ -1244,55 +1276,82 @@ fn normalize_facts(
     (facts, alive)
 }
 
-/// Renders a KIP object literal with unquoted identifier keys (the concept
-/// matcher grammar requires them) and JSON-encoded values.
-fn kip_object(pairs: &[(&str, Json)]) -> String {
-    let body = pairs
-        .iter()
-        .filter(|(key, _)| is_kip_identifier(key))
-        .map(|(key, value)| format!("{key}: {value}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("{{{body}}}")
-}
-
+/// Whether a name may appear as a bare object key in KIP.
 fn is_kip_identifier(key: &str) -> bool {
     let mut chars = key.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-fn concept_literal(r#type: &str, name: &str) -> String {
-    kip_object(&[("type", json!(r#type)), ("name", json!(name))])
-}
-
-/// Renders one atomic UPSERT capsule: schema registration for every type
-/// and predicate used (KIP requires define-before-use), concept blocks,
-/// then one proposition block per fact with its citation metadata. The
-/// global metadata block carries the shared provenance envelope.
-fn render_digest_kml(
-    space_id: &str,
+/// Builds one atomic transaction for a digested version.
+///
+/// Everything the digest learned from one document version commits together or
+/// not at all: the Evidence for each cited passage, the endpoint Concepts, and
+/// one attributed Assertion per fact. A half-written digest would leave claims
+/// whose Evidence never landed, which is the one shape a memory system must
+/// never produce.
+///
+/// Where the 1.x metadata went:
+///
+/// ```text
+/// confidence          → the Assertion's own confidence
+/// citation + checksum → an Evidence per cited passage
+/// source + extractor  → that Evidence's class and payload
+/// author "$self"      → asserted_by, the brain's semantic self
+/// status/superseded_by→ Assertion lifecycle (see `retract_facts`)
+/// ```
+fn digest_request(
     doc: &WikiDocRecord,
     version: &WikiVersionRecord,
     extraction: &Extraction,
     facts: &[DigestedFact],
     extractor: &str,
-) -> String {
-    let mut concept_types = BTreeSet::new();
-    let mut predicates = BTreeSet::new();
-    let mut endpoints: Vec<(String, String)> = Vec::new();
-    let mut endpoint_seen = BTreeSet::new();
-    let mut push_endpoint = |t: &str, n: &str, endpoints: &mut Vec<(String, String)>| {
-        if endpoint_seen.insert((t.to_string(), n.to_string())) {
-            endpoints.push((t.to_string(), n.to_string()));
-        }
-    };
+    now_ms: u64,
+) -> Request {
+    let mut parameters = serde_json::Map::new();
+    let mut lines = vec!["MUTATE {".to_string()];
+    parameters.insert(
+        "observed_at".to_string(),
+        json!(
+            anda_engine::rfc3339_datetime(now_ms).unwrap_or_else(anda_engine::rfc3339_datetime_now)
+        ),
+    );
+
+    // The brain's semantic self, resolved (or created) in the same transaction
+    // so a fresh space can be digested into without a bootstrap step.
+    lines.push(format!(
+        "  UPSERT CONCEPT ?self {{ MATCH {{type: \"Person\", key: \"{SELF_ACTOR_KEY}\"}} SET FIELDS {{name: \"{SELF_ACTOR_KEY}\"}} }}"
+    ));
+
+    // One Evidence per cited passage, not per fact: several facts read out of
+    // the same section rest on the same observation, and minting one Evidence
+    // each would let a Projection count one passage as several corroborations.
+    let mut evidence_handles: BTreeMap<String, String> = BTreeMap::new();
     for fact in facts {
-        concept_types.insert(fact.subject_type.clone());
-        concept_types.insert(fact.object_type.clone());
-        predicates.insert(fact.predicate.clone());
-        push_endpoint(&fact.subject_type, &fact.subject_name, &mut endpoints);
-        push_endpoint(&fact.object_type, &fact.object_name, &mut endpoints);
+        if evidence_handles.contains_key(&fact.citation) {
+            continue;
+        }
+        let index = evidence_handles.len();
+        let handle = format!("?e{index}");
+        parameters.insert(
+            format!("ekey{index}"),
+            json!(format!("wiki:{}", fact.citation)),
+        );
+        parameters.insert(
+            format!("epayload{index}"),
+            json!({
+                "citation": fact.citation,
+                "checksum": fact.checksum,
+                "extractor": extractor,
+                "doc_id": doc._id,
+                "version_id": version._id,
+                "title": doc.title,
+            }),
+        );
+        lines.push(format!(
+            "  CREATE EVIDENCE {handle} {{ CLIENT KEY :ekey{index} SET FIELDS {{ evidence_class: \"document\", payload: :epayload{index}, observed_at: :observed_at }} }}"
+        ));
+        evidence_handles.insert(fact.citation.clone(), handle);
     }
 
     // Optional descriptions from the extraction, only for endpoints in use.
@@ -1309,92 +1368,102 @@ fn render_digest_kml(
         }
     }
 
-    let mut lines = vec!["UPSERT {".to_string()];
-    for (idx, kind) in concept_types.iter().enumerate() {
-        lines.push(format!(
-            "  CONCEPT ?ct{idx} {{ {} }}",
-            concept_literal("$ConceptType", kind)
-        ));
-    }
-    for (idx, predicate) in predicates.iter().enumerate() {
-        lines.push(format!(
-            "  CONCEPT ?pt{idx} {{ {} }}",
-            concept_literal("$PropositionType", predicate)
-        ));
+    // The endpoint Concepts. `key` is the extracted name: identity is scoped to
+    // the type, so a `Drug` and a `Symptom` both named "Migraine" stay two
+    // Concepts, exactly as the 1.x `(type, name)` identity had them.
+    let mut endpoints: Vec<(String, String)> = Vec::new();
+    let mut seen = BTreeSet::new();
+    for fact in facts {
+        for (t, n) in [
+            (&fact.subject_type, &fact.subject_name),
+            (&fact.object_type, &fact.object_name),
+        ] {
+            if seen.insert((t.clone(), n.clone())) {
+                endpoints.push((t.clone(), n.clone()));
+            }
+        }
     }
     let mut handles: BTreeMap<(String, String), String> = BTreeMap::new();
-    for (idx, (t, n)) in endpoints.iter().enumerate() {
-        let handle = format!("?c{idx}");
-        let mut block = format!("  CONCEPT {handle} {{ {}", concept_literal(t, n));
+    for (index, (t, n)) in endpoints.iter().enumerate() {
+        let handle = format!("?c{index}");
+        parameters.insert(format!("ct{index}"), json!(t));
+        parameters.insert(format!("cn{index}"), json!(n));
+        let mut block = format!(
+            "  UPSERT CONCEPT {handle} {{ MATCH {{type: :ct{index}, key: :cn{index}}} SET FIELDS {{name: :cn{index}}}"
+        );
         if let Some(attrs) = attributes.get(&(t.clone(), n.clone())) {
-            let pairs: Vec<(&str, Json)> =
-                attrs.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
-            block.push_str(&format!(" SET ATTRIBUTES {}", kip_object(&pairs)));
+            // `SET ATTRIBUTES` takes an object literal, so each extracted value
+            // is bound to its own parameter rather than the map being passed
+            // whole: the keys are syntax and the values are data.
+            let assignments: Vec<String> = attrs
+                .iter()
+                .filter(|(key, _)| is_kip_identifier(key))
+                .enumerate()
+                .map(|(slot, (key, value))| {
+                    parameters.insert(format!("ca{index}_{slot}"), value.clone());
+                    format!("{key}: :ca{index}_{slot}")
+                })
+                .collect();
+            if !assignments.is_empty() {
+                block.push_str(&format!(" SET ATTRIBUTES {{ {} }}", assignments.join(", ")));
+            }
         }
         block.push_str(" }");
         lines.push(block);
         handles.insert((t.clone(), n.clone()), handle);
     }
-    for (idx, fact) in facts.iter().enumerate() {
+
+    // One attributed claim per fact. `mode: "inferred"` is the honest label: the
+    // digest read prose and drew a structured conclusion from it — the document
+    // did not state a triple. `key` makes a re-digest of the same passage
+    // resolve to the same Assertion instead of stacking duplicates.
+    for (index, fact) in facts.iter().enumerate() {
         let subject = &handles[&(fact.subject_type.clone(), fact.subject_name.clone())];
         let object = &handles[&(fact.object_type.clone(), fact.object_name.clone())];
+        let evidence = &evidence_handles[&fact.citation];
+        parameters.insert(format!("pred{index}"), json!(fact.predicate));
+        parameters.insert(format!("conf{index}"), json!(fact.confidence));
+        parameters.insert(
+            format!("fkey{index}"),
+            json!(format!(
+                "wiki:{}:{}:{}:{}",
+                doc._id, fact.subject_name, fact.predicate, fact.object_name
+            )),
+        );
         lines.push(format!(
-            "  PROPOSITION ?f{idx} {{ ({subject}, {}, {object}) }}",
-            serde_json::to_string(&fact.predicate).unwrap_or_default()
-        ));
-        lines.push(format!(
-            "  WITH METADATA {}",
-            kip_object(&[
-                ("confidence", json!(fact.confidence)),
-                ("citation", json!(fact.citation)),
-                ("checksum", json!(fact.checksum)),
-                // A fact can vanish in one revision (marked superseded) and
-                // return in a later one; nexus metadata merges are shallow
-                // and keep stale keys, so the re-assertion must explicitly
-                // clear the tombstone.
-                ("status", json!("active")),
-                ("superseded_by", Json::Null),
-            ])
+            "  ASSERT ?p{index} ({subject}, :pred{index}, {object}) {{ by: ?self, mode: \"inferred\", confidence: :conf{index}, evidence: {evidence}, key: :fkey{index} }}"
         ));
     }
     lines.push("}".to_string());
-    lines.push(format!(
-        "WITH METADATA {}",
-        kip_object(&[
-            ("source", json!("wiki")),
-            ("author", json!("$self")),
-            ("extractor", json!(extractor)),
-            ("doc_id", json!(doc._id)),
-            ("version_id", json!(version._id)),
-            (
-                "citation",
-                json!(citation_uri(
-                    space_id,
-                    doc._id,
-                    version._id,
-                    0,
-                    version.size
-                )),
-            ),
-            ("confidence", json!(0.7)),
-        ])
-    ));
-    lines.join("\n")
+
+    kip::request_with(lines.join("\n"), parameters)
 }
 
-/// One capsule per stale fact: marks the proposition superseded without
-/// touching its other metadata (shallow merge).
-fn render_supersede_kml(fact: &DigestedFact, superseded_by: &str) -> String {
-    format!(
-        "UPSERT {{\n  PROPOSITION ?p {{ ({}, {}, {}) }}\n  WITH METADATA {}\n}}\nWITH METADATA {}",
-        concept_literal(&fact.subject_type, &fact.subject_name),
-        serde_json::to_string(&fact.predicate).unwrap_or_default(),
-        concept_literal(&fact.object_type, &fact.object_name),
-        kip_object(&[
-            ("status", json!("superseded")),
-            ("superseded_by", json!(superseded_by)),
-        ]),
-        kip_object(&[("source", json!("wiki")), ("author", json!("$self"))]),
+/// Withdraws the digest's own Assertion about one fact.
+///
+/// Scoped to `asserted_by: ?self`: another actor may hold the same belief for
+/// their own reasons, and this document going quiet is no reason to speak for
+/// them. A `WHERE` that matches nothing retracts nothing.
+fn retract_request(fact: &DigestedFact) -> Request {
+    let parameters = serde_json::Map::from_iter([
+        ("st".to_string(), json!(fact.subject_type)),
+        ("sn".to_string(), json!(fact.subject_name)),
+        ("pred".to_string(), json!(fact.predicate)),
+        ("ot".to_string(), json!(fact.object_type)),
+        ("on".to_string(), json!(fact.object_name)),
+    ]);
+    kip::request_with(
+        r#"RETRACT ASSERTION ?a
+WHERE {
+  ?s CONCEPT {type: :st, key: :sn}
+  ?o CONCEPT {type: :ot, key: :on}
+  ?p (?s, :pred, ?o)
+  ?self CONCEPT {type: "Person", key: "$self"}
+  ?a ASSERTION {proposition: ?p, asserted_by: ?self}
+  FILTER(?a.lifecycle.status == "active")
+}
+LIMIT 8"#,
+        parameters,
     )
 }
 
@@ -1515,33 +1584,52 @@ mod tests {
             "publishes",
             ("Policy", "安全政策"),
         )];
-        let kml = render_digest_kml(
-            "sp",
+        let request = digest_request(
             &doc,
             &version,
             &Extraction::default(),
             &facts,
             "wiki_digest@v1/test-model",
+            1_700_000_000_000,
+        );
+        request.validate().unwrap();
+        let command = request.operations[0].command.clone().unwrap();
+        let parameters = request.parameters.clone().unwrap();
+
+        // One transaction: Evidence, endpoints and the attributed claim commit
+        // together or not at all.
+        assert!(command.starts_with("MUTATE {"), "{command}");
+        assert!(command.contains("CREATE EVIDENCE ?e0"), "{command}");
+        assert!(command.contains("UPSERT CONCEPT ?c0"), "{command}");
+        assert!(
+            command.contains(r#"ASSERT ?p0 (?c0, :pred0, ?c1) { by: ?self, mode: "inferred""#),
+            "{command}"
         );
 
-        assert!(kml.contains(r#"{type: "$ConceptType", name: "Organization"}"#));
-        assert!(kml.contains(r#"{type: "$ConceptType", name: "Policy"}"#));
-        assert!(kml.contains(r#"{type: "$PropositionType", name: "publishes"}"#));
-        assert!(kml.contains(r#"{type: "Organization", name: "Acme \"quoted\""}"#));
-        assert!(kml.contains(r#"(?c0, "publishes", ?c1)"#));
-        assert!(kml.contains(r#"citation: "wiki://sp/1@2#0-10""#));
-        assert!(kml.contains(r#"extractor: "wiki_digest@v1/test-model""#));
-        assert!(kml.contains(r#"source: "wiki""#));
-        // A re-asserted fact must clear a stale superseded tombstone.
-        assert!(kml.contains(r#"status: "active""#));
-        assert!(kml.contains("superseded_by: null"));
-        // Renderer output must parse as valid KML.
-        assert!(parse_kml(&kml).is_ok());
+        // Nothing extracted is spliced into the command text — a name carrying
+        // a quote is data, and the parser never sees it as syntax.
+        assert!(!command.contains("Acme"), "{command}");
+        assert_eq!(parameters["cn0"], json!(r#"Acme "quoted""#));
+        assert_eq!(parameters["ct0"], json!("Organization"));
+        assert_eq!(parameters["pred0"], json!("publishes"));
+        assert_eq!(parameters["conf0"], json!(0.9));
 
-        let supersede = render_supersede_kml(&facts[0], "wiki://sp/1@9#0-20");
-        assert!(supersede.contains(r#"status: "superseded""#));
-        assert!(supersede.contains(r#"superseded_by: "wiki://sp/1@9#0-20""#));
-        assert!(parse_kml(&supersede).is_ok());
+        // Provenance is Evidence, not metadata on the link.
+        assert_eq!(
+            parameters["epayload0"]["citation"],
+            json!("wiki://sp/1@2#0-10")
+        );
+        assert_eq!(
+            parameters["epayload0"]["extractor"],
+            json!("wiki_digest@v1/test-model")
+        );
+
+        // Dropping a fact withdraws this reader's claim, scoped to `$self`.
+        let retract = retract_request(&facts[0]);
+        retract.validate().unwrap();
+        let command = retract.operations[0].command.clone().unwrap();
+        assert!(command.starts_with("RETRACT ASSERTION ?a"), "{command}");
+        assert!(command.contains("asserted_by: ?self"), "{command}");
     }
 
     #[test]
@@ -1725,14 +1813,6 @@ mod tests {
         assert!(alive.contains(&key));
     }
 
-    #[test]
-    fn kql_has_rows_detects_emptiness() {
-        assert!(!kql_has_rows(&json!({"?link": []})));
-        assert!(!kql_has_rows(&json!(null)));
-        assert!(kql_has_rows(&json!({"?link": [{"id": "P1"}]})));
-        assert!(kql_has_rows(&json!([{"id": "P1"}])));
-    }
-
     use super::super::tests::{commit_input, test_wiki};
 
     #[tokio::test]
@@ -1898,11 +1978,20 @@ mod tests {
             .await
             .unwrap(),
         );
-        let nexus = Arc::new(
-            CognitiveNexus::connect(db.clone(), async |_| Ok(()))
-                .await
-                .unwrap(),
-        );
+        let nexus = CognitiveNexus::connect(db.clone()).await.unwrap();
+        // A Space that has activated nothing resolves Core alone, and Core
+        // declares no Concept types at all.
+        nexus
+            .install_and_activate(
+                &[(
+                    "anda_brain",
+                    anda_cognitive_nexus::profiles::COGNITIVE_MEMORY,
+                )],
+                anda_cognitive_nexus::nexus::DEFAULT_SPACE,
+            )
+            .await
+            .unwrap();
+        let nexus = Arc::new(nexus);
         let memory = Arc::new(MemoryManagement::connect(db.clone(), nexus).await.unwrap());
         let wiki = Arc::new(
             WikiService::connect("test_space".to_string(), db)
@@ -1913,20 +2002,26 @@ mod tests {
         (wiki, digest)
     }
 
-    async fn proposition_status_superseded(digest: &WikiDigest, fact: &DigestedFact) -> bool {
-        let kql = format!(
-            "FIND(?link) WHERE {{ ?link ({}, {}, {}) FILTER(?link.metadata.status == \"superseded\") }} LIMIT 1",
-            concept_literal(&fact.subject_type, &fact.subject_name),
-            serde_json::to_string(&fact.predicate).unwrap(),
-            concept_literal(&fact.object_type, &fact.object_name),
+    /// The lifecycle status of the digest's own Assertion about one fact.
+    async fn digest_claim_status(digest: &WikiDigest, fact: &DigestedFact) -> Vec<String> {
+        let request = kip::request_with(
+            r#"FIND(?a.lifecycle.status) WHERE {
+  ?s CONCEPT {type: :st, key: :sn}
+  ?o CONCEPT {type: :ot, key: :on}
+  ?p (?s, :pred, ?o)
+  ?a ASSERTION {proposition: ?p}
+}"#,
+            serde_json::Map::from_iter([
+                ("st".to_string(), json!(fact.subject_type)),
+                ("sn".to_string(), json!(fact.subject_name)),
+                ("pred".to_string(), json!(fact.predicate)),
+                ("ot".to_string(), json!(fact.object_type)),
+                ("on".to_string(), json!(fact.object_name)),
+            ]),
         );
-        let (result, _) = digest
-            .memory
-            .nexus()
-            .execute_kql(parse_kql(&kql).unwrap())
-            .await
-            .unwrap();
-        kql_has_rows(&result)
+        let response = anda_kip::execute_request(digest.memory.nexus().as_ref(), &request).await;
+        serde_json::from_value(kip::ok_result(&response).cloned().unwrap_or_default())
+            .unwrap_or_default()
     }
 
     #[tokio::test]
@@ -1958,20 +2053,26 @@ mod tests {
             citation: citation_uri("test_space", doc._id, v1_version._id, 0, v1_version.size),
             checksum: "sha3-256:x".to_string(),
         };
-        let kml = render_digest_kml(
-            "test_space",
+        // The Space must declare the extracted symbols before a write can name
+        // one; that is the host's decision in KIP 2.0, not the write's.
+        digest
+            .ensure_vocabulary(std::slice::from_ref(&fact))
+            .await
+            .unwrap();
+        let request = digest_request(
             &doc,
             &v1_version,
             &Extraction::default(),
             std::slice::from_ref(&fact),
             "wiki_digest@v1/test",
+            1500,
         );
-        digest
-            .memory
-            .nexus()
-            .execute_kml(parse_kml(&kml).unwrap(), false)
-            .await
-            .unwrap();
+        let response = anda_kip::execute_request(digest.memory.nexus().as_ref(), &request).await;
+        assert!(
+            kip::succeeded(&response),
+            "seed failed: {}",
+            kip::error_message(&response)
+        );
         wiki.write_event(
             EVENT_DIGEST_EXTRACTED,
             Some(doc._id),
@@ -1985,8 +2086,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(digest.proposition_exists(&fact).await);
-        assert!(!proposition_status_superseded(&digest, &fact).await);
+        assert_eq!(digest_claim_status(&digest, &fact).await, ["active"]);
 
         // v2 labels the document — the state the digest refuses to distill.
         let mut update = commit_input("秘密文档", "# 秘密文档\n\n内容乙。\n");
@@ -2007,8 +2107,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(retracted, 1);
-        // The proposition is tombstoned in the graph…
-        assert!(proposition_status_superseded(&digest, &fact).await);
+        // The digest withdrew its own claim; the Proposition survives…
+        assert_eq!(digest_claim_status(&digest, &fact).await, ["retracted"]);
         // …the digest head is a clean, retracted slate…
         let head = digest
             .previous_digest_facts(doc._id, v2_version._id + 1)

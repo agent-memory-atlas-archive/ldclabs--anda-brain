@@ -43,27 +43,47 @@
       "query": "Write a pricing follow-up for a new prospect.",
       "evaluation": {
         "scoring_rubric": "The answer should avoid expired discount codes and default to current pricing language.",
-        "required_answer_terms": ["current pricing"],
-        "forbidden_answer_terms": ["SPRING20"],
+        "required_answer_terms": [
+          "current pricing"
+        ],
+        "forbidden_answer_terms": [
+          "SPRING20"
+        ],
         "expected_memories": [
           {
             "id": "expired_discount",
             "description": "SPRING20 is expired and should not be used for new pricing.",
             "mode": "should_exist",
             "probe": {
-              "command": "SEARCH CONCEPT \"SPRING20 expired do not use pricing\" MODE \"semantic\" THRESHOLD 0.6 LIMIT 10",
-              "readonly": true
+              "kip": "2.0",
+              "operations": [
+                {
+                  "command": "SEARCH CONCEPT :term THRESHOLD 0.4 LIMIT 10"
+                }
+              ],
+              "parameters": {
+                "term": "SPRING20 expired do not use pricing"
+              }
             },
-            "answer_terms": ["current pricing"],
-            "trace_terms": ["SPRING20", "expired"]
+            "answer_terms": [
+              "current pricing"
+            ],
+            "trace_terms": [
+              "SPRING20",
+              "expired"
+            ]
           },
           {
             "id": "active_old_discount",
             "description": "The expired code should not remain active for new prospects.",
             "mode": "should_not_exist",
             "probe": {
-              "command": "FIND(?code) WHERE { ?code {type: \"Discount\"} FILTER(CONTAINS(?code.name, \"SPRING20\") || CONTAINS(?code.attributes.description, \"SPRING20\")) FILTER(IS_NULL(?code.metadata.expired) || ?code.metadata.expired != true) } LIMIT 10",
-              "readonly": true
+              "kip": "2.0",
+              "operations": [
+                {
+                  "command": "FIND(?code.name, ?code.attributes) WHERE {\n  ?code CONCEPT {}\n  FILTER(CONTAINS(?code.name, \"SPRING20\") || CONTAINS(?code.attributes.description, \"SPRING20\"))\n  FILTER(IS_NULL(?code.attributes.status) || ?code.attributes.status != \"expired\")\n} LIMIT 10"
+                }
+              ]
             }
           }
         ]

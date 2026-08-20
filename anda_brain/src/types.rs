@@ -613,10 +613,16 @@ fn default_trigger() -> String {
 pub struct MaintenanceParameters {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stale_event_threshold_days: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub confidence_decay_factor: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub unsorted_max_backlog: Option<u32>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        alias = "confidence_decay_factor"
+    )]
+    pub memory_strength_decay_factor: Option<f64>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        alias = "unsorted_max_backlog"
+    )]
+    pub unconsolidated_max_backlog: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub orphan_max_count: Option<u32>,
 }
@@ -627,10 +633,12 @@ impl MaintenanceParameters {
     /// maintenance prompt, so an out-of-range value (e.g. a negative decay
     /// factor) must be rejected at the entry point, not trusted downstream.
     pub fn validate(&self) -> Result<(), BoxError> {
-        if let Some(decay) = self.confidence_decay_factor
+        if let Some(decay) = self.memory_strength_decay_factor
             && !(decay.is_finite() && 0.0 < decay && decay <= 1.0)
         {
-            return Err("maintenance parameter `confidence_decay_factor` must be in (0, 1]".into());
+            return Err(
+                "maintenance parameter `memory_strength_decay_factor` must be in (0, 1]".into(),
+            );
         }
         if let Some(days) = self.stale_event_threshold_days
             && !(1..=365).contains(&days)
@@ -639,11 +647,11 @@ impl MaintenanceParameters {
                 "maintenance parameter `stale_event_threshold_days` must be in [1, 365]".into(),
             );
         }
-        if let Some(backlog) = self.unsorted_max_backlog
+        if let Some(backlog) = self.unconsolidated_max_backlog
             && !(1..=10_000).contains(&backlog)
         {
             return Err(
-                "maintenance parameter `unsorted_max_backlog` must be in [1, 10000]".into(),
+                "maintenance parameter `unconsolidated_max_backlog` must be in [1, 10000]".into(),
             );
         }
         if let Some(orphans) = self.orphan_max_count
@@ -671,10 +679,18 @@ pub struct MemoryPolicy {
     #[serde(default = "MemoryPolicy::default_version")]
     pub version: u32,
 
-    /// Confidence multiplier maintenance decay applies per cycle. Matches
-    /// the default documented in BrainMaintenance.md.
-    #[serde(default = "MemoryPolicy::default_confidence_decay_factor")]
-    pub confidence_decay_factor: f64,
+    /// Multiplier disuse metabolism applies to `MnemonicState.memory_strength`
+    /// per cycle. Matches the default documented in BrainMaintenance.md.
+    ///
+    /// KIP 1.x called this `confidence_decay_factor` and applied it to link
+    /// confidence; KIP 2.0 forbids decaying an epistemic stance over time, so
+    /// the same knob now paces accessibility instead. The old name is still
+    /// accepted when reading a persisted policy.
+    #[serde(
+        default = "MemoryPolicy::default_memory_strength_decay_factor",
+        alias = "confidence_decay_factor"
+    )]
+    pub memory_strength_decay_factor: f64,
 
     /// Stability gain per successful recall use (consumed from P1).
     #[serde(default = "MemoryPolicy::default_recall_reinforcement")]
@@ -684,7 +700,7 @@ pub struct MemoryPolicy {
     #[serde(default = "MemoryPolicy::default_correction_penalty")]
     pub correction_penalty: f64,
 
-    /// Lower bound decay may not push confidence below (consumed from P1).
+    /// Lower bound disuse metabolism may not push `memory_strength` below.
     #[serde(default = "MemoryPolicy::default_decay_floor")]
     pub decay_floor: f64,
 
@@ -692,9 +708,14 @@ pub struct MemoryPolicy {
     #[serde(default = "MemoryPolicy::default_stale_event_threshold_days")]
     pub stale_event_threshold_days: u32,
 
-    /// Unsorted-inbox size that maintenance should keep the graph under.
-    #[serde(default = "MemoryPolicy::default_unsorted_max_backlog")]
-    pub unsorted_max_backlog: u32,
+    /// Unconsolidated Event/Experience backlog that maintenance should keep
+    /// the graph under. Named `unsorted_max_backlog` before KIP 2.0, when the
+    /// backlog was the `Unsorted` Domain the profile no longer declares.
+    #[serde(
+        default = "MemoryPolicy::default_unconsolidated_max_backlog",
+        alias = "unsorted_max_backlog"
+    )]
+    pub unconsolidated_max_backlog: u32,
 
     /// Orphan-concept count that maintenance should keep the graph under.
     #[serde(default = "MemoryPolicy::default_orphan_max_count")]
@@ -727,12 +748,12 @@ impl Default for MemoryPolicy {
     fn default() -> Self {
         Self {
             version: Self::default_version(),
-            confidence_decay_factor: Self::default_confidence_decay_factor(),
+            memory_strength_decay_factor: Self::default_memory_strength_decay_factor(),
             recall_reinforcement: Self::default_recall_reinforcement(),
             correction_penalty: Self::default_correction_penalty(),
             decay_floor: Self::default_decay_floor(),
             stale_event_threshold_days: Self::default_stale_event_threshold_days(),
-            unsorted_max_backlog: Self::default_unsorted_max_backlog(),
+            unconsolidated_max_backlog: Self::default_unconsolidated_max_backlog(),
             orphan_max_count: Self::default_orphan_max_count(),
             self_test_queries_per_cycle: Self::default_self_test_queries_per_cycle(),
             self_test_token_budget: Self::default_self_test_token_budget(),
@@ -791,7 +812,7 @@ impl MemoryPolicy {
     fn default_version() -> u32 {
         1
     }
-    fn default_confidence_decay_factor() -> f64 {
+    fn default_memory_strength_decay_factor() -> f64 {
         0.95
     }
     fn default_recall_reinforcement() -> f64 {
@@ -808,7 +829,7 @@ impl MemoryPolicy {
     fn default_stale_event_threshold_days() -> u32 {
         7
     }
-    fn default_unsorted_max_backlog() -> u32 {
+    fn default_unconsolidated_max_backlog() -> u32 {
         20
     }
     fn default_orphan_max_count() -> u32 {
@@ -855,8 +876,8 @@ impl MemoryPolicy {
         }
 
         in_range(
-            "confidence_decay_factor",
-            self.confidence_decay_factor,
+            "memory_strength_decay_factor",
+            self.memory_strength_decay_factor,
             0.0,
             1.0,
         )?;
@@ -883,8 +904,8 @@ impl MemoryPolicy {
             365,
         )?;
         int_range(
-            "unsorted_max_backlog",
-            u64::from(self.unsorted_max_backlog),
+            "unconsolidated_max_backlog",
+            u64::from(self.unconsolidated_max_backlog),
             1,
             10_000,
         )?;
@@ -927,8 +948,8 @@ impl MemoryPolicy {
     pub fn maintenance_parameters(&self) -> MaintenanceParameters {
         MaintenanceParameters {
             stale_event_threshold_days: Some(self.stale_event_threshold_days),
-            confidence_decay_factor: Some(self.confidence_decay_factor),
-            unsorted_max_backlog: Some(self.unsorted_max_backlog),
+            memory_strength_decay_factor: Some(self.memory_strength_decay_factor),
+            unconsolidated_max_backlog: Some(self.unconsolidated_max_backlog),
             orphan_max_count: Some(self.orphan_max_count),
         }
     }
@@ -939,26 +960,29 @@ impl MemoryPolicy {
 /// tool outputs — never from the model's own claims.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct MemoryCitation {
-    /// Graph entity id: `"C:<id>"` or `"P:<id>:<predicate>"`.
+    /// The Cognitive Element id: `"C-<n>"`, `"P-<n>"` or `"A-<n>"`.
     pub entity: String,
 
-    /// Concept type, or the predicate for propositions.
+    /// The local name of the Concept's type, or of a Proposition's predicate.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub r#type: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 
-    /// `metadata.confidence` when the tool output carried it.
+    /// The Assertion's confidence, when the cited element is one. A Concept
+    /// and a Proposition carry no stance and cite none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f64>,
 
-    /// `metadata.source` when the tool output carried it (first entry for
-    /// multi-source facts).
+    /// The semantic actor whose stance this is (`asserted_by`), when the
+    /// cited element is an Assertion. Never the caller's Principal:
+    /// attribution is cognition, authority is Governance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
 
-    /// `metadata.created_at` (RFC3339) when the tool output carried it.
+    /// `_system.created_at` (RFC3339) — when the engine first wrote the
+    /// element, which is not when the content it records was observed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
 }
@@ -1239,15 +1263,21 @@ pub struct MemoryGraphCounters {
     pub concepts: u64,
     pub propositions: u64,
 
+    /// Events and Experiences maintenance has not consolidated yet — the
+    /// backlog that used to be the `Unsorted` Domain in KIP 1.x.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub unsorted: Option<u64>,
+    pub unconsolidated: Option<u64>,
 
+    /// Concepts no Proposition and no structural edge reaches.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub orphans: Option<u64>,
 
-    /// Registered `$PropositionType` count — the schema-sprawl indicator
-    /// (plan module M8).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Predicates the Space's Schema Environment declares — the vocabulary
+    /// breadth indicator (plan module M8). In KIP 1.x this counted
+    /// `$PropositionType` graph nodes a write could mint; 2.0 resolves
+    /// predicates from immutable Schema Packages, so this grows only when an
+    /// operator activates a package, never because a model invented a link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub predicate_types: Option<u64>,
 
     /// When these counters were censused. They refresh at settlement time
@@ -1667,15 +1697,15 @@ mod tests {
         // not a behavior change.
         let policy = MemoryPolicy::default();
         assert_eq!(policy.stale_event_threshold_days, 7);
-        assert_eq!(policy.confidence_decay_factor, 0.95);
-        assert_eq!(policy.unsorted_max_backlog, 20);
+        assert_eq!(policy.memory_strength_decay_factor, 0.95);
+        assert_eq!(policy.unconsolidated_max_backlog, 20);
         assert_eq!(policy.orphan_max_count, 20);
         assert!(policy.validate().is_ok());
 
         let parameters = policy.maintenance_parameters();
         assert_eq!(parameters.stale_event_threshold_days, Some(7));
-        assert_eq!(parameters.confidence_decay_factor, Some(0.95));
-        assert_eq!(parameters.unsorted_max_backlog, Some(20));
+        assert_eq!(parameters.memory_strength_decay_factor, Some(0.95));
+        assert_eq!(parameters.unconsolidated_max_backlog, Some(20));
         assert_eq!(parameters.orphan_max_count, Some(20));
     }
 
@@ -1684,17 +1714,17 @@ mod tests {
         let cases: Vec<(MemoryPolicy, &str)> = vec![
             (
                 MemoryPolicy {
-                    confidence_decay_factor: 0.0,
+                    memory_strength_decay_factor: 0.0,
                     ..Default::default()
                 },
-                "confidence_decay_factor",
+                "memory_strength_decay_factor",
             ),
             (
                 MemoryPolicy {
-                    confidence_decay_factor: f64::NAN,
+                    memory_strength_decay_factor: f64::NAN,
                     ..Default::default()
                 },
-                "confidence_decay_factor",
+                "memory_strength_decay_factor",
             ),
             (
                 MemoryPolicy {
@@ -1743,9 +1773,9 @@ mod tests {
         // Partial JSON fills the rest with defaults, so stored policies stay
         // readable when later phases add fields.
         let policy: MemoryPolicy =
-            serde_json::from_str(r#"{"confidence_decay_factor": 0.9}"#).unwrap();
-        assert_eq!(policy.confidence_decay_factor, 0.9);
-        assert_eq!(policy.unsorted_max_backlog, 20);
+            serde_json::from_str(r#"{"memory_strength_decay_factor": 0.9}"#).unwrap();
+        assert_eq!(policy.memory_strength_decay_factor, 0.9);
+        assert_eq!(policy.unconsolidated_max_backlog, 20);
         assert_eq!(policy.version, 1);
 
         // Typos fail loudly instead of silently configuring nothing.

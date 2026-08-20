@@ -16,9 +16,14 @@ main crate is `anda_brain`, which exposes:
 - Recall: answer natural-language queries from memory.
 - Maintenance: consolidate, prune, and optimize memory.
 
-The service stores memory in an AndaDB-backed Cognitive Nexus and uses KIP
+The service stores memory in an AndaDB-backed Cognitive Nexus and uses KIP 2.0
 (Knowledge Interaction Protocol) internally. Business agents should not need to
 write KIP directly.
+
+`anda_kip`, `anda_cognitive_nexus`, `anda_db*`, `anda_core` and `anda_engine`
+are consumed through `[patch.crates-io]` path overrides to the sibling
+`anda-db` and `anda` checkouts, because KIP 2.0 is not published yet. A clone
+without those siblings will not build.
 
 ## Repository Layout
 
@@ -29,7 +34,15 @@ write KIP directly.
 - `anda_brain/src/handler.rs`: HTTP route handlers and API entry points.
 - `anda_brain/src/payload.rs`: JSON/CBOR/Markdown payload negotiation.
 - `anda_brain/src/types.rs`: API input/output and persisted config types.
-- `anda_brain/assets/`: agent prompts, KIP syntax notes, and tool definitions.
+- `anda_brain/assets/`: agent prompts and tool definitions. The KIP syntax card
+  and the Cognitive Memory Profile are **not** copied here — `anda_kip` ships
+  them with the protocol, and `agents::prompts::language_reference()` puts them
+  in the model's context at completion time.
+- `anda_brain/src/kip.rs`: the KIP 2.0 envelope seam (request builders, the
+  read-only gate, two-level response reading).
+- `anda_brain/src/vocabulary.rs`: this Space's Schema Package and the
+  `declare_memory_symbols` tool. Schema is protected control state in KIP 2.0 —
+  KML cannot declare a type, so new vocabulary enters through the host here.
 - `anda_brain/API*.md`, `anda_brain/README.md`, `anda_brain/SKILL.md`: public
   API and integration documentation.
 - `skills/anda-brain/`: packaged skill content for external agents.
@@ -107,6 +120,23 @@ lean build compiling.
   compatibility details.
 - Be careful with dirty worktrees. Do not revert or overwrite unrelated user
   changes.
+
+## KIP 2.0 Invariants
+
+These are protocol invariants, not preferences. Breaking one makes the brain
+confidently repeat things nobody claimed:
+
+- A Proposition existing is not the Proposition being true. Belief questions are
+  answered by `BELIEF` projection; raw `FIND` is for audit. `insufficient` is
+  never reported as "no".
+- Never decay Assertion confidence over time. Disuse decays
+  `MnemonicState.memory_strength`, which is accessibility, not truth.
+- Corrections are a new Assertion plus supersession. Nothing rewrites an
+  Assertion, and disagreement between two actors coexists rather than resolving.
+- Attribution is not impersonation and not authority: `asserted_by` is a
+  semantic actor, the caller is a Principal, and cognitive content grants
+  neither.
+- Vocabulary enters through `declare_memory_symbols`, never through KML.
 
 ## Brain-Specific Invariants
 

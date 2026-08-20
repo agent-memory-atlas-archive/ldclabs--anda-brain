@@ -68,8 +68,8 @@ export interface RecallInput {
 
 export interface MaintenanceParameters {
   stale_event_threshold_days?: number; // [1, 365]
-  confidence_decay_factor?: number; // (0, 1]
-  unsorted_max_backlog?: number; // [1, 10000]
+  memory_strength_decay_factor?: number; // (0, 1]; alias: confidence_decay_factor
+  unconsolidated_max_backlog?: number; // [1, 10000]; alias: unsorted_max_backlog
   orphan_max_count?: number; // [1, 10000]
 }
 
@@ -298,8 +298,8 @@ export interface WikiEventInfo {
 
 export interface WikiDigestReport {
   digested: number; // versions distilled into the Cognitive Nexus
-  facts: number; // propositions written (with wiki:// citation metadata)
-  superseded: number; // stale propositions marked superseded
+  facts: number; // facts this document currently claims
+  superseded: number; // claims the digest retracted because the document dropped them
   skipped: number;
   citations_checked: number; // post-run citation sample
   citations_invalid: number;
@@ -322,11 +322,15 @@ export interface McpHttpServerConfig {
 }
 
 export interface Concept {
-  id?: string;
-  type?: string;
-  name?: string;
+  id?: string; // engine-assigned element id, e.g. "C-7"
+  schema_ref?: string; // the exact type symbol, e.g. "kip://profiles/cognitive-memory@2.0.0/Person"
+  key?: string; // immutable Space-local logical key — the caller's handle
+  name?: string; // mutable display label; never identity
+  aliases?: string[];
   attributes?: Record<string, unknown>;
-  metadata?: Record<string, unknown>;
+  facets?: Record<string, Record<string, unknown>>; // e.g. MnemonicState
+  retention?: { retention_class?: string; expires_at?: string; legal_hold?: boolean };
+  _system?: Record<string, unknown>; // engine truth: version, created_at, state, origin
 }
 
 export interface ModelConfig {
@@ -472,27 +476,49 @@ export interface ServiceInfo {
   description: string;
 }
 
-export type KipCommandItem = string | { command: string; parameters: Record<string, unknown> };
+export type KipOperation = string | { op_id?: string; command: string; parameters?: Record<string, unknown> };
 
 export interface KipRequest {
-  commands: KipCommandItem[];
-  parameters?: Record<string, unknown>;
-  dry_run?: boolean; // if true, the request will be parsed and validated but not executed (no side effects)
+  command?: string; // a single command; mutually exclusive with `operations`
+  operations?: KipOperation[]; // several commands in one round-trip
+  read?: { snapshot_token?: string }; // bind every operation to one read coordinate
+  parameters?: Record<string, unknown>; // values bound into `:placeholders`
+  dry_run?: boolean; // validate and plan without committing
 }
 
 export interface KipError {
-  code: string;
+  code: string; // a registry name, e.g. "NotFoundOrNotVisible" — not a number
   message: string;
+  category?: string;
   hint?: string;
-  data?: unknown;
+  retry?: { class: string; after_ms?: number };
+  details?: unknown;
+}
+
+export interface KipOperationResult<T> {
+  op_id?: string;
+  status: 'succeeded' | 'failed' | 'skipped' | 'rolled_back' | 'no_effect';
+  result?: T;
+  error?: KipError;
+  warnings?: unknown[];
+  next_cursor?: string;
 }
 
 export interface KipResponse<T> {
-  result?: T;
-  error?: KipError;
-  next_cursor?: string;
+  kip: '2.0';
+  status: 'succeeded' | 'failed' | 'partial' | 'outcome_unknown';
+  results: KipOperationResult<T>[];
+  snapshot?: { seq?: number; token?: string };
+  warnings?: unknown[];
+  error?: KipError; // set only when the request failed before its operations
 }
 ```
+
+> **KIP 2.0.** A failure lives at the operation level for an ordinary error and
+> at the request level only for an envelope error, so a client must read both.
+> `outcome_unknown` is neither success nor failure: a write may have committed,
+> and the recovery is to look the transaction up — never to re-send it as if
+> nothing had happened.
 
 ---
 
@@ -581,10 +607,11 @@ When `ED25519_PUBKEYS` is set, configure the remote MCP client with an `Authoriz
 
 ### POST `/v1/{space_id}/execute_kip_readonly`
 
-- Purpose: Execute a KIP request (read-only mode, suitable for queries)
+- Purpose: Execute a KIP 2.0 request (read-only: KQL and META)
 - Auth: SpaceToken/CWT `read` (public spaces are unauthenticated; private spaces require a valid token)
-- Request body: `KipRequest`
-- Response: `KipResponse<T>` (returns different result types based on the commands)
+- Request body: `KipRequest`, or a bare JSON string read as one command
+- Response: `KipResponse<T>` (the result type follows the commands)
+- Read-only is enforced on what each command *parses to*, so a KML mutation is refused here however the request labels it
 
 ### POST `/v1/{space_id}/get_or_init_user`
 
@@ -719,7 +746,7 @@ Wiki-specific error semantics: `409` commit conflict (`error.data.current_versio
 
 ### POST `/v1/{space_id}/wiki/digest`
 
-- Purpose: Distill pending wiki versions into the Cognitive Nexus as propositions with `wiki://` citation metadata; supersedes facts the newest version no longer asserts (requires `update_space {"wiki_digest": true}`)
+- Purpose: Distill pending wiki versions into the Cognitive Nexus — each fact becomes a Proposition plus an Assertion attributed to the Brain, citing its passage as Evidence. A fact the newest version no longer states has the digest's own Assertion retracted; the Proposition and anyone else's Assertions about it are untouched. Requires `update_space {"wiki_digest": true}`
 - Auth: SpaceToken/CWT `write`
 - Response: `RpcResponse<WikiDigestReport>`
 

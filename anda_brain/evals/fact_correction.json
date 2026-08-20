@@ -33,27 +33,47 @@
       "query": "What city should I use for shipping the conference badge?",
       "evaluation": {
         "scoring_rubric": "The answer should use the corrected shipping city and avoid the stale city.",
-        "required_answer_terms": ["Berlin"],
-        "forbidden_answer_terms": ["Tokyo"],
+        "required_answer_terms": [
+          "Berlin"
+        ],
+        "forbidden_answer_terms": [
+          "Tokyo"
+        ],
         "expected_memories": [
           {
             "id": "current_shipping_city",
             "description": "User's current shipping city is Berlin.",
             "mode": "should_exist",
             "probe": {
-              "command": "SEARCH CONCEPT \"current shipping city Berlin not Tokyo\" MODE \"semantic\" THRESHOLD 0.6 LIMIT 10",
-              "readonly": true
+              "kip": "2.0",
+              "operations": [
+                {
+                  "command": "SEARCH CONCEPT :term THRESHOLD 0.4 LIMIT 10"
+                }
+              ],
+              "parameters": {
+                "term": "current shipping city Berlin not Tokyo"
+              }
             },
-            "answer_terms": ["Berlin"],
-            "trace_terms": ["Berlin", "shipping"]
+            "answer_terms": [
+              "Berlin"
+            ],
+            "trace_terms": [
+              "Berlin",
+              "shipping"
+            ]
           },
           {
             "id": "stale_shipping_city",
             "description": "Tokyo should not remain the active shipping city after correction.",
             "mode": "should_not_exist",
             "probe": {
-              "command": "FIND(?city) WHERE { ?person {type: \"Person\", name: \"user_042\"} ?link (?person, \"ships_to\", ?city) FILTER(CONTAINS(?city.name, \"Tokyo\") || CONTAINS(?city.attributes.description, \"Tokyo\")) FILTER(IS_NULL(?link.metadata.superseded) || ?link.metadata.superseded != true) } LIMIT 10",
-              "readonly": true
+              "kip": "2.0",
+              "operations": [
+                {
+                  "command": "FIND(?belief.status, ?city.name) WHERE {\n  ?person CONCEPT {type: \"Person\", key: \"user_042\"}\n  ?belief BELIEF (?person, \"ships_to\", ?city)\n  FILTER(?belief.status == \"accepted\")\n  FILTER(CONTAINS(?city.name, \"Tokyo\") || CONTAINS(?city.attributes.description, \"Tokyo\"))\n} LIMIT 10"
+                }
+              ]
             }
           }
         ]

@@ -14,6 +14,7 @@ use serde::Deserialize;
 use super::{EvalProfile, EvalScenario, validate_eval_plan};
 use crate::{
     assess::{self, AssessContext},
+    kip,
     space::Space,
 };
 
@@ -41,7 +42,7 @@ pub struct MinedScenario {
     pub signal: String,
 }
 
-const MINE_INSTRUCTIONS: &str = r#"You distill real memory-correction events into longitudinal eval scenarios for an AI memory system. You will receive a superseded knowledge-graph link (a fact the user later corrected) and excerpts of the conversations it came from.
+const MINE_INSTRUCTIONS: &str = r#"You distill real memory-correction events into longitudinal eval scenarios for an AI memory system. You will receive a superseded Assertion (a claim the user later corrected) and excerpts of the conversations it came from.
 
 Write ONE eval scenario that replays this class of failure: the user states the original fact, later corrects it, maintenance runs, and a checkpoint verifies the correction won. Requirements:
 
@@ -77,12 +78,12 @@ pub async fn mine_scenarios(
         if mined.len() >= config.max_scenarios {
             break;
         }
-        let Some(link) = fetch_link(space, &entity).await else {
+        let Some(link) = fetch_correction(space, &entity).await else {
             continue;
         };
         let excerpts = fetch_source_excerpts(space, &link).await;
         let prompt = format!(
-            "# Corrected memory (superseded link)\n{}\n\n# Related conversation excerpts\n{}",
+            "# Corrected memory (superseded Assertion)\n{}\n\n# Related conversation excerpts\n{}",
             scrub_pii(&assess::truncate_chars(
                 &serde_json::to_string_pretty(&link).unwrap_or_default(),
                 MINE_EXCERPT_CHARS,
@@ -159,51 +160,77 @@ pub async fn mine_scenarios(
     Ok((mined, usage))
 }
 
-/// Fetches a link by id; `None` when it no longer exists (e.g. forgotten).
-async fn fetch_link(space: &Space, entity: &str) -> Option<Json> {
-    if !assess::is_proposition_entity_id(entity) {
+/// Fetches the superseded Assertion by id, with the Proposition it is about.
+///
+/// `None` when it no longer exists (e.g. purged by a forget request). The
+/// correction ledger records Assertion ids: in KIP 2.0 a correction *is* a new
+/// Assertion superseding an old one, where 1.x flipped a flag on the link.
+async fn fetch_correction(space: &Space, entity: &str) -> Option<Json> {
+    if !assess::is_assertion_entity_id(entity) {
         return None;
     }
     let response = space
-        .execute_kip_readonly(anda_kip::Request {
-            command: format!(
-                "FIND(?link) WHERE {{ ?link (id: \"{}\") }} LIMIT 1",
-                entity.replace('\\', "\\\\").replace('"', "\\\"")
-            ),
-            readonly: true,
-            ..Default::default()
-        })
+        .execute_kip_readonly(kip::request_with(
+            r#"FIND(?a, ?p) WHERE { ?a ASSERTION {id: :id, proposition: ?p} } LIMIT 1"#,
+            kip::param("id", entity),
+        ))
         .await
         .ok()?;
-    let mut found = None;
-    if let anda_kip::Response::Ok { result, .. } = &response {
-        assess::collect_entity_objects(result, &mut |id, object| {
-            if id == entity && found.is_none() {
-                found = Some(Json::Object(object.clone()));
-            }
-        });
-    }
-    found
+    let row = kip::ok_result(&response)?
+        .as_array()?
+        .first()?
+        .as_array()?
+        .to_vec();
+    Some(Json::Object(serde_json::Map::from_iter([
+        ("assertion".to_string(), row.first().cloned()?),
+        (
+            "proposition".to_string(),
+            row.get(1).cloned().unwrap_or(Json::Null),
+        ),
+    ])))
 }
 
-/// Pulls bounded excerpts of the conversations the link's `metadata.source`
-/// points at (formation writes conversation ids there).
-async fn fetch_source_excerpts(space: &Space, link: &Json) -> Vec<String> {
+/// Pulls bounded excerpts of the conversations behind a correction.
+///
+/// KIP 1.x kept a `metadata.source` list of conversation ids on the link. KIP
+/// 2.0 has no metadata bag: what a claim rests on is its Evidence, and
+/// Formation stamps the conversation it observed into each Evidence payload as
+/// `conversation` (see BrainFormation.md). Following the citations is therefore
+/// both the correct provenance path and the same answer the old field held.
+async fn fetch_source_excerpts(space: &Space, correction: &Json) -> Vec<String> {
+    let evidence_ids: Vec<String> = correction
+        .get("assertion")
+        .and_then(|assertion| assertion.get("evidence_refs"))
+        .and_then(Json::as_array)
+        .map(|refs| {
+            refs.iter()
+                .filter_map(|reference| {
+                    reference
+                        .get("evidence")
+                        .and_then(|evidence| evidence.get("id"))
+                        .or_else(|| reference.get("id"))
+                        .and_then(Json::as_str)
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     let mut ids: Vec<u64> = Vec::new();
-    let mut push_source = |value: &Json| {
-        let id = match value {
-            Json::Number(number) => number.as_u64(),
-            Json::String(text) => text.trim().parse::<u64>().ok(),
-            _ => None,
+    for evidence_id in evidence_ids.iter().take(MINE_MAX_CONVERSATIONS) {
+        let Ok(response) = space
+            .execute_kip_readonly(kip::request_with(
+                "FIND(?e.payload) WHERE { ?e EVIDENCE {id: :id} } LIMIT 1",
+                kip::param("id", evidence_id.as_str()),
+            ))
+            .await
+        else {
+            continue;
         };
-        if let Some(id) = id {
-            ids.push(id);
-        }
-    };
-    match link.get("metadata").and_then(|meta| meta.get("source")) {
-        Some(Json::Array(items)) => items.iter().for_each(&mut push_source),
-        Some(value) => push_source(value),
-        None => {}
+        let Some(payload) = kip::ok_result(&response) else {
+            continue;
+        };
+        collect_conversation_ids(payload, &mut ids);
     }
     ids.truncate(MINE_MAX_CONVERSATIONS);
 
@@ -224,6 +251,27 @@ async fn fetch_source_excerpts(space: &Space, link: &Json) -> Vec<String> {
         }
     }
     excerpts
+}
+
+/// Collects every `conversation` id nested anywhere in an Evidence payload.
+fn collect_conversation_ids(value: &Json, ids: &mut Vec<u64>) {
+    match value {
+        Json::Array(items) => items
+            .iter()
+            .for_each(|item| collect_conversation_ids(item, ids)),
+        Json::Object(map) => {
+            if let Some(id) = map.get("conversation").and_then(|value| match value {
+                Json::Number(number) => number.as_u64(),
+                Json::String(text) => text.trim().parse::<u64>().ok(),
+                _ => None,
+            }) {
+                ids.push(id);
+            }
+            map.values()
+                .for_each(|nested| collect_conversation_ids(nested, ids));
+        }
+        _ => {}
+    }
 }
 
 /// Masks obvious PII: email-like tokens and digit runs of 7+ characters.

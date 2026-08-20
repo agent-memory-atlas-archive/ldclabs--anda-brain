@@ -35,19 +35,39 @@
       "query": "Write an email to follow up on the renovation cost with the general contractor.",
       "evaluation": {
         "scoring_rubric": "The answer should pull in project context without pretending the budget is exact.",
-        "required_answer_terms": ["renovation", "$200k"],
-        "forbidden_answer_terms": ["exact budget", "guaranteed"],
+        "required_answer_terms": [
+          "renovation",
+          "$200k"
+        ],
+        "forbidden_answer_terms": [
+          "exact budget",
+          "guaranteed"
+        ],
         "expected_memories": [
           {
             "id": "renovation_budget",
             "description": "Home renovation project has a rough budget around $200k.",
             "mode": "should_exist",
             "probe": {
-              "command": "SEARCH CONCEPT \"home renovation budget 200k Orange County\" MODE \"semantic\" THRESHOLD 0.6 LIMIT 10",
-              "readonly": true
+              "kip": "2.0",
+              "operations": [
+                {
+                  "command": "SEARCH CONCEPT :term THRESHOLD 0.4 LIMIT 10"
+                }
+              ],
+              "parameters": {
+                "term": "home renovation budget 200k Orange County"
+              }
             },
-            "answer_terms": ["renovation", "$200k"],
-            "trace_terms": ["renovation", "200k", "Orange County"]
+            "answer_terms": [
+              "renovation",
+              "$200k"
+            ],
+            "trace_terms": [
+              "renovation",
+              "200k",
+              "Orange County"
+            ]
           }
         ]
       }

@@ -2207,7 +2207,9 @@ mod tests {
                   "expected_memories": [{
                     "id": "pref",
                     "probe": {
-                      "command": "SEARCH CONCEPT \"preference\" MODE \"semantic\" LIMIT 1"
+                      "kip": "2.0",
+                      "operations": [{"command": "TOMBSTONE :target"}],
+                      "parameters": {"target": "C-1"}
                     }
                   }]
                 }

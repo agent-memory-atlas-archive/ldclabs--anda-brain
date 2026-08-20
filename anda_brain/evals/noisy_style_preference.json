@@ -47,8 +47,13 @@
       "query": "Can you rewrite this intro to sound more like me?",
       "evaluation": {
         "scoring_rubric": "The answer should apply the user's learned writing-style preference: concise, direct, no hype. Paraphrases of the style count fully.",
-        "required_answer_terms": ["concise", "direct"],
-        "forbidden_answer_terms": ["salesy"],
+        "required_answer_terms": [
+          "concise",
+          "direct"
+        ],
+        "forbidden_answer_terms": [
+          "salesy"
+        ],
         "expected_memories": [
           {
             "id": "style_preference",
@@ -57,11 +62,25 @@
             "assertion": "a writing-style preference for user_042 stating they want concise, direct prose without hype",
             "search": "concise direct writing style no hype preference",
             "probe": {
-              "command": "SEARCH CONCEPT \"concise direct writing style\" MODE \"semantic\" THRESHOLD 0.6 LIMIT 10",
-              "readonly": true
+              "kip": "2.0",
+              "operations": [
+                {
+                  "command": "SEARCH CONCEPT :term THRESHOLD 0.4 LIMIT 10"
+                }
+              ],
+              "parameters": {
+                "term": "concise direct writing style"
+              }
             },
-            "answer_terms": ["concise", "direct"],
-            "trace_terms": ["concise", "direct", "writing"]
+            "answer_terms": [
+              "concise",
+              "direct"
+            ],
+            "trace_terms": [
+              "concise",
+              "direct",
+              "writing"
+            ]
           }
         ]
       }
@@ -83,7 +102,9 @@
       "query": "I'm writing the launch announcement for my blog. Any style guidance before I start?",
       "evaluation": {
         "scoring_rubric": "The answer should proactively surface the remembered style preference (concise, direct, avoid hype) and connect it to the user's blog project.",
-        "required_answer_terms": ["concise"],
+        "required_answer_terms": [
+          "concise"
+        ],
         "expected_memories": [
           {
             "id": "style_preference_after_maintenance",
@@ -92,11 +113,23 @@
             "assertion": "a writing-style preference for user_042 stating they want concise, direct prose without hype",
             "search": "concise direct writing style no hype preference",
             "probe": {
-              "command": "SEARCH CONCEPT \"concise direct writing style\" MODE \"semantic\" THRESHOLD 0.6 LIMIT 10",
-              "readonly": true
+              "kip": "2.0",
+              "operations": [
+                {
+                  "command": "SEARCH CONCEPT :term THRESHOLD 0.4 LIMIT 10"
+                }
+              ],
+              "parameters": {
+                "term": "concise direct writing style"
+              }
             },
-            "answer_terms": ["concise"],
-            "trace_terms": ["concise", "writing"]
+            "answer_terms": [
+              "concise"
+            ],
+            "trace_terms": [
+              "concise",
+              "writing"
+            ]
           }
         ]
       }

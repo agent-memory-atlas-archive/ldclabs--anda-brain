@@ -8,7 +8,10 @@ pub mod assess;
 pub(crate) mod authz;
 pub mod eval;
 pub mod handler;
+pub(crate) mod kip;
 pub(crate) mod ledger;
+#[cfg(test)]
+mod legacy_upgrade;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod payload;
@@ -16,6 +19,7 @@ pub mod space;
 #[cfg(test)]
 pub(crate) mod testkit;
 pub mod types;
+pub(crate) mod vocabulary;
 #[cfg(feature = "wiki")]
 pub(crate) mod wiki;
 

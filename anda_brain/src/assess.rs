@@ -11,6 +11,8 @@ use anda_core::{
     AgentOutput, BoxError, CompletionRequest, ContentPart, Json, Message, ModelEffort, Usage,
 };
 use anda_kip::{Request, Response};
+
+use crate::kip;
 use serde::{Deserialize, Serialize};
 
 use crate::space::Space;
@@ -25,25 +27,27 @@ pub const DEFAULT_ASSERTION_SEARCH_LIMIT: usize = 8;
 /// Upper bound applied to serialized evidence blobs fed to a judge.
 pub(crate) const MAX_EVIDENCE_CHARS: usize = 6_000;
 
-/// Maintenance-backlog count: concepts still in the `Unsorted` domain.
-/// The same assessment query the Maintenance prompt prescribes.
-pub const UNSORTED_COUNT_KQL: &str =
-    "FIND(COUNT(?n)) WHERE { (?n, \"belongs_to_domain\", {type: \"Domain\", name: \"Unsorted\"}) }";
+/// Maintenance-backlog probes: episodic memory nobody has consolidated yet.
+///
+/// KIP 1.x measured this as "concepts still in the `Unsorted` Domain". The
+/// Cognitive Memory Profile declares no Domain, so the backlog is now what
+/// Maintenance actually owes: Events and Experiences with no `consolidated_to`
+/// lineage. One probe per type, summed — a structural field is a schema symbol,
+/// so a single query cannot range over both.
+pub const UNCONSOLIDATED_COUNT_KQL: &[&str] = &[
+    "FIND(COUNT(?x)) WHERE { ?x CONCEPT {type: \"Event\"} NOT { STRUCTURAL (?x, \"consolidated_to\", ?to) } }",
+    "FIND(COUNT(?x)) WHERE { ?x CONCEPT {type: \"Experience\"} NOT { STRUCTURAL (?x, \"consolidated_to\", ?to) } }",
+];
 
-/// Concept-type inventory driving the per-type orphan sweep
-/// ([`orphan_count`]); paginated via `CURSOR :cursor` when needed.
-const CONCEPT_TYPES_KQL: &str = "FIND(?t.name) WHERE { ?t {type: \"$ConceptType\"} } LIMIT 500";
-
-/// Per-type orphan probe: concepts of `:type` without any
-/// `belongs_to_domain` proposition. `:type` is substituted via request
-/// parameters.
-const ORPHAN_COUNT_BY_TYPE_KQL: &str =
-    "FIND(COUNT(?n)) WHERE { ?n {type: :type} NOT { (?n, \"belongs_to_domain\", ?d) } }";
-
-/// Registered `$PropositionType` count — the schema-sprawl indicator
-/// (plan module M8).
-pub const PREDICATE_TYPES_COUNT_KQL: &str =
-    "FIND(COUNT(?t)) WHERE { ?t {type: \"$PropositionType\"} }";
+/// Orphan probe: Concepts no Proposition mentions on either side.
+///
+/// The 1.x sweep asked which Concepts lacked a `belongs_to_domain` link, and
+/// had to iterate the `$ConceptType` inventory because `?n {}` was a syntax
+/// error. KIP 2.0 accepts an unconstrained Concept pattern, so the whole census
+/// is one query — and it now measures the thing the old one stood in for: a
+/// Concept nothing says anything about.
+const ORPHAN_COUNT_KQL: &str =
+    "FIND(COUNT(?c)) WHERE { ?c CONCEPT {} NOT { (?c, ?out, ?o) } NOT { (?s, ?in, ?c) } }";
 
 /// Minimal capabilities the assessment instruments need from their host:
 /// one-shot LLM completions (for judges and simulators) and read-only KIP
@@ -238,10 +242,18 @@ where
 /// Builds the semantic search command for an assertion probe. The search
 /// text is embedded in a KQL string literal via the crate's shared escaping
 /// helper ([`crate::space::kip_string_literal`]).
-pub fn assertion_search_command(search: &str, threshold: f64, limit: usize) -> String {
-    format!(
-        "SEARCH CONCEPT {} MODE \"semantic\" THRESHOLD {threshold} LIMIT {limit}",
-        crate::space::kip_string_literal(search)
+pub fn assertion_search_request(search: &str, threshold: f64, limit: usize) -> Request {
+    // MODE is omitted deliberately: the engine picks hybrid where it has
+    // semantic capability and keyword otherwise, whereas asking for `semantic`
+    // outright is an `UnsupportedCapability` refusal on a deployment with no
+    // embedding model — which a probe would read as "the graph holds nothing".
+    kip::request_with(
+        "SEARCH CONCEPT :term THRESHOLD :threshold LIMIT :limit",
+        serde_json::Map::from_iter([
+            ("term".to_string(), Json::from(search)),
+            ("threshold".to_string(), Json::from(threshold)),
+            ("limit".to_string(), Json::from(limit)),
+        ]),
     )
 }
 
@@ -269,30 +281,55 @@ pub fn truncate_chars(text: &str, max_chars: usize) -> String {
     out
 }
 
-/// True for concept ids of the form `"C:<u64>"`.
+/// True for an element id of the given KIP 2.0 kind tag.
+///
+/// KIP 2.0 mints `<tag>-<row>` — `C-7`, `P-11`, `A-3`, `E-2`, `X-1` — where 1.x
+/// used `C:7` and packed the predicate into `P:11:has_allergy`. The tag is the
+/// only type information a bare reference carries, which is why these matchers
+/// read it rather than guessing from context.
+fn is_element_id(value: &str, tag: char) -> bool {
+    value
+        .strip_prefix(tag)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .is_some_and(|seq| !seq.is_empty() && seq.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+/// True for Concept ids of the form `"C-<u64>"`.
 pub fn is_concept_entity_id(value: &str) -> bool {
-    value
-        .strip_prefix("C:")
-        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()))
+    is_element_id(value, 'C')
 }
 
-/// True for proposition ids of the form `"P:<u64>:<predicate>"`.
+/// True for Proposition ids of the form `"P-<u64>"`.
 pub fn is_proposition_entity_id(value: &str) -> bool {
-    value
-        .strip_prefix("P:")
-        .and_then(|rest| rest.split_once(':'))
-        .is_some_and(|(id, predicate)| {
-            !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()) && !predicate.is_empty()
-        })
+    is_element_id(value, 'P')
 }
 
-/// True for any graph entity id (`C:*` concept or `P:*` proposition).
+/// True for Assertion ids of the form `"A-<u64>"`.
+pub fn is_assertion_entity_id(value: &str) -> bool {
+    is_element_id(value, 'A')
+}
+
+/// True for any Cognitive Element id the brain cites or meters.
+///
+/// Evidence (`E-`) and Activity (`X-`) are deliberately absent: they are
+/// provenance records rather than memories, and counting a recall of one as
+/// usage of a memory would reinforce the receipt instead of the fact.
 pub fn is_entity_id(value: &str) -> bool {
-    is_concept_entity_id(value) || is_proposition_entity_id(value)
+    is_concept_entity_id(value) || is_proposition_entity_id(value) || is_assertion_entity_id(value)
+}
+
+/// The local name of a schema symbol reference.
+///
+/// A persisted reference names one exact version —
+/// `kip://profiles/cognitive-memory@2.0.0/Person` — because that is what keeps
+/// an element's meaning from drifting when a package is republished. What a
+/// caller wants to read is `Person`.
+pub fn local_symbol_name(reference: &str) -> &str {
+    reference.rsplit('/').next().unwrap_or(reference)
 }
 
 impl RecallTrace {
-    /// Graph entity ids (`C:*` / `P:*`) surfaced in successful tool outputs.
+    /// Element ids (`C-*` / `P-*` / `A-*`) surfaced in successful tool outputs.
     /// This is the usage-ledger signal (plan module M1): which memories a
     /// recall actually retrieved.
     pub fn entity_ids(&self) -> std::collections::BTreeSet<String> {
@@ -346,17 +383,15 @@ fn collect_citations(
         if !seen.insert(id.to_string()) {
             return;
         }
+        // KIP 1.x kept every one of these in one `metadata` bag. KIP 2.0 puts
+        // each where it belongs: the type in the Concept's `schema_ref` or the
+        // Proposition's `predicate_ref`, engine truth under `_system`, and the
+        // stance — which only an Assertion has — on the Assertion itself.
         let r#type = object
-            .get("type")
+            .get("schema_ref")
+            .or_else(|| object.get("predicate_ref"))
             .and_then(Json::as_str)
-            .map(str::to_string)
-            .or_else(|| {
-                // Propositions carry their predicate in the id itself.
-                id.strip_prefix("P:")
-                    .and_then(|rest| rest.split_once(':'))
-                    .map(|(_, predicate)| predicate.to_string())
-            });
-        let metadata = object.get("metadata");
+            .map(|reference| local_symbol_name(reference).to_string());
         citations.push(MemoryCitation {
             entity: id.to_string(),
             r#type,
@@ -364,27 +399,32 @@ fn collect_citations(
                 .get("name")
                 .and_then(Json::as_str)
                 .map(str::to_string),
-            confidence: metadata
-                .and_then(|metadata| metadata.get("confidence"))
-                .and_then(Json::as_f64),
-            source: metadata
-                .and_then(|metadata| metadata.get("source"))
-                .and_then(|source| match source {
-                    Json::String(text) => Some(text.clone()),
-                    // Multi-source facts cite their first origin.
-                    Json::Array(items) => items.iter().find_map(Json::as_str).map(str::to_string),
-                    _ => None,
-                }),
-            created_at: metadata
-                .and_then(|metadata| metadata.get("created_at"))
+            confidence: object.get("confidence").and_then(Json::as_f64),
+            // Whose stance this is, when the cited element carries one. Never
+            // the caller's Principal: attribution is cognition, authority is
+            // Governance, and citing one as the other is the confusion KIP 2.0
+            // exists to prevent.
+            source: object.get("asserted_by").and_then(element_reference),
+            created_at: object
+                .get("_system")
+                .and_then(|system| system.get("created_at"))
                 .and_then(Json::as_str)
                 .map(str::to_string),
         });
     });
 }
 
+/// Reads an element reference — `{"id": "C-7"}` or a bare id string.
+fn element_reference(value: &Json) -> Option<String> {
+    match value {
+        Json::String(id) => Some(id.clone()),
+        Json::Object(map) => map.get("id").and_then(Json::as_str).map(str::to_string),
+        _ => None,
+    }
+}
+
 /// Walks a KIP result recursively, visiting every object that carries a
-/// graph entity `id` (concept or proposition).
+/// Cognitive Element `id`.
 pub(crate) fn collect_entity_objects(
     value: &Json,
     visit: &mut impl FnMut(&str, &serde_json::Map<String, Json>),
@@ -396,8 +436,19 @@ pub(crate) fn collect_entity_objects(
             }
         }
         Json::Object(map) => {
+            // A lone `{"id": ...}` is a reference, not a retrieved element —
+            // `asserted_by`, an evidence citation, a structural edge. Metering
+            // one as a recall would reinforce a memory nobody read, and
+            // reinforcement is supposed to track what the answer actually used.
+            //
+            // A SEARCH hit is `{id, kind, score, element}`: the wrapper repeats
+            // the id but holds none of the content, so visiting it would take
+            // the id and leave the real element deduplicated away — every
+            // citation coming back with no type and no name.
             if let Some(Json::String(id)) = map.get("id")
+                && map.len() > 1
                 && is_entity_id(id)
+                && !wraps_element(map, id)
             {
                 visit(id, map);
             }
@@ -407,6 +458,16 @@ pub(crate) fn collect_entity_objects(
         }
         _ => {}
     }
+}
+
+/// Whether this object is an envelope around the element it names, rather than
+/// the element itself.
+fn wraps_element(map: &serde_json::Map<String, Json>, id: &str) -> bool {
+    map.get("element")
+        .and_then(Json::as_object)
+        .and_then(|element| element.get("id"))
+        .and_then(Json::as_str)
+        == Some(id)
 }
 
 /// Opening tag of the recall self-report footer (plan module M4).
@@ -471,20 +532,16 @@ pub async fn kip_count<C>(ctx: &C, command: &str) -> Option<u64>
 where
     C: AssessContext + ?Sized,
 {
-    let request = Request {
-        command: command.to_string(),
-        readonly: true,
-        ..Default::default()
-    };
-    match ctx.execute_kip_readonly(request).await {
-        Ok(Response::Ok { result, .. }) => {
-            let count = first_integer(&result);
+    match ctx.execute_kip_readonly(kip::request(command)).await {
+        Ok(response) if kip::succeeded(&response) => {
+            let count = kip::ok_result(&response).and_then(first_integer);
             if count.is_none() {
                 log::warn!(target: "brain", command = command; "kip_count: no integer in result");
             }
             count
         }
-        Ok(Response::Err { error, .. }) => {
+        Ok(response) => {
+            let error = kip::error_message(&response);
             log::warn!(target: "brain", command = command, error:% = error; "kip_count: KIP error");
             None
         }
@@ -495,96 +552,29 @@ where
     }
 }
 
-/// Counts concepts without any `belongs_to_domain` proposition, across every
-/// registered concept type (the Maintenance prompt requires schema/meta
-/// concepts to be attached to CoreSchema on creation, so a fully maintained
-/// graph reaches zero orphans).
+/// Sums a group of count probes, answering `None` when any leg fails so a
+/// partial sum is never mistaken for a census.
+pub async fn kip_count_sum<C>(ctx: &C, commands: &[&str]) -> Option<u64>
+where
+    C: AssessContext + ?Sized,
+{
+    let mut total = 0u64;
+    for command in commands {
+        total = total.saturating_add(kip_count(ctx, command).await?);
+    }
+    Some(total)
+}
+
+/// Counts Concepts nothing refers to.
 ///
-/// KIP has no "any node" clause (`?n {}` is a syntax error — an RC11
-/// proposal), so the sweep iterates the `$ConceptType` inventory and sums one
-/// bounded count per type. Heavy — callers run it at settlement time only.
-/// Returns `None` (with the failure logged) when any leg fails, so a partial
-/// sum is never mistaken for a real census.
+/// Heavy — it scans the Space's Propositions — so callers run it at settlement
+/// time only. Returns `None` (with the failure logged) when the probe fails, so
+/// a missing census is never mistaken for a clean graph.
 pub async fn orphan_count<C>(ctx: &C) -> Option<u64>
 where
     C: AssessContext + ?Sized,
 {
-    // Inventory of concept types, following pagination if the schema has
-    // sprawled past one page.
-    let mut type_names: Vec<String> = Vec::new();
-    let mut cursor: Option<String> = None;
-    loop {
-        let (command, parameters) = match &cursor {
-            None => (CONCEPT_TYPES_KQL.to_string(), serde_json::Map::new()),
-            Some(token) => (
-                format!("{CONCEPT_TYPES_KQL} CURSOR :cursor"),
-                serde_json::Map::from_iter([("cursor".to_string(), Json::from(token.clone()))]),
-            ),
-        };
-        let request = Request {
-            command,
-            parameters,
-            readonly: true,
-            ..Default::default()
-        };
-        match ctx.execute_kip_readonly(request).await {
-            Ok(Response::Ok {
-                result,
-                next_cursor,
-            }) => {
-                match serde_json::from_value::<Vec<String>>(result) {
-                    Ok(names) => type_names.extend(names),
-                    Err(err) => {
-                        log::warn!(target: "brain", error:% = err; "orphan_count: unexpected type inventory shape");
-                        return None;
-                    }
-                }
-                match next_cursor {
-                    Some(token) => cursor = Some(token),
-                    None => break,
-                }
-            }
-            Ok(Response::Err { error, .. }) => {
-                log::warn!(target: "brain", error:% = error; "orphan_count: type inventory failed");
-                return None;
-            }
-            Err(err) => {
-                log::warn!(target: "brain", error:% = err; "orphan_count: type inventory request failed");
-                return None;
-            }
-        }
-    }
-
-    let mut total: u64 = 0;
-    for type_name in type_names {
-        let request = Request {
-            command: ORPHAN_COUNT_BY_TYPE_KQL.to_string(),
-            parameters: serde_json::Map::from_iter([(
-                "type".to_string(),
-                Json::from(type_name.clone()),
-            )]),
-            readonly: true,
-            ..Default::default()
-        };
-        match ctx.execute_kip_readonly(request).await {
-            Ok(Response::Ok { result, .. }) => match first_integer(&result) {
-                Some(count) => total = total.saturating_add(count),
-                None => {
-                    log::warn!(target: "brain", concept_type = type_name; "orphan_count: no integer in per-type result");
-                    return None;
-                }
-            },
-            Ok(Response::Err { error, .. }) => {
-                log::warn!(target: "brain", concept_type = type_name, error:% = error; "orphan_count: per-type probe failed");
-                return None;
-            }
-            Err(err) => {
-                log::warn!(target: "brain", concept_type = type_name, error:% = err; "orphan_count: per-type request failed");
-                return None;
-            }
-        }
-    }
-    Some(total)
+    kip_count(ctx, ORPHAN_COUNT_KQL).await
 }
 
 pub fn first_integer(value: &Json) -> Option<u64> {
@@ -597,10 +587,12 @@ pub fn first_integer(value: &Json) -> Option<u64> {
 }
 
 pub fn response_hit_count(response: &Response) -> usize {
-    match response {
-        Response::Ok { result, .. } => json_hit_count(result),
-        Response::Err { result, .. } => result.as_ref().map(json_hit_count).unwrap_or_default(),
-    }
+    response
+        .results
+        .iter()
+        .filter_map(|result| result.result.as_ref())
+        .map(json_hit_count)
+        .sum()
 }
 
 fn json_hit_count(value: &Json) -> usize {
@@ -679,11 +671,28 @@ mod tests {
     }
 
     #[test]
-    fn entity_id_matchers_accept_graph_ids_only() {
-        assert!(is_concept_entity_id("C:7"));
-        assert!(is_proposition_entity_id("P:11:likes"));
-        assert!(is_entity_id("P:0:belongs_to_domain"));
-        for bad in ["C:", "C:x", "P:11", "P::likes", "call_1", "wiki://x", ""] {
+    fn entity_id_matchers_accept_element_ids_only() {
+        assert!(is_concept_entity_id("C-7"));
+        assert!(is_proposition_entity_id("P-11"));
+        assert!(is_assertion_entity_id("A-3"));
+        assert!(is_entity_id("P-0"));
+        // Evidence and Activity are provenance records, not memories: metering
+        // a recall of one as usage would reinforce the receipt, not the fact.
+        assert!(!is_entity_id("E-2"));
+        assert!(!is_entity_id("X-1"));
+        // The KIP 1.x spellings must not match either, or a stale ledger row
+        // would silently keep metering an id nothing in the graph answers to.
+        for bad in [
+            "C:7",
+            "P:11:likes",
+            "C-",
+            "C-x",
+            "P11",
+            "C--1",
+            "call_1",
+            "wiki://x",
+            "",
+        ] {
             assert!(!is_entity_id(bad), "{bad} must not match");
         }
     }
@@ -694,16 +703,20 @@ mod tests {
             tools: vec![
                 ToolTrace {
                     name: "execute_kip_readonly".to_string(),
-                    args: json!({"command": "mentions C:50 in args only"}),
+                    args: json!({"command": "mentions C-50 in args only"}),
                     call_id: None,
                     output: Some(json!({"result": [
-                        {"id": "C:7", "type": "Preference", "name": "oolong",
-                         "metadata": {"confidence": 0.9, "source": "chat:42",
-                                      "created_at": "2026-07-01T00:00:00.000Z"}},
-                        {"id": "P:3:prefers", "metadata": {"confidence": 0.8,
-                                                           "source": ["a", "b"]}},
+                        {"id": "C-7",
+                         "schema_ref": "kip://profiles/cognitive-memory@2.0.0/Preference",
+                         "name": "oolong",
+                         "_system": {"created_at": "2026-07-01T00:00:00.000Z"}},
+                        {"id": "A-3", "confidence": 0.8,
+                         "asserted_by": {"id": "C-1"},
+                         "_system": {"created_at": "2026-07-02T00:00:00.000Z"}},
+                        {"id": "P-3",
+                         "predicate_ref": "kip://profiles/cognitive-memory@2.0.0/prefers"},
                         {"id": "not-an-entity"},
-                        {"nested": [{"id": "C:7"}]}
+                        {"nested": [{"id": "C-7"}]}
                     ]})),
                     is_error: None,
                 },
@@ -711,7 +724,7 @@ mod tests {
                     name: "execute_kip_readonly".to_string(),
                     args: Json::Null,
                     call_id: None,
-                    output: Some(json!([{"id": "C:99"}])),
+                    output: Some(json!([{"id": "C-99"}])),
                     is_error: Some(true),
                 },
             ],
@@ -720,26 +733,30 @@ mod tests {
         let ids = trace.entity_ids();
         assert_eq!(
             ids.into_iter().collect::<Vec<_>>(),
-            vec!["C:7".to_string(), "P:3:prefers".to_string()]
+            vec!["A-3".to_string(), "C-7".to_string(), "P-3".to_string()]
         );
 
         let citations = extract_memory_citations(&trace);
-        assert_eq!(citations.len(), 2);
-        assert_eq!(citations[0].entity, "C:7");
+        assert_eq!(citations.len(), 3);
+        // A type is read from the exact schema reference and shown by its local
+        // name: the version is what keeps the meaning pinned, not what a reader
+        // needs to see.
+        assert_eq!(citations[0].entity, "C-7");
         assert_eq!(citations[0].r#type.as_deref(), Some("Preference"));
         assert_eq!(citations[0].name.as_deref(), Some("oolong"));
-        assert_eq!(citations[0].confidence, Some(0.9));
-        assert_eq!(citations[0].source.as_deref(), Some("chat:42"));
         assert_eq!(
             citations[0].created_at.as_deref(),
             Some("2026-07-01T00:00:00.000Z")
         );
-        assert_eq!(citations[1].entity, "P:3:prefers");
-        // Propositions derive their type from the id's predicate segment.
-        assert_eq!(citations[1].r#type.as_deref(), Some("prefers"));
+        // Only an Assertion carries a stance, so only an Assertion cites one.
+        assert_eq!(citations[0].confidence, None);
+        assert_eq!(citations[1].entity, "A-3");
         assert_eq!(citations[1].confidence, Some(0.8));
-        // Multi-source facts cite their first origin.
-        assert_eq!(citations[1].source.as_deref(), Some("a"));
+        assert_eq!(citations[1].source.as_deref(), Some("C-1"));
+        // A Proposition's "type" is the predicate it relates its endpoints by.
+        assert_eq!(citations[2].entity, "P-3");
+        assert_eq!(citations[2].r#type.as_deref(), Some("prefers"));
+        assert_eq!(citations[2].confidence, None);
     }
 
     #[test]
@@ -830,11 +847,20 @@ mod tests {
     }
 
     #[test]
-    fn assertion_search_command_escapes_backslashes_and_quotes() {
-        let command = assertion_search_command("say \"hi\" \\ bye", 0.5, 3);
+    fn an_assertion_probe_binds_its_term_instead_of_splicing_it() {
+        // The search term comes from an eval set, and a quote or a backslash in
+        // it used to have to be escaped into the command text. A bound
+        // parameter occupies a complete value position, so the term is data
+        // even when it looks like syntax.
+        let request = assertion_search_request("say \"hi\" \\ bye", 0.5, 3);
+        request.validate().unwrap();
         assert_eq!(
-            command,
-            "SEARCH CONCEPT \"say \\\"hi\\\" \\\\ bye\" MODE \"semantic\" THRESHOLD 0.5 LIMIT 3"
+            request.operations[0].command.as_deref(),
+            Some("SEARCH CONCEPT :term THRESHOLD :threshold LIMIT :limit")
+        );
+        assert_eq!(
+            request.parameters.as_ref().unwrap()["term"],
+            Json::from("say \"hi\" \\ bye")
         );
     }
 

@@ -24,7 +24,7 @@ use std::{
     },
 };
 
-use super::{BrainHook, RunnerFlow, RunnerHost, drive_runner_loop};
+use super::{BrainHook, PERSON_BY_KEY, RunnerFlow, RunnerHost, drive_runner_loop, first_row};
 use crate::types::FormationInput;
 
 const REVIEW_INSTRUCTIONS: &str = include_str!("../../assets/BrainFormationReview.md");
@@ -116,27 +116,52 @@ impl FormationAgent {
             .get_extension_as::<DocumentId>("brain_processed")
     }
 
+    /// Resolves the Person Concept for a counterparty, creating it once.
+    ///
+    /// The counterparty handle is the Concept's `key` — immutable Space-local
+    /// identity — while `name` is a mutable display label. Matching on the key
+    /// is what makes this idempotent: a name-only match would mint a second
+    /// Person for anyone who renamed themselves, and a `key` is identity within
+    /// its type, so `type` is not optional decoration here.
+    ///
+    /// A Person is semantic cognition. It is not a Principal and cannot
+    /// authenticate as one — which is why nothing about this write says
+    /// anything about what the counterparty may do.
     pub async fn get_or_init_counterparty(
         &self,
         counterparty: String,
         name: Option<String>,
     ) -> Result<Json, BoxError> {
-        let mut attributes = Map::new();
-        let mut metadata = Map::new();
-        attributes.insert("id".to_string(), counterparty.clone().into());
-        attributes.insert("person_class".to_string(), "Human".into());
-        if let Some(name) = name {
-            attributes.insert("name".to_string(), name.into());
-        }
-        metadata.insert("author".to_string(), "$system".into());
-        metadata.insert("status".to_string(), "active".into());
-        let user = self
-            .memory
-            .nexus()
-            .get_or_init_concept("Person".to_string(), counterparty, attributes, metadata)
+        let parameters = Map::from_iter([
+            ("key".to_string(), Json::from(counterparty.clone())),
+            (
+                "name".to_string(),
+                Json::from(name.unwrap_or_else(|| counterparty.clone())),
+            ),
+        ]);
+        self.memory
+            .execute(
+                r#"UPSERT CONCEPT ?person {
+  MATCH { type: "Person", key: :key }
+  SET FIELDS { name: :name }
+}"#,
+                Some(parameters),
+            )
             .await?;
 
-        Ok(user.to_concept_node())
+        // Read back rather than returning the write receipt: callers want the
+        // Person as it now stands, which on a match is not what this call sent.
+        Ok(first_row(
+            self.memory
+                .query(
+                    PERSON_BY_KEY,
+                    Some(Map::from_iter([(
+                        "key".to_string(),
+                        Json::from(counterparty),
+                    )])),
+                )
+                .await?,
+        ))
     }
 
     pub async fn start_process(
@@ -413,7 +438,8 @@ impl FormationAgent {
         let mut runner = ctx.clone().completion_iter(
             CompletionRequest {
                 instructions: format!(
-                    "{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Your Notes:\n{}\n\n# Counterparty Profile:\n{}\n\n# Current Datetime: {}",
+                    "{}\n\n---\n\n{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Your Notes:\n{}\n\n# Counterparty Profile:\n{}\n\n# Current Datetime: {}",
+                    super::prompts::language_reference(),
                     super::prompts::active_prompt(super::prompts::PromptTarget::Formation),
                     primer,
                     serde_json::to_string(&notes.items).unwrap_or_default(),
@@ -502,7 +528,11 @@ impl Agent<AgentCtx> for FormationAgent {
     }
 
     fn tool_dependencies(&self) -> Vec<String> {
-        vec![self.memory.name(), NoteTool::NAME.to_string()]
+        vec![
+            self.memory.name(),
+            NoteTool::NAME.to_string(),
+            crate::vocabulary::DeclareSymbolsTool::NAME.to_string(),
+        ]
     }
 
     // 接收来自外部的 FormationInput，创建一个新的 Conversation，并启动处理流程。
@@ -732,7 +762,10 @@ mod tests {
                 Ok(AgentOutput {
                     tool_calls: vec![ToolCall {
                         name: "execute_kip".to_string(),
-                        args: serde_json::json!({"commands": []}),
+                        // A command the engine refuses, so the tool answers with
+                        // an error and the model is asked again: the point of
+                        // this fixture is a loop that never converges.
+                        args: serde_json::json!({"command": "NOT A VALID KIP COMMAND"}),
                         result: None,
                         call_id: Some("loop".to_string()),
                         remote_id: None,
@@ -771,7 +804,7 @@ mod tests {
                     return Ok(AgentOutput {
                         tool_calls: vec![ToolCall {
                             name: "execute_kip".to_string(),
-                            args: serde_json::json!({"commands": []}),
+                            args: serde_json::json!({"command": "DESCRIBE PRIMER"}),
                             result: None,
                             call_id: Some(format!("call-{call}")),
                             remote_id: None,
@@ -1413,12 +1446,28 @@ mod tests {
             "failed_reason: {:?}",
             conversation.failed_reason
         );
-        let stored = space
-            .memory
-            .get_conversation(conversation._id)
-            .await
-            .unwrap();
-        assert_eq!(stored.status, ConversationStatus::Failed);
+        assert_eq!(
+            stored_status(&space, conversation._id).await,
+            ConversationStatus::Failed
+        );
+    }
+
+    /// The persisted status of one conversation, allowing the write to become
+    /// visible.
+    ///
+    /// A conversation this long is rewritten on every throttled snapshot, and a
+    /// read issued in the same instant as the final write can still see the
+    /// previous one. The assertion is about what the agent persisted, not about
+    /// how fast the store settles.
+    async fn stored_status(space: &crate::space::Space, id: u64) -> ConversationStatus {
+        for _ in 0..50 {
+            let stored = space.memory.get_conversation(id).await.unwrap();
+            if stored.status != ConversationStatus::Working {
+                return stored.status;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        space.memory.get_conversation(id).await.unwrap().status
     }
 
     #[tokio::test]

@@ -276,10 +276,10 @@ pub struct PolicyPatch {
 /// accept gate can mistake for an improvement. Wire a field into the
 /// runtime first, then add it here.
 pub const POLICY_PATCH_FIELDS: &[&str] = &[
-    "confidence_decay_factor",
+    "memory_strength_decay_factor",
     "decay_floor",
     "stale_event_threshold_days",
-    "unsorted_max_backlog",
+    "unconsolidated_max_backlog",
     "orphan_max_count",
     "self_test_queries_per_cycle",
 ];
@@ -326,9 +326,9 @@ pub fn apply_policy_patch(
     let mut next = policy.clone();
     let field = patch.field.as_str();
     match field {
-        "confidence_decay_factor" => {
-            next.confidence_decay_factor =
-                bounded_f64(field, policy.confidence_decay_factor, patch.value)?;
+        "memory_strength_decay_factor" => {
+            next.memory_strength_decay_factor =
+                bounded_f64(field, policy.memory_strength_decay_factor, patch.value)?;
         }
         "decay_floor" => {
             next.decay_floor = bounded_f64(field, policy.decay_floor, patch.value)?;
@@ -337,9 +337,9 @@ pub fn apply_policy_patch(
             next.stale_event_threshold_days =
                 bounded_u32(field, policy.stale_event_threshold_days, patch.value)?;
         }
-        "unsorted_max_backlog" => {
-            next.unsorted_max_backlog =
-                bounded_u32(field, policy.unsorted_max_backlog, patch.value)?;
+        "unconsolidated_max_backlog" => {
+            next.unconsolidated_max_backlog =
+                bounded_u32(field, policy.unconsolidated_max_backlog, patch.value)?;
         }
         "orphan_max_count" => {
             next.orphan_max_count = bounded_u32(field, policy.orphan_max_count, patch.value)?;
@@ -367,7 +367,7 @@ Propose 1 to 3 minimal mutations that address the observed failure modes. Rules:
 - Prefer one decisive knob over many timid ones; explain the causal link in `rationale`.
 
 Respond with ONLY a JSON object:
-{"patches": [{"field": "confidence_decay_factor", "value": 0.9, "rationale": "..."}]}
+{"patches": [{"field": "memory_strength_decay_factor", "value": 0.9, "rationale": "..."}]}
 If no mutation is likely to help, respond {"patches": []}."#;
 
 #[derive(Debug, Default, Deserialize)]
@@ -977,30 +977,30 @@ mod tests {
         let next = apply_policy_patch(
             &policy,
             &PolicyPatch {
-                field: "confidence_decay_factor".to_string(),
+                field: "memory_strength_decay_factor".to_string(),
                 value: 0.9,
                 rationale: String::new(),
             },
         )
         .unwrap();
-        assert_eq!(next.confidence_decay_factor, 0.9);
+        assert_eq!(next.memory_strength_decay_factor, 0.9);
 
         // Integer fields round.
         let next = apply_policy_patch(
             &policy,
             &PolicyPatch {
-                field: "unsorted_max_backlog".to_string(),
+                field: "unconsolidated_max_backlog".to_string(),
                 value: 25.4,
                 rationale: String::new(),
             },
         )
         .unwrap();
-        assert_eq!(next.unsorted_max_backlog, 25);
+        assert_eq!(next.unconsolidated_max_backlog, 25);
 
         // The ±50% step bound rejects jumps.
         for (field, value) in [
-            ("unsorted_max_backlog", 100.0),
-            ("confidence_decay_factor", 0.4),
+            ("unconsolidated_max_backlog", 100.0),
+            ("memory_strength_decay_factor", 0.4),
         ] {
             let err = apply_policy_patch(
                 &policy,
@@ -1056,7 +1056,7 @@ mod tests {
         let patch = |value: f64| {
             serde_json::json!({
                 "patches": [{
-                    "field": "confidence_decay_factor",
+                    "field": "memory_strength_decay_factor",
                     "value": value,
                     "rationale": "test"
                 }]
@@ -1097,7 +1097,7 @@ mod tests {
                 .accepted_policy
                 .as_ref()
                 .unwrap()
-                .confidence_decay_factor,
+                .memory_strength_decay_factor,
             0.9
         );
         assert!(report.generations[0].target.is_none());

@@ -2,6 +2,141 @@
 
 All notable changes to the Anda Brain project.
 
+## [Unreleased] — KIP 2.0
+
+Anda Brain now speaks **KIP 2.0**. This is a protocol break, not an upgrade: 2.0
+separates what 1.x kept in one graph — meaning, belief, evidence, provenance,
+mnemonic state, retention, Governance and Schema — and the single distinction
+the rest follows from is that *a Proposition existing is not the Proposition
+being true*. Existing 1.x memory is migrated by the Cognitive Nexus on first
+open; see the KIP migration guide for what that can and cannot preserve.
+
+`anda_kip`, `anda_cognitive_nexus` and `anda_engine` are consumed from local
+path patches (`[patch.crates-io]`) until 0.13 / 0.15.1 are published.
+
+### Upgrading a KIP 1.x space
+
+**Install, restart, and the space keeps working.** The Cognitive Nexus migrates
+a 1.x layout on first open: the 1.x rows are staged verbatim, the colliding
+collection names are cleared, and every row becomes a 2.0 element. It is
+resumable — a crash mid-migration continues on the next start — and the original
+rows are kept in `kip_legacy_v1` afterwards, so the source is still inspectable.
+
+What the migration will not do is invent what 1.x never recorded. Every migrated
+claim carries `mode: "imported"`: a database row is not an observation. A 1.x
+`author` becomes the speaker only when it names exactly one migrated Concept;
+otherwise it stays an attribute. Legacy `confidence` is carried onto the
+Assertion *and* kept verbatim under `attributes.legacy`, because 1.x deployments
+used that field for several different things and only the operator knows which.
+`access_level` is preserved as a legacy attribute and does **not** become a
+classification.
+
+Two details decide whether a migrated space is usable, and both are now
+right (`anda_cognitive_nexus`):
+
+- **Migrated elements land on the vocabulary this service activates.** A 1.x
+  Brain used `Person`, `Event`, `SleepTask`, `Insight`, `Commitment` and
+  `Preference`, and the Cognitive Memory Profile declares all six. The migration
+  used to mint its own copies beside them, which made every command naming a
+  bare local type fail with `SchemaSymbolAmbiguous` on a space whose data had
+  migrated perfectly. The legacy load now runs after the host activates its
+  packages and adopts the host's symbol wherever the name matches; only a name
+  nothing else declares (say `Topic`) keeps a generated legacy symbol.
+- **1.x `(type, name)` identity becomes a 2.0 `key`,** so `get_or_init_user` and
+  every counterparty lookup resolve the migrated `Person` instead of minting a
+  second one beside it.
+
+What still does not carry over: the usage ledger is keyed by element id, and
+2.0 re-mints those, so recall-usage counters, correction history and self-test
+coverage all restart from empty. The memories themselves are unaffected.
+
+### Changed — memory model
+
+- **A fact is now a Proposition plus an Assertion.** Formation records who
+  claimed something, in what mode, with what confidence and on what Evidence.
+  Recall answers belief questions through `BELIEF` projection and keeps raw
+  `FIND` for audit, so `insufficient` is never reported as "no".
+- **Corrections supersede instead of overwriting.** A revision is a new
+  Assertion plus a supersession link; nothing rewrites what was said.
+- **Confidence is no longer decayed by time.** The maintenance settlement now
+  metabolizes `MnemonicState.memory_strength` on Concepts — how *available* a
+  memory should be — and never touches an epistemic stance. A fact nobody has
+  asked about in a month is no less credible.
+- **Reinforcement targets Concepts, not links.** Recall usage raises
+  `memory_strength` and stamps `last_metabolized_at`; repetition is
+  accessibility, not evidence.
+- **Pinning is a retention class.** `metadata.pinned` is gone; a pinned element
+  carries `retention.retention_class: "pinned"` and is exempt from metabolism.
+- **Forgetting purges.** `POST /v1/{space_id}/memory/forget` issues `PURGE` with
+  an authorized cascade, which erases content and leaves an identity stub —
+  archive and tombstone do not satisfy a forget request.
+- **Element ids changed shape.** `C:7` and `P:11:has_allergy` are now `C-7`,
+  `P-11`, `A-3`. Anything holding a stored 1.x id must re-resolve it.
+
+### Added — vocabulary is a host decision
+
+- **Schema is no longer graph state.** Types and predicates resolve from
+  immutable, versioned Schema Packages, so a write can no longer change what a
+  type means. Each space activates the standard Cognitive Memory Profile plus a
+  `kip://anda-brain/memory` package of its own.
+- **New agent tool `declare_memory_symbols { types, predicates }`** lets
+  Formation and Maintenance ask the *host* to publish a symbol the profile
+  lacks. The host validates the name's shape, caps how many a space may hold,
+  versions the result, and can refuse — a model proposes the word, it does not
+  administer the schema. Recall does not get the tool.
+- The wiki digest uses the same package instead of minting `$ConceptType` /
+  `$PropositionType` nodes, and no longer redeclares a symbol another active
+  package already defines.
+
+### Changed — wire contracts
+
+- **`POST /v1/{space_id}/execute_kip_readonly` speaks the KIP 2.0 envelope.**
+  The body is now `{command}` or `{operations}` (a bare JSON string is read as
+  one command), and the response carries `status`, `results[]` with
+  per-operation errors, and an optional request-level `error`. Read-only is
+  enforced on what each command *parses to*, so no envelope field can talk a
+  mutation past it. `outcome_unknown` is neither success nor failure.
+- **Error codes are registry names, not numbers.** `KIP_3002` is now
+  `NotFoundOrNotVisible`, which deliberately does not distinguish "absent" from
+  "not visible to you". Each error carries a `retry.class`.
+- **`Concept` gained `schema_ref`, `key`, `facets` and `_system`** and lost
+  `type`/`metadata`. A `key` is immutable identity; `name` is a mutable label.
+  `get_or_init_user` matches on the key.
+- **Maintenance parameters renamed**: `confidence_decay_factor` →
+  `memory_strength_decay_factor`, `unsorted_max_backlog` →
+  `unconsolidated_max_backlog`. Both old names still deserialize, so a persisted
+  policy keeps loading.
+- **Graph counters follow the 2.0 model**: `unsorted` (the `Unsorted` Domain,
+  which the profile no longer declares) became `unconsolidated` — Events and
+  Experiences with no `consolidated_to` lineage; `orphans` counts Concepts no
+  Proposition mentions; `predicate_types` counts what the Schema Environment
+  declares rather than what a write minted.
+
+### Changed — prompts
+
+- **The three mode prompts are the KIP 2.0 reference Brain policies** from the
+  specification repository, each followed by an Anda Brain deployment contract
+  covering this service's request shape, tools and output contract.
+- **The syntax card is no longer copied into the prompts.** `anda_kip` ships
+  `KIPSyntax.md` and the Cognitive Memory Profile with the protocol they
+  describe, and the runtime puts both in the model's context at completion time
+  — three hand-maintained copies of a protocol drift, and the copy that drifts
+  silently is the one a model then writes against.
+
+### Fixed
+
+- **`IS_NULL` over a dot path now works** (`anda_cognitive_nexus`). Reading an
+  absent member yields a null *literal*, which the filter did not recognise as
+  null, so `IS_NULL(?c.facets["MnemonicState"].last_metabolized_at)` — "never
+  metabolized" — was permanently false and the metabolism sweep selected
+  nothing.
+- **A bare `{"id": …}` reference is no longer metered as a recall.** Usage
+  reinforcement counted an Assertion's `asserted_by` pointer as a retrieved
+  memory; only rendered elements count now.
+- **Search hits are read through their envelope.** A `SEARCH` result wraps the
+  element in `{id, kind, score, element}`, and citations were being built from
+  the wrapper — every hit came back with no type and no name.
+
 ## [0.11.0] — 2026-08-07
 
 ### Changed

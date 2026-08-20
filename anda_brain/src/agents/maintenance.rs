@@ -191,7 +191,11 @@ impl Agent<AgentCtx> for MaintenanceAgent {
     }
 
     fn tool_dependencies(&self) -> Vec<String> {
-        vec!["execute_kip".to_string(), NoteTool::NAME.to_string()]
+        vec![
+            "execute_kip".to_string(),
+            NoteTool::NAME.to_string(),
+            crate::vocabulary::DeclareSymbolsTool::NAME.to_string(),
+        ]
     }
 
     /// Receives a trigger envelope (MaintenanceInput JSON), creates a conversation to track the
@@ -382,7 +386,8 @@ impl MaintenanceAgent {
         let mut runner = ctx.clone().completion_iter(
             CompletionRequest {
                 instructions: format!(
-                    "{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Your Notes:\n{}\n\n# Current Datetime: {}",
+                    "{}\n\n---\n\n{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Your Notes:\n{}\n\n# Current Datetime: {}",
+                    super::prompts::language_reference(),
                     super::prompts::active_prompt(super::prompts::PromptTarget::Maintenance),
                     primer,
                     serde_json::to_string(&notes.items).unwrap_or_default(),
@@ -586,7 +591,7 @@ mod tests {
                 Ok(AgentOutput {
                     tool_calls: vec![ToolCall {
                         name: "execute_kip".to_string(),
-                        args: serde_json::json!({"commands": []}),
+                        args: serde_json::json!({"command": "DESCRIBE PRIMER"}),
                         result: None,
                         call_id: Some("over-threshold".to_string()),
                         remote_id: None,
@@ -633,7 +638,7 @@ mod tests {
                 Ok(AgentOutput {
                     tool_calls: vec![ToolCall {
                         name: "execute_kip".to_string(),
-                        args: serde_json::json!({"commands": []}),
+                        args: serde_json::json!({"command": "DESCRIBE PRIMER"}),
                         result: None,
                         call_id: Some("loop".to_string()),
                         remote_id: None,

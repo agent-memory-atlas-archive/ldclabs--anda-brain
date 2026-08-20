@@ -47,27 +47,51 @@
       "query": "Summarize the room dimensions for me.",
       "evaluation": {
         "scoring_rubric": "The answer should apply Alice's preferences, not Bob's.",
-        "required_answer_terms": ["metric", "concise"],
-        "forbidden_answer_terms": ["imperial", "detailed"],
+        "required_answer_terms": [
+          "metric",
+          "concise"
+        ],
+        "forbidden_answer_terms": [
+          "imperial",
+          "detailed"
+        ],
         "expected_memories": [
           {
             "id": "alice_metric_preference",
             "description": "Alice prefers metric units and concise summaries.",
             "mode": "should_exist",
             "probe": {
-              "command": "SEARCH CONCEPT \"alice metric concise measurement preference\" MODE \"semantic\" THRESHOLD 0.6 LIMIT 10",
-              "readonly": true
+              "kip": "2.0",
+              "operations": [
+                {
+                  "command": "SEARCH CONCEPT :term THRESHOLD 0.4 LIMIT 10"
+                }
+              ],
+              "parameters": {
+                "term": "alice metric concise measurement preference"
+              }
             },
-            "answer_terms": ["metric", "concise"],
-            "trace_terms": ["alice", "metric", "concise"]
+            "answer_terms": [
+              "metric",
+              "concise"
+            ],
+            "trace_terms": [
+              "alice",
+              "metric",
+              "concise"
+            ]
           },
           {
             "id": "bob_preference_not_alice",
             "description": "Bob's imperial preference should not be applied to Alice.",
             "mode": "should_not_exist",
             "probe": {
-              "command": "FIND(?pref) WHERE { ?person {type: \"Person\", name: \"alice\"} ?link (?person, \"prefers\", ?pref) FILTER(CONTAINS(?pref.name, \"imperial\") || CONTAINS(?pref.attributes.description, \"imperial\")) } LIMIT 10",
-              "readonly": true
+              "kip": "2.0",
+              "operations": [
+                {
+                  "command": "FIND(?belief.status, ?pref.name) WHERE {\n  ?person CONCEPT {type: \"Person\", key: \"alice\"}\n  ?belief BELIEF (?person, \"prefers\", ?pref)\n  FILTER(?belief.status == \"accepted\")\n  FILTER(CONTAINS(?pref.name, \"imperial\") || CONTAINS(?pref.attributes.description, \"imperial\"))\n} LIMIT 10"
+                }
+              ]
             }
           }
         ]

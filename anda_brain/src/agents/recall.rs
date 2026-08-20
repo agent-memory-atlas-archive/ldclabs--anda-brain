@@ -1,4 +1,3 @@
-use anda_cognitive_nexus::ConceptPK;
 use anda_core::{
     Agent, AgentContext, AgentOutput, BoxError, CompletionRequest, Document, Documents,
     FunctionDefinition, Json, Message, ModelEffort, Resource, StateFeatures, Tool, ToolOutput,
@@ -10,8 +9,8 @@ use anda_engine::{
     extension::note::{load_notes, load_notes_from_legacy},
     local_date_hour,
     memory::{
-        Conversation, ConversationRef, ConversationStatus, Conversations, MemoryManagement,
-        MemoryReadonly,
+        Conversation, ConversationRef, ConversationStatus, Conversations, KipArgs,
+        MemoryManagement, MemoryReadonly, READONLY_FUNCTION_DEFINITION,
     },
     unix_ms,
 };
@@ -24,7 +23,9 @@ use std::{
 };
 use tokio::time::timeout;
 
-use anda_kip::{KipError, KipErrorCode, Request, Response};
+use anda_kip::{KipError, KipErrorCode, Response};
+
+use crate::kip;
 
 use super::{
     BrainHook, SELF_USER_ID, append_runner_history, compact_runner_if_needed,
@@ -129,7 +130,7 @@ impl TimedMemoryReadonly {
 }
 
 impl Tool<BaseCtx> for TimedMemoryReadonly {
-    type Args = Request;
+    type Args = KipArgs;
     type Output = Response;
 
     fn name(&self) -> String {
@@ -137,30 +138,35 @@ impl Tool<BaseCtx> for TimedMemoryReadonly {
     }
 
     fn description(&self) -> String {
-        "Executes one or more KIP (Knowledge Interaction Protocol) commands against the Cognitive Nexus to read from your persistent memory. This tool does not allow any modifications to the memory and is safe to use for retrieval operations.".to_string()
+        READONLY_FUNCTION_DEFINITION.description.clone()
     }
 
     fn definition(&self) -> FunctionDefinition {
-        FunctionDefinition {
-            name: self.name(),
-            description: self.description(),
-            // Mirrors the writable `execute_kip` tool's arguments, which the
-            // space installs from the same definition.
-            parameters: super::KIP_FUNCTION_DEFINITION.parameters.clone(),
-            strict: Some(true),
-        }
+        // The definition `anda_kip` ships with the protocol it describes, so
+        // the tool the model is shown and the envelope the engine executes stay
+        // in step across protocol revisions.
+        READONLY_FUNCTION_DEFINITION.clone()
     }
 
     async fn call(
         &self,
         _ctx: BaseCtx,
-        mut request: Self::Args,
+        args: Self::Args,
         _resources: Vec<Resource>,
     ) -> Result<ToolOutput<Self::Output>, BoxError> {
+        let request = match args.into_request() {
+            Ok(request) => request,
+            Err(err) => return Ok(error_output(Response::from(err))),
+        };
         let nexus = self.memory.nexus();
-        let res = match timeout(self.timeout, request.readonly().execute(nexus.as_ref())).await {
-            Ok((_, res)) => res,
-            Err(_) => Response::err(KipError::new(
+        let res = match timeout(
+            self.timeout,
+            kip::execute_readonly_request(nexus.as_ref(), &request),
+        )
+        .await
+        {
+            Ok(res) => res,
+            Err(_) => Response::failed(KipError::new(
                 KipErrorCode::ExecutionTimeout,
                 format!(
                     "read-only KIP execution timed out after {} seconds; memory is busy, retry later",
@@ -169,16 +175,21 @@ impl Tool<BaseCtx> for TimedMemoryReadonly {
             )),
         };
 
-        let is_error = if matches!(res, Response::Err { .. }) {
-            Some(true)
-        } else {
-            None
-        };
-
-        let mut output = ToolOutput::new(res);
-        output.is_error = is_error;
-        Ok(output)
+        Ok(error_output(res))
     }
+}
+
+/// Wraps a KIP response as a tool output.
+///
+/// Anything short of `succeeded` is flagged as an error, `partial` included: a
+/// batch where one operation failed is not a clean result, and the
+/// per-operation detail the model needs to tell which is already in the
+/// payload.
+fn error_output(res: Response) -> ToolOutput<Response> {
+    let is_error = (!kip::succeeded(&res)).then_some(true);
+    let mut output = ToolOutput::new(res);
+    output.is_error = is_error;
+    output
 }
 
 #[derive(Clone)]
@@ -234,17 +245,23 @@ impl RecallAgent {
         Ok(())
     }
 
+    /// The Person Concept a counterparty handle keys, or `Json::Null`.
+    ///
+    /// The handle is the Concept's `key` — immutable Space-local identity —
+    /// which is what Formation writes it under. Reading by `name` would resolve
+    /// through a mutable display label and could match more than one Person.
     pub async fn get_counterparty(&self, counterparty: &str) -> Result<Json, BoxError> {
-        let user = self
+        let found = self
             .memory
-            .nexus()
-            .get_concept(&ConceptPK::Object {
-                r#type: "Person".to_string(),
-                name: counterparty.to_string(),
-            })
+            .query(
+                super::PERSON_BY_KEY,
+                Some(serde_json::Map::from_iter([(
+                    "key".to_string(),
+                    Json::from(counterparty),
+                )])),
+            )
             .await?;
-
-        Ok(user.to_concept_node())
+        Ok(super::first_row(found))
     }
 
     async fn get_counterparty_with_timeout(&self, counterparty: Option<String>) -> Option<Json> {
@@ -464,7 +481,8 @@ impl Agent<AgentCtx> for RecallAgent {
         let mut runner = ctx.clone().completion_iter(
             CompletionRequest {
                 instructions: format!(
-                    "{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Your Notes:\n{}\n\n# Counterparty profile:\n{}\n\n# Current Datetime: {}",
+                    "{}\n\n---\n\n{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Your Notes:\n{}\n\n# Counterparty profile:\n{}\n\n# Current Datetime: {}",
+                    super::prompts::language_reference(),
                     super::prompts::active_prompt(super::prompts::PromptTarget::Recall),
                     primer,
                     serde_json::to_string(&notes).unwrap_or_default(),
@@ -757,7 +775,7 @@ mod tests {
                 Ok(AgentOutput {
                     tool_calls: vec![ToolCall {
                         name: "execute_kip_readonly".to_string(),
-                        args: serde_json::json!({"commands": []}),
+                        args: serde_json::json!({"command": "DESCRIBE PRIMER"}),
                         result: None,
                         call_id: Some("loop".to_string()),
                         remote_id: None,
@@ -790,7 +808,7 @@ mod tests {
                     return Ok(AgentOutput {
                         tool_calls: vec![ToolCall {
                             name: "execute_kip_readonly".to_string(),
-                            args: serde_json::json!({"commands": []}),
+                            args: serde_json::json!({"command": "DESCRIBE PRIMER"}),
                             result: None,
                             call_id: Some("t0".to_string()),
                             remote_id: None,

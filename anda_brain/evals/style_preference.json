@@ -34,19 +34,39 @@
       "query": "Can you rewrite this to sound more like me?",
       "evaluation": {
         "scoring_rubric": "The answer should use the user's learned writing-style preference.",
-        "required_answer_terms": ["concise", "direct"],
-        "forbidden_answer_terms": ["hype", "salesy"],
+        "required_answer_terms": [
+          "concise",
+          "direct"
+        ],
+        "forbidden_answer_terms": [
+          "hype",
+          "salesy"
+        ],
         "expected_memories": [
           {
             "id": "style_preference",
             "description": "User prefers concise, direct writing and dislikes hype.",
             "mode": "should_exist",
             "probe": {
-              "command": "SEARCH CONCEPT \"concise direct writing style\" MODE \"semantic\" THRESHOLD 0.6 LIMIT 10",
-              "readonly": true
+              "kip": "2.0",
+              "operations": [
+                {
+                  "command": "SEARCH CONCEPT :term THRESHOLD 0.4 LIMIT 10"
+                }
+              ],
+              "parameters": {
+                "term": "concise direct writing style"
+              }
             },
-            "answer_terms": ["concise", "direct"],
-            "trace_terms": ["concise", "direct", "writing"]
+            "answer_terms": [
+              "concise",
+              "direct"
+            ],
+            "trace_terms": [
+              "concise",
+              "direct",
+              "writing"
+            ]
           }
         ]
       }

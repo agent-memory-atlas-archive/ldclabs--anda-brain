@@ -27,7 +27,7 @@ use crate::{
     agents::SELF_USER_ID,
     assess::{
         self, AssessContext, DEFAULT_ASSERTION_SEARCH_LIMIT, DEFAULT_ASSERTION_SEARCH_THRESHOLD,
-        assertion_search_command, response_hit_count,
+        assertion_search_request, response_hit_count,
     },
     payload::StringOr,
     space::Space,
@@ -681,11 +681,11 @@ pub struct GraphStats {
     pub concepts: u64,
     pub propositions: u64,
 
-    /// Concepts still in the `Unsorted` domain (maintenance backlog).
+    /// Events and Experiences maintenance has not consolidated yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unsorted: Option<u64>,
+    pub unconsolidated: Option<u64>,
 
-    /// Concepts without any `belongs_to_domain` proposition.
+    /// Concepts no Proposition mentions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orphans: Option<u64>,
 
@@ -695,7 +695,7 @@ pub struct GraphStats {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub groundability: Option<f64>,
 
-    /// Registered `$PropositionType` count — schema sprawl (plan M8).
+    /// Predicates the Space's Schema Environment declares (plan M8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub predicate_types: Option<u64>,
 }
@@ -704,9 +704,9 @@ impl GraphStats {
     /// Health in 0..1: the fraction of concepts that are properly organized.
     /// Falls back to `None` when backlog counters are unavailable.
     pub fn health(&self) -> Option<f64> {
-        let unsorted = self.unsorted?;
+        let unconsolidated = self.unconsolidated?;
         let orphans = self.orphans?;
-        let backlog = unsorted.saturating_add(orphans) as f64;
+        let backlog = unconsolidated.saturating_add(orphans) as f64;
         let base = (self.concepts.max(1)) as f64;
         Some((1.0 - (backlog / base)).clamp(0.0, 1.0))
     }
@@ -756,7 +756,7 @@ impl MemoryProbeReport {
             || self
                 .response
                 .as_ref()
-                .is_some_and(|response| matches!(response, Response::Err { .. }))
+                .is_some_and(|response| !crate::kip::succeeded(response))
     }
 }
 
@@ -1321,19 +1321,28 @@ fn validate_checkpoint_turn(
         match &expectation.probe {
             Some(probe) => {
                 plan.probes += 1;
-                if !probe.readonly {
-                    issues.push(EvalValidationIssue {
-                        severity: EvalValidationSeverity::Error,
-                        path: format!("{expectation_path}.probe.readonly"),
-                        message: "memory probe must set `readonly` to true".to_string(),
-                    });
-                }
-                if probe.command.trim().is_empty() && probe.commands.is_empty() {
-                    issues.push(EvalValidationIssue {
-                        severity: EvalValidationSeverity::Warning,
-                        path: format!("{expectation_path}.probe"),
-                        message: "memory probe has neither `command` nor `commands`".to_string(),
-                    });
+                // KIP 2.0 has no `readonly` flag to set: read-only is decided
+                // by what each operation parses to, so an eval set that ships a
+                // mutation as a probe is caught here rather than at run time,
+                // where the engine would refuse it and the checkpoint would
+                // read as "the graph holds nothing".
+                match probe.parse_operations() {
+                    Ok(commands) if commands.iter().any(|command| command.is_mutation()) => {
+                        issues.push(EvalValidationIssue {
+                            severity: EvalValidationSeverity::Error,
+                            path: format!("{expectation_path}.probe"),
+                            message: "memory probe must be read-only; KML mutations are rejected"
+                                .to_string(),
+                        });
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        issues.push(EvalValidationIssue {
+                            severity: EvalValidationSeverity::Error,
+                            path: format!("{expectation_path}.probe"),
+                            message: format!("memory probe is not a valid KIP request: {err}"),
+                        });
+                    }
                 }
             }
             None if expectation.mode == MemoryExpectationMode::ShouldNotExist
@@ -1596,7 +1605,7 @@ impl EvalDriver for Space {
         let mut stats = GraphStats {
             concepts: status.concepts as u64,
             propositions: status.propositions as u64,
-            unsorted: None,
+            unconsolidated: None,
             orphans: None,
             groundability: self
                 .db
@@ -1606,14 +1615,14 @@ impl EvalDriver for Space {
         };
 
         // Three independent read-only counts; run them concurrently.
-        let (unsorted, orphans, predicate_types) = tokio::join!(
-            assess::kip_count(self, assess::UNSORTED_COUNT_KQL),
+        let (unconsolidated, orphans, predicates) = tokio::join!(
+            assess::kip_count_sum(self, assess::UNCONSOLIDATED_COUNT_KQL),
             assess::orphan_count(self),
-            assess::kip_count(self, assess::PREDICATE_TYPES_COUNT_KQL),
+            self.registered_predicates(),
         );
-        stats.unsorted = unsorted;
+        stats.unconsolidated = unconsolidated;
         stats.orphans = orphans;
-        stats.predicate_types = predicate_types;
+        stats.predicate_types = predicates.map(|names| names.len() as u64);
         Ok(Some(stats))
     }
 
@@ -2493,7 +2502,7 @@ where
     // hand-written KQL, so they stay correct across valid graph encodings.
     if let (Some(assertion), EvalJudgeKind::Llm) = (&expectation.assertion, judge_kind) {
         let search = expectation.search.as_deref().unwrap_or(assertion.as_str());
-        let command = assertion_search_command(
+        let request = assertion_search_request(
             search,
             expectation
                 .search_threshold
@@ -2502,39 +2511,29 @@ where
                 .search_limit
                 .unwrap_or(DEFAULT_ASSERTION_SEARCH_LIMIT),
         );
-        let response = match driver
-            .execute_kip_readonly(Request {
-                command,
-                readonly: true,
-                ..Default::default()
-            })
-            .await
-        {
+        let response = match driver.execute_kip_readonly(request).await {
             Ok(response) => response,
             Err(err) => return Some((errored_probe(expectation, err), usage)),
         };
         let hit_count = response_hit_count(&response);
-        let evidence = match &response {
-            Response::Ok { result, .. } => result.clone(),
-            // A KIP-level error means the graph was never observed: skip the
-            // judge (its verdict over no evidence would be discarded as
-            // errored anyway) and let the scorer and checkpoint judge treat
-            // the state as unknown instead of `satisfied: false`.
-            Response::Err { .. } => {
-                return Some((
-                    MemoryProbeReport {
-                        expectation_id: expectation.id.clone(),
-                        mode: expectation.mode,
-                        hit_count,
-                        satisfied: false,
-                        assertion: Some(assertion.clone()),
-                        judge_reason: None,
-                        error: None,
-                        response: Some(response),
-                    },
-                    usage,
-                ));
-            }
+        // A KIP-level error means the graph was never observed: skip the judge
+        // (its verdict over no evidence would be discarded as errored anyway)
+        // and let the scorer and checkpoint judge treat the state as unknown
+        // instead of `satisfied: false`.
+        let Some(evidence) = crate::kip::ok_result(&response).cloned() else {
+            return Some((
+                MemoryProbeReport {
+                    expectation_id: expectation.id.clone(),
+                    mode: expectation.mode,
+                    hit_count,
+                    satisfied: false,
+                    assertion: Some(assertion.clone()),
+                    judge_reason: None,
+                    error: None,
+                    response: Some(response),
+                },
+                usage,
+            ));
         };
 
         // Deterministic short-circuit: with zero hits and no evidence at all
@@ -2588,13 +2587,10 @@ where
         Err(err) => return Some((errored_probe(expectation, err), usage)),
     };
     let hit_count = response_hit_count(&response);
+    let observed = crate::kip::succeeded(&response);
     let satisfied = match expectation.mode {
-        MemoryExpectationMode::ShouldExist => {
-            hit_count > 0 && !matches!(response, Response::Err { .. })
-        }
-        MemoryExpectationMode::ShouldNotExist => {
-            hit_count == 0 && !matches!(response, Response::Err { .. })
-        }
+        MemoryExpectationMode::ShouldExist => hit_count > 0 && observed,
+        MemoryExpectationMode::ShouldNotExist => hit_count == 0 && observed,
     };
     Some((
         MemoryProbeReport {
@@ -3151,6 +3147,26 @@ mod tests {
     use serde_json::json;
     use std::sync::Mutex;
 
+    /// Identifies one canned probe.
+    ///
+    /// A KIP 2.0 assertion probe carries its search term as a bound parameter
+    /// rather than spliced into the command, so the command text alone no
+    /// longer tells two probes apart.
+    fn probe_key(request: &Request) -> String {
+        let command = request
+            .operations
+            .first()
+            .and_then(|operation| operation.command.as_deref())
+            .unwrap_or_default();
+        let term = request
+            .parameters
+            .as_ref()
+            .and_then(|parameters| parameters.get("term"))
+            .and_then(Json::as_str)
+            .unwrap_or_default();
+        format!("{command}|{term}")
+    }
+
     #[derive(Default)]
     struct FakeEvalDriver {
         recall_answer: String,
@@ -3197,10 +3213,10 @@ mod tests {
         }
 
         async fn execute_kip_readonly(&self, request: Request) -> Result<Response, BoxError> {
-            if request.command.contains("probe_transport_error") {
+            let key = probe_key(&request);
+            if key.contains("probe_transport_error") {
                 return Err("kip transport failed".into());
             }
-            let key = request.command.clone();
             Ok(self
                 .probes
                 .lock()
@@ -3285,7 +3301,7 @@ mod tests {
             ..Default::default()
         };
         driver.probes.lock().unwrap().insert(
-            "find_style".to_string(),
+            probe_key(&crate::kip::request("find_style")),
             Response::ok(json!([{"name": "concise direct style"}])),
         );
         let scenario = EvalScenario {
@@ -3309,11 +3325,7 @@ mod tests {
                         required_answer_terms: vec!["concise".to_string()],
                         expected_memories: vec![ExpectedMemory {
                             id: "style_pref".to_string(),
-                            probe: Some(Request {
-                                command: "find_style".to_string(),
-                                readonly: true,
-                                ..Default::default()
-                            }),
+                            probe: Some(crate::kip::request("find_style".to_string())),
                             answer_terms: vec!["concise".to_string()],
                             ..Default::default()
                         }],
@@ -3352,11 +3364,7 @@ mod tests {
                 evaluation: Some(EvalRubric {
                     expected_memories: vec![ExpectedMemory {
                         id: "unreachable".to_string(),
-                        probe: Some(Request {
-                            command: "probe_transport_error".to_string(),
-                            readonly: true,
-                            ..Default::default()
-                        }),
+                        probe: Some(crate::kip::request("probe_transport_error".to_string())),
                         ..Default::default()
                     }],
                     ..Default::default()
@@ -3400,14 +3408,16 @@ mod tests {
             ..Default::default()
         };
         let assertion = "an active BBQ preference for user_042";
-        let command = assertion_search_command(
+        let key = probe_key(&assertion_search_request(
             assertion,
             DEFAULT_ASSERTION_SEARCH_THRESHOLD,
             DEFAULT_ASSERTION_SEARCH_LIMIT,
-        );
+        ));
         driver.probes.lock().unwrap().insert(
-            command,
-            Response::err("embedding service flaked".to_string()),
+            key,
+            Response::failed(anda_kip::KipError::internal_error(
+                "embedding service flaked",
+            )),
         );
         let scenario = EvalScenario {
             id: "probe_kip_error".to_string(),
@@ -3613,11 +3623,7 @@ mod tests {
                 evaluation: Some(EvalRubric {
                     expected_memories: vec![ExpectedMemory {
                         id: "missing".to_string(),
-                        probe: Some(Request {
-                            command: "find_missing".to_string(),
-                            readonly: true,
-                            ..Default::default()
-                        }),
+                        probe: Some(crate::kip::request("find_missing".to_string())),
                         ..Default::default()
                     }],
                     ..Default::default()
@@ -3794,12 +3800,10 @@ mod tests {
                         forbidden_answer_terms: vec!["direct".to_string()],
                         expected_memories: vec![ExpectedMemory {
                             id: "pref".to_string(),
-                            probe: Some(Request {
-                                command: "SEARCH CONCEPT \"direct\" MODE \"semantic\" LIMIT 1"
-                                    .to_string(),
-                                readonly: false,
-                                ..Default::default()
-                            }),
+                            // A mutation as a probe: read-only is decided by
+                            // what the command parses to, so the plan check
+                            // catches it before a run does.
+                            probe: Some(crate::kip::request(r#"TOMBSTONE :x"#.to_string())),
                             search_threshold: Some(2.0),
                             search_limit: Some(0),
                             answer_terms: vec![String::new()],
@@ -3831,7 +3835,7 @@ mod tests {
             issue.severity == EvalValidationSeverity::Error && issue.message.contains("normal turn")
         }));
         assert!(report.issues.iter().any(|issue| {
-            issue.severity == EvalValidationSeverity::Error && issue.message.contains("readonly")
+            issue.severity == EvalValidationSeverity::Error && issue.message.contains("read-only")
         }));
         assert!(report.issues.iter().any(|issue| {
             issue.severity == EvalValidationSeverity::Error
@@ -3981,7 +3985,7 @@ mod tests {
             ..Default::default()
         };
         driver.probes.lock().unwrap().insert(
-            "find_style".to_string(),
+            probe_key(&crate::kip::request("find_style")),
             Response::ok(json!([{"name": "concise style"}])),
         );
         let scenario = EvalScenario {
@@ -3994,11 +3998,7 @@ mod tests {
                     required_answer_terms: vec!["concise".to_string()],
                     expected_memories: vec![ExpectedMemory {
                         id: "style".to_string(),
-                        probe: Some(Request {
-                            command: "find_style".to_string(),
-                            readonly: true,
-                            ..Default::default()
-                        }),
+                        probe: Some(crate::kip::request("find_style".to_string())),
                         answer_terms: vec!["concise".to_string()],
                         ..Default::default()
                     }],
@@ -4138,7 +4138,7 @@ mod tests {
             ..Default::default()
         };
         driver.probes.lock().unwrap().insert(
-            "find_style".to_string(),
+            probe_key(&crate::kip::request("find_style")),
             Response::ok(json!([{"name": "concise style"}])),
         );
         let scenario = EvalScenario {
@@ -4153,11 +4153,7 @@ mod tests {
                     forbidden_answer_terms: vec!["BBQ".to_string()],
                     expected_memories: vec![ExpectedMemory {
                         id: "style".to_string(),
-                        probe: Some(Request {
-                            command: "find_style".to_string(),
-                            readonly: true,
-                            ..Default::default()
-                        }),
+                        probe: Some(crate::kip::request("find_style".to_string())),
                         answer_terms: vec!["concise".to_string()],
                         ..Default::default()
                     }],
@@ -4218,11 +4214,11 @@ mod tests {
         // short-circuited deterministically without a judge call.
         let assertion = "an active, non-superseded BBQ preference for user_042";
         driver.probes.lock().unwrap().insert(
-            assertion_search_command(
+            probe_key(&assertion_search_request(
                 assertion,
                 DEFAULT_ASSERTION_SEARCH_THRESHOLD,
                 DEFAULT_ASSERTION_SEARCH_LIMIT,
-            ),
+            )),
             Response::ok(json!([{"name": "BBQ preference", "status": "superseded"}])),
         );
         let scenario = EvalScenario {

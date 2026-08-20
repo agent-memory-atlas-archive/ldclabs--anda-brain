@@ -1,4 +1,7 @@
-use anda_engine::{memory::Conversation, unix_ms};
+use anda_engine::{
+    memory::{Conversation, KipArgs},
+    unix_ms,
+};
 use axum::{
     Json,
     extract::State,
@@ -978,10 +981,20 @@ pub async fn execute_kip_readonly(
 ) -> Result<impl IntoResponse, AppError> {
     ensure_sharding(&app, sharding)?;
 
-    let input: StringOr<anda_kip::Request> = ct.parse_body(&body).map_err(AppError::bad_request)?;
-    let input = input
-        .value()
-        .map_err(|_| AppError::bad_request("invalid input"))?;
+    // The model-facing argument shape, not the wire envelope: a caller sends
+    // `{"command": "..."}` or an `operations` batch, and the protocol tag,
+    // nested `options.dry_run` and rejection of unknown fields are the
+    // envelope's business rather than every client's. A bare string body is
+    // read as one command.
+    let input: StringOr<KipArgs> = ct.parse_body(&body).map_err(AppError::bad_request)?;
+    let input = match input {
+        StringOr::Value(args) => args,
+        StringOr::String(command) => KipArgs {
+            command: Some(command),
+            ..Default::default()
+        },
+    };
+    let input = input.into_request().map_err(AppError::bad_request)?;
 
     let (space, _caller) = authorize(
         &app,
@@ -2605,11 +2618,17 @@ mod tests {
             .await,
         )
         .await;
-        assert_eq!(user["result"]["type"], "Person");
-        assert!(user["result"].to_string().contains("external-user-1"));
+        assert_eq!(
+            user["result"]["schema_ref"],
+            "kip://profiles/cognitive-memory@2.0.0/Person"
+        );
+        assert_eq!(user["result"]["key"], "external-user-1");
     }
 
     #[tokio::test]
+    // Each handler future is awaited on the heap: this test drives fifteen of
+    // them in one frame, and a KIP 2.0 envelope is a larger value than the 1.x
+    // one it replaced — enough to push the frame past a test thread's stack.
     async fn memory_evolution_endpoints_enforce_auth_matrix() {
         let signing_key = test_signing_key();
         let app = test_app_state_with_signing_key("mem_auth", 0, &signing_key);
@@ -2618,79 +2637,79 @@ mod tests {
 
         let probe_body = || json_bytes(&json!({"query": "anything"}));
         let recall_body = || json_bytes(&json!({"query": "anything"}));
-        let pin_body = || json_bytes(&json!({"entity": "C:999", "pinned": true}));
-        let forget_body = || json_bytes(&json!({"entities": ["C:999"], "dry_run": true}));
+        let pin_body = || json_bytes(&json!({"entity": "C-999", "pinned": true}));
+        let forget_body = || json_bytes(&json!({"entities": ["C-999"], "dry_run": true}));
         let shadow_body = || json_bytes(&json!({"policy": crate::types::MemoryPolicy::default()}));
         let no_token = || HeaderVals(String::new(), 0);
 
         // Private space, no token: every evolution endpoint rejects.
         err_json(
-            post_probe(
+            Box::pin(post_probe(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 no_token(),
                 probe_body(),
-            )
+            ))
             .await,
             StatusCode::UNAUTHORIZED,
         )
         .await;
         err_json(
-            post_recall_structured(
+            Box::pin(post_recall_structured(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 no_token(),
                 recall_body(),
-            )
+            ))
             .await,
             StatusCode::UNAUTHORIZED,
         )
         .await;
         err_json(
-            get_memory_status(
+            Box::pin(get_memory_status(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 no_token(),
-            )
+            ))
             .await,
             StatusCode::UNAUTHORIZED,
         )
         .await;
         err_json(
-            post_memory_pin(
+            Box::pin(post_memory_pin(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 no_token(),
                 pin_body(),
-            )
+            ))
             .await,
             StatusCode::UNAUTHORIZED,
         )
         .await;
         err_json(
-            post_memory_forget(
+            Box::pin(post_memory_forget(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 no_token(),
                 forget_body(),
-            )
+            ))
             .await,
             StatusCode::UNAUTHORIZED,
         )
         .await;
         err_json(
-            post_shadow_eval(
+            Box::pin(post_shadow_eval(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 no_token(),
                 shadow_body(),
-            )
+            ))
             .await,
             StatusCode::UNAUTHORIZED,
         )
@@ -2708,69 +2727,69 @@ mod tests {
             .await
             .unwrap();
         ok_json(
-            post_probe(
+            Box::pin(post_probe(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 no_token(),
                 probe_body(),
-            )
+            ))
             .await,
         )
         .await;
         ok_json(
-            get_memory_status(
+            Box::pin(get_memory_status(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 no_token(),
-            )
+            ))
             .await,
         )
         .await;
         ok_json(
-            post_recall_structured(
+            Box::pin(post_recall_structured(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 no_token(),
                 recall_body(),
-            )
+            ))
             .await,
         )
         .await;
         err_json(
-            post_memory_pin(
+            Box::pin(post_memory_pin(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 no_token(),
                 pin_body(),
-            )
+            ))
             .await,
             StatusCode::UNAUTHORIZED,
         )
         .await;
         err_json(
-            post_memory_forget(
+            Box::pin(post_memory_forget(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 no_token(),
                 forget_body(),
-            )
+            ))
             .await,
             StatusCode::UNAUTHORIZED,
         )
         .await;
         err_json(
-            post_shadow_eval(
+            Box::pin(post_shadow_eval(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 no_token(),
                 shadow_body(),
-            )
+            ))
             .await,
             StatusCode::UNAUTHORIZED,
         )
@@ -2784,13 +2803,13 @@ mod tests {
         // The nonexistent entity draws a KIP domain error — not 401: the
         // request got through the gate and reached the graph.
         let pin_err = err_json(
-            post_memory_pin(
+            Box::pin(post_memory_pin(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 with_token(),
                 pin_body(),
-            )
+            ))
             .await,
             StatusCode::BAD_REQUEST,
         )
@@ -2803,13 +2822,13 @@ mod tests {
             "{pin_err}"
         );
         let forget_ok = ok_json(
-            post_memory_forget(
+            Box::pin(post_memory_forget(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 with_token(),
                 forget_body(),
-            )
+            ))
             .await,
         )
         .await;
@@ -2817,13 +2836,13 @@ mod tests {
         // The recall_structured call above left a completed recall to
         // replay, so an authorized shadow evaluation runs end to end.
         let shadow_ok = ok_json(
-            post_shadow_eval(
+            Box::pin(post_shadow_eval(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 with_token(),
                 shadow_body(),
-            )
+            ))
             .await,
         )
         .await;

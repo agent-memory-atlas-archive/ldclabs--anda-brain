@@ -33,30 +33,60 @@
       "query": "Draft a quick flight search note for my next work trip.",
       "evaluation": {
         "scoring_rubric": "The answer should include durable travel logistics without inventing a destination.",
-        "required_answer_terms": ["SFO", "aisle"],
-        "forbidden_answer_terms": ["LAX", "window"],
+        "required_answer_terms": [
+          "SFO",
+          "aisle"
+        ],
+        "forbidden_answer_terms": [
+          "LAX",
+          "window"
+        ],
         "expected_memories": [
           {
             "id": "home_airport",
             "description": "User's home airport is SFO.",
             "mode": "should_exist",
             "probe": {
-              "command": "SEARCH CONCEPT \"home airport SFO work travel\" MODE \"semantic\" THRESHOLD 0.6 LIMIT 10",
-              "readonly": true
+              "kip": "2.0",
+              "operations": [
+                {
+                  "command": "SEARCH CONCEPT :term THRESHOLD 0.4 LIMIT 10"
+                }
+              ],
+              "parameters": {
+                "term": "home airport SFO work travel"
+              }
             },
-            "answer_terms": ["SFO"],
-            "trace_terms": ["SFO", "airport"]
+            "answer_terms": [
+              "SFO"
+            ],
+            "trace_terms": [
+              "SFO",
+              "airport"
+            ]
           },
           {
             "id": "seat_preference",
             "description": "User prefers aisle seats on flights.",
             "mode": "should_exist",
             "probe": {
-              "command": "SEARCH CONCEPT \"flight aisle seat preference\" MODE \"semantic\" THRESHOLD 0.6 LIMIT 10",
-              "readonly": true
+              "kip": "2.0",
+              "operations": [
+                {
+                  "command": "SEARCH CONCEPT :term THRESHOLD 0.4 LIMIT 10"
+                }
+              ],
+              "parameters": {
+                "term": "flight aisle seat preference"
+              }
             },
-            "answer_terms": ["aisle"],
-            "trace_terms": ["aisle", "seat"]
+            "answer_terms": [
+              "aisle"
+            ],
+            "trace_terms": [
+              "aisle",
+              "seat"
+            ]
           }
         ]
       }

@@ -213,9 +213,11 @@ For complex businesses, Vector RAG is insufficient. Enterprises have structured 
 
 ## Key Technologies
 
-### KIP — Knowledge Interaction Protocol
+### KIP 2.0 — Knowledge Interaction Protocol
 
-[**KIP**](https://github.com/ldclabs/KIP) is the core. It is a graph-oriented protocol designed exclusively for *Large Language Models (LLMs)*, serving as the bridge between probabilistic LLMs and deterministic knowledge graphs. It allows LLMs to accurately query, create, and update entities and relationships in the graph without the high error rates associated with writing Cypher/GQL. Because Brain supports KIP natively, **your agent never needs to know KIP exists**—it just enjoys the benefits of perfect graph memory.
+[**KIP**](https://github.com/ldclabs/KIP) is the core: a cognitive state protocol designed for *Large Language Models (LLMs)*, bridging probabilistic models and a deterministic memory. It lets an LLM query and change memory precisely, without the error rates of writing Cypher/GQL. Because Brain speaks KIP natively, **your agent never needs to know KIP exists**—it just gets the benefits.
+
+KIP 2.0 separates what 1.x kept in one graph — meaning, belief, evidence, provenance, mnemonic state, retention, governance and schema. The single distinction the rest follows from is that **a statement existing is not the statement being true**: a Proposition is truth-neutral, an Assertion is one actor's stance about it with its evidence, and what is currently believed is projected from those rather than stored. That is what lets Brain tell you "Alice said X, and Bob disagrees" instead of quietly picking a winner — and why it never answers "no" when the truthful answer is "I have no basis for that".
 
 ### Anda DB
 

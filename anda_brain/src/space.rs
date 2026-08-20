@@ -1,4 +1,4 @@
-use anda_cognitive_nexus::{CognitiveNexus, ConceptPK};
+use anda_cognitive_nexus::CognitiveNexus;
 use anda_core::{
     AgentInput, AgentOutput, BoxError, ContentPart, Message, Principal, Resource, Usage,
 };
@@ -19,10 +19,7 @@ use anda_engine::{
     model::{Model, ModelConfig as EngineModelConfig, Models, reqwest},
     rfc3339_datetime, rfc3339_datetime_now, unix_ms,
 };
-use anda_kip::{
-    KipError, KipErrorCode, META_SELF_NAME, PERSON_SELF_KIP, PERSON_SYSTEM_KIP, PERSON_TYPE,
-    parse_kml,
-};
+use anda_kip::{KipError, KipErrorCode, Request, Response, execute_request};
 use ic_auth_types::ByteBufB64;
 use ic_cose_types::cose::{
     SIGN1_TAG, cwt::cwt_from, ed25519::VerifyingKey, sign1::cose_sign1_from, skip_prefix,
@@ -49,10 +46,10 @@ use crate::wiki::{
 };
 use crate::{
     agents::{
-        BrainHook, FormationAgent, KIP_FUNCTION_DEFINITION, MaintenanceAgent, READONLY_KIP_TIMEOUT,
-        RecallAgent, SELF_USER_ID, TimedMemoryReadonly,
+        BrainHook, FormationAgent, MaintenanceAgent, READONLY_KIP_TIMEOUT, RecallAgent,
+        SELF_USER_ID, TimedMemoryReadonly,
     },
-    assess,
+    assess, kip,
     ledger::{MissCache, UsageLedger},
     payload::StringOr,
     types::{
@@ -474,7 +471,7 @@ impl AppState {
                 .get(&id)
                 .is_some_and(|entry| entry.cell.initialized())
             {
-                return Err(format!("space {} already exists", &id).into());
+                return Err(format!("space {id} already exists").into());
             }
         }
 
@@ -993,8 +990,8 @@ impl Space {
         let mut info = SpaceInfo {
             id: self.id.clone(),
             db_stats: self.db.stats(),
-            concepts: self.memory.nexus().concepts().len(),
-            propositions: self.memory.nexus().propositions().len(),
+            concepts: self.memory.nexus().store.concepts().len(),
+            propositions: self.memory.nexus().store.propositions().len(),
             conversations: self.conversations.len(),
             formation_processed_id: self.formation.get_processed().unwrap_or_default(),
             maintenance_processed_id: self.maintenance.get_processed().unwrap_or_default(),
@@ -1052,8 +1049,8 @@ impl Space {
     pub fn formation_status(&self) -> FormationStatus {
         FormationStatus {
             id: self.id.clone(),
-            concepts: self.memory.nexus().concepts().len(),
-            propositions: self.memory.nexus().propositions().len(),
+            concepts: self.memory.nexus().store.concepts().len(),
+            propositions: self.memory.nexus().store.propositions().len(),
             conversations: self.conversations.len(),
             formation_processing: self.formation.is_processing(),
             maintenance_processing: self.maintenance.is_processing(),
@@ -1091,6 +1088,7 @@ impl Space {
         let nodes = self
             .memory
             .nexus()
+            .store
             .concepts()
             .len()
             .max(self.conversations.len()) as u64;
@@ -1401,8 +1399,8 @@ impl Space {
             .db
             .get_extension_as::<MemoryGraphCounters>("memory_graph_counters")
             .unwrap_or_else(|| MemoryGraphCounters {
-                concepts: self.memory.nexus().concepts().len() as u64,
-                propositions: self.memory.nexus().propositions().len() as u64,
+                concepts: self.memory.nexus().store.concepts().len() as u64,
+                propositions: self.memory.nexus().store.propositions().len() as u64,
                 ..Default::default()
             });
         let maintenance_usage: Usage = self
@@ -1439,9 +1437,9 @@ impl Space {
         MemoryGraphCounters {
             concepts: formation.concepts as u64,
             propositions: formation.propositions as u64,
-            unsorted: assess::kip_count(self, assess::UNSORTED_COUNT_KQL).await,
+            unconsolidated: assess::kip_count_sum(self, assess::UNCONSOLIDATED_COUNT_KQL).await,
             orphans: assess::orphan_count(self).await,
-            predicate_types: assess::kip_count(self, assess::PREDICATE_TYPES_COUNT_KQL).await,
+            predicate_types: self.registered_predicates().await.map(|p| p.len() as u64),
             as_of: Some(now_ms),
         }
     }
@@ -1450,18 +1448,7 @@ impl Space {
     /// The counts feed the schema-sprawl metric and give the Maintenance
     /// prompt's merge guidance real numbers to look at.
     async fn audit_schema(&self, now_ms: u64) -> Result<(), BoxError> {
-        let response = self
-            .execute_kip_readonly(anda_kip::Request {
-                command: "FIND(?t.name) WHERE { ?t {type: \"$PropositionType\"} } LIMIT 100"
-                    .to_string(),
-                readonly: true,
-                ..Default::default()
-            })
-            .await?;
-        let mut names = BTreeSet::new();
-        if let anda_kip::Response::Ok { result, .. } = &response {
-            collect_string_leaves(result, &mut names);
-        }
+        let names = self.registered_predicates().await.unwrap_or_default();
 
         // Serial, bounded to 50 predicates: each count is a scan and this
         // runs while the settlement lock is held, so it must not hammer the
@@ -1501,6 +1488,45 @@ impl Space {
             },
         );
         Ok(())
+    }
+
+    /// The predicates this Space's Schema Environment declares.
+    ///
+    /// KIP 1.x read these off `$PropositionType` Concepts, which an ordinary
+    /// write could mint; 2.0 resolves predicates from immutable Schema Packages
+    /// and answers `LIST PREDICATES` from the active environment. `None` when
+    /// the introspection itself failed — an empty vocabulary and an unreachable
+    /// one are not the same answer.
+    pub(crate) async fn registered_predicates(&self) -> Option<Vec<String>> {
+        let response = self
+            .execute_kip_readonly(kip::request("LIST PREDICATES LIMIT 500"))
+            .await
+            .ok()?;
+        if !kip::succeeded(&response) {
+            log::warn!(
+                target: "brain",
+                space_id = self.id;
+                "listing registered predicates failed: {}",
+                kip::error_message(&response)
+            );
+            return None;
+        }
+        Some(
+            kip::ok_result(&response)
+                .and_then(serde_json::Value::as_array)
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .filter_map(|entry| {
+                            entry
+                                .get("local_name")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_string)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        )
     }
 
     /// The last per-predicate schema census, when one has run.
@@ -1553,18 +1579,29 @@ impl Space {
 
     /// Executes a settlement-built write KIP request. Only deterministic,
     /// code-generated commands go through here — never model output.
-    async fn execute_kip_settlement(
-        &self,
-        request: anda_kip::Request,
-    ) -> Result<anda_kip::Response, BoxError> {
+    ///
+    /// A timeout answers `outcome_unknown` rather than an error: the write may
+    /// already have committed (Spec §80.3), and reporting a clean failure would
+    /// invite a caller to redo work that is durable. Every settlement command
+    /// writes absolute values, so the honest answer costs nothing but a re-run
+    /// on the next cycle.
+    async fn execute_kip_settlement(&self, request: Request) -> Result<Response, BoxError> {
         let nexus = self.memory.nexus();
-        match timeout(SETTLEMENT_KIP_TIMEOUT, request.execute(nexus.as_ref())).await {
-            Ok((_, res)) => Ok(res),
-            Err(_) => Err(format!(
-                "settlement KIP execution timed out after {} seconds",
-                SETTLEMENT_KIP_TIMEOUT.as_secs()
-            )
-            .into()),
+        match timeout(
+            SETTLEMENT_KIP_TIMEOUT,
+            execute_request(nexus.as_ref(), &request),
+        )
+        .await
+        {
+            Ok(res) => Ok(res),
+            Err(_) => Ok(Response::outcome_unknown(KipError::new(
+                KipErrorCode::OutcomeUnknown,
+                format!(
+                    "settlement KIP execution timed out after {} seconds; whether it committed is \
+                     unknown until the transaction is looked up",
+                    SETTLEMENT_KIP_TIMEOUT.as_secs()
+                ),
+            ))),
         }
     }
 
@@ -1580,8 +1617,8 @@ impl Space {
     ///    to run by hand, now usage-modulated — recently recalled, pinned,
     ///    superseded, and system-truth links are exempt.
     /// 3. **Correction discovery** (every scope): newly superseded links are
-    ///    recorded in the ledger and aggregated per `metadata.source` into
-    ///    the `source_reliability` extension.
+    ///    recorded in the ledger and aggregated per asserting actor into the
+    ///    `source_reliability` extension.
     async fn settle_memory_metabolism(
         &self,
         scope: MaintenanceScope,
@@ -1623,36 +1660,32 @@ impl Space {
                 .unflushed_recalls(cursor, SETTLEMENT_BATCH_LIMIT)
                 .await?;
             for row in &rows {
-                if !crate::assess::is_proposition_entity_id(&row.entity) {
-                    // Concept usage stays ledger-only: decay targets links, and
-                    // marking the row flushed keeps it out of future scans.
+                if !crate::assess::is_concept_entity_id(&row.entity) {
+                    // Only a Concept carries `MnemonicState`: the Facet is
+                    // declared `applicable_to: Concept`, and an Assertion's
+                    // confidence is a stance, never a usage signal — raising it
+                    // because something was read would be exactly the
+                    // "reinforcement = evidence" confusion KIP 2.0 forbids.
+                    // Usage of a Proposition stays ledger-only.
                     self.ledger
                         .mark_flushed(row._id, row.recall_count, now_ms)
                         .await?;
                     continue;
                 }
-                let command = reinforcement_update_command(
+                let request = reinforcement_request(
                     &row.entity,
+                    policy.recall_reinforcement,
                     row.last_recalled_at,
-                    row.recall_count,
                 );
-                match self
-                    .execute_kip_settlement(anda_kip::Request {
-                        command,
-                        ..Default::default()
-                    })
-                    .await
-                {
-                    Ok(anda_kip::Response::Ok { .. }) => {
-                        report.reinforced += 1;
-                        self.ledger
-                            .mark_flushed(row._id, row.recall_count, now_ms)
-                            .await?;
-                    }
+                let response = self.execute_kip_settlement(request).await?;
+                if kip::succeeded(&response) {
+                    report.reinforced += 1;
+                    self.ledger
+                        .mark_flushed(row._id, row.recall_count, now_ms)
+                        .await?;
+                } else {
                     // Stays dirty: retried on the next settlement.
-                    Ok(anda_kip::Response::Err { .. }) | Err(_) => {
-                        report.flush_retries += 1;
-                    }
+                    report.flush_retries += 1;
                 }
             }
             match next_cursor {
@@ -1661,38 +1694,31 @@ impl Space {
             }
         }
 
-        // 2) Bulk decay, full scope only (mirrors the old Phase-7 cadence).
-        // A failing decay pass degrades — corrections and the schema census
-        // below still run. The loudest expected cause is the engine's
-        // full-scan solution cap (KIP_4002 at 65,536 propositions): decay
-        // stops working on graphs past that size, which must page an
-        // operator, not vanish into a debug log.
+        // 2) Bulk disuse metabolism, full scope only. This decays
+        // `MnemonicState.memory_strength` — how available a memory should be —
+        // and never Assertion confidence: a fact nobody asked about lately is
+        // no less credible, and KIP 2.0 forbids letting time erode a stance
+        // (Profile: "Do not decay epistemic confidence merely because a fact
+        // has not been recalled recently"). A failing pass degrades —
+        // corrections and the schema census below still run — but it must page
+        // an operator rather than vanish into a debug log.
         if scope == MaintenanceScope::Full {
             report.decay_ran = true;
-            let command = decay_update_command(&policy, now_ms, decay_min_interval_ms);
             for _ in 0..SETTLEMENT_MAX_BATCHES {
-                let response = self
-                    .execute_kip_settlement(anda_kip::Request {
-                        command: command.clone(),
-                        ..Default::default()
-                    })
-                    .await?;
-                let updated = match &response {
-                    anda_kip::Response::Ok { result, .. } => result
-                        .get("updated")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0),
-                    anda_kip::Response::Err { .. } => {
-                        log::error!(
-                            target: "brain",
-                            space_id = self.id;
-                            "bulk decay pass failed — confidence decay is NOT running \
-                             (graph past the full-scan engine cap?): {response:?}"
-                        );
-                        report.decay_error = Some(format!("{response:?}"));
-                        break;
-                    }
-                };
+                let request = decay_request(&policy, now_ms, decay_min_interval_ms);
+                let response = self.execute_kip_settlement(request).await?;
+                if !kip::succeeded(&response) {
+                    log::error!(
+                        target: "brain",
+                        space_id = self.id;
+                        "memory-strength metabolism failed — disuse decay is NOT running \
+                         (graph past the full-scan engine cap?): {}",
+                        kip::error_message(&response)
+                    );
+                    report.decay_error = Some(kip::error_message(&response));
+                    break;
+                }
+                let updated = kip::changed(&response, "update");
                 report.decayed += updated;
                 if updated < SETTLEMENT_BATCH_LIMIT as u64 {
                     break;
@@ -1700,76 +1726,51 @@ impl Space {
             }
         }
 
-        // 3) Correction discovery: superseded links not yet marked settled.
-        // The `correction_settled` graph marker (not a windowed scan) is the
-        // cursor: processed links leave the result set, so a superseded
-        // backlog larger than one batch drains across cycles instead of new
-        // corrections starving forever behind the first LIMIT-full.
+        // 3) Correction discovery: Assertions an actor has revised. In KIP 1.x
+        // this was a `metadata.superseded` flag the settlement could clear with
+        // a second write; an Assertion is immutable, so the cursor is the Space
+        // sequence coordinate instead — processed revisions fall behind the
+        // watermark, and a backlog larger than one batch drains across cycles
+        // rather than starving new corrections behind the first LIMIT-full.
+        let after: u64 = self.db.get_extension_as("correction_cursor").unwrap_or(0);
         let scan = self
-            .execute_kip_readonly(anda_kip::Request {
-                command: format!(
-                    "FIND(?link) WHERE {{ ?link (?s, ?p, ?o) FILTER(?link.metadata.superseded == true) FILTER(IS_NULL(?link.metadata.correction_settled)) }} LIMIT {SETTLEMENT_BATCH_LIMIT}"
+            .execute_kip_readonly(kip::request_with(
+                format!(
+                    "FIND(?a.id, ?a._system.space_seq, ?a.asserted_by) WHERE {{\n  ?a ASSERTION {{}}\n  FILTER(?a.lifecycle.status == \"superseded\")\n  FILTER(?a._system.space_seq > :after)\n}}\nORDER BY ?a._system.space_seq\nLIMIT {SETTLEMENT_BATCH_LIMIT}"
                 ),
-                readonly: true,
-                ..Default::default()
-            })
+                kip::param("after", after),
+            ))
             .await;
         match scan {
-            Ok(anda_kip::Response::Ok { result, .. }) => {
-                let mut hits: Vec<(String, Vec<String>)> = Vec::new();
-                crate::assess::collect_entity_objects(&result, &mut |id, object| {
-                    if !crate::assess::is_proposition_entity_id(id) {
-                        return;
+            Ok(response) if kip::succeeded(&response) => {
+                let rows = kip::ok_result(&response).cloned().unwrap_or_default();
+                let mut watermark = after;
+                for (entity, seq, actor) in superseded_rows(&rows) {
+                    watermark = watermark.max(seq);
+                    if !self.ledger.record_correction(&entity, now_ms).await? {
+                        continue;
                     }
-                    let sources = match object.get("metadata").and_then(|meta| meta.get("source")) {
-                        Some(serde_json::Value::String(source)) => vec![source.clone()],
-                        Some(serde_json::Value::Array(items)) => items
-                            .iter()
-                            .filter_map(serde_json::Value::as_str)
-                            .map(str::to_string)
-                            .collect(),
-                        _ => Vec::new(),
-                    };
-                    hits.push((id.to_string(), sources));
-                });
-                for (entity, sources) in hits {
-                    if self.ledger.record_correction(&entity, now_ms).await? {
-                        report.new_corrections += 1;
-                        if !sources.is_empty() {
-                            let _ = self.db.set_extension_from_with(
-                                "source_reliability".to_string(),
-                                |value| {
-                                    let mut map: BTreeMap<String, SourceReliability> =
-                                        value.unwrap_or_default();
-                                    for source in &sources {
-                                        let entry = map.entry(source.clone()).or_default();
-                                        entry.corrections += 1;
-                                        entry.last_corrected_at = now_ms;
-                                    }
-                                    Some(map)
-                                },
-                            );
-                        }
-                    }
-                    // Mark the link settled whether or not it was new to the
-                    // ledger, so it stops occupying the scan window. A failed
-                    // mark is retried next cycle; `record_correction` dedupes,
-                    // so re-processing never double-counts.
-                    let mark = metadata_flag_command(&entity, "correction_settled", "true");
-                    if !matches!(
-                        self.execute_kip_settlement(anda_kip::Request {
-                            command: mark,
-                            ..Default::default()
-                        })
-                        .await,
-                        Ok(anda_kip::Response::Ok { .. })
-                    ) {
-                        log::warn!(
-                            target: "brain",
-                            space_id = self.id;
-                            "marking correction settled failed for {entity}; will re-scan"
-                        );
-                    }
+                    report.new_corrections += 1;
+                    // Whose claim needed revising. KIP 1.x kept a free-text
+                    // `metadata.source`; 2.0 attributes a claim to a semantic
+                    // actor, and that actor is the reliability signal — this is
+                    // not a statement about the caller's authority.
+                    let Some(actor) = actor else { continue };
+                    let _ = self.db.set_extension_from_with(
+                        "source_reliability".to_string(),
+                        |value| {
+                            let mut map: BTreeMap<String, SourceReliability> =
+                                value.unwrap_or_default();
+                            let entry = map.entry(actor.clone()).or_default();
+                            entry.corrections += 1;
+                            entry.last_corrected_at = now_ms;
+                            Some(map)
+                        },
+                    );
+                }
+                if watermark > after {
+                    self.db
+                        .set_extension_from("correction_cursor".to_string(), watermark);
                 }
             }
             Ok(response) => {
@@ -1777,9 +1778,10 @@ impl Space {
                     target: "brain",
                     space_id = self.id;
                     "correction discovery scan failed — new corrections are NOT being \
-                     recorded (graph past the full-scan engine cap?): {response:?}"
+                     recorded (graph past the full-scan engine cap?): {}",
+                    kip::error_message(&response)
                 );
-                report.correction_scan_error = Some(format!("{response:?}"));
+                report.correction_scan_error = Some(kip::error_message(&response));
             }
             Err(err) => {
                 log::error!(
@@ -1849,31 +1851,28 @@ impl Space {
         // MODE omitted: the engine picks hybrid when it has semantic
         // capability, keyword otherwise.
         let response = self
-            .execute_kip_readonly(anda_kip::Request {
-                command: format!("SEARCH CONCEPT {} LIMIT {limit}", kip_string_literal(query)),
-                readonly: true,
-                ..Default::default()
-            })
+            .execute_kip_readonly(kip::request_with(
+                format!("SEARCH CONCEPT :query LIMIT {limit}"),
+                kip::param("query", query),
+            ))
             .await?;
-        let mut hits = match &response {
-            anda_kip::Response::Ok { result, .. } => assess::citations_from_json(result),
-            anda_kip::Response::Err { .. } => {
-                return Err(format!("probe search failed: {response:?}").into());
-            }
-        };
+        if !kip::succeeded(&response) {
+            return Err(format!("probe search failed: {}", kip::error_message(&response)).into());
+        }
+        let mut hits = kip::ok_result(&response)
+            .map(assess::citations_from_json)
+            .unwrap_or_default();
         // The engine's keyword fallback has no relevance threshold, so any
-        // token can match graph plumbing (meta-schema, domains, sleep
-        // tasks, `$system` identities). Those are not user memory: counting
-        // them as `found` would tell callers to pay for a recall that has
-        // nothing to say.
+        // token can match the brain's own bookkeeping. A SleepTask is work the
+        // maintenance cycle owes itself and a SelfModel is the brain's picture
+        // of itself; neither is a memory the caller asked about, and counting
+        // one as `found` would tell them to pay for a recall with nothing to
+        // say. (`$ConceptType` / `$PropositionType` / `Domain` are gone: KIP
+        // 2.0 keeps schema in Packages, so the meta-graph cannot be searched
+        // into a result at all.)
         hits.retain(|hit| {
-            !matches!(
-                hit.r#type.as_deref(),
-                Some("$ConceptType")
-                    | Some("$PropositionType")
-                    | Some("Domain")
-                    | Some("SleepTask")
-            ) && !hit.name.as_deref().unwrap_or_default().starts_with('$')
+            !matches!(hit.r#type.as_deref(), Some("SleepTask") | Some("SelfModel"))
+                && !hit.name.as_deref().unwrap_or_default().starts_with('$')
         });
         if hits.is_empty() {
             self.miss_cache.record_miss(query, now_ms).await?;
@@ -1892,37 +1891,37 @@ impl Space {
         })
     }
 
-    /// Pins (or unpins) a graph entity (plan M6). Pinned memories are exempt
-    /// from confidence decay. Returns the number of updated entities (0 when
-    /// the id does not exist).
+    /// Pins (or unpins) a memory (plan M6). Returns the number of updated
+    /// elements (0 when the id does not exist).
+    ///
+    /// A pinned memory is exempt from disuse metabolism. KIP 1.x recorded that
+    /// as `metadata.pinned`; 2.0 has no generic metadata bag, and "keep this
+    /// out of the forgetting ladder" is a storage-lifecycle statement — so it
+    /// is a retention class, which every element kind carries and which the
+    /// decay sweep already reads.
     pub async fn pin_memory(&self, entity: &str, pinned: bool) -> Result<u64, BoxError> {
         let entity = entity.trim();
-        let command = if assess::is_proposition_entity_id(entity) {
-            format!(
-                "UPDATE ?link\nSET METADATA {{ pinned: {pinned} }}\nWHERE {{ ?link (id: {}) }}",
-                kip_string_literal(entity)
-            )
-        } else if assess::is_concept_entity_id(entity) {
-            format!(
-                "UPDATE ?c\nSET METADATA {{ pinned: {pinned} }}\nWHERE {{ ?c {{id: {}}} }}",
-                kip_string_literal(entity)
-            )
+        if !assess::is_entity_id(entity) {
+            return Err(format!("`{entity}` is not an element id (C-*, P-* or A-*)").into());
+        }
+        let class = if pinned {
+            PINNED_RETENTION_CLASS
         } else {
-            return Err(format!("`{entity}` is not a graph entity id (C:* or P:*)").into());
+            STANDARD_RETENTION_CLASS
         };
         let response = self
-            .execute_kip_settlement(anda_kip::Request {
-                command,
-                ..Default::default()
-            })
+            .execute_kip_settlement(kip::request_with(
+                "SET RETENTION :id { retention_class: :class }",
+                serde_json::Map::from_iter([
+                    ("id".to_string(), serde_json::Value::from(entity)),
+                    ("class".to_string(), serde_json::Value::from(class)),
+                ]),
+            ))
             .await?;
-        match &response {
-            anda_kip::Response::Ok { result, .. } => Ok(result
-                .get("updated")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0)),
-            anda_kip::Response::Err { .. } => Err(format!("pin failed: {response:?}").into()),
+        if !kip::succeeded(&response) {
+            return Err(format!("pin failed: {}", kip::error_message(&response)).into());
         }
+        Ok(kip::changed(&response, "set_retention"))
     }
 
     /// Privacy-grade deletion (plan M6): physically removes entities from
@@ -1966,43 +1965,39 @@ impl Space {
                 entity: entity.clone(),
                 ..Default::default()
             };
-            let (exists_command, delete_command) = if assess::is_proposition_entity_id(&entity) {
-                let id = kip_string_literal(&entity);
-                (
-                    format!("FIND(?link) WHERE {{ ?link (id: {id}) }} LIMIT 1"),
-                    format!("DELETE PROPOSITIONS ?link WHERE {{ ?link (id: {id}) }}"),
-                )
+            let exists_command = if assess::is_proposition_entity_id(&entity) {
+                "FIND(?link) WHERE { ?link (id: :id) } LIMIT 1"
             } else if assess::is_concept_entity_id(&entity) {
-                let id = kip_string_literal(&entity);
-                (
-                    format!("FIND(?c) WHERE {{ ?c {{id: {id}}} }} LIMIT 1"),
-                    format!("DELETE CONCEPT ?c DETACH WHERE {{ ?c {{id: {id}}} }}"),
-                )
+                "FIND(?c) WHERE { ?c {id: :id} } LIMIT 1"
+            } else if assess::is_assertion_entity_id(&entity) {
+                "FIND(?a) WHERE { ?a ASSERTION {id: :id} } LIMIT 1"
             } else {
-                entry.error = Some("not a graph entity id (C:* or P:*)".to_string());
+                entry.error = Some("not an element id (C-*, P-* or A-*)".to_string());
                 report.entities.push(entry);
                 continue;
             };
 
             let response = self
-                .execute_kip_readonly(anda_kip::Request {
-                    command: exists_command,
-                    readonly: true,
-                    ..Default::default()
-                })
+                .execute_kip_readonly(kip::request_with(
+                    exists_command,
+                    kip::param("id", entity.as_str()),
+                ))
                 .await?;
-            match &response {
-                anda_kip::Response::Ok { result, .. } => {
+            match kip::ok_result(&response) {
+                Some(result) => {
                     entry.existed = assess::citations_from_json(result)
                         .iter()
                         .any(|hit| hit.entity == entity);
                 }
-                anda_kip::Response::Err { .. } => {
+                None => {
                     // An errored/timed-out existence check means *unknown*,
                     // never "absent": this is a privacy-grade deletion, and a
                     // clean `existed: false` here would tell the caller the
                     // data is gone while it may still be in the graph.
-                    entry.error = Some(format!("existence check failed, retry: {response:?}"));
+                    entry.error = Some(format!(
+                        "existence check failed, retry: {}",
+                        kip::error_message(&response)
+                    ));
                     report.entities.push(entry);
                     continue;
                 }
@@ -2022,28 +2017,28 @@ impl Space {
                 cascade.extend(self.concept_proposition_ids(&entity).await);
             }
 
+            // `PURGE` is the only removal that satisfies a forget request:
+            // archive keeps the content recallable and tombstone keeps it
+            // stored. `authorized_cascade` is what makes purging a Concept
+            // reach the Propositions that quote it — the 1.x `DETACH` — and
+            // the engine still leaves an identity stub so dangling references
+            // resolve to "erased" rather than to nothing.
             match self
-                .execute_kip_settlement(anda_kip::Request {
-                    command: delete_command,
-                    ..Default::default()
-                })
+                .execute_kip_settlement(kip::request_with(
+                    "PURGE :id REFERENCE POLICY \"authorized_cascade\" CONFIRM \"PURGE\"",
+                    kip::param("id", entity.as_str()),
+                ))
                 .await
             {
-                Ok(anda_kip::Response::Ok { result, .. }) => {
-                    report.deleted_concepts += result
-                        .get("deleted_concepts")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0);
-                    report.deleted_propositions += result
-                        .get("deleted_propositions")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0);
+                Ok(response) if kip::succeeded(&response) => {
+                    report.deleted_concepts += purged_of_kind(&response, "concept");
+                    report.deleted_propositions += purged_of_kind(&response, "proposition");
                     for gone in &cascade {
                         let _ = self.ledger.forget_entity(gone).await;
                     }
                 }
                 Ok(response) => {
-                    entry.error = Some(format!("{response:?}"));
+                    entry.error = Some(kip::error_message(&response));
                 }
                 Err(err) => {
                     entry.error = Some(err.to_string());
@@ -2073,40 +2068,44 @@ impl Space {
     /// an enumeration failure only leaves ledger rows behind, never blocks
     /// the deletion itself.
     async fn concept_proposition_ids(&self, concept_id: &str) -> Vec<String> {
-        let id = kip_string_literal(concept_id);
         let mut ids = BTreeSet::new();
         for base_command in [
-            format!("FIND(?link) WHERE {{ ?link ({{id: {id}}}, ?p, ?o) }} LIMIT 1000"),
-            format!("FIND(?link) WHERE {{ ?link (?s, ?p, {{id: {id}}}) }} LIMIT 1000"),
+            "FIND(?link) WHERE { ?c CONCEPT {id: :id} ?link (?c, ?p, ?o) } LIMIT 1000",
+            "FIND(?link) WHERE { ?c CONCEPT {id: :id} ?link (?s, ?p, ?c) } LIMIT 1000",
         ] {
             // Paginate with CURSOR: a concept with more than one page of
             // propositions must still cascade all of its ledger rows.
             let mut cursor: Option<String> = None;
             loop {
+                let mut parameters = kip::param("id", concept_id);
                 let command = match &cursor {
-                    Some(cursor) => {
-                        format!("{base_command} CURSOR {}", kip_string_literal(cursor))
+                    Some(token) => {
+                        parameters.insert("cursor".to_string(), token.clone().into());
+                        format!("{base_command} CURSOR :cursor")
                     }
-                    None => base_command.clone(),
+                    None => base_command.to_string(),
                 };
-                match self
-                    .execute_kip_readonly(anda_kip::Request {
-                        command,
-                        readonly: true,
-                        ..Default::default()
-                    })
-                    .await
-                {
-                    Ok(anda_kip::Response::Ok {
-                        result,
-                        next_cursor,
-                    }) => {
-                        assess::collect_entity_objects(&result, &mut |id, _| {
-                            if assess::is_proposition_entity_id(id) {
-                                ids.insert(id.to_string());
-                            }
-                        });
-                        match next_cursor {
+                let response = self
+                    .execute_kip_readonly(kip::request_with(command, parameters))
+                    .await;
+                match response {
+                    Ok(response) if kip::succeeded(&response) => {
+                        if let Some(result) = kip::ok_result(&response) {
+                            assess::collect_entity_objects(result, &mut |id, _| {
+                                if assess::is_proposition_entity_id(id) {
+                                    ids.insert(id.to_string());
+                                }
+                            });
+                        }
+                        // A single-operation response reports its cursor at the
+                        // operation level; the request level carries it only
+                        // when the whole envelope paged.
+                        let next = response
+                            .results
+                            .first()
+                            .and_then(|result| result.next_cursor.clone())
+                            .or_else(|| response.next_cursor.clone());
+                        match next {
                             Some(next) => cursor = Some(next),
                             None => break,
                         }
@@ -2155,11 +2154,19 @@ impl Space {
         });
     }
 
-    /// The dream self-test (plan M7): sample recent, never-recalled memories,
-    /// generate one natural query each (single LLM call), and check whether
-    /// search actually surfaces them. Ungroundable memories become `review`
+    /// The dream self-test (plan M7): sample memories the brain has not probed
+    /// yet, generate one natural query each (single LLM call), and check
+    /// whether search actually surfaces them. Ungroundable memories become
     /// SleepTasks the next full maintenance re-encodes. Self-test retrievals
     /// count only into `self_test_count` — never into usage reinforcement.
+    ///
+    /// KIP 1.x stamped `metadata.self_tested_at` on each sampled link so the
+    /// next pass would skip it. A Proposition is immutable and carries no
+    /// metadata, so coverage is paced by a Space-sequence cursor instead: each
+    /// pass reads the window after the last one and parks the cursor at its
+    /// end, wrapping around once the horizon has passed. The bookkeeping that
+    /// remains — which memories were tested, and how often — lives in the usage
+    /// ledger, where it never touches cognition at all.
     ///
     /// Returns `None` when disabled, already running, or nothing qualifies.
     async fn run_memory_self_test(&self, now_ms: u64) -> Result<Option<SelfTestReport>, BoxError> {
@@ -2172,63 +2179,56 @@ impl Space {
             return Ok(None);
         }
 
-        // 1) Sample candidate links: active encoded memories (< 1.0 excludes
-        // schema/system truths), skipping graph plumbing predicates. Links
-        // already self-tested (within the retest horizon) or with proven
-        // recall usage are excluded *in the query*: the engine returns
-        // untested rows in stable order, so the sample window slides across
-        // the whole graph over successive passes instead of re-reading the
-        // same fixed prefix until coverage stalls.
-        let retest_before =
-            kip_string_literal(&kip_timestamp(now_ms.saturating_sub(SELF_TEST_RETEST_MS)));
+        // 1) Sample the next window of Propositions. Projecting the subject and
+        // object variables returns the whole Concept — name and type included —
+        // so a groundable query can be written without a second lookup per
+        // endpoint, which is what the 1.x pass spent most of its round trips on.
+        let cursor: SelfTestCursor = self
+            .db
+            .get_extension_as("memory_self_test_cursor")
+            .unwrap_or_default();
+        let window = budget * 4;
         let response = self
-            .execute_kip_readonly(anda_kip::Request {
-                command: format!(
-                    r#"FIND(?link) WHERE {{
-  ?link (?s, ?p, ?o)
-  FILTER(?p != "belongs_to_domain")
-  FILTER(?p != "assigned_to")
-  FILTER(IS_NULL(?link.metadata.superseded) || ?link.metadata.superseded != true)
-  FILTER(IS_NULL(?link.metadata.self_tested_at) || ?link.metadata.self_tested_at < {retest_before})
-  FILTER(IS_NULL(?link.metadata.last_recalled_at))
-  FILTER(?link.metadata.confidence < 1.0)
-}} LIMIT {}"#,
-                    budget * 4
+            .execute_kip_readonly(kip::request_with(
+                format!(
+                    r#"FIND(?p.id, ?p._system.space_seq, ?s, ?o)
+WHERE {{
+  ?p (?s, ?predicate, ?o)
+  FILTER(?p._system.space_seq > :after)
+}}
+ORDER BY ?p._system.space_seq
+LIMIT {window}"#
                 ),
-                readonly: true,
-                ..Default::default()
-            })
+                kip::param("after", cursor.after),
+            ))
             .await?;
-        if let anda_kip::Response::Err { .. } = &response {
+        if !kip::succeeded(&response) {
             log::error!(
                 target: "brain",
                 space_id = self.id;
                 "self-test sampling scan failed — dream self-test is NOT running \
-                 (graph past the full-scan engine cap?): {response:?}"
+                 (graph past the full-scan engine cap?): {}",
+                kip::error_message(&response)
             );
             return Ok(None);
         }
-        let mut sampled: Vec<SelfTestCandidate> = Vec::new();
-        if let anda_kip::Response::Ok { result, .. } = &response {
-            assess::collect_entity_objects(result, &mut |id, object| {
-                if !assess::is_proposition_entity_id(id) || sampled.len() >= budget * 4 {
-                    return;
-                }
-                let subject = object.get("subject").and_then(serde_json::Value::as_str);
-                let object_id = object.get("object").and_then(serde_json::Value::as_str);
-                if let (Some(subject), Some(object_id)) = (subject, object_id) {
-                    sampled.push(SelfTestCandidate {
-                        id: id.to_string(),
-                        subject: subject.to_string(),
-                        object: object_id.to_string(),
-                        predicate: id.splitn(3, ':').nth(2).unwrap_or_default().to_string(),
-                        subject_type: String::new(),
-                        subject_name: String::new(),
-                        object_name: String::new(),
-                    });
-                }
-            });
-        }
+        let sampled =
+            self_test_candidates(kip::ok_result(&response).unwrap_or(&serde_json::Value::Null));
+
+        // A short window means the cursor has reached the end of the graph.
+        // Park it back at zero so coverage cycles — but only once the retest
+        // horizon has passed, or a small graph would re-test the same handful
+        // of memories on every cycle and burn its whole token budget doing it.
+        let reached_end = sampled.len() < window;
+        let next_after = sampled.last().map(|c| c.seq).unwrap_or(cursor.after);
+        let wrap = reached_end && now_ms.saturating_sub(cursor.cycled_at) >= SELF_TEST_RETEST_MS;
+        self.db.set_extension_from(
+            "memory_self_test_cursor".to_string(),
+            SelfTestCursor {
+                after: if wrap { 0 } else { next_after },
+                cycled_at: if wrap { now_ms } else { cursor.cycled_at },
+            },
+        );
 
         // Prefer memories with no usage evidence at all: recalled ones are
         // proven groundable, already-tested ones had their chance.
@@ -2245,43 +2245,12 @@ impl Space {
                 break;
             }
         }
-        if candidates.is_empty() {
-            return Ok(None);
-        }
-
-        // 2) Resolve subject/object names for query generation. An errored
-        // lookup (graph busy) aborts the whole pass via `?` — "unknown ≠
-        // missing": nothing gets a tested stamp, and a later pass re-samples
-        // the same window — unlike a confirmed-missing concept, which
-        // resolves to empty strings below.
-        let mut concept_cache: BTreeMap<String, (String, String)> = BTreeMap::new();
-        for candidate in &mut candidates {
-            let (subject_type, subject_name) = self
-                .self_test_concept(&mut concept_cache, &candidate.subject)
-                .await?;
-            let (_, object_name) = self
-                .self_test_concept(&mut concept_cache, &candidate.object)
-                .await?;
-            candidate.subject_type = subject_type;
-            candidate.subject_name = subject_name;
-            candidate.object_name = object_name;
-        }
-        // Unresolvable candidates (their subject concept is confirmed gone)
-        // are stamped tested too, or they would occupy the sample window
-        // forever; `stamp_only` later also collects candidates the LLM
-        // returned no query for.
-        let mut stamp_only: Vec<String> = candidates
-            .iter()
-            .filter(|candidate| candidate.subject_name.is_empty())
-            .map(|candidate| candidate.id.clone())
-            .collect();
         candidates.retain(|candidate| !candidate.subject_name.is_empty());
         if candidates.is_empty() {
-            self.mark_self_tested(stamp_only.iter(), now_ms).await;
             return Ok(None);
         }
 
-        // 3) One LLM call generates all probe queries. The token budget is
+        // 2) One LLM call generates all probe queries. The token budget is
         // enforced *before* the call by shrinking the candidate batch to fit
         // (≈3 chars per token, conservative); the knob bounds real spend
         // instead of warning after the fact.
@@ -2322,7 +2291,7 @@ impl Space {
             );
         }
 
-        // 4) Deterministic grounding check: does search surface the memory's
+        // 3) Deterministic grounding check: does search surface the memory's
         // subject or object concept for the generated query?
         let mut tested_entities = BTreeSet::new();
         for candidate in &candidates {
@@ -2333,40 +2302,31 @@ impl Space {
                 .map(|query| query.query.trim())
                 .filter(|query| !query.is_empty())
             else {
-                // Candidates the LLM returned no query for consumed prompt
-                // budget and cannot be tested; stamp them anyway or they
-                // would occupy the sampling window's stable prefix forever.
-                stamp_only.push(candidate.id.clone());
                 continue;
             };
             let response = self
-                .execute_kip_readonly(anda_kip::Request {
-                    command: format!("SEARCH CONCEPT {} LIMIT 8", kip_string_literal(query)),
-                    readonly: true,
-                    ..Default::default()
-                })
+                .execute_kip_readonly(kip::request_with(
+                    "SEARCH CONCEPT :query LIMIT 8",
+                    kip::param("query", query),
+                ))
                 .await?;
+            let Some(result) = kip::ok_result(&response) else {
+                // An errored/timed-out search is *unknown*, not
+                // "ungroundable": counting it would fabricate a false
+                // negative, lower the groundability metric, and burn a
+                // re-encode task on a healthy memory. Abort the whole pass; a
+                // later one re-samples from the same cursor.
+                return Err(format!(
+                    "self-test grounding search errored for {}: {}",
+                    candidate.id,
+                    kip::error_message(&response)
+                )
+                .into());
+            };
             let mut hit_ids = BTreeSet::new();
-            match &response {
-                anda_kip::Response::Ok { result, .. } => {
-                    assess::collect_entity_objects(result, &mut |id, _| {
-                        hit_ids.insert(id.to_string());
-                    });
-                }
-                anda_kip::Response::Err { .. } => {
-                    // An errored/timed-out search is *unknown*, not
-                    // "ungroundable": counting it would fabricate a false
-                    // negative, lower the groundability metric, and burn a
-                    // re-encode task on a healthy memory. Abort the whole
-                    // pass without stamping anything; a later pass
-                    // re-samples the same window.
-                    return Err(format!(
-                        "self-test grounding search errored for {}: {response:?}",
-                        candidate.id
-                    )
-                    .into());
-                }
-            }
+            assess::collect_entity_objects(result, &mut |id, _| {
+                hit_ids.insert(id.to_string());
+            });
             report.tested += 1;
             tested_entities.insert(candidate.id.clone());
             if hit_ids.contains(&candidate.subject) || hit_ids.contains(&candidate.object) {
@@ -2374,29 +2334,22 @@ impl Space {
                 continue;
             }
 
-            // Ungroundable: enqueue a review SleepTask for the next cycle,
-            // unless one is already pending for this concept.
-            if self
-                .has_pending_review_task(&candidate.subject_name)
-                .await?
-            {
+            // Ungroundable: enqueue a SleepTask for the next cycle, unless one
+            // is already pending for this concept.
+            if self.has_pending_review_task(&candidate.subject).await? {
                 continue;
             }
-            self.ensure_sleep_task_schema().await?;
-            let command = self_test_task_command(candidate, query, now_ms);
             match self
-                .execute_kip_settlement(anda_kip::Request {
-                    command,
-                    ..Default::default()
-                })
+                .execute_kip_settlement(self_test_task_request(candidate, query, now_ms))
                 .await
             {
-                Ok(anda_kip::Response::Ok { .. }) => report.reencode_tasks += 1,
+                Ok(response) if kip::succeeded(&response) => report.reencode_tasks += 1,
                 Ok(response) => {
                     log::warn!(
                         target: "brain",
                         space_id = self.id;
-                        "self-test SleepTask creation failed: {response:?}"
+                        "self-test SleepTask creation failed: {}",
+                        kip::error_message(&response)
                     );
                 }
                 Err(err) => {
@@ -2412,11 +2365,6 @@ impl Space {
         self.ledger
             .record_self_test(&tested_entities, now_ms)
             .await?;
-        // Stamp tested (and unresolvable/unqueried) links on the graph so
-        // the next sampling pass moves past them — this is what keeps
-        // self-test coverage sliding across the whole graph.
-        self.mark_self_tested(tested_entities.iter().chain(stamp_only.iter()), now_ms)
-            .await;
         self.bump_metrics(|metrics| {
             metrics.self_test_tested += report.tested;
             metrics.self_test_grounded += report.grounded;
@@ -2428,136 +2376,27 @@ impl Space {
         Ok(Some(report))
     }
 
-    /// Stamps `self_tested_at` on the given links; best-effort (an unmarked
-    /// link is simply re-sampled by a later pass).
-    async fn mark_self_tested(&self, entities: impl Iterator<Item = &String>, now_ms: u64) -> u64 {
-        let stamp = kip_string_literal(&kip_timestamp(now_ms));
-        let mut marked = 0u64;
-        for entity in entities {
-            let command = metadata_flag_command(entity, "self_tested_at", &stamp);
-            match self
-                .execute_kip_settlement(anda_kip::Request {
-                    command,
-                    ..Default::default()
-                })
-                .await
-            {
-                Ok(anda_kip::Response::Ok { .. }) => marked += 1,
-                _ => {
-                    log::warn!(
-                        target: "brain",
-                        space_id = self.id;
-                        "marking self-tested failed for {entity}; will re-sample"
-                    );
-                }
-            }
-        }
-        marked
-    }
-
-    /// Resolves a concept id to `(type, name)`, memoized per pass. A
-    /// confirmed-missing concept resolves to empty strings; an errored or
-    /// timed-out lookup is `Err` — *unknown*, never "missing" — which aborts
-    /// the caller's whole pass so nothing gets a tested stamp and the same
-    /// window is re-sampled once the graph is responsive again.
-    async fn self_test_concept(
-        &self,
-        cache: &mut BTreeMap<String, (String, String)>,
-        concept_id: &str,
-    ) -> Result<(String, String), BoxError> {
-        if let Some(found) = cache.get(concept_id) {
-            return Ok(found.clone());
-        }
+    /// True when a pending SleepTask already covers this Concept.
+    async fn has_pending_review_task(&self, target: &str) -> Result<bool, BoxError> {
         let response = self
-            .execute_kip_readonly(anda_kip::Request {
-                command: format!(
-                    "FIND(?c) WHERE {{ ?c {{id: {}}} }} LIMIT 1",
-                    kip_string_literal(concept_id)
-                ),
-                readonly: true,
-                ..Default::default()
-            })
+            .execute_kip_readonly(kip::request_with(
+                r#"FIND(?task) WHERE {
+  ?task CONCEPT {type: "SleepTask"}
+  FILTER(?task.attributes.status == "pending")
+  ?about CONCEPT {id: :target}
+  STRUCTURAL (?task, "about", ?about)
+} LIMIT 1"#,
+                kip::param("target", target),
+            ))
             .await?;
-        let resolved = match &response {
-            anda_kip::Response::Ok { result, .. } => {
-                let mut resolved = (String::new(), String::new());
-                assess::collect_entity_objects(result, &mut |id, object| {
-                    if id == concept_id {
-                        resolved = (
-                            object
-                                .get("type")
-                                .and_then(serde_json::Value::as_str)
-                                .unwrap_or_default()
-                                .to_string(),
-                            object
-                                .get("name")
-                                .and_then(serde_json::Value::as_str)
-                                .unwrap_or_default()
-                                .to_string(),
-                        );
-                    }
-                });
-                resolved
-            }
-            anda_kip::Response::Err { .. } => {
-                return Err(format!(
-                    "self-test concept lookup errored for {concept_id}: {response:?}"
-                )
-                .into());
-            }
-        };
-        cache.insert(concept_id.to_string(), resolved.clone());
-        Ok(resolved)
-    }
-
-    /// True when a pending review SleepTask already targets this concept.
-    async fn has_pending_review_task(&self, target_name: &str) -> Result<bool, BoxError> {
-        let response = self
-            .execute_kip_readonly(anda_kip::Request {
-                command: format!(
-                    "FIND(?task) WHERE {{ ?task {{type: \"SleepTask\"}} FILTER(?task.attributes.target_name == {}) FILTER(?task.attributes.status == \"pending\") }} LIMIT 1",
-                    kip_string_literal(target_name)
-                ),
-                readonly: true,
-                ..Default::default()
-            })
-            .await?;
-        Ok(match &response {
-            anda_kip::Response::Ok { result, .. } => {
-                let mut found = false;
-                assess::collect_entity_objects(result, &mut |_, _| found = true);
-                found
-            }
-            // An unknown SleepTask type (schema not yet installed) means no
-            // pending tasks either way.
-            anda_kip::Response::Err { .. } => false,
-        })
-    }
-
-    /// Installs the SleepTask type capsule (with its `assigned_to`
-    /// predicate) when the graph does not have it yet.
-    async fn ensure_sleep_task_schema(&self) -> Result<(), BoxError> {
-        if self
-            .memory
-            .nexus()
-            .has_concept(&ConceptPK::Object {
-                r#type: "$ConceptType".to_string(),
-                name: "SleepTask".to_string(),
-            })
-            .await
-        {
-            return Ok(());
-        }
-        let response = self
-            .execute_kip_settlement(anda_kip::Request {
-                command: anda_kip::SLEEP_TASK_KIP.to_string(),
-                ..Default::default()
-            })
-            .await?;
-        match response {
-            anda_kip::Response::Ok { .. } => Ok(()),
-            response => Err(format!("SleepTask capsule install failed: {response:?}").into()),
-        }
+        // An error here means *unknown*, and the caller's fallback is to create
+        // one more task than it needed — which the `key` on the upsert then
+        // collapses anyway.
+        Ok(kip::ok_result(&response).is_some_and(|result| {
+            let mut found = false;
+            assess::collect_entity_objects(result, &mut |_, _| found = true);
+            found
+        }))
     }
 
     /// WikiDigest is off by default (PRD §13): extraction writes to the
@@ -2689,15 +2528,21 @@ impl Space {
         self.formation.start_process(ctx, conversation).await
     }
 
-    pub async fn execute_kip_readonly(
-        &self,
-        mut req: anda_kip::Request,
-    ) -> Result<anda_kip::Response, BoxError> {
-        req.readonly = true;
+    /// Executes a KIP request on the read-only path.
+    ///
+    /// The read-only gate is on what each operation *parses to*, never on a
+    /// declared `language`, so a mutation cannot reach the engine through here
+    /// however the envelope labels it.
+    pub async fn execute_kip_readonly(&self, req: Request) -> Result<Response, BoxError> {
         let nexus = self.memory.nexus();
-        match timeout(READONLY_KIP_TIMEOUT, req.execute(nexus.as_ref())).await {
-            Ok((_, res)) => Ok(res),
-            Err(_) => Ok(anda_kip::Response::err(KipError::new(
+        match timeout(
+            READONLY_KIP_TIMEOUT,
+            kip::execute_readonly_request(nexus.as_ref(), &req),
+        )
+        .await
+        {
+            Ok(res) => Ok(res),
+            Err(_) => Ok(Response::failed(KipError::new(
                 KipErrorCode::ExecutionTimeout,
                 format!(
                     "read-only KIP execution timed out after {} seconds; memory is busy, retry later",
@@ -2810,8 +2655,8 @@ impl Space {
         db.set_extension_from("tier".to_string(), &tier);
 
         let db = Arc::new(db);
-        let nexus =
-            CognitiveNexus::connect(db.clone(), async |nexus| init_nexus_kip(nexus).await).await?;
+        let nexus = CognitiveNexus::connect(db.clone()).await?;
+        init_nexus_kip(&nexus).await?;
 
         let nexus = Arc::new(nexus);
         // Creates the conversation and resource collections; `connect` below
@@ -2823,8 +2668,8 @@ impl Space {
             description: None,
             owner: owner.to_string(),
             db_stats: db.stats(),
-            concepts: nexus.concepts().len(),
-            propositions: nexus.propositions().len(),
+            concepts: nexus.store.concepts().len(),
+            propositions: nexus.store.propositions().len(),
             // The space was just created, so its conversation collection is
             // necessarily empty.
             conversations: 0,
@@ -2847,8 +2692,8 @@ impl Space {
     ) -> Result<Arc<Self>, BoxError> {
         let id = db_config.name.clone();
         let db = Arc::new(AndaDB::open(object_store.clone(), db_config).await?);
-        let nexus =
-            CognitiveNexus::connect(db.clone(), async |nexus| init_nexus_kip(nexus).await).await?;
+        let nexus = CognitiveNexus::connect(db.clone()).await?;
+        init_nexus_kip(&nexus).await?;
         let mut schema = Conversation::schema()?;
         schema.with_version(4);
 
@@ -2899,11 +2744,10 @@ impl Space {
         // `open_or_create_collection` hands back the already-open handle, so
         // they adopt the leaner index layout applied above instead of
         // recreating the indexes `init_*_collection` just dropped.
-        let memory = Arc::new(
-            MemoryManagement::connect(db.clone(), Arc::new(nexus))
-                .await?
-                .with_kip_function_definitions(KIP_FUNCTION_DEFINITION.clone()),
-        );
+        // The KIP tool definition comes from `anda_kip` itself (via the
+        // engine's default), so the schema the model is shown and the envelope
+        // the engine executes stay in step across protocol revisions.
+        let memory = Arc::new(MemoryManagement::connect(db.clone(), Arc::new(nexus)).await?);
         let recall_store = Conversations::connect(db.clone(), "recall".to_string()).await?;
         let maintenance_store =
             Conversations::connect(db.clone(), "maintenance".to_string()).await?;
@@ -2938,6 +2782,9 @@ impl Space {
         let memory_r = TimedMemoryReadonly::new(memory.clone());
         let memory_tool = MemoryTool::new(memory.clone());
         let note_tool = NoteTool::new();
+        // Formation and Maintenance may grow this Space's vocabulary; Recall
+        // may not, and gets the tool nowhere.
+        let declare_tool = crate::vocabulary::DeclareSymbolsTool::new(memory.clone());
 
         let hooks = Arc::new(Hooks::new(db.clone()));
         let formation = Arc::new(FormationAgent::new(
@@ -2967,7 +2814,8 @@ impl Space {
             .register_tool(memory.clone())?
             .register_tool(Arc::new(memory_r))?
             .register_tool(Arc::new(memory_tool))?
-            .register_tool(Arc::new(note_tool))?;
+            .register_tool(Arc::new(note_tool))?
+            .register_tool(Arc::new(declare_tool))?;
         #[allow(unused_mut)]
         let mut exported_tools = vec![MemoryTool::NAME.to_string()];
         #[cfg(feature = "wiki")]
@@ -3289,21 +3137,29 @@ async fn init_resource_collection(collection: &mut Collection) -> Result<(), DBE
     Ok(())
 }
 
-async fn init_nexus_kip(nexus: &CognitiveNexus) -> Result<(), KipError> {
-    if !nexus
-        .has_concept(&ConceptPK::Object {
-            r#type: PERSON_TYPE.to_string(),
-            name: META_SELF_NAME.to_string(),
-        })
-        .await
-    {
-        // uuc56-gyb: Principal::from_slice(&[1])
-        let kml = &[PERSON_SELF_KIP, PERSON_SYSTEM_KIP].join("\n");
-
-        let result = nexus.execute_kml(parse_kml(kml)?, false).await?;
-        log::info!(target: "brain", result:serde = result; "Init $self and $system");
-    }
-    Ok(())
+/// Brings a freshly opened Nexus up to the vocabulary the brain writes against.
+///
+/// A Space that has activated nothing resolves Core alone, and Core declares no
+/// Concept types at all — `Person`, `Event`, `Experience`, `SleepTask` and the
+/// `MnemonicState` Facet all come from the Cognitive Memory Profile, so without
+/// it in force nothing the brain writes even parses.
+///
+/// KIP 1.x also seeded `$self` and `$system` Person nodes here. Neither is
+/// created any more: a Person is cognition and a Principal is authority, and
+/// the engine registers its own system Principal at `connect`. What the brain
+/// knows about itself now lives in a `SelfModel` Concept that Maintenance
+/// consolidates from evidence — descriptive, and unable to grant anything.
+///
+/// `install_and_activate` re-activates only when the lock actually changes, so
+/// running this on every open does not walk the Schema Environment version
+/// forward on each restart.
+async fn init_nexus_kip(nexus: &CognitiveNexus) -> Result<(), BoxError> {
+    // Load first: a Space that has been running already has a vocabulary of its
+    // own in force, and activating the Profile alone would deactivate it — a
+    // host owns its Space's lock, so dropping an artifact from that list is
+    // exactly how a package is retired.
+    let vocabulary = crate::vocabulary::MemoryVocabulary::load(nexus).await?;
+    vocabulary.activate(nexus).await
 }
 
 #[cfg(test)]
@@ -3356,9 +3212,26 @@ const SETTLEMENT_MAX_BATCHES: usize = 20;
 /// so daily maintenance cannot over-decay.
 const DECAY_MIN_INTERVAL_MS: u64 = 7 * 24 * 3_600 * 1_000;
 
-/// A link self-tested longer ago than this becomes eligible for re-sampling,
+/// A memory self-tested longer ago than this becomes eligible for re-sampling,
 /// so re-encoded memories eventually get their grounding re-verified.
 const SELF_TEST_RETEST_MS: u64 = 30 * 24 * 3_600 * 1_000;
+
+/// `MnemonicState.memory_strength` assumed for a Concept that has never been
+/// metabolized. The Facet's members are all optional, so reinforcement has to
+/// supply a baseline before it can add to one.
+const DEFAULT_MEMORY_STRENGTH: f64 = 0.5;
+
+/// The `retention.retention_class` a pinned memory carries.
+///
+/// KIP 1.x pinning was a `metadata.pinned` flag; 2.0 has no generic metadata
+/// bag, and "keep this out of the metabolism ladder" is a storage-lifecycle
+/// statement, which is what the retention block is for. Retention also lives on
+/// every element kind, so one class keeps pinning working for Concepts and
+/// Propositions alike.
+const PINNED_RETENTION_CLASS: &str = "pinned";
+
+/// The `retention_class` an unpinned element returns to.
+const STANDARD_RETENTION_CLASS: &str = "standard";
 
 /// Renders a KIP string literal with backslashes and quotes escaped.
 /// The crate's single escaping implementation — reuse it instead of
@@ -3376,26 +3249,6 @@ struct ShadowVerdict {
     winner: String,
     #[serde(default)]
     reason: String,
-}
-
-/// Collects every JSON string leaf; used to read KQL name projections.
-fn collect_string_leaves(value: &serde_json::Value, out: &mut BTreeSet<String>) {
-    match value {
-        serde_json::Value::String(text) if !text.trim().is_empty() => {
-            out.insert(text.clone());
-        }
-        serde_json::Value::Array(items) => {
-            for item in items {
-                collect_string_leaves(item, out);
-            }
-        }
-        serde_json::Value::Object(map) => {
-            for item in map.values() {
-                collect_string_leaves(item, out);
-            }
-        }
-        _ => {}
-    }
 }
 
 /// Graph metadata timestamps are RFC3339 strings (lexicographically
@@ -3423,24 +3276,81 @@ fn strip_recall_meta_from_history(history: &mut [anda_core::Message]) {
     }
 }
 
-/// Settlement command: set one metadata flag on one link by id. `value` is
-/// raw KIP (pass `"true"` for booleans, a `kip_string_literal` for strings).
-fn metadata_flag_command(entity: &str, key: &str, value: &str) -> String {
-    format!(
-        "UPDATE ?link\nSET METADATA {{ {key}: {value} }}\nWHERE {{ ?link (id: {entity}) }}",
-        entity = kip_string_literal(entity),
+/// Reads the rows of the correction-discovery scan —
+/// `FIND(?a.id, ?a._system.space_seq, ?a.asserted_by)` — into
+/// `(assertion id, space sequence, asserting actor)`.
+fn superseded_rows(result: &serde_json::Value) -> Vec<(String, u64, Option<String>)> {
+    let element_id = |value: &serde_json::Value| -> Option<String> {
+        match value {
+            serde_json::Value::String(id) => Some(id.clone()),
+            serde_json::Value::Object(map) => map
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            _ => None,
+        }
+    };
+    result
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    let columns = row.as_array()?;
+                    let id = columns.first().and_then(serde_json::Value::as_str)?;
+                    let seq = columns.get(1).and_then(serde_json::Value::as_u64)?;
+                    Some((id.to_string(), seq, columns.get(2).and_then(element_id)))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Settlement write: reinforce one recalled Concept's mnemonic accessibility
+/// (plan M2 step 1).
+///
+/// Reinforcement raises `MnemonicState.memory_strength` — how available the
+/// memory should be — and touches nothing epistemic. Repetition is not
+/// evidence: being asked about something three times is not three reasons to
+/// believe it, so no Assertion's confidence moves here.
+///
+/// `COALESCE` supplies the baseline for a Concept that has never been
+/// metabolized, and `CLAMP` keeps the Facet inside its declared `[0, 1]`, so
+/// re-running the pass converges instead of drifting.
+fn reinforcement_request(entity: &str, gain: f64, last_recalled_ms: u64) -> Request {
+    let parameters = serde_json::Map::from_iter([
+        ("id".to_string(), serde_json::Value::from(entity)),
+        ("gain".to_string(), serde_json::Value::from(gain)),
+        (
+            "now".to_string(),
+            serde_json::Value::from(kip_timestamp(last_recalled_ms)),
+        ),
+        (
+            "baseline".to_string(),
+            serde_json::Value::from(DEFAULT_MEMORY_STRENGTH),
+        ),
+    ]);
+    kip::request_with(
+        r#"UPDATE ?c
+SET FACET "MnemonicState" {
+  memory_strength: CLAMP(ADD(COALESCE(?c.facets["MnemonicState"].memory_strength, :baseline), :gain), 0, 1),
+  last_metabolized_at: :now
+}
+WHERE { ?c {id: :id} }"#,
+        parameters,
     )
 }
 
-/// Settlement command: flush one recalled proposition's usage counters onto
-/// its graph metadata (plan M2 step 1). Absolute values, so re-running is
-/// idempotent.
-fn reinforcement_update_command(entity: &str, last_recalled_ms: u64, recall_count: u64) -> String {
-    format!(
-        "UPDATE ?link\nSET METADATA {{ last_recalled_at: {recalled_at}, recall_count: {recall_count} }}\nWHERE {{ ?link (id: {entity}) }}",
-        recalled_at = kip_string_literal(&kip_timestamp(last_recalled_ms)),
-        entity = kip_string_literal(entity),
-    )
+/// Where the dream self-test's sampling window sits.
+///
+/// A Space sequence coordinate, not a timestamp: it is the same monotonic
+/// counter the engine stamps on every element, so "the memories formed after
+/// the ones I last looked at" is exact rather than approximate.
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize, serde::Serialize)]
+struct SelfTestCursor {
+    /// The highest `_system.space_seq` a previous pass already sampled.
+    after: u64,
+    /// When the cursor last wrapped back to the start of the graph.
+    cycled_at: u64,
 }
 
 /// One memory sampled for the dream self-test (plan M7); serialized as the
@@ -3448,12 +3358,82 @@ fn reinforcement_update_command(entity: &str, last_recalled_ms: u64, recall_coun
 #[derive(Debug, serde::Serialize)]
 struct SelfTestCandidate {
     id: String,
+    #[serde(skip)]
+    seq: u64,
     subject: String,
     object: String,
-    predicate: String,
     subject_type: String,
     subject_name: String,
     object_name: String,
+}
+
+/// Reads the self-test sampling rows —
+/// `FIND(?p.id, ?p._system.space_seq, ?s, ?o)` — into candidates.
+///
+/// Projecting a bare element variable returns the whole rendered element, so
+/// the subject's type and name arrive with the row. An object that is a literal
+/// rather than an element contributes its text and no id, which is correct: a
+/// literal cannot be what a `SEARCH CONCEPT` surfaces.
+fn self_test_candidates(result: &serde_json::Value) -> Vec<SelfTestCandidate> {
+    let Some(rows) = result.as_array() else {
+        return Vec::new();
+    };
+    rows.iter()
+        .filter_map(|row| {
+            let columns = row.as_array()?;
+            let id = columns.first().and_then(serde_json::Value::as_str)?;
+            let seq = columns.get(1).and_then(serde_json::Value::as_u64)?;
+            let subject = columns.get(2)?;
+            let object = columns.get(3);
+            Some(SelfTestCandidate {
+                id: id.to_string(),
+                seq,
+                subject: element_field(subject, "id"),
+                object: object.map(|o| element_field(o, "id")).unwrap_or_default(),
+                subject_type: assess::local_symbol_name(&element_field(subject, "schema_ref"))
+                    .to_string(),
+                subject_name: element_field(subject, "name"),
+                object_name: object.map(element_label).unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+/// Reads one string field out of a rendered element, or `""`.
+fn element_field(value: &serde_json::Value, field: &str) -> String {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// How a Proposition endpoint reads in a prompt: a Concept's name, or the
+/// literal itself when the endpoint is one.
+fn element_label(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Object(_) => element_field(value, "name"),
+        other if other.is_null() => String::new(),
+        other => other.to_string(),
+    }
+}
+
+/// How many elements of one Core kind a `PURGE` erased.
+fn purged_of_kind(response: &anda_kip::Response, kind: &str) -> u64 {
+    kip::ok_result(response)
+        .and_then(|result| result.get("changes"))
+        .and_then(serde_json::Value::as_array)
+        .map(|changes| {
+            changes
+                .iter()
+                .filter(|change| {
+                    change.get("op").and_then(serde_json::Value::as_str) == Some("purge")
+                        && change.get("kind").and_then(serde_json::Value::as_str) == Some(kind)
+                })
+                .count() as u64
+        })
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -3475,90 +3455,123 @@ For each memory, write ONE short natural-language query a real user would plausi
 Respond with ONLY a JSON object:
 {"queries": [{"id": "<memory id>", "query": "..."}]}"#;
 
-/// Self-test command: enqueue a `review` SleepTask (capsule schema) for a
-/// memory that search could not surface, targeting its subject concept —
-/// re-encoding (aliases, richer description, domain links) happens at the
-/// concept level.
-fn self_test_task_command(candidate: &SelfTestCandidate, query: &str, now_ms: u64) -> String {
-    let date = kip_timestamp(now_ms).chars().take(10).collect::<String>();
-    let slug: String = candidate
-        .subject_name
-        .chars()
-        .map(|ch| {
-            let ch = ch.to_ascii_lowercase();
-            if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .take(40)
-        .collect();
-    let reason = format!(
-        "memory self-test: the query {} did not surface `{}` ({}) via search; re-encode the concept with aliases, a richer description, or domain links so it becomes findable",
-        query, candidate.subject_name, candidate.id
+/// Self-test write: enqueue a SleepTask for a memory that search could not
+/// surface, pointed at its subject Concept — re-encoding (aliases, a richer
+/// description, links to neighbouring memory) happens at the Concept level.
+///
+/// The task is keyed by the Concept it is about, so a memory that stays
+/// ungroundable across several passes accumulates one task rather than one per
+/// pass, and `UPSERT` refreshes the existing one instead of colliding with it.
+/// `assigned_to` is deliberately absent: KIP 1.x assigned these to a `$system`
+/// Person, and the Profile is explicit that semantic assignment — to `$system`
+/// least of all — grants no Principal any permission.
+fn self_test_task_request(candidate: &SelfTestCandidate, query: &str, now_ms: u64) -> Request {
+    let summary = format!(
+        "memory self-test: the query {query:?} did not surface `{}` ({}) via search; re-encode the \
+         Concept with aliases, a richer description, or links to neighbouring memory so it becomes \
+         findable",
+        candidate.subject_name, candidate.id
     );
-    format!(
-        r#"UPSERT {{
-  CONCEPT ?task {{
-    {{type: "SleepTask", name: {name}}}
-    SET ATTRIBUTES {{
-      target_type: {target_type},
-      target_name: {target_name},
-      requested_action: "review",
-      reason: {reason},
-      status: "pending",
-      priority: 2
-    }}
-    SET PROPOSITIONS {{
-      ("assigned_to", {{type: "Person", name: "$system"}}),
-      ("belongs_to_domain", {{type: "Domain", name: "System"}})
-    }}
-  }}
-}}
-WITH METADATA {{ source: "memory_self_test", author: "$system", confidence: 1.0, created_at: {created_at} }}"#,
-        name = kip_string_literal(&format!("SleepTask:{date}:review:{slug}")),
-        target_type = kip_string_literal(&candidate.subject_type),
-        target_name = kip_string_literal(&candidate.subject_name),
-        reason = kip_string_literal(&reason),
-        created_at = kip_string_literal(&kip_timestamp(now_ms)),
+    let parameters = serde_json::Map::from_iter([
+        (
+            "key".to_string(),
+            serde_json::Value::from(format!("self_test:{}", candidate.subject)),
+        ),
+        (
+            "name".to_string(),
+            serde_json::Value::from(format!("Re-encode {}", candidate.subject_name)),
+        ),
+        ("summary".to_string(), serde_json::Value::from(summary)),
+        (
+            "created_at".to_string(),
+            serde_json::Value::from(kip_timestamp(now_ms)),
+        ),
+        (
+            "target".to_string(),
+            serde_json::Value::from(candidate.subject.clone()),
+        ),
+    ]);
+    kip::request_with(
+        r#"UPSERT CONCEPT ?task {
+  MATCH { type: "SleepTask", key: :key }
+  SET FIELDS { name: :name }
+  SET ATTRIBUTES {
+    task_class: "consolidate",
+    summary: :summary,
+    status: "pending",
+    priority: 2,
+    created_at: :created_at
+  }
+  SET STRUCTURAL { ("about", :target) }
+}"#,
+        parameters,
     )
 }
 
-/// Settlement command: one usage-modulated bulk decay batch (plan M2 step 2).
-/// This is the Maintenance prompt's former Phase-7 command with three new
-/// exemptions the runtime can now enforce: recently recalled links (usage
-/// reinforcement), pinned links, and links decayed within the weekly window.
-fn decay_update_command(policy: &MemoryPolicy, now_ms: u64, decay_min_interval_ms: u64) -> String {
-    let stale_window_ms = u64::from(policy.stale_event_threshold_days) * 86_400_000;
-    let created_before = kip_string_literal(&kip_timestamp(now_ms.saturating_sub(stale_window_ms)));
-    // The filter is also the intra-settlement batch cursor: rows stamped
-    // `now` this pass no longer match `< decay_before`, so an interval of 0
-    // still terminates — it just disables the *cross-cycle* rate limit.
-    let decay_before =
-        kip_string_literal(&kip_timestamp(now_ms.saturating_sub(decay_min_interval_ms)));
-    let now_iso = kip_string_literal(&kip_timestamp(now_ms));
-    format!(
-        r#"UPDATE ?link
-SET METADATA {{
-  confidence: CLAMP(MUL(?link.metadata.confidence, {factor}), {floor}, 1.0),
-  decay_applied_at: {now_iso}
-}}
-WHERE {{
-  ?link (?s, ?p, ?o)
-  FILTER(?p != "belongs_to_domain")
-  FILTER(IS_NULL(?link.metadata.superseded) || ?link.metadata.superseded != true)
-  FILTER(IS_NULL(?link.metadata.pinned) || ?link.metadata.pinned != true)
-  FILTER(IS_NOT_NULL(?link.metadata.created_at))
-  FILTER(?link.metadata.created_at < {created_before})
-  FILTER(IS_NULL(?link.metadata.decay_applied_at) || ?link.metadata.decay_applied_at < {decay_before})
-  FILTER(IS_NULL(?link.metadata.last_recalled_at) || ?link.metadata.last_recalled_at < {created_before})
-  FILTER(?link.metadata.confidence > {floor} && ?link.metadata.confidence < 1.0)
-}}
-LIMIT {limit}"#,
-        factor = policy.confidence_decay_factor,
-        floor = policy.decay_floor,
-        limit = SETTLEMENT_BATCH_LIMIT,
+/// Settlement write: one disuse-metabolism batch (plan M2 step 2).
+///
+/// This decays `MnemonicState.memory_strength` on Concepts — accessibility, not
+/// truth. KIP 1.x decayed `metadata.confidence` on every link, which is exactly
+/// what the Profile now forbids: a fact nobody has asked about in a month is no
+/// less credible, and an Assertion is immutable in any case.
+///
+/// Two exemptions survive the port. A Concept metabolized inside the rate window
+/// is skipped, which also makes the filter the intra-settlement batch cursor:
+/// rows stamped `now` by this pass stop matching, so an interval of `0` still
+/// terminates and merely disables the *cross-cycle* limit — and since
+/// reinforcement stamps the same field, a Concept a recall just touched is
+/// spared for a full window. A pinned Concept is exempt through its retention
+/// class.
+///
+/// A Concept that has never carried the Facet is metabolized from a baseline
+/// rather than skipped: leaving it out would make "the model forgot to set
+/// MnemonicState" mean "this memory never fades", which is not a decision
+/// anybody made.
+fn decay_request(policy: &MemoryPolicy, now_ms: u64, decay_min_interval_ms: u64) -> Request {
+    let parameters = serde_json::Map::from_iter([
+        (
+            "baseline".to_string(),
+            serde_json::Value::from(DEFAULT_MEMORY_STRENGTH),
+        ),
+        (
+            "factor".to_string(),
+            serde_json::Value::from(policy.memory_strength_decay_factor),
+        ),
+        (
+            "floor".to_string(),
+            serde_json::Value::from(policy.decay_floor),
+        ),
+        (
+            "now".to_string(),
+            serde_json::Value::from(kip_timestamp(now_ms)),
+        ),
+        (
+            "metabolized_before".to_string(),
+            serde_json::Value::from(kip_timestamp(now_ms.saturating_sub(decay_min_interval_ms))),
+        ),
+        (
+            "pinned".to_string(),
+            serde_json::Value::from(PINNED_RETENTION_CLASS),
+        ),
+        (
+            "limit".to_string(),
+            serde_json::Value::from(SETTLEMENT_BATCH_LIMIT),
+        ),
+    ]);
+    kip::request_with(
+        r#"UPDATE ?c
+SET FACET "MnemonicState" {
+  memory_strength: CLAMP(MUL(COALESCE(?c.facets["MnemonicState"].memory_strength, :baseline), :factor), :floor, 1.0),
+  last_metabolized_at: :now
+}
+WHERE {
+  ?c CONCEPT {}
+  FILTER(IS_NULL(?c.retention.retention_class) || ?c.retention.retention_class != :pinned)
+  FILTER(IS_NULL(?c.facets["MnemonicState"].last_metabolized_at) || ?c.facets["MnemonicState"].last_metabolized_at < :metabolized_before)
+  FILTER(IS_NULL(?c.facets["MnemonicState"].memory_strength) || ?c.facets["MnemonicState"].memory_strength > :floor)
+}
+LIMIT :limit"#,
+        parameters,
     )
 }
 
@@ -3595,6 +3608,7 @@ mod tests {
     };
     use crate::{
         agents::{BrainHook, SELF_USER_ID, TimedMemoryReadonly},
+        kip,
         payload::StringOr,
         testkit::{app_state_core, create_loaded_space},
         types::{
@@ -3610,7 +3624,7 @@ mod tests {
     use anda_db::collection::CollectionConfig;
     use anda_engine::{
         context::BaseCtx,
-        memory::{Conversation, ConversationRef, ConversationStatus, MemoryReadonly},
+        memory::{Conversation, ConversationRef, ConversationStatus, KipArgs, MemoryReadonly},
         model::{CompletionFeaturesDyn, Model, Models},
         unix_ms,
     };
@@ -4430,7 +4444,7 @@ mod tests {
         assert_eq!(space.memory_policy(), MemoryPolicy::default());
 
         let policy = MemoryPolicy {
-            confidence_decay_factor: 0.9,
+            memory_strength_decay_factor: 0.9,
             orphan_max_count: 5,
             ..Default::default()
         };
@@ -4448,7 +4462,7 @@ mod tests {
 
         // Invalid values reject the update and leave the stored policy alone.
         let invalid = MemoryPolicy {
-            confidence_decay_factor: 0.0,
+            memory_strength_decay_factor: 0.0,
             ..Default::default()
         };
         let err = space
@@ -4461,7 +4475,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("confidence_decay_factor"));
+        assert!(err.to_string().contains("memory_strength_decay_factor"));
         assert_eq!(space.memory_policy(), policy);
 
         // Budget knobs are capped, not just floored: this object is settable
@@ -4492,7 +4506,7 @@ mod tests {
             .update(
                 UpdateSpaceInput {
                     memory_policy: Some(MemoryPolicy {
-                        unsorted_max_backlog: 42,
+                        unconsolidated_max_backlog: 42,
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -4516,8 +4530,8 @@ mod tests {
         let encoded = serde_json::to_string(&conversation.messages).unwrap();
         // The prompt is the pretty-printed MaintenanceInput JSON, escaped
         // inside the stored message text.
-        assert!(encoded.contains("\\\"unsorted_max_backlog\\\": 42"));
-        assert!(encoded.contains("\\\"confidence_decay_factor\\\": 0.95"));
+        assert!(encoded.contains("\\\"unconsolidated_max_backlog\\\": 42"));
+        assert!(encoded.contains("\\\"memory_strength_decay_factor\\\": 0.95"));
     }
 
     #[tokio::test]
@@ -4528,8 +4542,8 @@ mod tests {
         let input = MaintenanceInput {
             parameters: Some(MaintenanceParameters {
                 stale_event_threshold_days: Some(3),
-                confidence_decay_factor: None,
-                unsorted_max_backlog: None,
+                memory_strength_decay_factor: None,
+                unconsolidated_max_backlog: None,
                 orphan_max_count: None,
             }),
             ..Default::default()
@@ -4545,7 +4559,7 @@ mod tests {
         let encoded = serde_json::to_string(&conversation.messages).unwrap();
         assert!(encoded.contains("\\\"stale_event_threshold_days\\\": 3"));
         // The policy must not overwrite explicit parameters.
-        assert!(!encoded.contains("confidence_decay_factor"));
+        assert!(!encoded.contains("memory_strength_decay_factor"));
     }
 
     #[tokio::test]
@@ -4661,109 +4675,144 @@ mod tests {
         assert_eq!(pending.len(), 2);
     }
 
-    async fn seed_kip(space: &Space, command: &str) {
-        let response = space
-            .execute_kip_settlement(anda_kip::Request {
-                command: command.to_string(),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
+    async fn seed_kip(space: &Space, request: anda_kip::Request) {
+        let response = space.execute_kip_settlement(request).await.unwrap();
         assert!(
-            matches!(response, anda_kip::Response::Ok { .. }),
-            "seed failed: {response:?}"
+            kip::succeeded(&response),
+            "seed failed: {}",
+            kip::error_message(&response)
         );
     }
 
-    async fn link_metadata(space: &Space, id: &str) -> serde_json::Value {
+    /// One Concept's `MnemonicState`, or `Json::Null` when it has none.
+    async fn mnemonic_state(space: &Space, id: &str) -> serde_json::Value {
         let response = space
-            .execute_kip_readonly(anda_kip::Request {
-                command: format!("FIND(?link) WHERE {{ ?link (id: \"{id}\") }}"),
-                readonly: true,
-                ..Default::default()
-            })
+            .execute_kip_readonly(kip::request_with(
+                r#"FIND(?c.facets["MnemonicState"]) WHERE { ?c {id: :id} } LIMIT 1"#,
+                kip::param("id", id),
+            ))
             .await
             .unwrap();
-        let mut metadata = serde_json::Value::Null;
-        if let anda_kip::Response::Ok { result, .. } = &response {
-            crate::assess::collect_entity_objects(result, &mut |found, object| {
-                if found == id {
-                    metadata = object
-                        .get("metadata")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Null);
-                }
-            });
-        }
-        metadata
+        kip::ok_result(&response)
+            .and_then(|result| result.as_array())
+            .and_then(|rows| rows.first())
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    /// True when the element still exists.
+    async fn element_exists(space: &Space, id: &str) -> bool {
+        let command = if crate::assess::is_concept_entity_id(id) {
+            "FIND(?c) WHERE { ?c {id: :id} } LIMIT 1"
+        } else {
+            "FIND(?p) WHERE { ?p (id: :id) } LIMIT 1"
+        };
+        let response = space
+            .execute_kip_readonly(kip::request_with(command, kip::param("id", id)))
+            .await
+            .unwrap();
+        kip::ok_result(&response)
+            .and_then(|result| result.as_array())
+            .is_some_and(|rows| !rows.is_empty())
+    }
+
+    /// Seeds three Person Concepts and two `prefers` claims from `alpha`,
+    /// each at `memory_strength` 0.8. Returns `(concept ids, proposition ids)`,
+    /// both sorted, with the Concepts in `alpha, beta, gamma` order.
+    ///
+    /// `Person` and `prefers` come from the Cognitive Memory Profile the space
+    /// activates at open: KIP 2.0 resolves every symbol through the Schema
+    /// Environment, so a test cannot invent a `Topic` type on the way in the way
+    /// the 1.x fixtures did.
+    async fn seed_people(space: &Space) -> (Vec<String>, Vec<String>) {
+        seed_kip(
+            space,
+            kip::request(
+                r#"MUTATE {
+  UPSERT CONCEPT ?alpha { MATCH {type: "Person", key: "alpha"} SET FIELDS {name: "alpha"}
+                          SET FACET "MnemonicState" {memory_strength: 0.8, salience: 0.5} }
+  UPSERT CONCEPT ?beta  { MATCH {type: "Person", key: "beta"}  SET FIELDS {name: "beta"}
+                          SET FACET "MnemonicState" {memory_strength: 0.8, salience: 0.5} }
+  UPSERT CONCEPT ?gamma { MATCH {type: "Person", key: "gamma"} SET FIELDS {name: "gamma"}
+                          SET FACET "MnemonicState" {memory_strength: 0.8, salience: 0.5} }
+  ASSERT ?ab (?alpha, "prefers", ?beta) { by: ?alpha, mode: "stated", confidence: 0.8 }
+  ASSERT ?ag (?alpha, "prefers", ?gamma) { by: ?alpha, mode: "stated", confidence: 0.8 }
+}"#,
+            ),
+        )
+        .await;
+
+        let response = space
+            .execute_kip_readonly(kip::request(
+                r#"FIND(?c.id) WHERE { ?c CONCEPT {type: "Person"} } ORDER BY ?c.name"#,
+            ))
+            .await
+            .unwrap();
+        let concepts: Vec<String> =
+            serde_json::from_value(kip::ok_result(&response).cloned().unwrap()).unwrap();
+        assert_eq!(concepts.len(), 3, "{response:?}");
+
+        let response = space
+            .execute_kip_readonly(kip::request(
+                r#"FIND(?p.id) WHERE { ?p (?s, "prefers", ?o) }"#,
+            ))
+            .await
+            .unwrap();
+        let mut propositions: Vec<String> =
+            serde_json::from_value(kip::ok_result(&response).cloned().unwrap()).unwrap();
+        propositions.sort();
+        assert_eq!(propositions.len(), 2, "{response:?}");
+        (concepts, propositions)
+    }
+
+    /// The id of the Assertion about one exact `(subject, "prefers", object)`.
+    async fn assertion_about(space: &Space, subject: &str, object: &str) -> String {
+        let response = space
+            .execute_kip_readonly(kip::request_with(
+                r#"FIND(?a.id) WHERE {
+  ?s CONCEPT {id: :subject}
+  ?o CONCEPT {id: :object}
+  ?p (?s, "prefers", ?o)
+  ?a ASSERTION {proposition: ?p}
+} LIMIT 1"#,
+                serde_json::Map::from_iter([
+                    ("subject".to_string(), serde_json::Value::from(subject)),
+                    ("object".to_string(), serde_json::Value::from(object)),
+                ]),
+            ))
+            .await
+            .unwrap();
+        serde_json::from_value::<Vec<String>>(
+            kip::ok_result(&response).cloned().unwrap_or_default(),
+        )
+        .unwrap_or_default()
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("no assertion about ({subject}, prefers, {object})"))
+    }
+
+    fn strength(state: &serde_json::Value) -> f64 {
+        state["memory_strength"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("no memory_strength in {state}"))
     }
 
     #[tokio::test]
-    async fn settlement_decays_unused_and_spares_recalled_memories() {
+    async fn settlement_metabolizes_unused_and_reinforces_recalled_memories() {
         let app = test_app_state("settlement");
         let space = create_loaded_space(&app, "settlement").await;
         let now_ms = unix_ms();
-        let old_iso = anda_engine::rfc3339_datetime(now_ms - 30 * 86_400_000).unwrap();
+        let (concepts, _) = seed_people(&space).await;
+        let (alpha, beta, gamma) = (
+            concepts[0].clone(),
+            concepts[1].clone(),
+            concepts[2].clone(),
+        );
 
-        // Seed a tiny graph: one schema type, one predicate, three concepts,
-        // two month-old links at confidence 0.8.
-        seed_kip(
-            &space,
-            r#"UPSERT { CONCEPT ?t { {type: "$ConceptType", name: "Topic"} } WITH METADATA { "source": "test", "confidence": 1.0 } }"#,
-        )
-        .await;
-        seed_kip(
-            &space,
-            r#"UPSERT { CONCEPT ?p { {type: "$PropositionType", name: "linked_to"} } WITH METADATA { "source": "test", "confidence": 1.0 } }"#,
-        )
-        .await;
-        for name in ["alpha", "beta", "gamma"] {
-            seed_kip(
-                &space,
-                &format!(
-                    r#"UPSERT {{ CONCEPT ?c {{ {{type: "Topic", name: "{name}"}} }} WITH METADATA {{ "source": "test", "confidence": 1.0 }} }}"#
-                ),
-            )
-            .await;
-        }
-        for target in ["beta", "gamma"] {
-            seed_kip(
-                &space,
-                &format!(
-                    r#"UPSERT {{ CONCEPT ?c {{ {{type: "Topic", name: "alpha"}} SET PROPOSITIONS {{ ("linked_to", {{type: "Topic", name: "{target}"}}) }} }} WITH METADATA {{ "source": "test_source", "confidence": 0.8, "created_at": "{old_iso}" }} }}"#
-                ),
-            )
-            .await;
-        }
-
-        let response = space
-            .execute_kip_readonly(anda_kip::Request {
-                command: r#"FIND(?link) WHERE { ?link (?s, "linked_to", ?o) }"#.to_string(),
-                readonly: true,
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        let mut ids: Vec<String> = Vec::new();
-        if let anda_kip::Response::Ok { result, .. } = &response {
-            crate::assess::collect_entity_objects(result, &mut |id, _| {
-                if crate::assess::is_proposition_entity_id(id) {
-                    ids.push(id.to_string());
-                }
-            });
-        }
-        ids.sort();
-        ids.dedup();
-        assert_eq!(ids.len(), 2, "expected two links: {response:?}");
-        let (recalled, unused) = (ids[0].clone(), ids[1].clone());
-
-        // One link was surfaced by a recall; the other never was.
+        // One Concept was surfaced by a recall; the others never were.
         space
             .ledger
-            .record_recall(
-                &std::collections::BTreeSet::from([recalled.clone()]),
-                now_ms,
-            )
+            .record_recall(&BTreeSet::from([beta.clone()]), now_ms)
             .await
             .unwrap();
 
@@ -4773,21 +4822,20 @@ mod tests {
             .unwrap();
         assert_eq!(report.reinforced, 1, "{report:?}");
         assert!(report.decay_ran);
-        assert_eq!(report.decayed, 1, "{report:?}");
+        assert_eq!(report.decayed, 2, "{report:?}");
         assert_eq!(report.new_corrections, 0);
 
-        // The recalled link kept its confidence and gained usage metadata.
-        let metadata = link_metadata(&space, &recalled).await;
-        assert_eq!(metadata["recall_count"], 1, "{metadata}");
-        assert!(metadata["last_recalled_at"].is_string());
-        let confidence = metadata["confidence"].as_f64().unwrap();
-        assert!((confidence - 0.8).abs() < 1e-9, "{metadata}");
+        // Reinforcement raised the recalled Concept's accessibility (0.8 + 0.1)
+        // and stamped it, which also spares it from this cycle's metabolism.
+        let state = mnemonic_state(&space, &beta).await;
+        assert!((strength(&state) - 0.9).abs() < 1e-9, "{state}");
+        assert!(state["last_metabolized_at"].is_string(), "{state}");
 
-        // The unused link decayed by the policy factor (0.8 × 0.95).
-        let metadata = link_metadata(&space, &unused).await;
-        let confidence = metadata["confidence"].as_f64().unwrap();
-        assert!((confidence - 0.76).abs() < 1e-9, "{metadata}");
-        assert!(metadata["decay_applied_at"].is_string());
+        // The untouched Concepts decayed by the policy factor (0.8 × 0.95).
+        for id in [&alpha, &gamma] {
+            let state = mnemonic_state(&space, id).await;
+            assert!((strength(&state) - 0.76).abs() < 1e-9, "{state}");
+        }
 
         // Idempotence: an immediate re-settlement neither re-decays (weekly
         // rate limit) nor re-flushes (ledger flush marker).
@@ -4798,36 +4846,78 @@ mod tests {
         assert_eq!(report.reinforced, 0, "{report:?}");
         assert_eq!(report.decayed, 0, "{report:?}");
 
-        // Supersede the unused link: the next settlement records it as a
-        // correction and charges its source.
+        // Nothing decayed the *claims*: KIP 2.0 forbids letting time erode a
+        // stance, and a settlement that quietly did would be the single
+        // easiest way for this brain to start lying slowly.
+        let response = space
+            .execute_kip_readonly(kip::request(
+                r#"FIND(?a.confidence) WHERE { ?a ASSERTION {} }"#,
+            ))
+            .await
+            .unwrap();
+        let confidences: Vec<f64> =
+            serde_json::from_value(kip::ok_result(&response).cloned().unwrap()).unwrap();
+        assert_eq!(confidences.len(), 2, "{response:?}");
+        assert!(
+            confidences.iter().all(|c| (c - 0.8).abs() < 1e-9),
+            "{confidences:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn settlement_records_an_actors_own_revision_as_a_correction() {
+        let app = test_app_state("corrections");
+        let space = create_loaded_space(&app, "corrections").await;
+        let now_ms = unix_ms();
+        let (concepts, _) = seed_people(&space).await;
+        let alpha = concepts[0].clone();
+
+        // The asserting actor revises their own claim. In KIP 1.x this was a
+        // `superseded: true` flag on the link; here it is a new Assertion plus
+        // a supersession, and the old one keeps saying what it said.
+        // Pick the Assertion about one exact tuple: a supersession must stay
+        // inside one Proposition, and the engine refuses one that wanders.
+        let old = assertion_about(&space, &alpha, &concepts[2]).await;
+
+        // A mutation endpoint is a handle, a parameter or a literal — this
+        // engine does not run the KQL solver on the write path — so the
+        // endpoints arrive as element references.
         seed_kip(
             &space,
-            &format!(
-                "UPDATE ?link\nSET METADATA {{ superseded: true }}\nWHERE {{ ?link (id: \"{unused}\") }}"
+            kip::request_with(
+                r#"ASSERT ?new (:alpha, "prefers", :gamma) { by: :alpha, mode: "stated", confidence: 0.4 }
+SUPERSEDING :old"#,
+                serde_json::Map::from_iter([
+                    ("alpha".to_string(), serde_json::json!({"id": alpha})),
+                    (
+                        "gamma".to_string(),
+                        serde_json::json!({"id": concepts[2]}),
+                    ),
+                    ("old".to_string(), serde_json::Value::from(old.as_str())),
+                ]),
             ),
         )
         .await;
+
         let report = space
-            .settle_memory_metabolism(MaintenanceScope::Quick, now_ms + 2)
+            .settle_memory_metabolism(MaintenanceScope::Quick, now_ms)
             .await
             .unwrap();
         assert!(!report.decay_ran);
         assert_eq!(report.new_corrections, 1, "{report:?}");
-        let row = space.ledger.get(&unused).await.unwrap().unwrap();
+        let row = space.ledger.get(&old).await.unwrap().unwrap();
         assert_eq!(row.correction_count, 1);
+
+        // The actor whose claim needed revising is charged, not the caller:
+        // attribution is cognition, authority is Governance.
         let reliability: std::collections::BTreeMap<String, crate::types::SourceReliability> =
             space.db.get_extension_as("source_reliability").unwrap();
-        assert_eq!(reliability["test_source"].corrections, 1);
+        assert_eq!(reliability[&alpha].corrections, 1, "{reliability:?}");
 
-        // The processed link is marked settled on the graph, so it leaves
-        // the discovery window (the marker, not a LIMIT window, is the scan
-        // cursor) and the next settlement finds nothing new.
-        assert_eq!(
-            link_metadata(&space, &unused).await["correction_settled"],
-            true
-        );
+        // The sequence watermark, not a graph flag, is the scan cursor: the
+        // processed revision falls behind it and the next pass finds nothing.
         let report = space
-            .settle_memory_metabolism(MaintenanceScope::Quick, now_ms + 3)
+            .settle_memory_metabolism(MaintenanceScope::Quick, now_ms + 1)
             .await
             .unwrap();
         assert_eq!(report.new_corrections, 0, "{report:?}");
@@ -4836,67 +4926,11 @@ mod tests {
         assert!(space.memory_settlement().is_some());
     }
 
-    /// Seeds Topic concepts alpha/beta/gamma plus two month-old `linked_to`
-    /// links from alpha at confidence 0.8. Returns the sorted link ids.
-    async fn seed_topic_links(space: &Space, created_iso: &str) -> Vec<String> {
-        seed_kip(
-            space,
-            r#"UPSERT { CONCEPT ?t { {type: "$ConceptType", name: "Topic"} } WITH METADATA { "source": "test", "confidence": 1.0 } }"#,
-        )
-        .await;
-        seed_kip(
-            space,
-            r#"UPSERT { CONCEPT ?p { {type: "$PropositionType", name: "linked_to"} } WITH METADATA { "source": "test", "confidence": 1.0 } }"#,
-        )
-        .await;
-        for name in ["alpha", "beta", "gamma"] {
-            seed_kip(
-                space,
-                &format!(
-                    r#"UPSERT {{ CONCEPT ?c {{ {{type: "Topic", name: "{name}"}} }} WITH METADATA {{ "source": "test", "confidence": 1.0 }} }}"#
-                ),
-            )
-            .await;
-        }
-        for target in ["beta", "gamma"] {
-            seed_kip(
-                space,
-                &format!(
-                    r#"UPSERT {{ CONCEPT ?c {{ {{type: "Topic", name: "alpha"}} SET PROPOSITIONS {{ ("linked_to", {{type: "Topic", name: "{target}"}}) }} }} WITH METADATA {{ "source": "test_source", "confidence": 0.8, "created_at": "{created_iso}" }} }}"#
-                ),
-            )
-            .await;
-        }
-
-        let response = space
-            .execute_kip_readonly(anda_kip::Request {
-                command: r#"FIND(?link) WHERE { ?link (?s, "linked_to", ?o) }"#.to_string(),
-                readonly: true,
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        let mut ids: Vec<String> = Vec::new();
-        if let anda_kip::Response::Ok { result, .. } = &response {
-            crate::assess::collect_entity_objects(result, &mut |id, _| {
-                if crate::assess::is_proposition_entity_id(id) {
-                    ids.push(id.to_string());
-                }
-            });
-        }
-        ids.sort();
-        ids.dedup();
-        assert_eq!(ids.len(), 2);
-        ids
-    }
-
     #[tokio::test]
     async fn probe_memory_uses_negative_knowledge_cache() {
         let app = test_app_state("probe_memory");
         let space = create_loaded_space(&app, "probe_memory").await;
-        let now_ms = unix_ms();
-        let old_iso = anda_engine::rfc3339_datetime(now_ms - 86_400_000).unwrap();
-        seed_topic_links(&space, &old_iso).await;
+        seed_people(&space).await;
 
         let hit = space.probe_memory("alpha", None).await.unwrap();
         assert!(hit.found, "{hit:?}");
@@ -4941,26 +4975,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pin_exempts_from_decay_and_forget_removes_for_real() {
+    async fn pin_exempts_from_metabolism_and_forget_removes_for_real() {
         let app = test_app_state("pin_forget");
         let space = create_loaded_space(&app, "pin_forget").await;
         let now_ms = unix_ms();
-        let old_iso = anda_engine::rfc3339_datetime(now_ms - 30 * 86_400_000).unwrap();
-        let ids = seed_topic_links(&space, &old_iso).await;
-        let (pinned, doomed) = (ids[0].clone(), ids[1].clone());
+        let (concepts, propositions) = seed_people(&space).await;
+        let (alpha, pinned, plain) = (
+            concepts[0].clone(),
+            concepts[1].clone(),
+            concepts[2].clone(),
+        );
 
-        // Pin one link: decay must skip it (plan M6 + M2 integration).
+        // Pin one Concept: metabolism must skip it (plan M6 + M2 integration).
         assert_eq!(space.pin_memory(&pinned, true).await.unwrap(), 1);
         let report = space
             .settle_memory_metabolism(MaintenanceScope::Full, now_ms)
             .await
             .unwrap();
-        assert_eq!(report.decayed, 1, "{report:?}");
-        let metadata = link_metadata(&space, &pinned).await;
-        assert_eq!(metadata["pinned"], true);
-        assert!((metadata["confidence"].as_f64().unwrap() - 0.8).abs() < 1e-9);
+        assert_eq!(report.decayed, 2, "{report:?}");
+        let state = mnemonic_state(&space, &pinned).await;
+        assert!((strength(&state) - 0.8).abs() < 1e-9, "{state}");
+        assert!((strength(&mnemonic_state(&space, &plain).await) - 0.76).abs() < 1e-9);
 
-        // Dry run reports without deleting.
+        // Dry run reports without erasing.
+        let doomed = propositions[0].clone();
         let report = space
             .forget_memory(crate::types::MemoryForgetInput {
                 entities: vec![doomed.clone()],
@@ -4971,10 +5009,10 @@ mod tests {
         assert!(report.dry_run);
         assert!(report.entities[0].existed);
         assert_eq!(report.deleted_propositions, 0);
-        assert!(!link_metadata(&space, &doomed).await.is_null());
+        assert!(element_exists(&space, &doomed).await);
 
-        // Real forget removes the link, its ledger row, and reports bogus
-        // ids per entity without aborting the batch.
+        // A real forget purges the Proposition and its ledger row, and reports
+        // a bogus id per entity without aborting the batch.
         space
             .ledger
             .record_recall(&BTreeSet::from([doomed.clone()]), now_ms)
@@ -4994,39 +5032,29 @@ mod tests {
                 .iter()
                 .any(|entry| entry.entity == "bogus" && entry.error.is_some())
         );
-        assert!(link_metadata(&space, &doomed).await.is_null());
         assert!(space.ledger.get(&doomed).await.unwrap().is_none());
 
-        // Forgetting the concept detaches and removes its remaining link —
-        // and cascades the ledger rows of the DETACH-deleted propositions
-        // (their ids embed predicate names; usage traces of a forgotten
-        // memory must not survive).
+        // Forgetting a Concept cascades to the Propositions that quote it —
+        // and to their ledger rows: usage traces of a forgotten memory must
+        // not survive the memory.
+        let survivor = propositions[1].clone();
         space
             .ledger
-            .record_recall(&BTreeSet::from([pinned.clone()]), now_ms)
+            .record_recall(&BTreeSet::from([survivor.clone()]), now_ms)
             .await
             .unwrap();
-        let hit = space.probe_memory("alpha", None).await.unwrap();
-        let concept = hit
-            .hits
-            .iter()
-            .find(|citation| citation.name.as_deref() == Some("alpha"))
-            .unwrap()
-            .entity
-            .clone();
         let report = space
             .forget_memory(crate::types::MemoryForgetInput {
-                entities: vec![concept],
+                entities: vec![alpha.clone()],
                 dry_run: false,
             })
             .await
             .unwrap();
         assert_eq!(report.deleted_concepts, 1, "{report:?}");
         assert!(report.deleted_propositions >= 1, "{report:?}");
-        assert!(link_metadata(&space, &pinned).await.is_null());
         assert!(
-            space.ledger.get(&pinned).await.unwrap().is_none(),
-            "cascaded proposition must lose its ledger row"
+            space.ledger.get(&survivor).await.unwrap().is_none(),
+            "a cascaded proposition must lose its ledger row"
         );
     }
 
@@ -5035,8 +5063,7 @@ mod tests {
         let app = test_app_state_with_self_test_model("memory_self_test");
         let space = create_loaded_space(&app, "memory_self_test").await;
         let now_ms = unix_ms();
-        let old_iso = anda_engine::rfc3339_datetime(now_ms - 86_400_000).unwrap();
-        let ids = seed_topic_links(&space, &old_iso).await;
+        let (_, propositions) = seed_people(&space).await;
 
         let report = space
             .run_memory_self_test(now_ms)
@@ -5048,28 +5075,22 @@ mod tests {
         assert_eq!(report.reencode_tasks, 1, "{report:?}");
         assert_eq!(report.groundability(), Some(0.5));
 
-        // The ungroundable memory produced one pending review SleepTask
-        // targeting its subject concept.
+        // The ungroundable memory produced one pending SleepTask about its
+        // subject Concept.
         let response = space
-            .execute_kip_readonly(anda_kip::Request {
-                command: "FIND(?task) WHERE { ?task {type: \"SleepTask\"} FILTER(?task.attributes.status == \"pending\") } LIMIT 10".to_string(),
-                readonly: true,
-                ..Default::default()
-            })
+            .execute_kip_readonly(kip::request(
+                r#"FIND(?task) WHERE { ?task CONCEPT {type: "SleepTask"} FILTER(?task.attributes.status == "pending") } LIMIT 10"#,
+            ))
             .await
             .unwrap();
-        let tasks = match &response {
-            anda_kip::Response::Ok { result, .. } => crate::assess::citations_from_json(result)
-                .into_iter()
-                .filter(|citation| citation.r#type.as_deref() == Some("SleepTask"))
-                .count(),
-            _ => 0,
-        };
-        assert_eq!(tasks, 1, "{response:?}");
+        let tasks = kip::ok_result(&response)
+            .map(crate::assess::citations_from_json)
+            .unwrap_or_default();
+        assert_eq!(tasks.len(), 1, "{response:?}");
 
         // Guardrail: self-tests count only into self_test_count — never into
         // usage reinforcement.
-        for id in &ids {
+        for id in &propositions {
             let row = space.ledger.get(id).await.unwrap().unwrap();
             assert_eq!(row.self_test_count, 1);
             assert_eq!(row.recall_count, 0);
@@ -5085,15 +5106,11 @@ mod tests {
                 .is_none()
         );
 
-        // The exclusion lives on the graph (`self_tested_at`), not just in
-        // the ledger: even with ledger rows gone, tested links stay out of
-        // the sample window. This is what makes coverage slide across the
-        // graph instead of re-reading the same fixed prefix forever.
-        for id in &ids {
-            assert!(
-                !link_metadata(&space, id).await["self_tested_at"].is_null(),
-                "tested link must carry the self_tested_at stamp"
-            );
+        // The exclusion is the sequence cursor, not the ledger. KIP 1.x stamped
+        // `self_tested_at` on the link; a Proposition is immutable, so coverage
+        // now slides on `_system.space_seq` — and still holds with the ledger
+        // rows gone.
+        for id in &propositions {
             space.ledger.forget_entity(id).await.unwrap();
         }
         assert!(
@@ -5105,11 +5122,22 @@ mod tests {
         );
 
         // A newly formed memory enters the window on the next pass.
-        let old_iso = anda_engine::rfc3339_datetime(now_ms - 86_400_000).unwrap();
+        let response = space
+            .execute_kip_readonly(kip::request(
+                r#"FIND(?c.id) WHERE { ?c CONCEPT {type: "Person"} } ORDER BY ?c.name"#,
+            ))
+            .await
+            .unwrap();
+        let people: Vec<String> =
+            serde_json::from_value(kip::ok_result(&response).cloned().unwrap()).unwrap();
         seed_kip(
             &space,
-            &format!(
-                r#"UPSERT {{ CONCEPT ?c {{ {{type: "Topic", name: "beta"}} SET PROPOSITIONS {{ ("linked_to", {{type: "Topic", name: "gamma"}}) }} }} WITH METADATA {{ "source": "test_source", "confidence": 0.8, "created_at": "{old_iso}" }} }}"#
+            kip::request_with(
+                r#"ASSERT (:beta, "prefers", :gamma) { by: :beta, mode: "stated", confidence: 0.8 }"#,
+                serde_json::Map::from_iter([
+                    ("beta".to_string(), serde_json::json!({"id": people[1]})),
+                    ("gamma".to_string(), serde_json::json!({"id": people[2]})),
+                ]),
             ),
         )
         .await;
@@ -5231,13 +5259,22 @@ mod tests {
         let app = test_app_state_with_models("mine_corrections", Arc::new(models));
         let space = create_loaded_space(&app, "mine_corrections").await;
         let now_ms = unix_ms();
-        let old_iso = anda_engine::rfc3339_datetime(now_ms - 86_400_000).unwrap();
-        let ids = seed_topic_links(&space, &old_iso).await;
+        seed_people(&space).await;
 
-        // One corrected memory is the mining signal.
+        // One revised Assertion is the mining signal.
+        let response = space
+            .execute_kip_readonly(kip::request(
+                r#"FIND(?a.id) WHERE { ?a ASSERTION {} } LIMIT 1"#,
+            ))
+            .await
+            .unwrap();
+        let signal: String =
+            serde_json::from_value::<Vec<String>>(kip::ok_result(&response).cloned().unwrap())
+                .unwrap()
+                .remove(0);
         space
             .ledger
-            .record_correction(&ids[0], now_ms)
+            .record_correction(&signal, now_ms)
             .await
             .unwrap();
 
@@ -5252,7 +5289,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(mined.len(), 1);
-        assert_eq!(mined[0].signal, ids[0]);
+        assert_eq!(mined[0].signal, signal);
         let scenario = &mined[0].scenario;
         assert_eq!(scenario.id, "mined_pref_fix");
         assert!(
@@ -5276,8 +5313,7 @@ mod tests {
         let app = test_app_state("memory_status");
         let space = create_loaded_space(&app, "memory_status").await;
         let now_ms = unix_ms();
-        let old_iso = anda_engine::rfc3339_datetime(now_ms - 30 * 86_400_000).unwrap();
-        let ids = seed_topic_links(&space, &old_iso).await;
+        let (concepts, _) = seed_people(&space).await;
 
         // Probe activity: one hit, one miss, one negative-cache hit.
         assert!(space.probe_memory("alpha", None).await.unwrap().found);
@@ -5301,7 +5337,13 @@ mod tests {
                 },
                 anda_core::ContentPart::ToolOutput {
                     name: "execute_kip_readonly".to_string(),
-                    output: serde_json::json!([{"id": ids[0]}]),
+                    // A rendered element, not a bare reference: the ledger
+                    // meters what an answer actually read.
+                    output: serde_json::json!([{
+                        "id": concepts[0],
+                        "name": "alpha",
+                        "schema_ref": "kip://profiles/cognitive-memory@2.0.0/Person",
+                    }]),
                     is_error: None,
                     call_id: Some("c1".to_string()),
                     remote_id: None,
@@ -5311,12 +5353,21 @@ mod tests {
         });
         space.record_recall_usage(&[message]).await.unwrap();
 
-        // One correction + a full settlement (decay + schema audit).
+        // One correction + a full settlement (metabolism + schema census).
+        let old = assertion_about(&space, &concepts[0], &concepts[1]).await;
         seed_kip(
             &space,
-            &format!(
-                "UPDATE ?link\nSET METADATA {{ superseded: true }}\nWHERE {{ ?link (id: \"{}\") }}",
-                ids[1]
+            kip::request_with(
+                r#"ASSERT ?new (:alpha, "prefers", :beta) { by: :alpha, mode: "stated", confidence: 0.4 }
+SUPERSEDING :old"#,
+                serde_json::Map::from_iter([
+                    (
+                        "alpha".to_string(),
+                        serde_json::json!({"id": concepts[0]}),
+                    ),
+                    ("beta".to_string(), serde_json::json!({"id": concepts[1]})),
+                    ("old".to_string(), serde_json::Value::from(old.as_str())),
+                ]),
             ),
         )
         .await;
@@ -5330,7 +5381,7 @@ mod tests {
         assert_eq!(status.metrics.probe_misses, 1);
         assert_eq!(status.metrics.negative_cache_hits, 1);
         assert_eq!(status.metrics.recalls_completed, 1);
-        assert_eq!(status.metrics.entities_recalled, 1);
+        assert_eq!(status.metrics.entities_recalled, 1, "{status:?}");
         assert_eq!(status.metrics.corrections, 1);
         assert_eq!(status.metrics.reinforced, 1);
         assert_eq!(status.probe_hit_rate, Some(0.5));
@@ -5339,9 +5390,15 @@ mod tests {
         assert!(status.graph.predicate_types.unwrap_or(0) >= 1);
         assert!(status.last_settlement.is_some());
 
-        // The full settlement also refreshed the per-predicate census.
+        // The full settlement also refreshed the per-predicate census. The
+        // vocabulary is the Space's Schema Environment now, so the census
+        // covers every declared predicate — including the ones nothing uses.
         let audit = space.schema_audit().expect("schema audit stored");
-        assert_eq!(audit.predicates.get("linked_to"), Some(&2));
+        // Two Propositions, not three: the revision above added an Assertion
+        // about a tuple that already existed. A Proposition is the statement,
+        // and how many actors have an opinion about it is a separate question.
+        assert_eq!(audit.predicates.get("prefers"), Some(&2));
+        assert_eq!(audit.predicates.get("same_as"), Some(&0));
     }
 
     /// Shadow judge: always votes for answer B — with deterministic A/B
@@ -5404,7 +5461,7 @@ mod tests {
         }
 
         let candidate = crate::types::MemoryPolicy {
-            confidence_decay_factor: 0.9,
+            memory_strength_decay_factor: 0.9,
             ..Default::default()
         };
         let report = app
@@ -5425,7 +5482,7 @@ mod tests {
         assert_eq!(report.candidate_wins, 1, "{report:?}");
         assert_eq!(report.baseline_wins, 1, "{report:?}");
         assert_eq!(report.samples.len(), 2);
-        assert_eq!(report.candidate_policy.confidence_decay_factor, 0.9);
+        assert_eq!(report.candidate_policy.memory_strength_decay_factor, 0.9);
 
         // The report persists on the live space...
         let stored: crate::types::ShadowReport = space
@@ -5737,8 +5794,14 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(counterparty["type"], "Person");
-        assert!(counterparty.to_string().contains("external-user-formation"));
+        // A Concept names its type by the exact schema symbol it was created
+        // under, so the meaning cannot drift when a package is republished.
+        assert_eq!(
+            counterparty["schema_ref"],
+            "kip://profiles/cognitive-memory@2.0.0/Person"
+        );
+        assert_eq!(counterparty["key"], "external-user-formation");
+        assert_eq!(counterparty["name"], "Formation User");
 
         let recall = RecallInput {
             query: "What color is preferred?".to_string(),
@@ -5788,14 +5851,11 @@ mod tests {
         assert_eq!(maintenance_at.full, formation_id + 1);
         assert_eq!(maintenance_at.daydream, formation_id + 2);
 
-        let kip = space
-            .execute_kip_readonly(anda_kip::Request {
-                command: "DESCRIBE PRIMER".to_string(),
-                ..Default::default()
-            })
+        let primer = space
+            .execute_kip_readonly(kip::request("DESCRIBE PRIMER"))
             .await
             .unwrap();
-        assert!(!serde_json::to_value(kip).unwrap().is_null());
+        assert!(kip::ok_result(&primer).is_some(), "{primer:?}");
 
         let restart_err = space
             .restart_formation(SELF_USER_ID, formation_id + 1)
@@ -5815,7 +5875,16 @@ mod tests {
 
         let readonly = TimedMemoryReadonly::new(space.memory.clone());
         assert_eq!(Tool::<BaseCtx>::name(&readonly), MemoryReadonly::NAME);
-        assert_eq!(Tool::<BaseCtx>::definition(&readonly).strict, Some(true));
+        // The read-only definition is the one `anda_kip` ships with the
+        // protocol: no write vocabulary, and no `execution` modes for a read
+        // path to choose between.
+        let definition = Tool::<BaseCtx>::definition(&readonly);
+        assert_eq!(definition.name, MemoryReadonly::NAME);
+        assert!(
+            definition.parameters["properties"]
+                .get("execution")
+                .is_none()
+        );
 
         let ok_ctx = space
             .engine
@@ -5829,8 +5898,8 @@ mod tests {
         let ok = Tool::<BaseCtx>::call(
             &readonly,
             ok_ctx,
-            anda_kip::Request {
-                command: "DESCRIBE PRIMER".to_string(),
+            KipArgs {
+                command: Some("DESCRIBE PRIMER".to_string()),
                 ..Default::default()
             },
             vec![],
@@ -5851,8 +5920,8 @@ mod tests {
         let err = Tool::<BaseCtx>::call(
             &readonly,
             err_ctx,
-            anda_kip::Request {
-                command: "NOT A VALID KIP COMMAND".to_string(),
+            KipArgs {
+                command: Some("NOT A VALID KIP COMMAND".to_string()),
                 ..Default::default()
             },
             vec![],
@@ -6103,8 +6172,6 @@ mod tests {
     #[tokio::test]
     async fn wiki_digest_extracts_supersedes_and_verifies() {
         use crate::wiki::WikiCommitInput;
-        use anda_cognitive_nexus::ConceptPK;
-        use anda_kip::parse_kql;
 
         let extraction_v1 = serde_json::json!({
             "concepts": [
@@ -6199,38 +6266,70 @@ mod tests {
         assert!(report.citations_checked >= 2);
         assert_eq!(report.citations_invalid, 0);
 
-        // The graph now holds the concepts and a proposition whose metadata
-        // carries the wiki citation and extractor fingerprint.
-        assert!(
-            space
-                .memory
-                .nexus()
-                .has_concept(&ConceptPK::Object {
-                    r#type: "Organization".to_string(),
-                    name: "Acme".to_string(),
-                })
-                .await
-        );
-        let (meta, _) = space
-            .memory
-            .nexus()
-            .execute_kql(
-                parse_kql(
-                    "FIND(?link.metadata) WHERE { ?link ({type: \"Organization\", name: \"Acme\"}, \"publishes\", {type: \"Policy\", name: \"安全政策\"}) }",
-                )
-                .unwrap(),
-            )
+        // The Space's Schema Environment grew to hold the extracted
+        // vocabulary — in KIP 2.0 the digest cannot mint a type on the way in,
+        // so `Organization` existing at all is the host having decided it does.
+        let types = space
+            .execute_kip_readonly(kip::request("LIST TYPES LIMIT 500"))
             .await
             .unwrap();
-        let meta_text = meta.to_string();
-        assert!(meta_text.contains("wiki://"), "metadata: {meta_text}");
         assert!(
-            meta_text.contains("wiki_digest@v1"),
-            "metadata: {meta_text}"
+            kip::ok_result(&types)
+                .unwrap()
+                .to_string()
+                .contains("Organization"),
+            "{types:?}"
+        );
+
+        // The graph holds the concepts, and the claim about them carries its
+        // provenance as Evidence rather than as metadata on the link.
+        let acme = space
+            .execute_kip_readonly(kip::request(
+                r#"FIND(?c.id) WHERE { ?c CONCEPT {type: "Organization", key: "Acme"} }"#,
+            ))
+            .await
+            .unwrap();
+        let acme: Vec<String> =
+            serde_json::from_value(kip::ok_result(&acme).cloned().unwrap()).unwrap();
+        assert_eq!(acme.len(), 1, "{acme:?}");
+
+        // The claim cites its Evidence…
+        let cited = space
+            .execute_kip_readonly(kip::request(
+                r#"FIND(?a.evidence_refs) WHERE {
+  ?s CONCEPT {type: "Organization", key: "Acme"}
+  ?o CONCEPT {type: "Policy", key: "安全政策"}
+  ?p (?s, "publishes", ?o)
+  ?a ASSERTION {proposition: ?p}
+}"#,
+            ))
+            .await
+            .unwrap();
+        let cited_text = kip::ok_result(&cited).unwrap().to_string();
+        assert!(
+            cited_text.contains("evidence_id"),
+            "citations: {cited_text}"
+        );
+
+        // …and the Evidence carries the passage it was read from.
+        let evidence = space
+            .execute_kip_readonly(kip::request(
+                r#"FIND(?e.payload) WHERE { ?e EVIDENCE {evidence_class: "document"} }"#,
+            ))
+            .await
+            .unwrap();
+        let evidence_text = kip::ok_result(&evidence).unwrap().to_string();
+        assert!(
+            evidence_text.contains("wiki://"),
+            "evidence: {evidence_text}"
         );
         assert!(
-            meta_text.contains(&format!("@{}", v1.version.id)),
-            "citation should pin version {}: {meta_text}",
+            evidence_text.contains("wiki_digest@v1"),
+            "evidence: {evidence_text}"
+        );
+        assert!(
+            evidence_text.contains(&format!("@{}", v1.version.id)),
+            "the citation should pin version {}: {evidence_text}",
             v1.version.id
         );
 
@@ -6267,40 +6366,41 @@ mod tests {
         assert_eq!(report.digested, 1);
         assert_eq!(report.superseded, 1);
 
-        let (stale, _) = space
-            .memory
-            .nexus()
-            .execute_kql(
-                parse_kql(
-                    "FIND(?link.metadata) WHERE { ?link ({type: \"Policy\", name: \"安全政策\"}, \"requires\", {type: \"Procedure\", name: \"密钥轮换\"}) }",
-                )
-                .unwrap(),
-            )
+        // The dropped fact: the digest withdrew its own claim, and the
+        // Proposition itself survives untouched. KIP 1.x flagged the link
+        // `superseded`, which spoke for every actor at once; a retraction says
+        // only that *this* reader stopped saying it.
+        let stale = space
+            .execute_kip_readonly(kip::request(
+                r#"FIND(?a.lifecycle.status) WHERE {
+  ?s CONCEPT {type: "Policy", key: "安全政策"}
+  ?o CONCEPT {type: "Procedure", key: "密钥轮换"}
+  ?p (?s, "requires", ?o)
+  ?a ASSERTION {proposition: ?p}
+}"#,
+            ))
             .await
             .unwrap();
-        let stale_text = stale.to_string();
-        assert!(stale_text.contains("superseded"), "stale: {stale_text}");
-        assert!(
-            stale_text.contains(&format!("@{}", v2.version.id)),
-            "superseded_by should pin version {}: {stale_text}",
-            v2.version.id
-        );
-        let (live, _) = space
-            .memory
-            .nexus()
-            .execute_kql(
-                parse_kql(
-                    "FIND(?link.metadata) WHERE { ?link ({type: \"Organization\", name: \"Acme\"}, \"publishes\", {type: \"Policy\", name: \"安全政策\"}) }",
-                )
-                .unwrap(),
-            )
+        let statuses: Vec<String> =
+            serde_json::from_value(kip::ok_result(&stale).cloned().unwrap()).unwrap();
+        assert_eq!(statuses, vec!["retracted".to_string()], "{stale:?}");
+
+        // The surviving fact stays believed.
+        let live = space
+            .execute_kip_readonly(kip::request(
+                r#"FIND(?a.lifecycle.status) WHERE {
+  ?s CONCEPT {type: "Organization", key: "Acme"}
+  ?o CONCEPT {type: "Policy", key: "安全政策"}
+  ?p (?s, "publishes", ?o)
+  ?a ASSERTION {proposition: ?p}
+}"#,
+            ))
             .await
             .unwrap();
-        // The surviving fact stays live: its status is active and never the
-        // "superseded" value (the `superseded_by: null` reset key is fine).
-        let live_text = live.to_string();
-        assert!(!live_text.contains("\"superseded\""), "live: {live_text}");
-        assert!(live_text.contains("\"active\""), "live: {live_text}");
+        let statuses: Vec<String> =
+            serde_json::from_value(kip::ok_result(&live).cloned().unwrap()).unwrap();
+        assert_eq!(statuses, vec!["active".to_string()], "{live:?}");
+        let _ = v2;
 
         // Labeled documents never reach the graph: the Cognitive Nexus has
         // no ACL, so digesting them would leak restricted facts to any Read

@@ -1,6 +1,6 @@
 # Anda Brain — Technical Documentation
 
-A dedicated LLM-powered memory management service that maintains a persistent **Cognitive Nexus** (Knowledge Graph) on behalf of business AI agents via [KIP (Knowledge Interaction Protocol)](https://github.com/ldclabs/KIP).
+A dedicated LLM-powered memory management service that maintains a persistent **Cognitive Nexus** on behalf of business AI agents via [KIP 2.0 (Knowledge Interaction Protocol)](https://github.com/ldclabs/KIP).
 
 Business agents interact entirely through natural language and a REST API — no KIP knowledge required.
 
@@ -681,9 +681,27 @@ Business agents can register the Recall endpoint as an LLM tool/function call. S
 
 ### Creation
 1. Creates a new `AndaDB` instance.
-2. Initializes `CognitiveNexus` (knowledge graph).
-3. Loads bootstrap KIP definitions (`$self`, `$system`, core meta-types).
+2. Initializes `CognitiveNexus`.
+3. Activates the KIP 2.0 Cognitive Memory Profile plus this space's own vocabulary package.
 4. Stores creator/owner principal IDs.
+
+### Upgrading a space written by a KIP 1.x build
+
+Automatic on first open, and resumable. The 1.x rows are staged verbatim into
+`kip_legacy_v1`, the colliding collection names are cleared, and each row becomes
+a 2.0 element: a Concept stays a Concept, and a fact-like Proposition becomes a
+truth-neutral Proposition plus a positive Assertion — without one, nothing would
+be believed after the migration, because silence in 2.0 means *insufficient*
+rather than assent.
+
+Migrated claims carry `mode: "imported"`, and 1.x `(type, name)` identity becomes
+a 2.0 `key`, so counterparty lookups keep resolving. Types the Cognitive Memory
+Profile also declares are adopted onto it; a type only this deployment used keeps
+a generated `kip://legacy/nexus@1.0.0` symbol.
+
+The usage ledger does not survive: it is keyed by element id and 2.0 re-mints
+those, so recall counters, correction history and self-test coverage restart
+empty. The memories themselves are unaffected.
 
 ### Runtime
 - Spaces are **lazy-loaded** on first access via `OnceCell`.
@@ -692,15 +710,31 @@ Business agents can register the Recall endpoint as an LLM tool/function call. S
 - **9-minute idle timeout**: Evict unused spaces from cache (skipped while a space is pinned, processing, or still referenced by requests).
 - Graceful shutdown: Close all space databases before exit.
 
-### Memory Types in the Cognitive Nexus
+### Memory Elements in the Cognitive Nexus
 
-| Type            | Nodes                                   | Description                                 |
-| --------------- | --------------------------------------- | ------------------------------------------- |
-| **Concept**     | `{type: "UpperCamelCase", name: "..."}` | Entities with typed attributes and metadata |
-| **Proposition** | `(Subject, Predicate, Object)`          | Directed relationships between concepts     |
-| **Domain**      | Grouping node                           | Organizational containers for concepts      |
+KIP 2.0 separates things KIP 1.x kept in one graph. The distinction the rest
+follows from is that **a Proposition existing is not the Proposition being
+true**:
 
-The schema is self-describing — all type definitions are stored as nodes within the graph itself. Types can be defined on-the-fly by the Formation agent as needed.
+| Element         | What it is                                                                      |
+| --------------- | ------------------------------------------------------------------------------- |
+| **Concept**     | A referable entity: `schema_ref`, immutable `key`, mutable `name`, attributes    |
+| **Proposition** | A truth-neutral `(subject, predicate, object)` tuple                            |
+| **Assertion**   | One actor's stance about a Proposition: `asserted_by`, `mode`, `confidence`     |
+| **Evidence**    | An observed artifact — a message, a tool result, a document passage             |
+| **Activity**    | The provenance of a process: consolidation, revision, import                    |
+
+What is *currently believed* is projected from Assertions under a named policy
+(`BELIEF`), never stored. Mnemonic state — how available and how noteworthy a
+memory is — lives in the `MnemonicState` Facet, and is not confidence.
+
+**Schema is not graph state.** Types and predicates are resolved from immutable,
+versioned Schema Packages, so a write cannot change what a type means. This
+space activates the standard [Cognitive Memory
+Profile](https://github.com/ldclabs/KIP) plus a `kip://anda-brain/memory`
+package of its own. When Formation meets vocabulary the profile lacks, it asks
+the host to publish it (`declare_memory_symbols`) — the host validates the
+name's shape, caps how many a space may hold, and versions the result.
 
 ## Configuration
 
@@ -820,7 +854,7 @@ Key crates from the Anda ecosystem:
 | `anda_core`            | Core traits (`Agent`, `Tool`, `AgentContext`) and types        |
 | `anda_engine`          | Agent engine, model integration, memory management             |
 | `anda_db`              | Persistent database layer (`AndaDB`) with configurable storage |
-| `anda_kip`             | KIP syntax parser and built-in knowledge templates             |
+| `anda_kip`             | KIP 2.0 protocol: parser, error registry, request envelope     |
 | `anda_cognitive_nexus` | Cognitive Nexus knowledge graph implementation                 |
 | `object_store`         | Object store abstraction                                       |
 

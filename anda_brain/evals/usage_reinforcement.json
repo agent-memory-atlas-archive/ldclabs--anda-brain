@@ -26,17 +26,28 @@
       "query": "What do I drink in the morning?",
       "evaluation": {
         "scoring_rubric": "The answer should recall the strong oolong tea morning preference.",
-        "required_answer_terms": ["oolong"],
+        "required_answer_terms": [
+          "oolong"
+        ],
         "expected_memories": [
           {
             "id": "tea_preference",
             "description": "User drinks strong oolong tea every morning.",
             "mode": "should_exist",
             "probe": {
-              "command": "SEARCH CONCEPT \"oolong tea morning preference\" MODE \"semantic\" THRESHOLD 0.5 LIMIT 10",
-              "readonly": true
+              "kip": "2.0",
+              "operations": [
+                {
+                  "command": "SEARCH CONCEPT :term THRESHOLD 0.4 LIMIT 10"
+                }
+              ],
+              "parameters": {
+                "term": "oolong tea morning preference"
+              }
             },
-            "answer_terms": ["oolong"]
+            "answer_terms": [
+              "oolong"
+            ]
           }
         ]
       }
@@ -58,15 +69,21 @@
       "query": "Remind me what my morning drink is.",
       "evaluation": {
         "scoring_rubric": "The answer should still recall the oolong preference; the graph should now carry runtime usage metadata from the settled recall of turn 2.",
-        "required_answer_terms": ["oolong"],
+        "required_answer_terms": [
+          "oolong"
+        ],
         "expected_memories": [
           {
             "id": "reinforced_usage_metadata",
             "description": "Settlement flushed last_recalled_at/recall_count onto at least one recalled link (plan M2 step 1).",
             "mode": "should_exist",
             "probe": {
-              "command": "FIND(?link) WHERE { ?link (?s, ?p, ?o) FILTER(IS_NOT_NULL(?link.metadata.last_recalled_at)) } LIMIT 10",
-              "readonly": true
+              "kip": "2.0",
+              "operations": [
+                {
+                  "command": "FIND(?c.name, ?c.facets[\"MnemonicState\"]) WHERE {\n  ?c CONCEPT {}\n  FILTER(IS_NOT_NULL(?c.facets[\"MnemonicState\"].last_metabolized_at))\n} LIMIT 10"
+                }
+              ]
             }
           }
         ]
