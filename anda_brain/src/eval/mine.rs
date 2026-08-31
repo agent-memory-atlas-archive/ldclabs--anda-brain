@@ -200,15 +200,14 @@ async fn fetch_correction(space: &Space, entity: &str) -> Option<Json> {
 async fn fetch_source_excerpts(space: &Space, correction: &Json) -> Vec<String> {
     let evidence_ids: Vec<String> = correction
         .get("assertion")
-        .and_then(|assertion| assertion.get("evidence_refs"))
+        .and_then(|assertion| assertion.get("evidence"))
         .and_then(Json::as_array)
         .map(|refs| {
             refs.iter()
                 .filter_map(|reference| {
+                    // §13.2: a citation is `{"id": "E-1", "role": "support"}`.
                     reference
-                        .get("evidence")
-                        .and_then(|evidence| evidence.get("id"))
-                        .or_else(|| reference.get("id"))
+                        .get("id")
                         .and_then(Json::as_str)
                         .map(str::to_string)
                 })

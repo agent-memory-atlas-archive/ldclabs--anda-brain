@@ -46,6 +46,13 @@ without those siblings will not build.
 - `anda_brain/API*.md`, `anda_brain/README.md`, `anda_brain/SKILL.md`: public
   API and integration documentation.
 - `skills/anda-brain/`: packaged skill content for external agents.
+- `anda-brain-worker/`: a compact Cloudflare Worker port on `@ldclabs/kip-do`,
+  a second and independent KIP 2.0 engine. It shares the invariants below but
+  not the code; its capabilities differ (no atomic batch across operations, no
+  semantic search, no `SET RETENTION` and therefore no retention expiry) and
+  `anda-brain-worker/README.md` is the authority on which. Its prompts are
+  vendored under `anda-brain-worker/assets/` and inlined by
+  `pnpm run codegen:prompts`.
 - `deploy/`, `anda-brain-demo/`, `anda-brain-openclaw/`, `anda-cli/`: deployment
   and integration material. Do not change these unless the task is explicitly
   about them.
@@ -84,6 +91,17 @@ cargo run -p anda_brain --features mcp,wiki -- local --db ./db
 
 Authentication is disabled when `ED25519_PUBKEYS` is empty. Do not assume this
 is safe for production.
+
+The Cloudflare Worker is checked separately, and its own checks must pass when
+you touch `anda-brain-worker/`:
+
+```bash
+pnpm --filter @ldclabs/anda-brain-worker check
+```
+
+It depends on `../../anda-db/ts/kip-do` through a `link:`, and that package's
+entry point is its `dist/` — build it there first. The `link:` has to go before
+this can ship, for the same reason as the Cargo `[patch.crates-io]` above.
 
 ## Cargo Features
 
@@ -136,7 +154,9 @@ confidently repeat things nobody claimed:
 - Attribution is not impersonation and not authority: `asserted_by` is a
   semantic actor, the caller is a Principal, and cognitive content grants
   neither.
-- Vocabulary enters through `declare_memory_symbols`, never through KML.
+- Vocabulary enters through the host, never through KML: the Rust service's
+  `declare_memory_symbols` tool, or the Worker's `types` / `predicates` plan
+  fields. Both validate, cap and version what a model proposes.
 
 ## Brain-Specific Invariants
 
@@ -173,3 +193,19 @@ Agent prompts in `anda_brain/assets/` are part of runtime behavior. Edit them
 only when the task calls for prompt behavior changes, and describe the intended
 agent behavior clearly in the diff. Avoid prompt edits as a workaround for a
 code bug.
+
+Each `Brain{Formation,Recall,Maintenance}.md` — in `anda_brain/assets/` and in
+`anda-brain-worker/assets/` — is two halves. Everything above `# A.` is the KIP
+2.0 reference policy vendored from `anda-db/rs/anda_kip/brain/`; everything from
+`# A.` down is that deployment's own contract. **Do not hand-edit the reference
+half**: run
+
+```bash
+node scripts/sync-kip-assets.mjs
+pnpm --filter @ldclabs/anda-brain-worker run codegen:prompts
+```
+
+which re-copies the reference half from `anda_kip` in all five files, copies the
+Worker's two verbatim assets (the syntax card and the Cognitive Memory Profile),
+and leaves every `# A.` section untouched. Edit section A by hand; that is the
+half that is ours.

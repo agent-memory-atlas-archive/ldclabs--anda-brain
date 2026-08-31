@@ -43,14 +43,12 @@ use super::{
     WikiDocRecord, WikiError, WikiService, WikiVerifyInput, WikiVerifyStatus, WikiVersionRecord,
     chunk::chunk_checksum, citation_uri,
 };
+// A digest claim is the brain's reading of a document, so it is attributed to
+// the brain's semantic self — cognition, which grants the brain nothing it did
+// not already have from Governance. The Space designates the same Concept as
+// its §5.6 `$self`.
+use crate::space::SELF_ACTOR_KEY;
 use crate::{kip, vocabulary::MemoryVocabulary};
-
-/// The `key` of the Person Concept the brain speaks as.
-///
-/// A digest claim is the brain's reading of a document, so it is attributed to
-/// the brain's semantic self — which is cognition, and grants the brain nothing
-/// it did not already have from Governance.
-const SELF_ACTOR_KEY: &str = "$self";
 
 /// Extractor fingerprint prefix written into proposition metadata; bump on
 /// prompt or renderer changes so maintenance can bulk-invalidate old
@@ -1451,6 +1449,7 @@ fn retract_request(fact: &DigestedFact) -> Request {
         ("pred".to_string(), json!(fact.predicate)),
         ("ot".to_string(), json!(fact.object_type)),
         ("on".to_string(), json!(fact.object_name)),
+        ("self_key".to_string(), json!(SELF_ACTOR_KEY)),
     ]);
     kip::request_with(
         r#"RETRACT ASSERTION ?a
@@ -1458,7 +1457,7 @@ WHERE {
   ?s CONCEPT {type: :st, key: :sn}
   ?o CONCEPT {type: :ot, key: :on}
   ?p (?s, :pred, ?o)
-  ?self CONCEPT {type: "Person", key: "$self"}
+  ?self CONCEPT {type: "Person", key: :self_key}
   ?a ASSERTION {proposition: ?p, asserted_by: ?self}
   FILTER(?a.lifecycle.status == "active")
 }

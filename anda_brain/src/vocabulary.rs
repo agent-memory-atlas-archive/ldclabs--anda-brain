@@ -71,6 +71,18 @@ pub struct MemoryVocabulary {
     /// still two published artifacts in the environment's history.
     pub revision: u32,
 
+    /// The highest revision this Space has ever *installed*, in force or not.
+    ///
+    /// `revision` is the one in force, which is what `package_ref()` has to
+    /// name. They differ after a partial publish: `install_and_activate`
+    /// installs the artifact and then activates it, and a failure between those
+    /// two leaves a version installed that never came into force. Re-minting
+    /// that number with a different symbol set is refused as a `DigestMismatch`
+    /// — a package version identifies one canonical content forever — and the
+    /// Space could then never grow its vocabulary again. Skipping the stranded
+    /// number costs one integer.
+    floor: u32,
+
     /// Symbols other active packages declare, chiefly the Cognitive Memory
     /// Profile's. Writable, but not this package's to redeclare.
     borrowed_types: BTreeSet<String>,
@@ -124,11 +136,8 @@ impl MemoryVocabulary {
                 }
             }
         }
-        vocabulary.revision = version
-            .rsplit('.')
-            .next()
-            .and_then(|patch| patch.parse().ok())
-            .unwrap_or(0);
+        vocabulary.revision = patch_of(&version).unwrap_or(0);
+        vocabulary.floor = highest_installed_revision(nexus).await?;
         Ok(vocabulary)
     }
 
@@ -170,6 +179,7 @@ impl MemoryVocabulary {
     ) -> Vec<String> {
         let mut rejected = Vec::new();
         let mut changed = false;
+        let mut published = self.len();
         for (names, valid, mine, borrowed) in [
             (
                 types.into_iter().collect::<Vec<_>>(),
@@ -192,16 +202,29 @@ impl MemoryVocabulary {
                     rejected.push(name.to_string());
                     continue;
                 }
-                if self.borrowed_types.len() + mine.len() >= MAX_SYMBOLS {
+                // The cap is on what *this package* declares — the artifact
+                // it re-publishes on every extension — so it counts types and
+                // predicates together and counts nothing another package
+                // declares. Reading `self.borrowed_types` here charged the
+                // Profile's types against the predicate budget and let each
+                // kind fill MAX_SYMBOLS on its own, so the real ceiling was
+                // twice the documented one. `@ldclabs/kip-do` checks
+                // `this.size`, and the two engines have to agree on a limit
+                // both READMEs quote.
+                if published >= MAX_SYMBOLS {
                     rejected.push(name.to_string());
                     continue;
                 }
                 mine.insert(name.to_string());
+                published += 1;
                 changed = true;
             }
         }
         if changed {
-            self.revision = self.revision.saturating_add(1);
+            // Past the highest number ever installed, not merely past the one
+            // in force: see `floor`.
+            self.revision = self.revision.max(self.floor).saturating_add(1);
+            self.floor = self.revision;
         }
         rejected
     }
@@ -383,6 +406,33 @@ static DECLARE_SYMBOLS_DEFINITION: LazyLock<FunctionDefinition> = LazyLock::new(
     .unwrap()
 });
 
+/// The patch component of a `1.0.N` version string.
+fn patch_of(version: &str) -> Option<u32> {
+    version
+        .rsplit('.')
+        .next()
+        .and_then(|patch| patch.parse().ok())
+}
+
+/// The highest revision of this package the Space has ever installed.
+///
+/// Read from the installed set rather than from what is in force, because the
+/// two differ exactly in the case this exists to survive — an artifact
+/// installed by a publish that then failed to activate. The installed set holds
+/// a handful of packages (Core, the Profile, this one), so enumerating it is
+/// cheaper than the failure it prevents.
+async fn highest_installed_revision(nexus: &CognitiveNexus) -> Result<u32, BoxError> {
+    let prefix = format!("{MEMORY_PACKAGE_ID}@");
+    Ok(nexus
+        .store
+        .installed_packages()
+        .await?
+        .keys()
+        .filter_map(|package_ref| patch_of(package_ref.strip_prefix(&prefix)?))
+        .max()
+        .unwrap_or(0))
+}
+
 /// Lets Formation and Maintenance grow this Space's vocabulary.
 ///
 /// The tool exists because KIP 2.0 deliberately took schema out of the language
@@ -539,6 +589,44 @@ mod tests {
             vocabulary.predicates,
             BTreeSet::from(["fine_one".to_string()])
         );
+    }
+
+    #[test]
+    fn the_cap_counts_this_package_whole_and_nobody_else() {
+        let mut vocabulary = MemoryVocabulary::default();
+        // Another package's symbols are not this one's to be charged for.
+        vocabulary
+            .borrowed_types
+            .extend((0..40).map(|i| format!("Borrowed{i}")));
+
+        let types: Vec<String> = (0..MAX_SYMBOLS).map(|i| format!("T{i}")).collect();
+        let rejected = vocabulary.extend(types.iter().map(String::as_str), []);
+        assert!(rejected.is_empty(), "{} rejected", rejected.len());
+        assert_eq!(vocabulary.len(), MAX_SYMBOLS);
+
+        // Types and predicates share one budget: the cap is on the artifact
+        // this package republishes, and it holds both.
+        let rejected = vocabulary.extend(["OneMore"], ["one_more"]);
+        assert_eq!(rejected, vec!["OneMore", "one_more"]);
+        assert_eq!(vocabulary.len(), MAX_SYMBOLS);
+    }
+
+    #[test]
+    fn a_revision_never_reuses_a_number_already_installed() {
+        // The in-force package is 1.0.4, but 1.0.5 and 1.0.6 were installed by
+        // publishes that never activated. Re-minting either with different
+        // content is a permanent DigestMismatch.
+        let mut vocabulary = MemoryVocabulary {
+            revision: 4,
+            floor: 6,
+            ..Default::default()
+        };
+
+        assert!(vocabulary.extend(["Drug"], []).is_empty());
+        assert_eq!(vocabulary.version(), "1.0.7");
+
+        assert!(vocabulary.extend([], ["treats"]).is_empty());
+        assert_eq!(vocabulary.version(), "1.0.8");
     }
 
     #[test]

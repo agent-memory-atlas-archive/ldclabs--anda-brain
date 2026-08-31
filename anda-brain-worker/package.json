@@ -6,15 +6,17 @@
   "private": true,
   "scripts": {
     "check": "pnpm run typecheck && pnpm run test && pnpm run deploy:dry-run",
+    "codegen:prompts": "node scripts/codegen-prompts.mjs",
     "deploy": "wrangler deploy",
     "deploy:dry-run": "wrangler deploy --dry-run",
     "dev": "wrangler dev",
+    "sync:assets": "node ../scripts/sync-kip-assets.mjs",
     "test": "WRANGLER_WRITE_LOGS=0 vitest run",
     "test:watch": "WRANGLER_WRITE_LOGS=0 vitest",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@ldclabs/kip-do": "^0.12.1"
+    "@ldclabs/kip-do": "link:../../anda-db/ts/kip-do"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.20.2",

@@ -1059,6 +1059,49 @@ pub struct MemorySettlementReport {
     /// not recorded this cycle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correction_scan_error: Option<String>,
+
+    /// What the retention pass acted on, and what it left alone.
+    #[serde(default)]
+    pub retention: RetentionSettlement,
+}
+
+/// What one retention pass did, and what it deliberately did not do.
+///
+/// Two different clocks, kept apart because conflating them is how a Space
+/// loses memory it meant to keep. `retention.expires_at` says when the
+/// *record* stops being kept (Spec §19.1); `valid_time.until` says when the
+/// *claim* stops applying (§14.3). A claim that lapsed is still a claim that
+/// was made, so it is marked `expired` and kept; a record whose retention ran
+/// out is archived.
+///
+/// The counts that are not `archived` matter as much as the one that is. A
+/// sweep that reports "archived 4" when 9 had lapsed reads as the whole truth
+/// and is not, which is the shape of a retention failure nobody notices.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct RetentionSettlement {
+    /// Assertions whose validity windows closed, marked `expired` (§14.3).
+    /// Not retraction and not supersession: nobody withdrew these and nothing
+    /// replaced them — their own stated windows ran out.
+    pub expired_assertions: u64,
+
+    /// Elements whose `retention.expires_at` lapsed, archived. Archive rather
+    /// than tombstone or purge: expiry says the record need not stay in
+    /// ordinary recall, not that it should stop having existed.
+    pub archived: u64,
+
+    /// Kept because a legal hold blocks removal for everyone, including a
+    /// sweep the holder authorized (§163). Nothing went wrong.
+    pub held: u64,
+
+    /// Elements this Space's own policy refused to archive.
+    pub refused: u64,
+
+    /// Left for the next cycle by this pass's limit.
+    pub remaining: u64,
+
+    /// Set when the pass failed — nothing expired this cycle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Outcome of one dream self-test pass (memory evolution plan, module M7).

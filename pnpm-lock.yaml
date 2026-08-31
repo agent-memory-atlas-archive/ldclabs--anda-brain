@@ -55,8 +55,8 @@ importers:
   anda-brain-worker:
     dependencies:
       '@ldclabs/kip-do':
-        specifier: ^0.12.1
-        version: 0.12.1
+        specifier: link:../../anda-db/ts/kip-do
+        version: link:../../anda-db/ts/kip-do
     devDependencies:
       '@cloudflare/vitest-pool-workers':
         specifier: ^0.20.2
@@ -1115,13 +1115,6 @@ packages:
 
   '@larksuiteoapi/node-sdk@1.59.0':
     resolution: {integrity: sha512-sBpkruTvZDOxnVtoTbepWKRX0j1Y1ZElQYu0x7+v088sI9pcpbVp6ZzCGn62dhrKPatzNyCJyzYCPXPYQWccrA==}
-
-  '@ldclabs/kip-do@0.12.1':
-    resolution: {integrity: sha512-mUi0rw5OQDtQ28GKyoiSe6GdhPRWLVmNjbtPE0fHR9XSJeNTTkQe9DY4Fs51Ba/AZl2OwWs0WMOevtvEsBARxg==}
-    engines: {node: '>=20'}
-
-  '@ldclabs/kip-lang@0.4.0':
-    resolution: {integrity: sha512-5NS/MgSWJw94I2HenaGwpTi8EvRWMg0PctY63qBiDjw7jlvvHBtebMh/DSHVuItFNlahVCatG/2D7XbvQobIvQ==}
 
   '@line/bot-sdk@10.6.0':
     resolution: {integrity: sha512-4hSpglL/G/cW2JCcohaYz/BS0uOSJNV9IEYdMm0EiPEvDLayoI2hGq2D86uYPQFD2gvgkyhmzdShpWLG3P5r3w==}
@@ -3477,8 +3470,8 @@ packages:
     resolution: {integrity: sha512-+bT2uH4E5LGE7h/n3evcS/sQlJXCpIp6ym8OWJ5eV6+67Dsql/LaaT7qJBAt2rzfoa/5QBGBhxDix1dMt2kQKQ==}
     engines: {node: '>= 0.8.0'}
 
-  libsignal@git+https://git@github.com:whiskeysockets/libsignal-node.git#bcea72df9ec34d9d9140ab30619cf479c7c144c7:
-    resolution: {commit: bcea72df9ec34d9d9140ab30619cf479c7c144c7, repo: git@github.com:whiskeysockets/libsignal-node.git, type: git}
+  libsignal@https://codeload.github.com/whiskeysockets/libsignal-node/tar.gz/bcea72df9ec34d9d9140ab30619cf479c7c144c7:
+    resolution: {gitHosted: true, tarball: https://codeload.github.com/whiskeysockets/libsignal-node/tar.gz/bcea72df9ec34d9d9140ab30619cf479c7c144c7}
     version: 6.0.0
 
   lie@3.3.0:
@@ -5977,12 +5970,6 @@ snapshots:
       - debug
       - utf-8-validate
 
-  '@ldclabs/kip-do@0.12.1':
-    dependencies:
-      '@ldclabs/kip-lang': 0.4.0
-
-  '@ldclabs/kip-lang@0.4.0': {}
-
   '@line/bot-sdk@10.6.0':
     dependencies:
       '@types/node': 24.3.0
@@ -7218,7 +7205,7 @@ snapshots:
       '@cacheable/node-cache': 1.7.6
       '@hapi/boom': 9.1.4
       async-mutex: 0.5.0
-      libsignal: git+https://git@github.com:whiskeysockets/libsignal-node.git#bcea72df9ec34d9d9140ab30619cf479c7c144c7
+      libsignal: https://codeload.github.com/whiskeysockets/libsignal-node/tar.gz/bcea72df9ec34d9d9140ab30619cf479c7c144c7
       lru-cache: 11.2.7
       music-metadata: 11.12.3
       p-queue: 9.1.0
@@ -8560,7 +8547,7 @@ snapshots:
       prelude-ls: 1.2.1
       type-check: 0.4.0
 
-  libsignal@git+https://git@github.com:whiskeysockets/libsignal-node.git#bcea72df9ec34d9d9140ab30619cf479c7c144c7:
+  libsignal@https://codeload.github.com/whiskeysockets/libsignal-node/tar.gz/bcea72df9ec34d9d9140ab30619cf479c7c144c7:
     dependencies:
       curve25519-js: 0.0.4
       protobufjs: 7.6.0

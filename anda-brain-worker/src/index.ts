@@ -1,8 +1,7 @@
 import {
-  assertReadonlyCommands,
-  collectCitations,
-  conceptSearchCommand,
-  firstKipError,
+  assertReadonlyOperations,
+  citationsFromLookup,
+  conceptLookupCommand,
 } from './kip.js'
 import { AndaBrain } from './brain.js'
 import { formMemory, maintainMemory, OperationError, recallMemory } from './operations.js'
@@ -19,7 +18,7 @@ export { AndaBrain }
 
 const MAX_BODY_BYTES = 256 * 1024
 const SPACE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
-const GET_ACTIONS = new Set(['info', 'formation_status'])
+const GET_ONLY = new Set(['info', 'formation_status', 'vocabulary'])
 const POST_ACTIONS = new Set([
   'formation',
   'recall',
@@ -52,6 +51,7 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
         name: 'Anda Brain Worker',
         description: 'Compact graph memory for AI agents on Cloudflare Workers.',
         engine: '@ldclabs/kip-do',
+        kip: '2.0',
       })
     }
 
@@ -67,15 +67,18 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     }
     const action = match[2] ?? ''
     if (!SPACE_ID.test(spaceId)) throw new ApiError('invalid space id', 400)
-    if (!GET_ACTIONS.has(action) && !POST_ACTIONS.has(action)) {
+    if (!GET_ONLY.has(action) && !POST_ACTIONS.has(action)) {
       throw new ApiError('not found', 404)
     }
     const brain = env.BRAIN.getByName(spaceId) as unknown as BrainRpc
 
-    if (GET_ACTIONS.has(action)) {
+    if (GET_ONLY.has(action)) {
       if (request.method !== 'GET') throw new ApiError('method not allowed', 405)
       if (action === 'info') {
         return ok({ space_id: spaceId, ...(await brain.stats()) })
+      }
+      if (action === 'vocabulary') {
+        return ok(await brain.vocabulary())
       }
       return ok({
         formation_processing: false,
@@ -96,33 +99,40 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
         return ok(await maintainMemory(env, brain, parseMaintenanceInput(body)))
       case 'probe': {
         const input = parseRecallInput(body)
-        const responses = await brain.executeKipReadonlyBatch([
-          conceptSearchCommand(input.query, 8),
+        const results = await brain.executeKipReadonlyBatch([
+          conceptLookupCommand(input.query, 8),
         ])
-        const failure = firstKipError(responses)
-        if (failure) throw new OperationError('probe KIP failed', 422, failure.error)
-        const memories = collectCitations(responses)
+        const probe = results[0]
+        if (probe === undefined || probe.status === 'failed') {
+          throw new OperationError('probe KIP failed', 422, probe?.error)
+        }
+        const memories = citationsFromLookup(probe.result)
         return ok({ found: memories.length > 0, memories })
       }
       case 'execute_kip_readonly': {
-        const input = parseKipInput(body)
-        const commands = input.commands ?? [input.command as string]
+        const batch = parseKipInput(body)
+        // Gated here as well as inside the object: a 400 that names the offence
+        // is a better answer than a per-operation error, and the object's own
+        // gate is what makes this one an early message rather than the only
+        // thing standing between a mutation and the graph.
         try {
-          assertReadonlyCommands(commands)
+          assertReadonlyOperations(batch.operations)
         } catch (error) {
           throw new ApiError(
             error instanceof Error ? error.message : 'invalid read-only KIP',
             400,
           )
         }
-        return ok(await brain.executeKipReadonlyBatch(commands))
+        return ok(await brain.executeKipReadonlyBatch(batch.operations, batch.execution))
       }
       case 'execute_kip': {
-        const input = parseKipInput(body)
-        const result = input.commands
-          ? await brain.executeKipBatch(input.commands)
-          : await brain.executeKip(input.command as string)
-        return ok(result)
+        const batch = parseKipInput(body)
+        // `context` and `read` are the object's own concerns on this path, so
+        // they go unset; `execution` is the caller's and rides the fourth slot
+        // the engine's own batch signature puts it in.
+        return ok(
+          await brain.executeKipBatch(batch.operations, undefined, undefined, batch.execution),
+        )
       }
       default:
         throw new ApiError('not found', 404)

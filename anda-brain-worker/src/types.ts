@@ -1,4 +1,5 @@
-import type { KipResponse } from '@ldclabs/kip-do'
+import type { KipResult } from '@ldclabs/kip-do'
+import type { KipExecution, KipOperation } from './kip.js'
 
 export type JsonObject = Record<string, unknown>
 
@@ -12,26 +13,56 @@ export interface Env {
   AI: AiBinding
   AI_MODEL?: string
   BRAIN_API_KEY?: string
-  TOKENIZER?: {
-    fetch(input: RequestInfo, init?: RequestInit): Promise<Response>
-  }
 }
 
+/**
+ * The Durable Object as the Worker sees it.
+ *
+ * Every method is synchronous inside the object and a promise across the RPC
+ * boundary, which is why these signatures do not match the class's.
+ */
 export interface BrainRpc {
-  describePrimer(): Promise<KipResponse>
-  executeFormationPlan(commands: string[]): Promise<KipResponse[]>
-  executeKip(command: string): Promise<KipResponse>
-  executeKipBatch(commands: string[]): Promise<KipResponse[]>
-  executeKipReadonlyBatch(commands: string[]): Promise<KipResponse[]>
-  executeMaintenancePlan(commands: string[]): Promise<KipResponse[]>
+  declareSymbols(
+    types: readonly string[],
+    predicates: readonly string[],
+  ): Promise<DeclaredVocabulary>
+  describePrimer(): Promise<KipResult>
+  executeFormationPlan(operations: readonly KipOperation[]): Promise<KipResult[]>
+  executeKip(command: string, params?: Record<string, unknown>): Promise<KipResult>
+  executeKipBatch(
+    operations: readonly KipOperation[],
+    context?: undefined,
+    read?: undefined,
+    execution?: KipExecution,
+  ): Promise<KipResult[]>
+  executeKipReadonlyBatch(
+    operations: readonly KipOperation[],
+    execution?: KipExecution,
+  ): Promise<KipResult[]>
+  executeMaintenancePlan(operations: readonly KipOperation[]): Promise<KipResult[]>
   stats(): Promise<BrainStats>
+  vocabulary(): Promise<DeclaredVocabulary>
 }
 
 export interface BrainStats {
   concepts: number
   propositions: number
+  assertions: number
+  evidence: number
+  /** Every schema activation mints one; a restart is not an activation. */
+  schema_environment_version: number
   initialized_at: string
   engine: string
+  kip: string
+}
+
+/** What this Space can say, after a declaration and before the next one. */
+export interface DeclaredVocabulary {
+  package_ref: string
+  types: string[]
+  predicates: string[]
+  /** Names refused as malformed, or past the Space's symbol cap. */
+  rejected: string[]
 }
 
 export interface InputContext {
@@ -73,7 +104,6 @@ export interface MaintenanceInput {
   timestamp?: string
   parameters?: {
     stale_event_threshold_days?: number
-    confidence_decay_factor?: number
     unsorted_max_backlog?: number
     orphan_max_count?: number
   }
@@ -84,8 +114,18 @@ export interface Usage {
   output_tokens: number
 }
 
+/**
+ * What a mutation plan asks for.
+ *
+ * `types` and `predicates` are the plan's schema request. KML cannot declare a
+ * symbol in KIP 2.0, so a plan that needs one names it here and the host
+ * publishes it before running a single command — otherwise every write using it
+ * would fail with `SchemaSymbolNotFound`.
+ */
 export interface MutationPlan {
   commands: string[]
+  types: string[]
+  predicates: string[]
   summary: string
 }
 
@@ -99,11 +139,17 @@ export interface RecallAnswer {
   uncertainty: number
 }
 
+/**
+ * One element an answer rests on.
+ *
+ * `type` and `schema_ref` are present only when the read that produced this
+ * projected them. KIP 2.0 shapes a KQL answer by its projection and never as
+ * objects, so a citation from a model-planned read is often an id and nothing
+ * else — which is honest, where a guessed type would not be.
+ */
 export interface MemoryCitation {
   entity: string
   type?: string
   name?: string
-  confidence?: number
-  source?: string
-  created_at?: string
+  schema_ref?: string
 }

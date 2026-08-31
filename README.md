@@ -69,10 +69,10 @@ This is exactly where **Anda Brain** gets its name. It is not a database, nor is
 What this architecture means:
 
 - **Zero-Threshold Agent Integration:** AI agents don't need to learn graph query languages; they use memory just like speaking. Brain handles all graph processing.
-- **Autonomous Schema Evolution:** The LLM decides in real-time which concepts and relationships to track. No predefined database schema is needed. The type system itself is stored in the graph, allowing AI to register new concept and relationship types on the fly.
+- **Autonomous Schema Evolution:** The LLM decides in real-time which concepts and relationships to track—no predefined database schema is needed. It *proposes* the vocabulary and Brain publishes it: a new concept or relationship type enters through a versioned schema package the host owns, never through an ordinary write. Your agent grows new words as it goes, and nothing it writes can quietly change what an existing word means.
 - **Multiple Agents Sharing One Brain:** Customer feedback remembered by the Customer Service Agent can be naturally discovered by the Supply Chain Agent during recall. Knowledge is linked across departments automatically, eliminating the need for massive "Data Middle Platform" engineering.
 - **Model Agnostic:** Your business agents can use various SOTA models, while the memory engine safely uses an independent model to maintain core assets. Use GPT today, switch to Claude or open-source models tomorrow—your memory remains intact, and the new model inherits all knowledge instantly.
-- **Sleep & Consolidation:** Just like the human brain, Brain automatically runs background "sleep" tasks to deduplicate facts, decay outdated information, and consolidate long-term knowledge.
+- **Sleep & Consolidation:** Just like the human brain, Brain automatically runs background "sleep" tasks to deduplicate facts, let unused memories fade, and consolidate long-term knowledge. What fades is how *reachable* a memory is, never how *credible*—a fact nobody has asked about in a month is no less true than it was.
 
 ---
 
@@ -88,7 +88,7 @@ When a business agent converses with a customer or an internal employee, Brain w
 | **Semantic Memory** (Concept)  | "Supplier A's delivery reliability is 85%"; "Customer B prefers online communication".                          | Persistent                |
 | **Pattern Memory** (Cognitive) | "When making purchasing decisions, this customer always compares prices before payment terms".                  | Persistent                |
 
-Every memory is automatically tagged with **source, author, confidence level, and timestamp**—fully auditable and compliant.
+Every memory records **who claimed it, on what evidence, with what confidence, and when**—fully auditable and compliant. The claim and the person making it are separate records, so when two people disagree neither one is silently overwritten.
 
 ### Three-Stage Sleep Cycle: Automatic Knowledge Metabolism
 
@@ -103,7 +103,7 @@ The system scans unprocessed event nodes in the graph and performs **Essence Ext
   - Alice mentioned salmon, sea urchin, and sushi in three different conversations → Extracted pattern: "Prefers Japanese cuisine".
   - Alice always asks about cost before features in multiple project discussions → Extracted pattern: "Decision tendency: Cost-first".
 
-Each extracted pattern is written into the graph as a new concept node, complete with an `evidence_count` and `confidence` score (more evidence = higher confidence). This stage also handles **Deduplication** (merging "JS" and "JavaScript") and **Confidence Decay** (gradually lowering the confidence of old knowledge that hasn't been verified recently).
+Each extracted pattern is written into the graph as a new concept node, together with a claim citing the conversations it was read from. "How well supported is this?" is then answered by walking back to that evidence—counting the independent sources that actually stand behind it—rather than by trusting a score somebody stored. This stage also handles **Deduplication** (merging "JS" and "JavaScript") and **Mnemonic Metabolism** (a memory nothing has drawn on for a long time gets harder to surface). Metabolism moves accessibility alone: how easily a memory comes to mind, never how believable it is.
 
 #### REM Dreaming — Contradiction Detection & Cognitive Evolution
 
@@ -111,8 +111,8 @@ The system performs **Contradiction Detection** on the graph—traversing the sa
 
 Traditional solutions either ignore it (Vector RAG lets both coexist) or brutally overwrite it (KV storage deletes the old and writes the new). Anda Brain performs **State Evolution**:
 
-- The old relationship is not deleted; instead, it is marked as `superseded`, noting *when* it was replaced and by *what*.
-- The new relationship's confidence is boosted, accompanied by an evolution explanation.
+- The old claim is neither deleted nor edited; it is marked as `superseded`, noting *when* it was replaced and by *what*.
+- The correction is recorded as a **new claim**, with its own evidence and its own confidence, linked to the one it replaces. Nothing rewrites what was already said—the record of what Alice believed in 2024 survives having been overtaken.
 
 This means the graph perfectly preserves the **timeline** of cognition. When someone asks, "How have Alice's dietary habits changed?", the system can trace the `superseded` chain to precisely reconstruct the evolutionary trajectory—instead of returning two contradictory answers that confuse the user.
 
@@ -209,7 +209,7 @@ For complex businesses, Vector RAG is insufficient. Enterprises have structured 
 | :-------------- | :------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------ |
 | **Formation**   | Extracts entities, relationships, and events from dialogues and weaves them seamlessly into the knowledge graph.                       | The brain encoding new experiences into short/long-term memory.                                               |
 | **Recall**      | Navigates the graph to synthesize accurate, context-rich answers, spanning multiple hops if necessary.                                 | Retrieving memories—pulling interconnected facts together into coherent thoughts.                             |
-| **Maintenance** | An asynchronous background process: compresses fragments into knowledge, detects contradictions & evolves them, and prunes stale data. | Sleep—the process where the brain consolidates memories, strengthens important ones, and lets the noise fade. |
+| **Maintenance** | An asynchronous background process: compresses fragments into knowledge, detects contradictions & evolves them, and retires what a space said should stop being kept. | Sleep—the process where the brain consolidates memories, strengthens important ones, and lets the noise fade. |
 
 ## Key Technologies
 
@@ -229,7 +229,7 @@ Anda Brain is [open-source software](https://github.com/ldclabs/anda-brain), des
 
 > **Note:** The hosted cloud service (`brain.anda.ai`) and its console (`anda.ai/brain`) have been discontinued. Deploy your own instance instead — it only takes a few minutes.
 
-For a smaller edge-native deployment, see [anda-brain-worker](./anda-brain-worker/README.md): it keeps Formation, Recall, Maintenance, and KIP on Cloudflare Workers using one SQLite Durable Object per memory space.
+For a smaller edge-native deployment, see [anda-brain-worker](./anda-brain-worker/README.md): it keeps Formation, Recall, Maintenance, and KIP 2.0 on Cloudflare Workers using one SQLite Durable Object per memory space. It runs on `@ldclabs/kip-do`, a second, independent engine — so its capabilities differ; the README lists what it does not build.
 
 👉 **[Anda Brain Quick Start](https://github.com/ldclabs/anda-brain/blob/main/deploy/quick_start.md)**: Provides a minimal viable deployment guide from 0 to 1.
 

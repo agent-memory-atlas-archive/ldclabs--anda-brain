@@ -1,3 +1,5 @@
+import type { JsonMap } from '@ldclabs/kip-do'
+import type { KipExecution, KipOperation } from './kip.js'
 import type {
   FormationInput,
   InputContext,
@@ -59,18 +61,17 @@ export function parseMaintenanceInput(value: unknown): MaintenanceInput {
   let parameters: MaintenanceInput['parameters']
   if (body.parameters !== undefined) {
     const raw = object(body.parameters, '`parameters` must be an object')
+    // There is deliberately no `confidence_decay_factor`. KIP 2.0 forbids
+    // decaying an Assertion's confidence over time: a fact nobody has asked
+    // about in a month is no less credible. What disuse decays is
+    // `MnemonicState.memory_strength`, which is accessibility, not truth — and
+    // that is Maintenance's own judgement rather than a request parameter.
     parameters = {
       stale_event_threshold_days: boundedInteger(
         raw.stale_event_threshold_days,
         'stale_event_threshold_days',
         1,
         365,
-      ),
-      confidence_decay_factor: boundedNumber(
-        raw.confidence_decay_factor,
-        'confidence_decay_factor',
-        Number.MIN_VALUE,
-        1,
       ),
       unsorted_max_backlog: boundedInteger(
         raw.unsorted_max_backlog,
@@ -95,22 +96,130 @@ export function parseMaintenanceInput(value: unknown): MaintenanceInput {
   }
 }
 
-export function parseKipInput(value: unknown): {
-  command?: string
-  commands?: string[]
-} {
+/** A parsed batch: what to run, and how the operations relate to one another. */
+export interface KipBatch {
+  operations: KipOperation[]
+  execution: KipExecution
+}
+
+/**
+ * The model-facing argument shape, not the wire envelope.
+ *
+ * A caller sends `{"command": "…"}` or an `operations` batch, exactly as the
+ * Rust service does, so the two products present one API. The protocol tag and
+ * the envelope's own fields are this service's business rather than every
+ * client's.
+ */
+export function parseKipInput(value: unknown): KipBatch {
   const body = object(value, 'KIP body must be a JSON object')
-  if (typeof body.command === 'string' && body.command.trim()) {
-    return { command: body.command }
+  const shared = body.parameters === undefined
+    ? undefined
+    : jsonObject(body.parameters, '`parameters` must be an object')
+  const execution = parseExecution(body.execution)
+
+  const hasCommand = body.command !== undefined && body.command !== null
+  const hasOperations = body.operations !== undefined && body.operations !== null
+  if (hasCommand && hasOperations) {
+    throw new ValidationError(
+      'send either a single `command` or an `operations` batch, never both',
+    )
   }
-  if (
-    Array.isArray(body.commands) &&
-    body.commands.length > 0 &&
-    body.commands.every((item) => typeof item === 'string' && item.trim())
-  ) {
-    return { commands: body.commands as string[] }
+
+  if (hasCommand) {
+    const command = requiredString(body.command, 'command', 256_000).trim()
+    if (!command) throw new ValidationError('`command` cannot be blank')
+    return {
+      operations: [{ command, ...(shared ? { parameters: shared } : {}) }],
+      execution,
+    }
   }
-  throw new ValidationError('body must contain `command` or non-empty `commands`')
+
+  if (!Array.isArray(body.operations) || body.operations.length === 0) {
+    throw new ValidationError('body must contain `command` or non-empty `operations`')
+  }
+  const operations = body.operations.map((item) => parseOperation(item, shared))
+  const named = new Set<string>()
+  for (const operation of operations) {
+    if (operation.op_id === undefined) continue
+    if (named.has(operation.op_id)) {
+      throw new ValidationError(
+        `\`op_id\` ${JSON.stringify(operation.op_id)} appears twice; it is how a ` +
+          'caller pairs an answer with the operation it answers',
+      )
+    }
+    named.add(operation.op_id)
+  }
+  return { operations, execution }
+}
+
+/**
+ * How the batch runs (§75), defaulted rather than required.
+ *
+ * The wire envelope makes a multi-operation request declare this; the
+ * model-facing shape does not, because the historical answer here was
+ * `independent` and a caller that never asked for anything else should not
+ * start getting envelope errors. What it must not do is *silently* differ from
+ * what was asked, which is why `atomic` is refused and an unrecognized
+ * `on_error` is refused rather than defaulted: the default it would fall into
+ * is `continue`, so a sequence meant to stop would commit the writes the caller
+ * asked to have skipped.
+ */
+function parseExecution(value: unknown): KipExecution {
+  if (value === undefined || value === null) {
+    return { mode: 'independent', onError: 'stop' }
+  }
+  const raw = object(value, '`execution` must be an object')
+  const mode = raw.mode ?? 'independent'
+  // Refused rather than run as a sequence that looks like one: this engine has
+  // no transaction spanning several operations, and a caller that asked for
+  // all-or-none must not be told it got it.
+  if (mode === 'atomic') {
+    throw new ValidationError(
+      'this service has no atomic batch: each operation commits on its own',
+    )
+  }
+  if (mode !== 'independent' && mode !== 'sequence') {
+    throw new ValidationError(
+      '`execution.mode` is one of independent, sequence or atomic',
+    )
+  }
+  const onError = raw.on_error ?? 'stop'
+  if (onError !== 'stop' && onError !== 'continue') {
+    throw new ValidationError('`execution.on_error` is one of stop or continue')
+  }
+  return { mode, onError }
+}
+
+function parseOperation(value: unknown, shared: JsonMap | undefined): KipOperation {
+  if (typeof value === 'string') {
+    const command = value.trim()
+    if (!command) throw new ValidationError('a KIP operation cannot be blank')
+    return { command, ...(shared ? { parameters: shared } : {}) }
+  }
+  const raw = object(value, 'every KIP operation must be a string or an object')
+  const command = requiredString(raw.command, 'operation.command', 256_000).trim()
+  if (!command) throw new ValidationError('a KIP operation cannot be blank')
+  // Carried through untouched and echoed on the answer. It is the caller's own
+  // name for this operation, which is what makes a batch whose answers are not
+  // all present — a stopped `sequence` answers `skipped` — readable without
+  // counting positions.
+  const opId = raw.op_id === undefined || raw.op_id === null
+    ? undefined
+    : requiredString(raw.op_id, 'operation.op_id', 128).trim()
+  if (opId === '') throw new ValidationError('`operation.op_id` cannot be blank')
+  // An operation's own bindings win over the shared ones, which is what lets a
+  // batch send one `:limit` for every command and override it in exactly one.
+  const own = raw.parameters === undefined
+    ? undefined
+    : jsonObject(raw.parameters, '`operation.parameters` must be an object')
+  const parameters = own === undefined && shared === undefined
+    ? undefined
+    : { ...(shared ?? {}), ...(own ?? {}) }
+  return {
+    ...(opId === undefined ? {} : { op_id: opId }),
+    command,
+    ...(parameters ? { parameters } : {}),
+  }
 }
 
 function parseMessage(value: unknown): Message {
@@ -182,24 +291,6 @@ function boundedInteger(
   return value as number
 }
 
-function boundedNumber(
-  value: unknown,
-  name: string,
-  minExclusive: number,
-  max: number,
-): number | undefined {
-  if (value === undefined) return undefined
-  if (
-    typeof value !== 'number' ||
-    !Number.isFinite(value) ||
-    value < minExclusive ||
-    value > max
-  ) {
-    throw new ValidationError(`maintenance parameter \`${name}\` must be in (0, ${max}]`)
-  }
-  return value
-}
-
 function requiredString(value: unknown, name: string, max: number): string {
   if (typeof value !== 'string') throw new ValidationError(`\`${name}\` must be a string`)
   if (value.length > max) throw new ValidationError(`\`${name}\` exceeds ${max} characters`)
@@ -240,6 +331,17 @@ function optionalTimestamp(value: unknown): string | undefined {
     throw new ValidationError('`timestamp` must be an ISO 8601 date-time')
   }
   return timestamp
+}
+
+/**
+ * The same check as {@link object}, for a value that reaches a KIP parameter.
+ *
+ * The cast is safe by construction rather than by inspection: the whole body
+ * came out of `JSON.parse`, so every value in it is already JSON — and walking
+ * it again to prove that to the compiler would reject nothing.
+ */
+function jsonObject(value: unknown, message: string): JsonMap {
+  return object(value, message) as JsonMap
 }
 
 function object(value: unknown, message: string): Record<string, unknown> {

@@ -1744,9 +1744,26 @@ impl Space {
         match scan {
             Ok(response) if kip::succeeded(&response) => {
                 let rows = kip::ok_result(&response).cloned().unwrap_or_default();
-                let mut watermark = after;
-                for (entity, seq, actor) in superseded_rows(&rows) {
-                    watermark = watermark.max(seq);
+                let parsed = superseded_rows(&rows);
+                let page_full = rows
+                    .as_array()
+                    .is_some_and(|rows| rows.len() >= SETTLEMENT_BATCH_LIMIT);
+                let seqs: Vec<u64> = parsed.iter().map(|(_, seq, _)| *seq).collect();
+                let watermark = match correction_watermark(&seqs, page_full, after) {
+                    CorrectionWatermark::Consumed(seq) => seq,
+                    CorrectionWatermark::Truncated(seq) => {
+                        log::error!(
+                            target: "brain",
+                            space_id = self.id,
+                            space_seq = seq;
+                            "one transaction superseded more Assertions than a settlement page \
+                             holds ({SETTLEMENT_BATCH_LIMIT}); the remainder at this coordinate \
+                             will not be recorded as corrections"
+                        );
+                        seq
+                    }
+                };
+                for (entity, _, actor) in parsed {
                     if !self.ledger.record_correction(&entity, now_ms).await? {
                         continue;
                     }
@@ -1794,6 +1811,28 @@ impl Space {
             }
         }
 
+        // 4) Retention expiry, full scope only. Both halves are the host
+        // deciding *when* forgetting happens; the engine only ever decided
+        // what may be forgotten. They are explicit calls rather than a
+        // background timer for the reason the engine declines to run one: a
+        // thread that removed memory on its own schedule would act while no
+        // request was in flight and no Principal was accountable for it.
+        //
+        // This is also what makes `SET RETENTION` mean something here. The
+        // maintenance policy's retention review tells the model to set expiry
+        // on what should stop being kept; until something swept on
+        // `expires_at`, that write was recorded and never honoured.
+        if scope == MaintenanceScope::Full {
+            report.retention = self.sweep_retention().await;
+            if let Some(error) = &report.retention.error {
+                log::error!(
+                    target: "brain",
+                    space_id = self.id;
+                    "retention expiry failed — lapsed records are NOT being archived: {error}"
+                );
+            }
+        }
+
         // Full cycles also refresh the per-predicate schema census (plan M8).
         if scope == MaintenanceScope::Full
             && let Err(err) = self.audit_schema(now_ms).await
@@ -1821,6 +1860,75 @@ impl Space {
             .set_extension_from("memory_settlement".to_string(), report.clone());
         self.db.flush_metadata(now_ms).await.ok();
         Ok(report)
+    }
+
+    /// Acts on what this Space's own retention said should stop being kept.
+    ///
+    /// Two passes over two different clocks, in this order:
+    ///
+    /// 1. **Lapsed claims.** An Assertion whose `valid_time.until` has passed
+    ///    is marked `expired` (§14.3) — a lifecycle state the Cognitive Memory
+    ///    Profile names and that nothing produced until the engine gained this
+    ///    call. A projection still admits it at a coordinate its window
+    ///    covered, so `FOR TIME` in the past does not lose every claim that has
+    ///    since lapsed.
+    /// 2. **Lapsed records.** An element whose `retention.expires_at` has
+    ///    passed is archived: out of ordinary recall, still readable, still
+    ///    referenced. Tombstone would withdraw it from use and purge would
+    ///    destroy it, and neither is what an expiry date asked for.
+    ///
+    /// Purge is deliberately not reachable from here. §19.3 makes erasure
+    /// high-impact with its own reference policy, and running it over a set the
+    /// caller never enumerated would be the largest irreversible action this
+    /// service can take, reached by a scheduled maintenance cycle. A forget
+    /// request enumerates its target and purges that.
+    ///
+    /// Errors are reported rather than propagated: a settlement that could not
+    /// sweep is a degraded cycle, not a failed one, and the surrounding passes
+    /// have already done work worth keeping.
+    async fn sweep_retention(&self) -> crate::types::RetentionSettlement {
+        use anda_cognitive_nexus::nexus::{DEFAULT_SPACE, RetentionAction};
+
+        let mut report = crate::types::RetentionSettlement::default();
+        let session = self.memory.nexus().system_session();
+
+        // The two passes are independent — different clocks, and different
+        // permissions (`expire_lapsed_assertions` needs the Assertion write,
+        // `sweep_expired` needs `manage_retention` at Space scope) — so one
+        // failing must not silently cancel the other. Letting it would leave a
+        // report of one error and four zeros, which reads as "nothing had
+        // lapsed" rather than "the record sweep never ran".
+        let mut errors: Vec<String> = Vec::new();
+
+        match session
+            .expire_lapsed_assertions(DEFAULT_SPACE, SETTLEMENT_BATCH_LIMIT)
+            .await
+        {
+            Ok(expired) => report.expired_assertions = expired.len() as u64,
+            Err(err) => errors.push(format!("expiring lapsed claims: {err}")),
+        }
+
+        match session
+            .sweep_expired(
+                DEFAULT_SPACE,
+                RetentionAction::Archive,
+                SETTLEMENT_BATCH_LIMIT,
+            )
+            .await
+        {
+            Ok(sweep) => {
+                report.archived = sweep.swept.len() as u64;
+                report.held = sweep.held as u64;
+                report.refused = sweep.refused as u64;
+                report.remaining = sweep.remaining as u64;
+            }
+            Err(err) => errors.push(format!("archiving lapsed records: {err}")),
+        }
+
+        if !errors.is_empty() {
+            report.error = Some(errors.join("; "));
+        }
+        report
     }
 
     /// Metamemory probe (plan M5): a cheap, LLM-free existence check.
@@ -1859,9 +1967,17 @@ impl Space {
         if !kip::succeeded(&response) {
             return Err(format!("probe search failed: {}", kip::error_message(&response)).into());
         }
-        let mut hits = kip::ok_result(&response)
-            .map(assess::citations_from_json)
-            .unwrap_or_default();
+        let result = kip::ok_result(&response);
+        // §66.6: a page is cut from a bounded candidate window that spans the
+        // database while the search is Space-scoped, so an empty page is not
+        // always an empty index. The engine says which, and this is the one
+        // place the answer can be acted on — see the cache write below.
+        let exhaustive = result
+            .and_then(|result| result.get("search_context"))
+            .and_then(|context| context.get("exhaustive"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        let mut hits = result.map(assess::citations_from_json).unwrap_or_default();
         // The engine's keyword fallback has no relevance threshold, so any
         // token can match the brain's own bookkeeping. A SleepTask is work the
         // maintenance cycle owes itself and a SelfModel is the brain's picture
@@ -1874,7 +1990,12 @@ impl Space {
             !matches!(hit.r#type.as_deref(), Some("SleepTask") | Some("SelfModel"))
                 && !hit.name.as_deref().unwrap_or_default().starts_with('$')
         });
-        if hits.is_empty() {
+        // A miss is cached only when the engine says the search saw everything
+        // it could have. A non-exhaustive page means the window filled with
+        // candidates this Space may not see, not that the Space holds nothing —
+        // and remembering "nothing here" for the cache's whole window would
+        // turn one truncated search into a stretch of confident wrong answers.
+        if hits.is_empty() && exhaustive {
             self.miss_cache.record_miss(query, now_ms).await?;
         }
         self.bump_metrics(|metrics| {
@@ -2436,14 +2557,19 @@ LIMIT {window}"#
         // The digest writes graph memory outside the formation hook, so it
         // must invalidate the negative-knowledge cache itself (plan M5): a
         // probe miss cached before this digest could now be answerable.
-        if rt.digested > 0
-            && let Err(err) = self.miss_cache.clear().await
-        {
-            log::warn!(
-                target: "brain",
-                space_id = self.id;
-                "negative-knowledge cache clear after wiki digest failed: {err:?}"
-            );
+        if rt.digested > 0 {
+            if let Err(err) = self.miss_cache.clear().await {
+                log::warn!(
+                    target: "brain",
+                    space_id = self.id;
+                    "negative-knowledge cache clear after wiki digest failed: {err:?}"
+                );
+            }
+            // The digest is what mints the `$self` Person, so this is the
+            // first moment a fresh Space has one to designate. Doing it only
+            // at open would leave the primer contradicting the prompts for the
+            // whole run that created it.
+            designate_self_concept(self.memory.nexus().as_ref()).await;
         }
         Ok(rt)
     }
@@ -3159,7 +3285,83 @@ async fn init_nexus_kip(nexus: &CognitiveNexus) -> Result<(), BoxError> {
     // host owns its Space's lock, so dropping an artifact from that list is
     // exactly how a package is retired.
     let vocabulary = crate::vocabulary::MemoryVocabulary::load(nexus).await?;
-    vocabulary.activate(nexus).await
+    vocabulary.activate(nexus).await?;
+    designate_self_concept(nexus).await;
+    Ok(())
+}
+
+/// Points the Space's §5.6 self identity at the `$self` Person, when there is
+/// one.
+///
+/// `DESCRIBE PRIMER` reports the authenticated Principal and the semantic
+/// `$self` as the two different things §64.2 requires it to distinguish, and
+/// the brain puts that primer in front of every agent — beside a Recall prompt
+/// that opens "you operate on behalf of `$self`, the owner of this
+/// MemorySpace". Leaving the designation unset would put a primer saying this
+/// Space has no `$self` next to a policy saying it has one, in the same
+/// context window.
+///
+/// So it is designated where it exists and left alone where it does not. A
+/// Space this brain has never digested a wiki into has no `$self` Concept —
+/// `init_nexus_kip` deliberately seeds no Person, because a Person is cognition
+/// and a Principal is authority — and inventing one here to fill the slot would
+/// be the host writing the Brain's own identity into the graph. A primer that
+/// says "none designated" is the honest answer for such a Space.
+///
+/// Protected Space configuration, so it goes through the Governance operation
+/// rather than KML: §5.6 forbids ordinary KML from creating or changing it,
+/// which is what stops cognitive content from deciding who the Brain is.
+///
+/// Best-effort and idempotent: an already-designated Space is left untouched,
+/// and a failure is logged rather than blocking the open. Nothing the brain
+/// writes depends on the designation — it is orientation, not authority.
+async fn designate_self_concept(nexus: &CognitiveNexus) {
+    use anda_cognitive_nexus::nexus::DEFAULT_SPACE;
+
+    // Read straight off the Space row. `DESCRIBE PRIMER` reports the same
+    // field, but it builds its element counts by enumerating every Concept,
+    // Proposition, Assertion, Evidence and Activity in the Space — a full scan
+    // per open, and per eval fork, to answer one boolean.
+    match nexus.store.get_space(DEFAULT_SPACE).await {
+        Ok(space) if !space.self_concept.is_empty() => return,
+        Ok(_) => {}
+        Err(err) => {
+            log::warn!(
+                target: "brain",
+                "reading the Space's $self designation failed: {err:?}"
+            );
+            return;
+        }
+    }
+
+    let found = execute_request(
+        nexus,
+        &kip::request_with(
+            r#"FIND(?c.id) WHERE { ?c CONCEPT {type: "Person", key: :key} } LIMIT 1"#,
+            kip::param("key", SELF_ACTOR_KEY),
+        ),
+    )
+    .await;
+    let Some(id) = kip::ok_result(&found)
+        .and_then(|result| result.as_array())
+        .and_then(|rows| rows.first())
+        .and_then(serde_json::Value::as_str)
+        .and_then(|id| id.parse::<anda_cognitive_nexus::id::ElementId>().ok())
+    else {
+        return;
+    };
+
+    if let Err(err) = nexus
+        .system_session()
+        .designate_self(DEFAULT_SPACE, Some(id))
+        .await
+    {
+        log::warn!(
+            target: "brain",
+            "designating the Space's $self identity failed; DESCRIBE PRIMER will \
+             report none: {err:?}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3228,6 +3430,14 @@ const DEFAULT_MEMORY_STRENGTH: f64 = 0.5;
 /// statement, which is what the retention block is for. Retention also lives on
 /// every element kind, so one class keeps pinning working for Concepts and
 /// Propositions alike.
+/// The `key` of the Concept this brain treats as its semantic self (§5.6).
+///
+/// A `key`, not a name: a key is immutable identity and a name is a mutable
+/// label. Nothing seeds this Concept — `init_nexus_kip` deliberately creates no
+/// Person — so a Space has one only where the wiki digest minted it as the
+/// actor its extracted claims are attributed to.
+pub(crate) const SELF_ACTOR_KEY: &str = "$self";
+
 const PINNED_RETENTION_CLASS: &str = "pinned";
 
 /// The `retention_class` an unpinned element returns to.
@@ -3273,6 +3483,43 @@ fn strip_recall_meta_from_history(history: &mut [anda_core::Message]) {
                 *text = stripped;
             }
         }
+    }
+}
+
+/// How far a correction page may advance the cursor, and whether anything was
+/// lost getting there.
+enum CorrectionWatermark {
+    /// Every coordinate up to this one was read whole.
+    Consumed(u64),
+    /// One coordinate held more rows than a page, so advancing past it drops
+    /// the remainder. Reported so an operator hears about it.
+    Truncated(u64),
+}
+
+/// Chooses the cursor a correction page has actually earned.
+///
+/// `_system.space_seq` is the *transaction* coordinate, so one commit stamps
+/// every Assertion it revised with the same number, and the scan's `>` filter
+/// cannot page inside one coordinate. A full page therefore hands its trailing
+/// coordinate back and stops one short of it — re-reading costs nothing,
+/// because `record_correction` dedupes, while advancing past a half-read
+/// coordinate drops the rest of it for good.
+///
+/// The one case with no good answer is a full page that is *entirely* one
+/// coordinate: standing still re-reads it forever and never reaches the
+/// corrections behind it, so the cursor advances and says so.
+fn correction_watermark(seqs: &[u64], page_full: bool, after: u64) -> CorrectionWatermark {
+    let Some(last) = seqs.last().copied() else {
+        return CorrectionWatermark::Consumed(after);
+    };
+    if !page_full {
+        // A short page means the scan reached the end of the backlog, so every
+        // coordinate in it was read whole.
+        return CorrectionWatermark::Consumed(last.max(after));
+    }
+    match seqs.iter().copied().filter(|seq| *seq < last).max() {
+        Some(seq) => CorrectionWatermark::Consumed(seq.max(after)),
+        None => CorrectionWatermark::Truncated(last),
     }
 }
 
@@ -3604,7 +3851,8 @@ async fn copy_space_objects(
 #[cfg(test)]
 mod tests {
     use super::{
-        AppState, Hooks, Space, SpaceEntry, init_conversation_collection, init_resource_collection,
+        AppState, CorrectionWatermark, Hooks, Space, SpaceEntry, correction_watermark,
+        init_conversation_collection, init_resource_collection,
     };
     use crate::{
         agents::{BrainHook, SELF_USER_ID, TimedMemoryReadonly},
@@ -4974,6 +5222,140 @@ SUPERSEDING :old"#,
         assert!(!repeat.negative_cached);
     }
 
+    /// The correction cursor advances only over coordinates it read whole.
+    #[test]
+    fn the_correction_cursor_never_steps_over_a_half_read_coordinate() {
+        let consumed = |w| match w {
+            CorrectionWatermark::Consumed(seq) => seq,
+            CorrectionWatermark::Truncated(seq) => panic!("unexpectedly truncated at {seq}"),
+        };
+
+        // A short page reached the end of the backlog: every coordinate in it
+        // was read whole, so the cursor takes the last one.
+        assert_eq!(consumed(correction_watermark(&[7, 9, 9], false, 3)), 9);
+        // Nothing to read leaves the cursor alone.
+        assert_eq!(consumed(correction_watermark(&[], false, 3)), 3);
+        assert_eq!(consumed(correction_watermark(&[], true, 3)), 3);
+
+        // A full page stops one coordinate short: `space_seq` is the
+        // transaction coordinate, so the trailing 9s may have more behind them
+        // and the next scan has to see them again.
+        assert_eq!(consumed(correction_watermark(&[7, 8, 9, 9], true, 3)), 8);
+        // Never backwards, whatever the page held.
+        assert_eq!(consumed(correction_watermark(&[7, 8, 9, 9], true, 8)), 8);
+
+        // A full page that is entirely one coordinate has no good answer:
+        // standing still would re-read it forever, so it advances and says so.
+        match correction_watermark(&[9, 9, 9], true, 3) {
+            CorrectionWatermark::Truncated(seq) => assert_eq!(seq, 9),
+            CorrectionWatermark::Consumed(seq) => {
+                panic!("a page of one coordinate cannot be fully consumed, got {seq}")
+            }
+        }
+    }
+
+    /// A full settlement honours what retention wrote, and keeps the record
+    /// clock apart from the claim clock.
+    #[tokio::test]
+    async fn settlement_expires_lapsed_records_and_claims() {
+        let app = test_app_state("retention_sweep");
+        let space = create_loaded_space(&app, "retention_sweep").await;
+        let now_ms = unix_ms();
+        let (concepts, _) = seed_people(&space).await;
+
+        // One record whose retention lapsed, one whose claim's window closed,
+        // and one held. `expires_at` and `valid_time.until` are two different
+        // clocks, and the sweep must not confuse them.
+        seed_kip(
+            &space,
+            kip::request_with(
+                r#"MUTATE {
+  SET RETENTION :lapsed { expires_at: "2020-01-01T00:00:00Z" }
+  SET RETENTION :held { expires_at: "2020-01-01T00:00:00Z", legal_hold: true }
+}"#,
+                serde_json::Map::from_iter([
+                    ("lapsed".to_string(), concepts[0].clone().into()),
+                    ("held".to_string(), concepts[1].clone().into()),
+                ]),
+            ),
+        )
+        .await;
+
+        // The claim is created with its window already closed rather than
+        // edited into one: an Assertion's epistemic payload is immutable, and
+        // a changed commitment is a new Assertion, not a rewrite.
+        seed_kip(
+            &space,
+            kip::request(
+                r#"MUTATE {
+  UPSERT CONCEPT ?alpha { MATCH {type: "Person", key: "alpha"} }
+  UPSERT CONCEPT ?gamma { MATCH {type: "Person", key: "gamma"} }
+  ASSERT ?lapsed (?alpha, "prefers", ?gamma) {
+    by: ?alpha, mode: "stated", confidence: 0.8,
+    valid: {from: "2019-01-01T00:00:00Z", until: "2020-01-01T00:00:00Z"}
+  }
+}"#,
+            ),
+        )
+        .await;
+
+        // Quick scope does not sweep: forgetting is a full-cycle decision.
+        let quick = space
+            .settle_memory_metabolism(MaintenanceScope::Quick, now_ms)
+            .await
+            .unwrap();
+        assert_eq!(quick.retention.archived, 0, "{quick:?}");
+        assert_eq!(quick.retention.expired_assertions, 0, "{quick:?}");
+
+        let report = space
+            .settle_memory_metabolism(MaintenanceScope::Full, now_ms)
+            .await
+            .unwrap();
+        assert_eq!(report.retention.error, None, "{report:?}");
+        // §163: the hold blocks the sweep that authorized it, and is counted
+        // rather than dropped — "archived 1" when 2 lapsed is not the truth.
+        assert_eq!(report.retention.archived, 1, "{report:?}");
+        assert_eq!(report.retention.held, 1, "{report:?}");
+        assert!(report.retention.expired_assertions >= 1, "{report:?}");
+
+        // Archived, not destroyed: the element is still there to be read.
+        let still_there = space
+            .execute_kip_readonly(kip::request_with(
+                "FIND(?c) WHERE { ?c CONCEPT {id: :id} } LIMIT 1",
+                kip::param("id", concepts[0].as_str()),
+            ))
+            .await
+            .unwrap();
+        assert!(kip::succeeded(&still_there), "{still_there:?}");
+
+        // §14.3: the lapsed claim is `expired` — not retracted and not
+        // superseded, because nobody withdrew it and nothing replaced it.
+        let status = space
+            .execute_kip_readonly(kip::request(
+                r#"FIND(?a.lifecycle.status) WHERE {
+  ?a ASSERTION {}
+  FILTER(?a.lifecycle.status == "expired")
+} LIMIT 5"#,
+            ))
+            .await
+            .unwrap();
+        assert!(
+            kip::ok_result(&status)
+                .and_then(|value| value.as_array())
+                .is_some_and(|rows| !rows.is_empty()),
+            "{status:?}"
+        );
+
+        // Idempotent: a second full cycle finds nothing left to act on.
+        let again = space
+            .settle_memory_metabolism(MaintenanceScope::Full, now_ms + 1)
+            .await
+            .unwrap();
+        assert_eq!(again.retention.archived, 0, "{again:?}");
+        assert_eq!(again.retention.expired_assertions, 0, "{again:?}");
+        assert_eq!(again.retention.held, 1, "{again:?}");
+    }
+
     #[tokio::test]
     async fn pin_exempts_from_metabolism_and_forget_removes_for_real() {
         let app = test_app_state("pin_forget");
@@ -6281,6 +6663,28 @@ SUPERSEDING :old"#,
             "{types:?}"
         );
 
+        // §5.6/§64.2: the digest minted the `$self` Person, so the Space now
+        // designates one — and the primer every agent reads reports it as a
+        // different thing from the authenticated Principal.
+        let primer = space
+            .execute_kip_readonly(kip::request("DESCRIBE PRIMER"))
+            .await
+            .unwrap();
+        let primer = kip::ok_result(&primer).unwrap();
+        let designated = primer
+            .pointer("/cognitive_identity/self_concept/id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            designated.starts_with("C-"),
+            "cognitive_identity: {}",
+            primer["cognitive_identity"]
+        );
+        assert!(
+            primer.pointer("/execution_context/principal/id").is_some(),
+            "the primer distinguishes the Principal from $self: {primer}"
+        );
+
         // The graph holds the concepts, and the claim about them carries its
         // provenance as Evidence rather than as metadata on the link.
         let acme = space
@@ -6296,7 +6700,7 @@ SUPERSEDING :old"#,
         // The claim cites its Evidence…
         let cited = space
             .execute_kip_readonly(kip::request(
-                r#"FIND(?a.evidence_refs) WHERE {
+                r#"FIND(?a.evidence) WHERE {
   ?s CONCEPT {type: "Organization", key: "Acme"}
   ?o CONCEPT {type: "Policy", key: "安全政策"}
   ?p (?s, "publishes", ?o)
@@ -6306,10 +6710,10 @@ SUPERSEDING :old"#,
             .await
             .unwrap();
         let cited_text = kip::ok_result(&cited).unwrap().to_string();
-        assert!(
-            cited_text.contains("evidence_id"),
-            "citations: {cited_text}"
-        );
+        // §13.2: a citation is `{"id": "E-…", "role": "support"}` — the role is
+        // what makes it a citation rather than a bare pointer, so assert on it.
+        assert!(cited_text.contains(r#""role""#), "citations: {cited_text}");
+        assert!(cited_text.contains("\"E-"), "citations: {cited_text}");
 
         // …and the Evidence carries the passage it was read from.
         let evidence = space

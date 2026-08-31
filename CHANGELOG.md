@@ -123,6 +123,181 @@ coverage all restart from empty. The memories themselves are unaffected.
   — three hand-maintained copies of a protocol drift, and the copy that drifts
   silently is the one a model then writes against.
 
+### Changed — anda-brain-worker
+
+The Cloudflare Worker speaks KIP 2.0 too, on `@ldclabs/kip-do` 0.13 (consumed
+from a local `link:` until it is published, mirroring `[patch.crates-io]` on the
+Rust side). It is a second, independent engine, so the port is not a translation
+of the Rust one:
+
+- **Operations, not command strings.** `executeKip(command, params)` and
+  `executeKipBatch([{command, parameters}])` replace the 1.x string API, and
+  `execute_kip` / `execute_kip_readonly` now accept `{command}` or
+  `{operations}` exactly as the Rust service does. An `execution.mode: "atomic"`
+  request is refused rather than run as a sequence that looks like one — this
+  engine has no transaction spanning several operations.
+- **The gates are on what a command parses to, per clause.** Formation may write
+  cognition (`CREATE` / `UPSERT` / `ENSURE` / `ASSERT`) and correct it
+  (`SUPERSEDE` / `RETRACT` / `CORRECT`); `UPDATE`, `ARCHIVE`, `TOMBSTONE`,
+  `PURGE` and `MERGE` are refused there. Maintenance has all of them except
+  `PURGE`. The `LIMIT 20` bound moved from `UPDATE` by name to *any clause that
+  selects with `WHERE`* — `ARCHIVE ?e WHERE { ?e CONCEPT {} }` was the same
+  hazard wearing a different verb.
+- **New vocabulary enters through the host.** Each Durable Object publishes one
+  `kip://anda-brain/memory` Schema Package beside the Cognitive Memory Profile,
+  and a plan proposes symbols in its `types` / `predicates` fields rather than
+  declaring them in KML. The object re-activates exactly that set on
+  construction: returning only the Profile would narrow the environment on every
+  eviction, and every local name the Space had published would stop resolving.
+- **`SEARCH` is back, and is now real full-text search.** `kip-do` 0.13 shipped
+  with no search index at all; it builds one now (see the `anda-db` changelog),
+  so grounding for `recall`, `probe` and the citation list is a bounded
+  `SEARCH CONCEPT` again, run before the model is asked anything — an answer
+  should not depend on a planner having thought to look. A hit is an envelope,
+  `{id, kind, score, element}`, and the type and name are read off `element`:
+  reading them off the wrapper is the bug that made every citation on the Rust
+  side come back with no type and no name. Semantic and hybrid modes,
+  `AS OF SEQ`, and `SEARCH ASSERTION` / `ACTIVITY` are refused by that engine,
+  and the three mode contracts say so. The `TOKENIZER` service binding is gone.
+- **Citations from a model-planned read are bare element ids.** KIP 2.0 shapes a
+  KQL answer by its projection and never as objects, so nothing can tell which
+  column of a planned query holds a name — an id alone is a usable citation, and
+  a guessed type would not be.
+- **The prompts are the reference Brain policies**, vendored into
+  `anda-brain-worker/assets/` with a Worker deployment contract appended, and
+  inlined by `pnpm run codegen:prompts`. `kip-do` ships neither the syntax card
+  nor the Profile, so unlike the Rust service the Worker keeps copies;
+  `pnpm run sync:assets` refreshes the two verbatim ones. A mode prompt is now
+  about 20k tokens, so `AI_MODEL` defaults to a long-context model.
+- **`$system` is gone.** Authority is Governance and is held by a Principal;
+  writing it into cognitive content as a Person made "the system says so" look
+  like a claim somebody made. `$self` remains, keyed rather than named.
+- No data migration: `kip-do` never reached production, so no Durable Object
+  holds 1.x data and the Worker starts clean.
+
+### Changed — re-synced to KIP 2.0 `40e655f`
+
+`anda-db` moved the two engines onto the Specification below the syntax and
+then onto upstream `40e655f`. Four of those changes reach this service, and the
+first two were quietly wrong here rather than loudly broken.
+
+- **The Core elements use the field names the Specification gives them.**
+  `Assertion.evidence_refs` is `Assertion.evidence`, and a citation is
+  `{"id": "E-1", "role": "support"}` rather than `{"evidence_id": …}`. The
+  correction miner read the old path, so `fetch_source_excerpts` resolved no
+  citations on any correction and every mined eval case reached the miner's
+  model with `(none available)` where the conversation that produced the
+  correction should have been — the one piece of context that says *why* the
+  memory needed revising. The Recall policy's own worked example read the old
+  path too, which is worse: a prompt teaching a model a query shape the engine
+  no longer answers.
+- **A probe miss is cached only when the search was exhaustive.** §66.6 cuts a
+  `SEARCH` page from a bounded candidate window that spans the database while
+  the search is Space-scoped, so a narrow Space's page can fill with hits it
+  may not see. The engine now reports `search_context.exhaustive`, and the
+  negative-knowledge cache reads it: an empty page the engine will not vouch
+  for is answered as a miss and not remembered as one. Caching it turned a
+  single truncated search into a window of confident wrong answers.
+- **Retention expiry is now honoured** (full maintenance cycles). The engine
+  gained `sweep_expired` and `expire_lapsed_assertions`; the settlement pass
+  calls both, so an Assertion whose `valid_time.until` has passed becomes
+  `expired` (§14.3) and an element whose `retention.expires_at` has passed is
+  archived. Both were writable before and read by nothing — a space could set a
+  90-day expiry and be kept forever with nothing saying it would not be
+  honoured. Archived rather than tombstoned or purged: an expiry date asks for
+  a record to leave ordinary recall, not to stop having existed. A legal hold
+  stops the sweep that authorized it (§163), and `MemorySettlementReport`
+  carries what was held, refused and left over — "archived 4" when 9 lapsed is
+  the shape of a retention failure nobody notices. Purge stays unreachable from
+  here: erasure over a set nobody enumerated is the largest irreversible action
+  this service can take, and a scheduled cycle is not where it belongs. The
+  Worker's engine has no `SET RETENTION` at all, so it has neither half, and
+  its Maintenance contract says so.
+- **A Space designates its `$self`** (§5.6) where it has one. `DESCRIBE PRIMER`
+  now reports the authenticated Principal and the semantic `$self` as the two
+  different things §64.2 requires it to distinguish — and this service puts
+  that primer in front of every agent, beside a Recall policy that opens "you
+  operate on behalf of `$self`". Leaving it undesignated would have put a
+  primer saying this Space has no `$self` next to a policy saying it has one,
+  in one context window. It is designated where the wiki digest minted the
+  `$self` Person and left alone where it did not: a Space with no such Concept
+  gets an honest "none designated", because inventing one to fill the slot
+  would be the host writing the Brain's own identity into the graph.
+- **`PURGE PAYLOAD` is refused in a Worker maintenance plan**, on the same
+  grounds as `PURGE` and not lesser ones. §60.6 destroys an Evidence record's
+  bytes while its record, digest and citations survive — a narrower blast
+  radius, not a reversible one, and it leaves an Assertion pointing at an
+  observation whose content is gone.
+
+### Changed — re-synced to KIP 2.0 `12cfd4d` (`anda-db` `0f92200`…`86777c0`)
+
+Upstream added the consequence channel and then spent two commits holding both
+engines to declarations they had been carrying and not reading. The Rust
+service inherits all of the second half without a line changing — it goes
+through `anda_cognitive_nexus`, and every write it builds already conformed —
+so what follows is the vocabulary this service teaches its models, and the
+Worker's own seam onto `@ldclabs/kip-do`.
+
+- **A Skill is now graded by what happened, not by who vouched for it.** The
+  Cognitive Memory Profile gained `OutcomeRecord` — a Facet on Outcome Evidence
+  (`evidence_class: "outcome"`) carrying `task_family` and `outcome_status`,
+  required and immutable — and rebuilt `Skill` around it: `task_family` is
+  required, the lifecycle is `proposed | trialed | adopted | revoked`, and every
+  transition is a deterministic `lifecycle_verdict` Activity over graded
+  outcomes rather than an author's assertion. `SkillUtility` traded
+  `last_validated_at` for `graded_count` + `last_verdict_at`. The separation
+  that makes it worth anything is the one this service has to teach: an actor's
+  report about its own result is `agent_statement`, re-typed instrument output
+  is `derived_result`, and neither is Outcome Evidence. All five `Brain*.md`
+  carry the new policy — Formation forms it, Maintenance schedules the verdict,
+  Recall ranks `adopted` above `trialed` and shows `revoked` only as a warning.
+- **A development Space that installed the previous `@2.0.0` Profile must be
+  recreated.** The Profile's content changed and its version did not — KIP 2.0
+  is unreleased, and a draft that moved a version per revision would spend the
+  version space it exists to protect. `install_package` refuses a same-version
+  replacement (`DigestMismatch`), which is the §20.11 defence working rather
+  than a bug: every element already bound to that reference would otherwise
+  change meaning with nothing recording it. Spaces created from this build are
+  unaffected.
+- **The Worker reads a §81 operation result.** `receipt` is gone from
+  `KipResult`; the full transaction outcome — handles, per-element changes, the
+  governance decision — is under `extensions["kip-do/outcome"]`, because the
+  normative schema closes `OperationResult` and puts one `receipt` on the
+  envelope. Every result now carries a required `status`, and the service
+  decides on it rather than on the absence of an error: `no_effect` has neither
+  an error nor a commit, and reading "no error" as "written" would count a
+  mutation that never happened.
+- **A change record spells its Core kind lowercase**, as `?c.kind` always did.
+  The Worker's `countWrites` compared `"Concept"`, so every formation answer
+  reported `{concepts: 0, propositions: 0, assertions: 0}` while writing the
+  graph correctly — a wrong count with no failure anywhere to notice it. The
+  Rust settlement already read lowercase.
+- **`execution` and `op_id` reach the engine.** `@ldclabs/kip-do` gained §75
+  sequencing, and the Worker was dropping both halves: `AndaBrain` overrode
+  `executeKipBatch` without the `execution` argument the base class passes down,
+  so a batch asking for `sequence` + `on_error: stop` ran as `independent` and
+  committed the writes it asked to have skipped — while the envelope reported
+  the mode it had requested. `POST /v1/{space}/execute_kip` now accepts
+  `execution` (`independent` | `sequence`, with `on_error`; `atomic` stays
+  refused) and per-operation `op_id`, echoed on the answer so a batch whose
+  operations did not all run is readable without counting positions.
+
+### Changed — the reference half of a mode prompt is generated
+
+`scripts/sync-kip-assets.mjs` re-copies the KIP 2.0 reference policy into all
+five `Brain*.md` (three in `anda_brain/assets/`, three in
+`anda-brain-worker/assets/`), splitting each on its `# A.` heading so the
+deployment contract below it survives untouched, and re-copies the Worker's two
+verbatim assets. `pnpm --filter @ldclabs/anda-brain-worker run sync:assets` is
+the same script.
+
+The note it replaces said to diff the policies by hand when upstream changed
+them. Between `40e655f` landing and this script, `Watch`, `WorkingState`,
+`DerivationState`, `MnemonicState.utility`, `LIST DEPENDENTS`, `PURGE PAYLOAD`
+and the `action_gate` Activity class were in the reference policies and in none
+of the five copies — which is the failure mode of hand-maintained copies, and
+the reason the syntax card was taken out of the prompts in the first place.
+
 ### Fixed
 
 - **`IS_NULL` over a dot path now works** (`anda_cognitive_nexus`). Reading an

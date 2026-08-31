@@ -1,4 +1,4 @@
-import type { KipResponse } from '@ldclabs/kip-do'
+import type { KipResult } from '@ldclabs/kip-do'
 import {
   DEFAULT_AI_MODEL,
   addUsage,
@@ -7,14 +7,17 @@ import {
   createRecallPlan,
 } from './ai.js'
 import {
-  assertFormationCommands,
-  assertMaintenanceCommands,
+  MAX_KIP_OPERATIONS,
+  assertFormationOperations,
+  assertMaintenanceOperations,
+  citationsFromLookup,
   collectCitations,
-  conceptSearchCommand,
+  conceptLookupCommand,
   countChanges,
   countWrites,
   firstKipError,
-  keepReadonlyCommands,
+  keepReadonlyOperations,
+  type KipOperation,
 } from './kip.js'
 import {
   formationMessages,
@@ -24,6 +27,7 @@ import {
 } from './prompts.js'
 import type {
   BrainRpc,
+  DeclaredVocabulary,
   Env,
   FormationInput,
   MaintenanceInput,
@@ -32,6 +36,31 @@ import type {
 } from './types.js'
 
 const EMPTY_USAGE: Usage = { input_tokens: 0, output_tokens: 0 }
+
+/**
+ * What Maintenance is shown before it plans.
+ *
+ * Three bounded reads rather than a free look: the model gets one completion,
+ * so what it does not see here it cannot go and fetch. Recent Events are the
+ * consolidation backlog, open SleepTasks are the work it left itself, and the
+ * least-available memories are where metabolism has something to say.
+ */
+const MAINTENANCE_SNAPSHOT: KipOperation[] = [
+  {
+    command:
+      'FIND(?e.id, ?e.name, ?e.updated_at) WHERE { ?e CONCEPT {type: "Event"} } ' +
+      'ORDER BY ?e.updated_at DESC LIMIT 20',
+  },
+  {
+    command:
+      'FIND(?t.id, ?t.name, ?t.attributes) WHERE { ?t CONCEPT {type: "SleepTask"} } LIMIT 20',
+  },
+  {
+    command:
+      'FIND(?c.id, ?c.name, ?c.schema_ref, ?c.facets) WHERE { ?c CONCEPT {} } ' +
+      'ORDER BY ?c.updated_at ASC LIMIT 20',
+  },
+]
 
 export class OperationError extends Error {
   constructor(
@@ -58,8 +87,13 @@ export async function formMemory(
     formationMessages(primer, input, timestamp),
   )
 
+  // Gate before publishing. Parsing resolves no symbols, so the gate does not
+  // need the vocabulary — and declaring first would let a plan the gate is
+  // about to refuse still mint a schema version and spend part of the Space's
+  // symbol cap on words nothing ever wrote.
+  const operations = plan.value.commands.map((command) => ({ command }))
   try {
-    assertFormationCommands(plan.value.commands)
+    if (operations.length > 0) assertFormationOperations(operations)
   } catch (error) {
     throw new OperationError(
       error instanceof Error ? error.message : 'invalid formation plan',
@@ -67,15 +101,19 @@ export async function formMemory(
     )
   }
 
-  const responses = plan.value.commands.length
-    ? await brain.executeFormationPlan(plan.value.commands)
-    : []
-  throwOnKipError(responses, 'formation KIP failed')
+  // Then schema, before any command runs: KML cannot declare a symbol, so a
+  // command naming one the Space does not resolve fails with
+  // `SchemaSymbolNotFound` and takes the whole statement with it.
+  const vocabulary = await declareVocabulary(brain, plan.value)
+
+  const results = operations.length ? await brain.executeFormationPlan(operations) : []
+  throwOnKipError(results, 'formation KIP failed')
 
   return {
     content: plan.value.summary || 'No durable memory was extracted.',
-    stored: countWrites(responses),
-    commands: plan.value.commands.length,
+    stored: countWrites(results),
+    commands: operations.length,
+    ...(vocabulary ? { vocabulary } : {}),
     usage: plan.usage,
   }
 }
@@ -88,32 +126,42 @@ export async function recallMemory(
   const model = env.AI_MODEL || DEFAULT_AI_MODEL
   const primer = resultOrThrow(await brain.describePrimer(), 'recall primer failed')
   let usage = { ...EMPTY_USAGE }
-  let plannedCommands: string[] = []
+  let planned: KipOperation[] = []
   let plannerWarning: string | undefined
 
   try {
-    const plan = await createRecallPlan(
-      env.AI,
-      model,
-      recallPlanMessages(primer, input),
-    )
+    const plan = await createRecallPlan(env.AI, model, recallPlanMessages(primer, input))
     usage = addUsage(usage, plan.usage)
-    plannedCommands = keepReadonlyCommands(plan.value.commands)
+    planned = keepReadonlyOperations(plan.value.commands.map((command) => ({ command })))
   } catch (error) {
     plannerWarning = error instanceof Error ? error.message : String(error)
   }
 
-  const fallback = conceptSearchCommand(input.query, 8)
-  const commands = [...new Set([fallback, ...plannedCommands])].slice(0, 4)
-  const evidence = await brain.executeKipReadonlyBatch(commands)
-  throwOnKipError(evidence, 'recall KIP failed')
+  // The grounding lookup runs first and always. It is deterministic, so its
+  // failure is the service's failure — a planned read failing is the model's,
+  // and answering "nothing found" because one speculative query was malformed
+  // would report a miss the memory never had.
+  const lookup = conceptLookupCommand(input.query, 8)
+  const operations = [lookup, ...planned].slice(0, MAX_KIP_OPERATIONS)
+  const results = await brain.executeKipReadonlyBatch(operations)
+  const grounding = results[0]
+  if (grounding === undefined || grounding.status === 'failed') {
+    throw new OperationError('recall KIP failed', 422, grounding?.error)
+  }
+
+  const planFailures = results
+    .slice(1)
+    .flatMap((result) => (result.status === 'failed' ? [result.error?.code ?? 'Unknown'] : []))
+  const memories = collectCitations(
+    results.slice(1),
+    citationsFromLookup(grounding?.result),
+  )
   const answer = await createRecallAnswer(
     env.AI,
     model,
-    recallAnswerMessages(input, evidence),
+    recallAnswerMessages(input, results),
   )
   usage = addUsage(usage, answer.usage)
-  const memories = collectCitations(evidence)
 
   return {
     content: answer.value.answer,
@@ -123,8 +171,9 @@ export async function recallMemory(
     memories,
     usage,
     diagnostics: {
-      kip_commands: commands.length,
+      kip_commands: operations.length,
       ...(plannerWarning ? { planner_warning: plannerWarning } : {}),
+      ...(planFailures.length ? { planned_read_errors: planFailures } : {}),
     },
   }
 }
@@ -135,11 +184,7 @@ export async function maintainMemory(
   input: MaintenanceInput,
 ): Promise<unknown> {
   const timestamp = input.timestamp ?? new Date().toISOString()
-  const snapshotCommands = [
-    'FIND(?event) WHERE { ?event {type: "Event"} } ORDER BY ?event.metadata._updated_at DESC LIMIT 20',
-    'FIND(?task) WHERE { ?task {type: "SleepTask"} } LIMIT 20',
-  ]
-  const snapshot = await brain.executeKipReadonlyBatch(snapshotCommands)
+  const snapshot = await brain.executeKipReadonlyBatch(MAINTENANCE_SNAPSHOT)
   throwOnKipError(snapshot, 'maintenance snapshot failed')
   const model = env.AI_MODEL || DEFAULT_AI_MODEL
   const plan = await createMutationPlan(
@@ -147,34 +192,53 @@ export async function maintainMemory(
     model,
     maintenanceMessages(input, snapshot, timestamp),
   )
+
+  const operations = plan.value.commands.map((command) => ({ command }))
   try {
-    assertMaintenanceCommands(plan.value.commands)
+    if (operations.length > 0) assertMaintenanceOperations(operations)
   } catch (error) {
     throw new OperationError(
       error instanceof Error ? error.message : 'invalid maintenance plan',
       422,
     )
   }
-  const responses = plan.value.commands.length
-    ? await brain.executeMaintenancePlan(plan.value.commands)
-    : []
-  throwOnKipError(responses, 'maintenance KIP failed')
+
+  const vocabulary = await declareVocabulary(brain, plan.value)
+
+  const results = operations.length ? await brain.executeMaintenancePlan(operations) : []
+  throwOnKipError(results, 'maintenance KIP failed')
 
   return {
     content: plan.value.summary || 'No maintenance changes were needed.',
     scope: input.scope ?? 'daydream',
-    changed: countChanges(responses),
-    commands: plan.value.commands.length,
+    changed: countChanges(results),
+    commands: operations.length,
+    ...(vocabulary ? { vocabulary } : {}),
     usage: plan.usage,
   }
 }
 
-function resultOrThrow(response: KipResponse, message: string): unknown {
-  if ('result' in response) return response.result
-  throw new OperationError(message, 422, response.error)
+/**
+ * Publishes the symbols a plan asked for, when it asked for any.
+ *
+ * A refusal is not fatal: the plan's other commands are still writable, and the
+ * one that needed the refused symbol will fail on its own with an error naming
+ * the symbol — which is a better message than a blanket rejection here.
+ */
+async function declareVocabulary(
+  brain: BrainRpc,
+  plan: { types: string[]; predicates: string[] },
+): Promise<DeclaredVocabulary | undefined> {
+  if (plan.types.length === 0 && plan.predicates.length === 0) return undefined
+  return brain.declareSymbols(plan.types, plan.predicates)
 }
 
-function throwOnKipError(responses: KipResponse[], message: string): void {
-  const failure = firstKipError(responses)
-  if (failure) throw new OperationError(message, 422, failure.error)
+function resultOrThrow(result: KipResult, message: string): unknown {
+  if (result.status === 'failed') throw new OperationError(message, 422, result.error)
+  return result.result
+}
+
+function throwOnKipError(results: readonly KipResult[], message: string): void {
+  const failure = firstKipError(results)
+  if (failure) throw new OperationError(message, 422, failure)
 }

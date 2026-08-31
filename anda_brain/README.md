@@ -95,7 +95,7 @@ Consolidates, prunes, and optimizes the knowledge graph during scheduled or on-d
 
 **Key behaviors:**
 - Single-execution guard — only one maintenance cycle can run at a time per space.
-- Non-destructive principle — archives before deleting, decays confidence rather than removing.
+- Non-destructive principle — archives before deleting, and weakens mnemonic accessibility rather than removing (never epistemic confidence).
 - Async execution — returns immediately with conversation ID; actual processing in background.
 
 **Memory policy:** each space carries an evolvable `MemoryPolicy` (stored in
@@ -110,16 +110,33 @@ changes nothing. The policy is the evolution genome of
 **Usage-modulated metabolism (selection pressure):** every completed recall
 records which graph entities it actually surfaced into an off-graph usage
 ledger (`memory_usage` collection). Before each maintenance cycle the runtime
-runs a deterministic settlement: recalled propositions get their
-`last_recalled_at` / `recall_count` flushed onto graph metadata; full cycles
-then run the bulk confidence decay in code (usage-modulated — recently
-recalled, pinned, and superseded links are exempt; weekly rate-limited via
-`decay_applied_at`); newly superseded links are recorded as corrections and
-aggregated per source into the `source_reliability` extension. The LLM
-maintenance agent no longer runs bulk decay itself — "use it or lose it" is
-enforced by code, and reads stay reads (recall never mutates the graph it
-queries). The last settlement report is stored in the `memory_settlement`
-extension.
+runs a deterministic settlement: recalled Concepts get their
+`MnemonicState` reinforced and `last_metabolized_at` stamped; full cycles then
+run the bulk metabolism in code (usage-modulated — recently recalled, pinned,
+and superseded elements are exempt; weekly rate-limited via
+`decay_applied_at`); newly superseded Assertions are recorded as corrections
+and aggregated per asserting actor into the `source_reliability` extension.
+What decays is `MnemonicState.memory_strength` — how *available* a memory
+should be — and never an Assertion's confidence: KIP 2.0 forbids letting time
+erode a stance, because a fact nobody has asked about in a month is no less
+credible. The LLM maintenance agent no longer runs bulk metabolism itself —
+"use it or lose it" is enforced by code, and reads stay reads (recall never
+mutates the graph it queries). The last settlement report is stored in the
+`memory_settlement` extension.
+
+**Retention expiry:** a full settlement also acts on the two clocks that say
+when something should stop being kept, which are not the same clock. An
+Assertion whose `valid_time.until` has passed is marked `expired` (§14.3) —
+not retracted and not superseded, because nobody withdrew it and nothing
+replaced it. An element whose `retention.expires_at` has passed is archived:
+out of ordinary recall, still readable, still referenced. Purge is
+deliberately unreachable from here — erasure over a set nobody enumerated is
+the largest irreversible action this service can take, and a scheduled cycle
+is not where that decision belongs; `POST /memory/forget` enumerates its
+target and purges that. A legal hold stops the sweep that authorized it, and
+the `retention` block of the settlement report says how many were held,
+refused and left for the next cycle rather than reporting only what it
+managed to archive.
 
 > **Known scale ceiling:** the bulk decay, correction discovery, and
 > self-test sampling passes use unconstrained full-scan KQL, and the engine
