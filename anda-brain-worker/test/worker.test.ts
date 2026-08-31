@@ -805,28 +805,65 @@ describe('Anda Brain Worker', () => {
     expect(prompt.snapshot.assessment.predicates.prefers).toBe(1)
   })
 
-  it('refuses a clause the engine parses but has not built', async () => {
-    // `SET RETENTION` used to pass the gate and fail at execution. A batch is
-    // not a transaction, so the commands before it had already committed while
-    // the request as a whole answered 422 — the caller could not tell what had
-    // landed. Now the whole plan is refused before anything runs.
+  it('lets maintenance set retention, which is what §20 review is for', async () => {
+    // `SET RETENTION` used to be refused at the gate because the engine had not
+    // built it. It has, so §20 Retention Review and §25 Retention Expiry have a
+    // mechanism here now: a retention class and an `expires_at` are storage
+    // policy, and the removal they schedule is a host-run sweep.
     const runtime = testEnv(
       new FakeAi([
         {
           types: [],
           predicates: [],
           commands: [
-            'MUTATE { CREATE CONCEPT ?c { TYPE "Event" NAME "Kept" } }',
-            'SET RETENTION ?e { retention_class: "standard" } WHERE { ?e CONCEPT {} } LIMIT 5',
+            'MUTATE { CREATE CONCEPT ?c { TYPE "Event" NAME "Kept" SET ATTRIBUTES {summary: "an event worth keeping"} } }',
+            'SET RETENTION ?e { retention_class: "standard", expires_at: "2030-01-01T00:00:00Z" } WHERE { ?e CONCEPT {} } LIMIT 5',
           ],
-          summary: 'Expire some events.',
+          summary: 'Scheduled some events to expire.',
         },
       ]),
     )
-    const space = uniqueSpace('maintenance-unbuilt')
+    const space = uniqueSpace('maintenance-retention')
+    const response = await post(runtime, space, 'maintenance', { scope: 'full' })
+    expect(response.status).toBe(200)
+
+    // And it landed: the retention block is on the element, not merely accepted.
+    const found = await post(runtime, space, 'execute_kip', {
+      operations: [
+        { command: 'FIND(?c.retention.retention_class) WHERE { ?c CONCEPT {type: "Event"} }' },
+      ],
+    })
+    expect(await found.json()).toMatchObject({
+      result: [{ result: ['standard'] }],
+    })
+  })
+
+  it('refuses a legal hold in a maintenance plan, in either direction', async () => {
+    // §19.1 names this attack by its shape: content that could place a hold
+    // could make itself undeletable, and content that could clear one could
+    // unblock an erasure somebody placed a hold to stop. Neither is a decision
+    // to reach from a graph snapshot.
+    //
+    // Refused at the gate, so the whole plan fails before anything runs — a
+    // batch is not a transaction, and half-committing before failing would
+    // leave the caller unable to tell what landed.
+    const runtime = testEnv(
+      new FakeAi([
+        {
+          types: [],
+          predicates: [],
+          commands: [
+            'MUTATE { CREATE CONCEPT ?c { TYPE "Event" NAME "Kept" SET ATTRIBUTES {summary: "an event worth keeping"} } }',
+            'SET RETENTION ?e { legal_hold: true } WHERE { ?e CONCEPT {} } LIMIT 5',
+          ],
+          summary: 'Hold some events.',
+        },
+      ]),
+    )
+    const space = uniqueSpace('maintenance-legal-hold')
     const response = await post(runtime, space, 'maintenance', { scope: 'full' })
     expect(response.status).toBe(422)
-    expect(await response.text()).toContain('SET RETENTION is not implemented')
+    expect(await response.text()).toContain('cannot place or lift a legal hold')
 
     // Nothing from the plan committed, including the legal first command.
     const info = await get(runtime, space, 'info')

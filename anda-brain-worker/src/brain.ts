@@ -257,19 +257,12 @@ export class AndaBrain extends KipDatabase<Env> {
     const listed = super.executeKip('LIST PREDICATES LIMIT 100')
     if (listed.status === 'failed' || !Array.isArray(listed.result)) return census
     for (const entry of listed.result) {
-      // The two engines answer `LIST PREDICATES` differently: this one returns
-      // bare schema refs, `anda_kip` returns objects carrying `local_name`.
-      // Both are read here so the census does not silently come back empty on
-      // whichever one it was not written against.
-      const reference =
-        typeof entry === 'string'
-          ? entry
-          : typeof entry === 'object' && entry !== null && 'local_name' in entry
-            ? (entry as { local_name?: unknown }).local_name
-            : undefined
-      if (typeof reference !== 'string') continue
-      const name = reference.slice(reference.lastIndexOf('/') + 1)
-      if (name === '') continue
+      // A `LIST` row, the same one both engines answer with:
+      // `{ref, local_name, package_ref, status}`. `local_name` is what a
+      // command may write, which is what the census counts by.
+      if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue
+      const name = (entry as { local_name?: unknown }).local_name
+      if (typeof name !== 'string' || name === '') continue
       const operation = settle.predicateCensusCommand(name)
       const counted = super.executeKip(operation.command, operation.parameters)
       if (counted.status === 'failed') continue

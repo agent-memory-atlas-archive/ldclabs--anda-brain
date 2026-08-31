@@ -185,35 +185,41 @@ export function assertMaintenanceOperations(operations: readonly KipOperation[])
       if ('Purge' in clause || 'PurgePayload' in clause) {
         throw new Error('maintenance plans cannot issue KIP PURGE commands')
       }
-      assertBuilt(clause)
+      assertNoLegalHold(clause)
       assertBoundedSelection(clause, operation.parameters, MAX_MAINTENANCE_SELECTION)
     }
   }
 }
 
 /**
- * Clauses the engine parses and then refuses to run.
+ * Maintenance may set retention, but never place or lift a legal hold.
  *
- * `SET RETENTION` is legal KIP that `@ldclabs/kip-do` has not implemented, so
- * it sailed through this gate and failed at execution — and because a batch is
- * not a transaction, the commands *before* it had already committed while the
- * request as a whole answered 422. Refusing at the gate makes the whole plan
- * fail before anything runs, which is the outcome a caller can act on.
+ * `SET RETENTION` itself is exactly what §20 Retention Review and §25 Retention
+ * Expiry are for: a retention class and an `expires_at` are storage policy, and
+ * the removal they schedule is a host-run sweep that a Principal is accountable
+ * for. A model may make that judgement.
  *
- * Kept as an explicit list rather than a try/catch around execution: a plan
- * rejected for naming an unbuilt capability should say so in the same breath
- * as the other gates, and the deployment contract (§A.5) already tells the
- * model this one is refused.
+ * `legal_hold` is the member it may not touch, in either direction. A hold
+ * blocks erasure for everyone, so content that could set one could make itself
+ * undeletable — §19.1 names that attack by its shape — and content that could
+ * clear one could unblock an erasure somebody placed a hold to stop. Neither is
+ * a decision to reach from a graph snapshot; both go through the administrative
+ * `execute_kip` endpoint, where a human is the one asking.
+ *
+ * Checked on the member name, which the grammar fixes, so a parameterized value
+ * cannot smuggle it past: `{legal_hold: :whatever}` is refused on the name
+ * alone, before anything is evaluated.
  */
-const UNBUILT_CLAUSES = new Set(['SetRetention'])
-
-function assertBuilt(clause: MutationClause): void {
-  const name = clauseName(clause)
-  if (UNBUILT_CLAUSES.has(name)) {
-    throw new Error(
-      `${spelling(name)} is not implemented by this engine; say what should ` +
-        'expire in the summary rather than encoding a decision nothing enforces',
-    )
+function assertNoLegalHold(clause: MutationClause): void {
+  if (!('SetRetention' in clause)) return
+  for (const [name] of clause.SetRetention.values) {
+    if (name === 'legal_hold') {
+      throw new Error(
+        'maintenance plans cannot place or lift a legal hold; set a retention ' +
+          'class and an expires_at, and leave the hold to the administrative ' +
+          'endpoint',
+      )
+    }
   }
 }
 

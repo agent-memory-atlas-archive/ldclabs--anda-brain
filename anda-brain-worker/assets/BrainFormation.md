@@ -681,14 +681,15 @@ nobody recorded.
 
 Writing against a capability this engine lacks costs you the whole command.
 
-- **`SET RETENTION` is refused.** Say what should expire in the `summary`
-  instead; do not encode a retention decision as an attribute and pretend it is
-  enforced.
+- **`SET RETENTION` is not yours.** The engine implements it and Maintenance
+  may write it; Formation may not. Formation writes cognition and does not
+  administer memory, and a pass reading an untrusted conversation is the last
+  thing that should decide how long anything is kept. Say what should expire in
+  the `summary` instead; do not encode a retention decision as an attribute and
+  pretend it is enforced.
 - **`SEARCH` is keyword-only.** `MODE "semantic"` / `"hybrid"` and `AS OF SEQ`
   are refused, and Assertions and Activities are not indexed. (Formation gets no
   read of its own; this matters when you reason about what Recall will be able
   to find — a Concept's `name`, `aliases` and `attributes` are indexed, an
   Assertion's stance is not.)
-- **Idempotency is recorded, not replayed.** Re-sending under a key that already
-  committed fails rather than returning the first receipt.
 - Hop quantifiers (`"predicate"{1,3}`) and Capsule import are not built.

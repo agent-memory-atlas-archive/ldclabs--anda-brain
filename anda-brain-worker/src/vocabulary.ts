@@ -105,7 +105,7 @@ export class MemoryVocabulary {
       ['LIST TYPES LIMIT 1000', vocabulary.types, vocabulary.borrowedTypes],
       ['LIST PREDICATES LIMIT 1000', vocabulary.predicates, vocabulary.borrowedPredicates],
     ] as const) {
-      for (const text of stringList(nexus.describe(command))) {
+      for (const text of symbolRefs(nexus.describe(command))) {
         const symbol = parseSymbolRef(text)
         if (symbol.package.packageId === MEMORY_PACKAGE_ID) {
           mine.add(symbol.name)
@@ -334,8 +334,29 @@ export function isPredicateName(name: string): boolean {
   )
 }
 
-function stringList(value: Json): string[] {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === 'string')
-    : []
+/**
+ * The exact symbol references a `LIST TYPES` / `LIST PREDICATES` page carries.
+ *
+ * A row, not a bare string: both engines answer with
+ * `{ref, local_name, package_ref, status}`, and `ref` is the one member that
+ * identifies the symbol — `local_name` means nothing outside the environment
+ * that resolved it, and two packages may declare the same one.
+ *
+ * This used to read strings, which is how it came to matter: `@ldclabs/kip-do`
+ * answered with bare references and the reference engine with rows, so the same
+ * code read an empty vocabulary from one of them and re-declared symbols the
+ * Space already had. An empty result is the worst shape mismatch there is,
+ * because it reads as an empty Space rather than as a wrong path. The shape is
+ * now one contract, pinned by the shared `meta-shapes` conformance fixture, so
+ * this reads the one shape rather than tolerating two.
+ */
+function symbolRefs(value: Json): string[] {
+  if (!Array.isArray(value)) return []
+  const refs: string[] = []
+  for (const row of value) {
+    if (typeof row !== 'object' || row === null || Array.isArray(row)) continue
+    const reference = (row as { ref?: unknown }).ref
+    if (typeof reference === 'string' && reference !== '') refs.push(reference)
+  }
+  return refs
 }

@@ -229,6 +229,71 @@ first two were quietly wrong here rather than loudly broken.
   radius, not a reversible one, and it leaves an Assertion pointing at an
   observation whose content is gone.
 
+### Changed — re-synced to `anda-db` `87f7ab0`…`168be6f`
+
+Upstream closed the six engine gaps this project's own audit had reported, so
+three statements this service was making about `@ldclabs/kip-do` stopped being
+true, one gate it was holding stopped being necessary, and one wire shape moved
+under two readers that did not notice.
+
+- **`SET RETENTION` reaches Maintenance.** The Worker was refusing the clause at
+  its own gate because the engine parsed it and then failed at execution — and
+  because a batch is not a transaction, the commands before it had already
+  committed. The engine implements it now, so the gate comes down and §20
+  Retention Review and §25 Retention Expiry have a mechanism here for the first
+  time.
+
+  What replaces it is narrower and is not about the engine: **a maintenance plan
+  may not place or lift a `legal_hold`.** A hold blocks erasure for everyone, so
+  a plan that could place one could make its own cognition undeletable — §19.1
+  names that attack by its shape — and one that could clear it could unblock an
+  erasure somebody placed a hold to stop. Neither is a decision to reach from a
+  graph snapshot; both go through the administrative `execute_kip` endpoint.
+  Refused on the member name, which the grammar fixes, so `{legal_hold:
+  :whatever}` does not smuggle it past.
+
+- **A `LIST TYPES` / `LIST PREDICATES` row is a row.** Both engines now answer
+  `{ref, local_name, package_ref, status}`; `@ldclabs/kip-do` used to answer
+  bare reference strings. Two readers here were written against the string
+  shape and **came back empty** rather than failing — which is the whole reason
+  the shape was unified upstream, and it landed here first:
+
+  - `MemoryVocabulary.load` read no existing symbols, so it re-declared `Person`
+    and `prefers` — symbols the Cognitive Memory Profile already provides — and
+    versioned the memory package forward to do it. Three tests caught it.
+  - `predicateCensus` carried a compatibility branch for both shapes and so kept
+    working; the branch is gone, because tolerating two shapes is what made the
+    divergence survivable and therefore permanent.
+
+  An empty result is the worst shape mismatch there is: it reads as an empty
+  Space rather than as a wrong path, with no error and no clue.
+
+- **Idempotency replays.** A resend under a committed key returns the original
+  receipt rather than failing, so the sentence saying otherwise is gone from
+  the Formation and Maintenance contracts. The Worker sends no key today, so
+  nothing changes for a model — the statement was simply false.
+
+- **`STRUCTURAL` reaches the Core reference fields.** An Assertion's `evidence`
+  and `context`, an Evidence record's `source` and `generated_by`, an
+  Activity's `inputs`, `outputs` and `associated_actors`, each by that plain
+  name. *Which Assertions cite this Evidence* is now a selection block
+  Maintenance can write — `ARCHIVE ?a WHERE { STRUCTURAL (?a, "evidence", :e) }
+  LIMIT 20` — which is what §16 Contradiction Review and §26 Evidence
+  Correction needed and had been guessing at. Added to the Maintenance and
+  Recall contracts.
+
+- **Formation's `SET RETENTION` refusal is restated as what it is.** The
+  contract said the engine had not built it. The engine has; Formation may not
+  write it, because Formation writes cognition and does not administer memory,
+  and a pass reading an untrusted conversation is the last thing that should
+  decide how long anything is kept. Same refusal, honest reason.
+
+Known divergence, unchanged by this: the Rust service gates only the Formation
+agent, so its Maintenance keeps the full clause set — including `PURGE` and now
+a `legal_hold` the Worker refuses. The two deployments have different
+maintenance authority models, which predates this change and is a policy
+decision rather than a defect to fix here.
+
 ### Changed — re-synced to KIP 2.0 `12cfd4d` (`anda-db` `0f92200`…`86777c0`)
 
 Upstream added the consequence channel and then spent two commits holding both

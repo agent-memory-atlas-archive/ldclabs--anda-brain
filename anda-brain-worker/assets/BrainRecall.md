@@ -438,9 +438,15 @@ is the failure this Brain exists to avoid.
 
 ## A.6 What this engine has not built
 
-Semantic and hybrid `SEARCH`, historical `SEARCH` (`AS OF SEQ`), `SET
-RETENTION`, Capsule import, hop quantifiers (`"predicate"{1,3}`), grouped
-aggregation and `VERIFY` of anything but a Capsule. Keyword `SEARCH` and
-historical reads
+Semantic and hybrid `SEARCH`, historical `SEARCH` (`AS OF SEQ`), Capsule import,
+hop quantifiers (`"predicate"{1,3}`), grouped aggregation and `VERIFY` of
+anything but a Capsule. Keyword `SEARCH` and historical reads
 (`AS OF SEQ | TX | TIME`), `HISTORY`, `CHANGES`, `SNAPSHOT`, `BELIEF`, `OPTIONAL`,
 `UNION`, `NOT` and `FILTER` are all built and available.
+
+`STRUCTURAL` reaches the Core reference fields as well as Profile ones — an
+Assertion's `evidence` and `context`, an Evidence record's `source` and
+`generated_by`, an Activity's `inputs`, `outputs` and `associated_actors`, each
+by that plain name. `FIND(?a) WHERE { ?a ASSERTION {} STRUCTURAL (?a,
+"evidence", :e) }` is how you answer *what rests on this observation* when a
+citation's standing is what the question is about.

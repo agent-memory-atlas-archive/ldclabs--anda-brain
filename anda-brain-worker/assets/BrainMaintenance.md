@@ -465,15 +465,20 @@ Consolidation sometimes needs a symbol the Space does not have. Name it in
 KML cannot declare one. Types are UpperCamelCase, predicates snake_case, and a
 symbol the Cognitive Memory Profile already provides must never be redeclared.
 
-## A.6 What this engine has not built
+## A.6 What this engine will and will not run
 
-- **`SET RETENTION` is refused at the gate**, so §20 Retention Review and §25
-  Retention Expiry have no mechanism here. The whole plan is rejected before
-  any command runs, so a batch that reaches for it loses its other commands
-  too — the batch is not a transaction, and half-committing before failing
-  would leave you unable to tell what landed. Report what should expire in the
-  `summary`; encoding a retention decision as an ordinary attribute would
-  claim an enforcement that does not exist.
+- **`SET RETENTION` sets a class and an expiry, and never a legal hold.** §20
+  Retention Review and §25 Retention Expiry have a mechanism here: a retention
+  class and an `expires_at` are storage policy, and the removal they schedule
+  is a host-run sweep a Principal is accountable for. `legal_hold` is the one
+  member refused at the gate, in **both** directions — a hold blocks erasure
+  for everyone, so a plan that could place one could make its own cognition
+  undeletable (§19.1), and one that could clear one could unblock an erasure
+  somebody placed a hold to stop. The whole plan is rejected before any command
+  runs, so a batch that reaches for it loses its other commands too.
+
+  The block **replaces** rather than patches: a member the new block omits is
+  cleared. Restate `retention_class` when you are only changing `expires_at`.
 - **`MERGE CONCEPT` takes no `LIMIT`** — KIP gives its grammar no slot for
   one — so its `WHERE` must identify exactly the source and the target. Merge
   duplicates one pair at a time; a pattern that sweeps for them is refused.
@@ -481,6 +486,14 @@ symbol the Cognitive Memory Profile already provides must never be redeclared.
   Cognition. Semantic and hybrid modes, `AS OF SEQ`, and Assertions and
   Activities as targets are all refused. Useful for §9 Semantic Consolidation:
   `SEARCH COGNITION :term LIMIT 20` finds the cluster, then read it exactly.
+- **`STRUCTURAL` reaches the Core reference fields**, not only Profile ones. An
+  Assertion's `evidence` and `context`, an Evidence record's `source` and
+  `generated_by`, an Activity's `inputs`, `outputs` and `associated_actors` are
+  each addressed by that plain name, so *which Assertions cite this Evidence* is
+  a selection block you can write: `ARCHIVE ?a WHERE { STRUCTURAL (?a,
+  "evidence", :e) } LIMIT 20`. It is how §16 Contradiction Review and §26
+  Evidence Correction find what a corrected observation was resting under,
+  without guessing.
 - **Derivation review is narrower than §28 asks.** Walking `LIST DEPENDENTS`
   after a revision is a META read, and this pass emits KML only. The runtime
   does not walk it for you either. So name the revised root and what you
@@ -509,8 +522,6 @@ symbol the Cognitive Memory Profile already provides must never be redeclared.
   that misstates what it was built at is worse than no digest, because Recall
   serves it as though the basis were true.
 
-- **Idempotency is recorded, not replayed**: a resend under a committed key
-  fails rather than returning the first receipt.
 - Capsule import, hop quantifiers and grouped aggregation are not built.
-- `ARCHIVE`, `TOMBSTONE`, `MERGE CONCEPT`, `RETRACT`, `SUPERSEDE`,
-  `CORRECT EVIDENCE` and `TRANSITION ACTIVITY` all are.
+- `SET RETENTION`, `ARCHIVE`, `TOMBSTONE`, `MERGE CONCEPT`, `RETRACT`,
+  `SUPERSEDE`, `CORRECT EVIDENCE` and `TRANSITION ACTIVITY` all are.
