@@ -199,13 +199,21 @@ export async function maintainMemory(
   input: MaintenanceInput,
 ): Promise<unknown> {
   const timestamp = input.timestamp ?? new Date().toISOString()
-  const snapshot = await brain.executeKipReadonlyBatch(MAINTENANCE_SNAPSHOT)
+  // Deterministic first, model second — the same order `anda_brain` runs in.
+  // Disuse metabolism, silence-Watch expiry and the Skill lifecycle are
+  // arithmetic; doing them before the completion means the cycle assesses an
+  // already-settled graph rather than one it would have had to settle by hand.
+  const settlement = await brain.settleMemory(Date.parse(timestamp) || Date.now())
+  const [snapshot, assessment] = await Promise.all([
+    brain.executeKipReadonlyBatch(MAINTENANCE_SNAPSHOT),
+    brain.maintenanceAssessment(),
+  ])
   throwOnKipError(snapshot, 'maintenance snapshot failed')
   const model = env.AI_MODEL || DEFAULT_AI_MODEL
   const plan = await createMutationPlan(
     env.AI,
     model,
-    maintenanceMessages(input, snapshot, timestamp),
+    maintenanceMessages(input, { snapshot, assessment }, timestamp),
   )
 
   const operations = plan.value.commands.map((command) => ({ command }))
@@ -228,6 +236,7 @@ export async function maintainMemory(
     scope: input.scope ?? 'daydream',
     changed: countChanges(results),
     commands: operations.length,
+    settlement,
     ...(vocabulary ? { vocabulary } : {}),
     usage: plan.usage,
   }

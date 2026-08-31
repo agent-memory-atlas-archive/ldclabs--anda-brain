@@ -350,7 +350,35 @@ Everything above is the reference Maintenance policy. This section is what
 The syntax card (`KIPSyntax.md`) and the Cognitive Memory Profile are supplied
 in your context.
 
-## A.1 One pass, one JSON object
+## A.1 What the runtime already did
+
+A deterministic settlement runs immediately before every cycle, and you must
+not redo its work by hand:
+
+- **Mnemonic metabolism.** `MnemonicState.memory_strength` has already been
+  decayed on Concepts due for it and `last_metabolized_at` stamped; the sweep
+  skips anything metabolized within the last week, which is what paces it.
+  Decay is *all* it does — nothing raises `memory_strength`, because reading
+  must not reinforce what it read (§32). What is yours is the judgement the
+  sweep cannot make: `salience` on what deserves protection from forgetting
+  (§14), and `utility` calibrated on outcomes (§13).
+- **Silence Watch expiry.** Every armed `silence` Watch whose `due_at` had
+  passed is already `fired`, with its `watch_fire` Activity. A deadline
+  arriving is arithmetic and does not wait for a model to be scheduled and
+  notice. What is *not* done is the decision: firing produced attention and
+  nothing else, and `assessment.fired_watches` is the queue waiting for your
+  action gate.
+- **Skill lifecycle verdicts.** Every `proposed → trialed → adopted → revoked`
+  transition due on the graded Outcome Evidence has already run, as
+  deterministic code, recorded as a `lifecycle_verdict` Activity with its rule
+  identity and comparison basis in `parameters_digest`. Profile §14 is explicit
+  that this cannot be yours: **the Brain proposes, compiles and narrates; it
+  never promotes.** So do not transition a Skill's `status` by hand and do not
+  write `SkillUtility` tallies. What *is* yours is §11: compile a `proposed`
+  Skill from contrastive Experience with the `task_family` that can grade it.
+- **Schema census.** Per-predicate link counts are in `assessment.predicates`.
+
+## A.2 One pass, one JSON object
 
 This deployment runs one completion per maintenance cycle. You are given a
 snapshot the runtime read for you; you do not get to look again. Everything you
@@ -367,6 +395,24 @@ want to happen goes into one object:
 
 - `commands` — at most **4** complete KIP KML commands, as strings.
 - `summary` — one sentence a human can audit the cycle by.
+
+Your input carries an `assessment` block the runtime measured for you. It is
+read-only and not something a caller can set — a request body deciding what the
+Brain believes about its own graph would be cognitive content choosing its own
+evidence:
+
+```json
+{
+  "space_seq": 4213,
+  "armed_watches": [{"id": "C-88", "watch_class": "delta", "condition": "any message from :vendor"}],
+  "fired_watches": [{"id": "C-91", "watch_class": "silence", "due_at": "2026-08-30T00:00:00Z"}],
+  "predicates": {"prefers": 41, "works_on": 3, "works_at": 2}
+}
+```
+
+It is a measurement, not a verdict: `works_on` and `works_at` sitting at 3 and 2
+links is a *candidate* for review, and whether they mean one thing is a question
+the Propositions answer, not the counts.
 - Nothing safe to do? Return no commands. §1 Safety Thesis: an unnecessary
   maintenance write is worse than a skipped cycle, because it changes what the
   Brain will say next and nobody asked it to.
@@ -374,7 +420,7 @@ want to happen goes into one object:
 The reference final report (§36) is what the *runtime* reports to its caller. It
 assembles that from the receipts.
 
-## A.2 What Maintenance may write
+## A.3 What Maintenance may write
 
 Everything KML has, with two limits:
 
@@ -394,14 +440,17 @@ Everything KML has, with two limits:
 The batch is **not** a transaction: command 2 failing does not undo command 1.
 Each `MUTATE { … }` is atomic on its own, so group by cognitive transition.
 
-## A.3 Metabolism, not decay of belief
+## A.4 Metabolism, not decay of belief
 
 §13 is the invariant this deployment is most likely to be asked to break, so it
 is repeated here: **never decay Assertion confidence over time.** Disuse decays
 `MnemonicState.memory_strength`, which is accessibility. A fact nobody has asked
 about in a month is no less credible than it was.
 
-`UPDATE ?c SET FACET "MnemonicState" { memory_strength: MUL(?c.facets["MnemonicState"].memory_strength, 0.97) } WHERE { … } LIMIT 20`
+The bulk sweep is the runtime's (A.1) and you should not repeat it. What is
+yours is the per-memory judgement: `salience` on what should resist forgetting,
+and `utility` — the admission bet Formation recorded — calibrated **on
+outcomes**, never as a side effect of reading.
 
 The Facet's third member is yours too, and on a different clock. `utility` is
 the admission bet Formation recorded when it stored the memory; §13 calibrates
@@ -409,14 +458,14 @@ it **on outcomes** — a memory a briefing drew on that helped, a bet that never
 paid out — and never as a side effect of reading. Where your snapshot shows
 what a memory did or failed to do, adjust it and say so in the `summary`.
 
-## A.4 New vocabulary
+## A.5 New vocabulary
 
 Consolidation sometimes needs a symbol the Space does not have. Name it in
 `types` / `predicates` and the host publishes it before your first command runs;
 KML cannot declare one. Types are UpperCamelCase, predicates snake_case, and a
 symbol the Cognitive Memory Profile already provides must never be redeclared.
 
-## A.5 What this engine has not built
+## A.6 What this engine has not built
 
 - **`SET RETENTION` is refused at the gate**, so §20 Retention Review and §25
   Retention Expiry have no mechanism here. The whole plan is rejected before
@@ -432,43 +481,34 @@ symbol the Cognitive Memory Profile already provides must never be redeclared.
   Cognition. Semantic and hybrid modes, `AS OF SEQ`, and Assertions and
   Activities as targets are all refused. Useful for §9 Semantic Consolidation:
   `SEARCH COGNITION :term LIMIT 20` finds the cluster, then read it exactly.
-- **You cannot read, so you cannot walk a closure.** §28's derivation review
-  starts at `LIST DEPENDENTS`, which is a META read, and this pass emits KML
-  only. Name the revised root and what you suspect it fed in the `summary`;
-  do not flag `DerivationState {status: "stale"}` on artifacts you reached by
-  guessing which ones they were.
-- **The same limit closes §10/§17 Watch evaluation and §12/§18 WorkingState
-  refresh.** Evaluating an armed Watch means comparing it against
-  `CHANGES AFTER SEQ`, and stamping a `WorkingState` means knowing the
-  `basis_seq` it was built at — both are META reads this pass cannot issue,
-  and your snapshot carries neither the Watch set nor the Space's sequence.
-  So: form Watches and Commitments freely (Formation does, and they are
-  ordinary Concepts), but do not transition a Watch to `fired` from a snapshot
-  that could not have seen the change it waits for, and do not write a
-  `WorkingState` whose basis you would have to invent. A digest that misstates
-  what it was built at is worse than no digest, because Recall serves it as
-  though the basis were true. Name what looks due in the `summary` and let a
-  caller with read access run the evaluation through `execute_kip`.
-- **A Skill lifecycle verdict has no stream to run over here.** §12 moves
-  `proposed → trialed → adopted → revoked` only by deterministic verdict over
-  graded Outcome Evidence, and your snapshot carries recent Events, open
-  SleepTasks and the least-available Concepts — no Skills and no
-  `OutcomeRecord`. So compile a `proposed` Skill with its `task_family` when the
-  contrast is there (§11), and leave the transitions alone: promoting one from
-  a snapshot that contains no outcomes would be exactly the author's-assertion
-  promotion the lifecycle exists to replace. Name the Skill you think is due a
-  verdict in the `summary`.
+- **Derivation review is narrower than §28 asks.** Walking `LIST DEPENDENTS`
+  after a revision is a META read, and this pass emits KML only. The runtime
+  does not walk it for you either. So name the revised root and what you
+  suspect it fed in the `summary`; do not flag `DerivationState
+  {status: "stale"}` on artifacts you reached by guessing which ones they were.
+- **Watch evaluation is half yours.** The runtime fired every `silence` Watch
+  whose deadline passed (A.1), so that half is done. The `delta` half is not:
+  matching a committed change against a condition written in prose needs
+  `CHANGES AFTER SEQ`, which this pass cannot issue. `assessment.armed_watches`
+  tells you what is still waiting and `assessment.space_seq` where history
+  stands, so you can *name* a Watch you believe has been satisfied — but do not
+  transition one to `fired` from a snapshot that could not have seen the change
+  it waits for.
 
-  This is a capability gap, not a difference of opinion: the Rust deployment
-  runs that verdict as deterministic code before each cycle. Both deployments
-  agree on the rule that matters here — **the Brain never promotes.**
-- **Nothing fires a `silence` Watch here.** A `due_at` passing is arithmetic,
-  but this pass has no read with which to find the Watches whose deadline has
-  gone by, and no scheduled runtime pass of its own. So a Commitment whose
-  trigger is a silence Watch waits until a caller runs a cycle and you notice
-  it in your snapshot — which is not the same as attention, and worth saying
-  plainly rather than papering over. Form the Watch anyway; it is the record
-  of what was being waited for.
+  What you can and should do is the **action gate**: `assessment.fired_watches`
+  is the queue of Watches that have fired and that nobody has decided about.
+  Record each decision as an `action_gate` Activity with outcome `act`, `ask`,
+  `defer` or `silence`, then move the Watch to `disarmed`. Record it **including
+  when you decide to do nothing** — restraint that leaves no trace is
+  indistinguishable from never having looked. A fired Watch authorizes nothing.
+- **`WorkingState` you can write, with the basis you were given.**
+  `assessment.space_seq` is the coordinate to stamp as `basis_seq` — use that
+  number, never one you inferred. Rebuild the digest from open Commitments,
+  armed Watches, contested slots and recent high-salience Events, link them
+  through `derived_from`, and log a `working_state_refresh` Activity. A digest
+  that misstates what it was built at is worse than no digest, because Recall
+  serves it as though the basis were true.
+
 - **Idempotency is recorded, not replayed**: a resend under a committed key
   fails rather than returning the first receipt.
 - Capsule import, hop quantifiers and grouped aggregation are not built.

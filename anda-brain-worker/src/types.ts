@@ -40,6 +40,8 @@ export interface BrainRpc {
     execution?: KipExecution,
   ): Promise<KipResult[]>
   executeMaintenancePlan(operations: readonly KipOperation[]): Promise<KipResult[]>
+  maintenanceAssessment(): Promise<MaintenanceAssessment>
+  settleMemory(nowMs: number): Promise<SettlementReport>
   stats(): Promise<BrainStats>
   vocabulary(): Promise<DeclaredVocabulary>
 }
@@ -108,6 +110,72 @@ export interface MaintenanceInput {
     unconsolidated_max_backlog?: number
     orphan_max_count?: number
   }
+}
+
+/** One armed or fired Watch, as the maintenance cycle receives it. */
+export interface ArmedWatch {
+  id: string
+  name: string
+  /** `delta` (fire on a matching change) or `silence` (fire when `due_at` passes). */
+  watch_class: string
+  /** What counts as a matching change; the Profile fixes no condition language. */
+  condition: string
+  summary: string
+  due_at: string
+}
+
+export interface WatchSettlement {
+  /** Silence Watches whose deadline had passed and that this sweep fired. */
+  fired: number
+  /**
+   * Watches that were due but whose fire did not commit — the maintenance
+   * model changed the same Watch between the scan and the write, which
+   * `EXPECT VERSION` refuses rather than clobbers. They stay armed.
+   */
+  conflicted: number
+  error?: string
+}
+
+export interface SkillSettlement {
+  /** Skills whose tallies or standing moved. */
+  graded: number
+  /** Lifecycle transitions recorded as `lifecycle_verdict` Activities. */
+  transitions: number
+  /** Verdicts refused by `EXPECT VERSION`; the cursor did not advance. */
+  conflicted: number
+  error?: string
+}
+
+/** What the deterministic settlement did before the cycle's completion. */
+export interface SettlementReport {
+  settled_at: string
+  /** Concepts whose `MnemonicState.memory_strength` the bulk sweep decayed. */
+  decayed: number
+  watches: WatchSettlement
+  skills: SkillSettlement
+  error?: string
+}
+
+/**
+ * What the settlement measured, handed to the maintenance prompt.
+ *
+ * Runtime-filled and not something a caller can set: a request body deciding
+ * what the Brain believes about its own graph would be cognitive content
+ * choosing its own evidence.
+ */
+export interface MaintenanceAssessment {
+  /**
+   * The Space's sequence coordinate. The `basis_seq` a refreshed
+   * `WorkingState` is stamped with, and the coordinate `CHANGES AFTER SEQ`
+   * reads from.
+   */
+  space_seq: number
+  /** What the Brain is still waiting for — the delta evaluation's input. */
+  armed_watches: ArmedWatch[]
+  /** Fired and undecided — the action gate's queue. */
+  fired_watches: ArmedWatch[]
+  /** Registered predicate to link count; vocabulary sprawl is visible here. */
+  predicates: Record<string, number>
 }
 
 export interface Usage {

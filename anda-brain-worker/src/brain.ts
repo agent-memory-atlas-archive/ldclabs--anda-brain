@@ -14,7 +14,14 @@ import {
   type KipExecution,
   type KipOperation,
 } from './kip.js'
-import type { BrainStats, DeclaredVocabulary, Env } from './types.js'
+import * as settle from './settle.js'
+import type {
+  BrainStats,
+  DeclaredVocabulary,
+  Env,
+  MaintenanceAssessment,
+  SettlementReport,
+} from './types.js'
 import { MemoryVocabulary, activeSet, activeVocabulary } from './vocabulary.js'
 
 const APP_BOOTSTRAP_KEY = '__anda_brain_worker_bootstrap_version'
@@ -116,6 +123,161 @@ export class AndaBrain extends KipDatabase<Env> {
   describePrimer(): KipResult {
     this.ensureInitialized()
     return super.executeKip('DESCRIBE PRIMER')
+  }
+
+  /**
+   * The deterministic settlement, run before every maintenance cycle.
+   *
+   * Everything here is arithmetic the host can do without a model, and the
+   * reason it did not exist before is worth naming: the maintenance model gets
+   * one completion and emits KML, so a pass needing a read before a write
+   * looked impossible. It was only impossible for the model — this object holds
+   * the nexus, and reads it directly.
+   *
+   * Synchronous throughout, like everything else under it, and never allowed to
+   * fail the cycle: a settlement that could not sweep is a degraded cycle, not
+   * a failed one, and each pass reports its own error so "nothing was due" and
+   * "the pass never ran" stay distinguishable.
+   */
+  settleMemory(nowMs: number): SettlementReport {
+    this.ensureInitialized()
+    const now = new Date(nowMs).toISOString()
+    const report = settle.emptySettlement(now)
+    report.decayed = this.metabolize(now, new Date(settle.decayHorizon(nowMs)).toISOString())
+    report.watches = this.fireDueWatches(now)
+    report.skills = this.settleSkillLifecycle(now)
+    return report
+  }
+
+  /**
+   * Disuse metabolism: `MnemonicState.memory_strength`, never confidence.
+   *
+   * The `last_metabolized_at` filter is both the weekly rate limit and the
+   * intra-sweep cursor, so a Space with nothing due costs one query that
+   * matches no rows.
+   */
+  private metabolize(now: string, metabolizedBefore: string): number {
+    const operation = settle.decayCommand(now, metabolizedBefore)
+    const result = super.executeKip(operation.command, operation.parameters)
+    if (result.status === 'failed') return 0
+    const outcome = result.extensions?.['kip-do/outcome']
+    return (outcome?.changes ?? []).filter((change) => change.op === 'update').length
+  }
+
+  /** Fires the silence Watches whose deadline has passed. */
+  private fireDueWatches(now: string): SettlementReport['watches'] {
+    const report = settle.emptyWatchSettlement()
+    const scan = settle.dueSilenceWatchesCommand(now)
+    const found = super.executeKip(scan.command, scan.parameters)
+    if (found.status === 'failed') {
+      report.error = found.error?.message ?? 'watch scan failed'
+      return report
+    }
+    for (const due of settle.dueWatches(found.result)) {
+      const fire = settle.fireWatchCommand(due, now)
+      const written = super.executeKip(fire.command, fire.parameters)
+      if (written.status === 'failed') report.conflicted += 1
+      else report.fired += 1
+    }
+    return report
+  }
+
+  /**
+   * Runs the deterministic Skill lifecycle rule over graded outcomes.
+   *
+   * Profile §14 rule 1: promotion and demotion are executed by deterministic
+   * code reading graded Outcome Evidence — "the Brain proposes, compiles, and
+   * narrates; it never promotes."
+   */
+  private settleSkillLifecycle(now: string): SettlementReport['skills'] {
+    const report = settle.emptySkillSettlement()
+    const scan = settle.skillsCommand()
+    const found = super.executeKip(scan.command, scan.parameters)
+    if (found.status === 'failed') {
+      report.error = found.error?.message ?? 'skill scan failed'
+      return report
+    }
+    for (const skill of settle.skillRows(found.result)) {
+      // One read per Skill: the window is per-family and per-cursor, and a
+      // Skill never graded starts from a different coordinate than one that has.
+      const outcomes = settle.outcomesCommand(skill.task_family, skill.cursor)
+      const graded = super.executeKip(outcomes.command, outcomes.parameters)
+      if (graded.status === 'failed') continue
+      const window = settle.tally(graded.result)
+      const verdict = settle.decide(skill, window)
+      // No new graded outcome: an idle stream writes nothing.
+      if (verdict === undefined) continue
+
+      const write = settle.verdictCommand(skill, verdict, window, now)
+      const written = super.executeKip(write.command, write.parameters)
+      if (written.status === 'failed') {
+        // The cursor did not advance, so the next pass re-reads the same
+        // outcomes and reaches the same verdict.
+        report.conflicted += 1
+        continue
+      }
+      report.graded += 1
+      if (verdict.transition !== undefined) report.transitions += 1
+    }
+    return report
+  }
+
+  /**
+   * What the settlement measured, as the maintenance prompt receives it.
+   *
+   * The model cannot go and fetch any of this — it gets one completion — so a
+   * signal absent here is a duty it will not perform. That is why the armed
+   * set, the fired queue and `space_seq` are read for it rather than left to
+   * a §6 assessment it has no way to run.
+   */
+  maintenanceAssessment(): MaintenanceAssessment {
+    this.ensureInitialized()
+    const watches = (status: string) => {
+      const operation = settle.watchesCommand(status)
+      const result = super.executeKip(operation.command, operation.parameters)
+      return result.status === 'failed' ? [] : settle.readWatches(result.result)
+    }
+    return {
+      space_seq: this.nexus.store.currentSeq(this.nexus.space),
+      armed_watches: watches('armed'),
+      fired_watches: watches('fired'),
+      predicates: this.predicateCensus(),
+    }
+  }
+
+  /**
+   * Per-predicate link counts — the vocabulary sprawl indicator.
+   *
+   * A count that failed is omitted rather than reported as zero: naming the
+   * busiest predicate as unused would point the merge guidance at exactly the
+   * wrong target.
+   */
+  private predicateCensus(): Record<string, number> {
+    const census: Record<string, number> = {}
+    const listed = super.executeKip('LIST PREDICATES LIMIT 100')
+    if (listed.status === 'failed' || !Array.isArray(listed.result)) return census
+    for (const entry of listed.result) {
+      // The two engines answer `LIST PREDICATES` differently: this one returns
+      // bare schema refs, `anda_kip` returns objects carrying `local_name`.
+      // Both are read here so the census does not silently come back empty on
+      // whichever one it was not written against.
+      const reference =
+        typeof entry === 'string'
+          ? entry
+          : typeof entry === 'object' && entry !== null && 'local_name' in entry
+            ? (entry as { local_name?: unknown }).local_name
+            : undefined
+      if (typeof reference !== 'string') continue
+      const name = reference.slice(reference.lastIndexOf('/') + 1)
+      if (name === '') continue
+      const operation = settle.predicateCensusCommand(name)
+      const counted = super.executeKip(operation.command, operation.parameters)
+      if (counted.status === 'failed') continue
+      const rows = counted.result
+      const count = Array.isArray(rows) ? rows[0] : undefined
+      if (typeof count === 'number') census[name] = count
+    }
+    return census
   }
 
   /**

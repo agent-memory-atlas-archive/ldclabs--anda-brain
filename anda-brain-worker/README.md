@@ -46,11 +46,39 @@ cd ../../anda-db/ts/kip-do && pnpm install && pnpm run build
 | 异步 Formation 队列与对话历史 | 未实现 |
 | Wiki、MCP、BYOK、分级令牌 | 未实现 |
 | 自动周期维护 | 未实现；由调用方或 Cron Trigger 调用 maintenance |
+| 确定性 settlement（代谢 / Watch 到期 / Skill 判决） | 保留，见下节 |
 | 全文检索（`SEARCH`） | 保留，keyword 模式，见「检索」一节 |
 | 派生闭包（`LIST DEPENDENTS`） | 保留，`DEPTH` 上限 8；但 maintenance 一次只出 KML，走不了这条读 |
 | 保留期（`SET RETENTION`） | 引擎未实现，maintenance 闸门直接拒绝；Rust 服务两样都有 |
 | 载荷清除（`PURGE PAYLOAD`） | 引擎已实现；maintenance 计划里和 `PURGE` 一样被拒 |
 | 原子批（`execution.mode: "atomic"`） | 引擎未实现，请求会被拒绝而不是伪装成功 |
+
+## 确定性 settlement
+
+每次 maintenance 在问模型**之前**先跑一遍确定性结算，与 Rust 服务同形。分工只有一条：
+
+> **runtime 做算术，模型做解释。**
+
+之前这三件事在 Worker 里都做不了，原因不是引擎缺能力——`kip-do` 读写俱全——而是
+「maintenance 一次 completion 只出 KML」这个约定被误当成了整个部署的限制。它只约束
+**模型**：Durable Object 自己持有 nexus，可以随便读。
+
+- **记忆代谢**：按 `MnemonicState.memory_strength × 0.95` 衰减，下限 0.3，周期一周
+  （靠 `last_metabolized_at` 过滤器自己节流）。从不碰 Assertion 的 confidence。
+  没有任何东西**抬高** memory_strength——读取不强化它读到的东西。
+- **silence Watch 到期**：`due_at` 过了且仍 `armed` 的，原子地转 `fired` + 写
+  `watch_fire` Activity，`EXPECT VERSION` 守卫。**不建 SleepTask、不写
+  `action_gate`、不做任何对外动作**——日子到了是算术，那意味着什么不是。决定留给
+  下一轮的 `assessment.fired_watches` 队列。`delta` Watch 仍归模型：匹配一句散文写
+  的 condition 是解释。
+- **Skill 生命周期判决**：`proposed → trialed → adopted → revoked` 只按 graded
+  Outcome Evidence 的确定性规则走。Profile §14 规则 1 点名了执行者——**「the Brain
+  proposes, compiles, and narrates; it never promotes」**——所以它在代码里。规则常量
+  与 `anda_brain/src/skill.rs` 逐一对齐，`VERDICT_RULE` 两边**必须相同**：一个 Skill
+  在 Rust 侧被采纳、在 Worker 侧被撤销，会让这个规则标识变成谎话。
+
+模型拿到的 `assessment` 块（`space_seq`、armed / fired Watch 集合、每谓词链接数）
+也是 runtime 读好的：它只有一次 completion，**输入里没有的信号就是它不会履行的职责**。
 
 ## 词汇表：新类型和新谓词
 

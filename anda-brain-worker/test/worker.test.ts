@@ -5,9 +5,15 @@ import { boundedJson, formationMessages, maintenanceMessages } from '../src/prom
 import type { AiBinding, BrainRpc, Env } from '../src/types.js'
 
 class FakeAi implements AiBinding {
+  /** Every `messages` array this binding was handed, newest last. */
+  readonly calls: { role: string; content: string }[][] = []
+
   constructor(private readonly responses: unknown[]) {}
 
-  async run(): Promise<unknown> {
+  async run(_model: string, input: Record<string, unknown>): Promise<unknown> {
+    if (Array.isArray(input?.messages)) {
+      this.calls.push(input.messages as { role: string; content: string }[])
+    }
     const response = this.responses.shift()
     if (response === undefined) throw new Error('unexpected AI call')
     if (response instanceof Error) throw response
@@ -16,6 +22,13 @@ class FakeAi implements AiBinding {
       usage: { input_tokens: 10, output_tokens: 5 },
     }
   }
+}
+
+/** The user payload of the last completion — what the model actually saw. */
+function lastUserPayload(runtime: Env): string {
+  const ai = runtime.AI as FakeAi
+  const messages = ai.calls[ai.calls.length - 1] ?? []
+  return messages.find((message) => message.role === 'user')?.content ?? '{}'
 }
 
 /** One coherent formation: Evidence, the Concepts, the Proposition, the claim. */
@@ -591,6 +604,205 @@ describe('Anda Brain Worker', () => {
       // parse failure would otherwise let this pass without the gate running.
       expect(await response.text()).toContain('maintenance plans cannot issue KIP PURGE')
     }
+  })
+
+  it('fires a silence Watch whose deadline passed, and only that one', async () => {
+    // The half of Watch evaluation that is arithmetic. Until the runtime did
+    // it, a Commitment whose trigger was a silence Watch waited forever,
+    // because nothing in the system noticed a date passing.
+    // The settlement runs before the completion, so the cycle still needs one.
+    const runtime = testEnv(new FakeAi([{ types: [], predicates: [], commands: [], summary: 'Nothing to do.' }]))
+    const space = uniqueSpace('watch-expiry')
+    const past = new Date(Date.now() - 86_400_000).toISOString()
+    const future = new Date(Date.now() + 86_400_000).toISOString()
+
+    for (const [key, watchClass, due] of [
+      ['overdue', 'silence', past],
+      ['not_yet', 'silence', future],
+      // A delta Watch waits for a matching change; only the model can say
+      // what matched, so a deadline means nothing to it.
+      ['delta', 'delta', past],
+    ]) {
+      const created = await post(runtime, space, 'execute_kip', {
+        command: `MUTATE {
+  UPSERT CONCEPT ?w {
+    MATCH { type: "Watch", key: :key }
+    SET FIELDS { name: :key }
+    SET ATTRIBUTES {
+      watch_class: :class, summary: "escalate if nothing lands",
+      condition: "no reply from the vendor", status: "armed", due_at: :due
+    }
+  }
+}`,
+        parameters: { key, class: watchClass, due },
+      })
+      expect(created.status, await text(created)).toBe(200)
+    }
+
+    const settled = await post(runtime, space, 'maintenance', { scope: 'full' })
+    expect(settled.status, await text(settled)).toBe(200)
+    const body = (await settled.json()) as { result: { settlement: any } }
+    expect(body.result.settlement.watches).toMatchObject({ fired: 1, conflicted: 0 })
+
+    const statuses = await post(runtime, space, 'execute_kip_readonly', {
+      command:
+        'FIND(?w.name, ?w.attributes.status) WHERE { ?w CONCEPT {type: "Watch"} } LIMIT 10',
+    })
+    const rows = ((await statuses.json()) as any).result[0].result as [string, string][]
+    expect(Object.fromEntries(rows)).toEqual({
+      overdue: 'fired',
+      not_yet: 'armed',
+      delta: 'armed',
+    })
+
+    // Firing produced attention and nothing else. An `action_gate` here would
+    // be the runtime inventing a decision — act, ask, defer and silence are
+    // all judgements about what the deadline means.
+    const activities = await post(runtime, space, 'execute_kip_readonly', {
+      command: 'FIND(?a.activity_class) WHERE { ?a ACTIVITY {} } LIMIT 10',
+    })
+    expect(((await activities.json()) as any).result[0].result).toEqual(['watch_fire'])
+  })
+
+  it('moves a Skill on its outcome stream alone, never on assertion', async () => {
+    // Profile §14 rule 1: "the Brain proposes, compiles, and narrates; it
+    // never promotes." The model is given no say here, and is not asked.
+    // Four cycles below, each of which still ends in one completion.
+    const runtime = testEnv(new FakeAi(Array.from({ length: 4 }, () => ({ types: [], predicates: [], commands: [], summary: 'Nothing to do.' }))))
+    const space = uniqueSpace('skill-lifecycle')
+
+    const created = await post(runtime, space, 'execute_kip', {
+      command: `MUTATE {
+  UPSERT CONCEPT ?s {
+    MATCH { type: "Skill", key: "redeploy" }
+    SET FIELDS { name: "Redeploy after a schema change" }
+    SET ATTRIBUTES {
+      skill_class: "recovery", task_family: "deploy",
+      summary: "check the migration target first",
+      procedure: "1. verify the target 2. redeploy", status: "proposed"
+    }
+  }
+}`,
+    })
+    expect(created.status, await text(created)).toBe(200)
+
+    const grade = async (status: string, magnitude: number) => {
+      const written = await post(runtime, space, 'execute_kip', {
+        command: `MUTATE {
+  CREATE EVIDENCE ?e {
+    SET FIELDS {
+      evidence_class: "outcome", payload: {instrument: "ci"},
+      observed_at: "2026-08-31T00:00:00Z"
+    }
+    SET FACET "OutcomeRecord" {
+      task_family: "deploy", outcome_status: :status, magnitude: :magnitude
+    }
+  }
+}`,
+        parameters: { status, magnitude },
+      })
+      expect(written.status, await text(written)).toBe(200)
+    }
+
+    const cycle = async () => {
+      const response = await post(runtime, space, 'maintenance', { scope: 'quick' })
+      expect(response.status, await text(response)).toBe(200)
+      return ((await response.json()) as any).result.settlement.skills
+    }
+    const standing = async () => {
+      const response = await post(runtime, space, 'execute_kip_readonly', {
+        command:
+          'FIND(?s.attributes.status, ?s.facets["SkillUtility"].utility, ?s.facets["SkillUtility"].graded_count) ' +
+          'WHERE { ?s CONCEPT {type: "Skill", key: "redeploy"} } LIMIT 1',
+      })
+      return ((await response.json()) as any).result[0].result[0] as [string, number, number]
+    }
+
+    // A poor first showing opens the trial and records the basis (1 of 3).
+    await grade('success', 0.5)
+    await grade('failure', 0.2)
+    await grade('failure', 0.2)
+    expect(await cycle()).toMatchObject({ transitions: 1 })
+    expect((await standing())[0]).toBe('trialed')
+
+    // The stream then beats that basis over enough runs. Adoption is
+    // comparative — better than things were going, not merely good.
+    for (let i = 0; i < 6; i += 1) await grade('success', 0.5)
+    expect(await cycle()).toMatchObject({ transitions: 1 })
+    const [status, utility, graded] = await standing()
+    expect(status).toBe('adopted')
+    expect(graded).toBe(9)
+    expect(utility).toBeCloseTo(7 / 9, 9)
+
+    // Idempotent: the cursor advanced, so a replay grades nothing and cannot
+    // promote on arithmetic instead of evidence.
+    expect(await cycle()).toMatchObject({ graded: 0, transitions: 0 })
+
+    // One severe matching-condition failure revokes without waiting — the
+    // Profile's one sanctioned asymmetry, and it favours demotion.
+    await grade('failure', 0.95)
+    expect(await cycle()).toMatchObject({ transitions: 1 })
+    expect((await standing())[0]).toBe('revoked')
+
+    // Every move left a recomputable verdict: inputs are the graded Evidence,
+    // outputs the Skill it moved, and the digest pins the rule and basis.
+    const verdicts = await post(runtime, space, 'execute_kip_readonly', {
+      command:
+        'FIND(?a.parameters_digest, ?a.inputs, ?a.outputs) ' +
+        'WHERE { ?a ACTIVITY {activity_class: "lifecycle_verdict"} } LIMIT 10',
+    })
+    const rows = ((await verdicts.json()) as any).result[0].result as [string, any[], any[]][]
+    expect(rows).toHaveLength(3)
+    const cited: string[] = []
+    for (const [digest, inputs, outputs] of rows) {
+      // The rule identity is shared with `anda_brain` on purpose: an auditor
+      // must get the same answer whichever deployment wrote the verdict.
+      expect(digest).toContain('anda-brain/skill-verdict@1')
+      expect(digest).toContain('window=(')
+      expect(inputs.every((r: any) => String(r.id).startsWith('E-'))).toBe(true)
+      expect(outputs).toHaveLength(1)
+      expect(String(outputs[0].id)).toMatch(/^C-\d+$/)
+      cited.push(...inputs.map((r: any) => String(r.id)))
+    }
+    // Each graded outcome is cited by exactly one verdict.
+    expect(new Set(cited).size).toBe(cited.length)
+    expect(cited).toHaveLength(10)
+  })
+
+  it('hands the cycle the signals it cannot go and fetch', async () => {
+    // The model gets one completion, so a signal absent from its input is a
+    // duty it will not perform. This is why the runtime reads them for it.
+    const runtime = testEnv(
+      new FakeAi([{ types: [], predicates: [], commands: [], summary: 'Nothing to do.' }]),
+    )
+    const space = uniqueSpace('assessment')
+    await post(runtime, space, 'execute_kip', { command: FORMATION_PLAN })
+    const past = new Date(Date.now() - 86_400_000).toISOString()
+    await post(runtime, space, 'execute_kip', {
+      command: `MUTATE {
+  UPSERT CONCEPT ?w {
+    MATCH { type: "Watch", key: "due" }
+    SET FIELDS { name: "due" }
+    SET ATTRIBUTES {
+      watch_class: "silence", summary: "s", condition: "c",
+      status: "armed", due_at: :due
+    }
+  }
+}`,
+      parameters: { due: past },
+    })
+
+    const response = await post(runtime, space, 'maintenance', { scope: 'full' })
+    expect(response.status, await text(response)).toBe(200)
+
+    // The prompt the model actually saw.
+    const prompt = JSON.parse(lastUserPayload(runtime))
+    expect(prompt.snapshot.assessment.space_seq).toBeGreaterThan(0)
+    // Fired by the settlement in this same cycle, and now waiting for the
+    // action gate — which is cognition, not arithmetic.
+    expect(prompt.snapshot.assessment.fired_watches).toHaveLength(1)
+    expect(prompt.snapshot.assessment.armed_watches).toHaveLength(0)
+    expect(prompt.snapshot.assessment.predicates.prefers).toBe(1)
   })
 
   it('refuses a clause the engine parses but has not built', async () => {
