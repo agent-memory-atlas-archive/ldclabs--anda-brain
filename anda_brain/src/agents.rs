@@ -3,15 +3,21 @@ mod maintenance;
 pub mod prompts;
 mod recall;
 
-use anda_core::{BoxError, ContentPart, Document, Json, Message, Principal, Usage};
+use anda_core::{
+    BoxError, ContentPart, Document, FunctionDefinition, Json, Message, Principal, Resource, Tool,
+    ToolGroupInfo, ToolOutput, Usage,
+};
 use anda_db::schema::DocumentId;
 use anda_engine::{
-    context::CompletionRunner,
-    memory::{Conversation, ConversationStatus},
+    context::{BaseCtx, CompletionRunner},
+    memory::{Conversation, ConversationStatus, KipArgs, MemoryManagement},
     unix_ms,
 };
+use anda_kip::Response;
 use parking_lot::RwLock;
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
+
+use crate::kip;
 
 pub use formation::*;
 pub use maintenance::*;
@@ -36,6 +42,87 @@ pub(crate) fn first_row(result: Json) -> Json {
         Json::Array(rows) => rows.into_iter().next().unwrap_or(Json::Null),
         other => other,
     }
+}
+
+/// `execute_kip`, with Formation's clause allowlist applied to Formation.
+///
+/// One tool serves both writing agents because both deployment contracts name
+/// `execute_kip` and the definition ships with the protocol; branching on the
+/// calling agent keeps the model-facing surface identical while the authority
+/// behind it is not. `BaseCtx::agent` is the agent whose context spawned this
+/// tool call, which the engine sets when it dispatches — not anything the
+/// model can write.
+///
+/// Why a wrapper rather than a Governance grant: every agent here executes as
+/// the Space's system Principal ([`anda_cognitive_nexus::CognitiveNexus`]'s
+/// `Executor` impl runs `system_session()`), so the reference Maintenance
+/// policy §2 distinction between granted and ungranted permissions has nothing
+/// to attach to. Until the engine can hand an agent a scoped session, this is
+/// where "Formation writes cognition; it does not administer memory" is
+/// actually enforced instead of merely written down.
+#[derive(Clone)]
+pub struct GuardedMemory {
+    memory: Arc<MemoryManagement>,
+}
+
+impl GuardedMemory {
+    pub fn new(memory: Arc<MemoryManagement>) -> Self {
+        Self { memory }
+    }
+}
+
+impl Tool<BaseCtx> for GuardedMemory {
+    type Args = KipArgs;
+    type Output = Response;
+
+    fn name(&self) -> String {
+        self.memory.name()
+    }
+
+    fn description(&self) -> String {
+        self.memory.description()
+    }
+
+    fn group(&self) -> Option<ToolGroupInfo> {
+        self.memory.group()
+    }
+
+    fn definition(&self) -> FunctionDefinition {
+        self.memory.definition()
+    }
+
+    async fn call(
+        &self,
+        ctx: BaseCtx,
+        args: Self::Args,
+        resources: Vec<Resource>,
+    ) -> Result<ToolOutput<Self::Output>, BoxError> {
+        if ctx.agent != FormationAgent::NAME {
+            return self.memory.call(ctx, args, resources).await;
+        }
+
+        let request = match args.into_request() {
+            Ok(request) => request,
+            Err(err) => return Ok(error_output(Response::from(err))),
+        };
+        let nexus = self.memory.nexus();
+        Ok(error_output(
+            kip::execute_cognition_request(nexus.as_ref(), &request).await,
+        ))
+    }
+}
+
+/// Wraps a KIP response as a tool output.
+///
+/// Anything short of `succeeded` is flagged as an error, `partial` included: a
+/// batch where one operation failed is not a clean result, and the
+/// per-operation detail the model needs to tell which is already in the
+/// payload.
+fn error_output(res: Response) -> ToolOutput<Response> {
+    let is_error = (!kip::succeeded(&res)).then_some(true);
+    let mut output = ToolOutput::new(res);
+    output.is_error = is_error;
+    output
 }
 
 #[async_trait::async_trait]

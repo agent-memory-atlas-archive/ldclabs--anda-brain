@@ -412,11 +412,16 @@ answer; Formation is a separate channel.
 
 ```kip
 FIND(?e.payload) WHERE {
-  ?a ASSERTION {proposition: ?p}
+  ?a ASSERTION {proposition: :proposition}
+  STRUCTURAL (?a, "evidence", ?e)
   ?e EVIDENCE {evidence_class: "document"}
-  FILTER(?a.evidence[0].id == ?e.id)
-}
+} LIMIT 5
 ```
+
+An Assertion's Evidence citations are reached through `STRUCTURAL`, not through
+a path expression: a citation is an edge, and `?a.evidence` is not a list you
+can index. `[...]` after a dot path takes a quoted key (`?c.facets["MnemonicState"]`),
+never a position.
 
 4. A digest claim whose `?a.lifecycle.status` is `retracted` means the document
    stopped saying it. Do not answer from it.
@@ -446,6 +451,13 @@ Neither is truth: the factual answer still comes from `BELIEF`, never from rank.
 
 A `Commitment` is exempt. A promise nobody has asked about in months has a low
 `memory_strength` and is exactly what a "what do I owe?" question is for.
+
+Reading changes none of it. This deployment records which memories a recall
+surfaced, in an off-graph usage ledger the dream self-test and the health
+metrics read; that record never reaches the graph, so answering from a memory
+does not raise its `memory_strength`, its `salience` or any confidence, and
+does not spare it from the next metabolism sweep. You have no write tool, and
+the runtime does not have one on your behalf either.
 
 ## A.7 Answer
 

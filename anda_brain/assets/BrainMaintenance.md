@@ -356,10 +356,24 @@ A deterministic settlement pass runs immediately before every cycle, and you
 must not redo its work by hand:
 
 - **Mnemonic metabolism.** `MnemonicState.memory_strength` has already been
-  decayed on unmetabolized Concepts and raised on ones recall actually used,
-  and `last_metabolized_at` stamped. Do not sweep it again this cycle.
+  decayed on Concepts due for it and `last_metabolized_at` stamped. Every
+  cycle sweeps, whatever its scope; the sweep skips a Concept metabolized
+  within the last week, which is what paces the decay. Do not sweep it again
+  this cycle.
+
+  Decay is *all* it does. Recall does not raise `memory_strength` and nothing
+  raises it on recall's behalf: reading is observed in an off-graph ledger and
+  never paid back into the graph, because a memory being retrieved is not a
+  memory being reinforced (§32). So what is yours is the judgement the sweep
+  cannot make — `salience` on what deserves protection from forgetting (§14),
+  and `utility` calibrated on outcomes, on whether a memory a briefing drew on
+  actually helped (§13). Those are the only two hands on this dial, and both
+  are yours.
 - **Correction discovery.** Assertions an actor superseded since the last cycle
   are already recorded, attributed to the actor whose claim needed revising.
+  The running tally is in `assessment.source_reliability`: an actor who
+  corrects themselves often is a source whose fresh claims deserve a lower
+  initial confidence — never a Principal who may do less.
 - **Retention expiry** (`full` cycles). Assertions whose `valid_time.until` has
   passed are already marked `expired`, and elements whose
   `retention.expires_at` has passed are already archived — archived, not
@@ -369,7 +383,11 @@ must not redo its work by hand:
   deciding what should carry an expiry at all, and writing that with
   `SET RETENTION`. The sweep is what makes that write mean something rather
   than being recorded and never honoured.
-- **Schema census.** Per-predicate usage counts are in your input.
+- **Schema census** (`full` cycles). Per-predicate link counts are in
+  `assessment.predicates`, stamped `assessment.audited_at` — a cheaper cycle
+  reads the last full one's, so check the age before acting on it. Two
+  predicates carrying a handful of links each, where one would carry both, is
+  the vocabulary sprawl §15 asks you to review.
 
 What is left for you is the cognitive work the reference policy describes:
 consolidation, contrastive Skill compilation, identity and contradiction review,
@@ -387,9 +405,20 @@ SleepTask queue.
     "stale_event_threshold_days": 30,
     "unconsolidated_max_backlog": 20,
     "orphan_max_count": 20
+  },
+  "assessment": {
+    "audited_at": 1756608000000,
+    "predicates": {"prefers": 41, "works_on": 3, "works_at": 2},
+    "source_reliability": {"C-7": {"corrections": 4, "last_corrected_at": 1756512000000}}
   }
 }
 ```
+
+`assessment` is the runtime's own measurement of this graph, written by the
+settlement — not something a caller can set. It is read-only input to your
+assessment phase (§6), and it is a measurement, not a verdict: `works_on` and
+`works_at` sitting at 3 and 2 links is a *candidate* for review, and whether
+they mean one thing is a question the Propositions answer, not the counts.
 
 `scope` is `daydream`, `quick` or `full`. These are this deployment's budget
 metaphors, not protocol semantics: a `quick` cycle does assessment, pending

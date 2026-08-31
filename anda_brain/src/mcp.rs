@@ -193,6 +193,8 @@ impl From<RunMaintenanceInput> for MaintenanceInput {
             timestamp: input.timestamp,
             parameters: input.parameters,
             formation_id: 0,
+            // Runtime-filled by `Space::maintenance`, like `formation_id`.
+            assessment: None,
         }
     }
 }

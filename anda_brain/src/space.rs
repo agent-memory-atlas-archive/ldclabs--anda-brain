@@ -46,8 +46,8 @@ use crate::wiki::{
 };
 use crate::{
     agents::{
-        BrainHook, FormationAgent, MaintenanceAgent, READONLY_KIP_TIMEOUT, RecallAgent,
-        SELF_USER_ID, TimedMemoryReadonly,
+        BrainHook, FormationAgent, GuardedMemory, MaintenanceAgent, READONLY_KIP_TIMEOUT,
+        RecallAgent, SELF_USER_ID, TimedMemoryReadonly,
     },
     assess, kip,
     ledger::{MissCache, UsageLedger},
@@ -1338,6 +1338,11 @@ impl Space {
                 );
             }
         }
+        // What the settlement just measured, handed to the cycle's assessment
+        // phase. Overwritten rather than merged: like `formation_id`, this is
+        // the runtime's account of its own graph, and a request body must not
+        // be able to tell the Brain what its vocabulary looks like.
+        input.assessment = Some(self.maintenance_assessment());
         let rt = self
             .engine
             .agent_run(
@@ -1361,6 +1366,28 @@ impl Space {
     /// The last memory-metabolism settlement report, when one has run.
     fn memory_settlement(&self) -> Option<MemorySettlementReport> {
         self.db.get_extension_as("memory_settlement")
+    }
+
+    /// What the settlement measured, as the Maintenance prompt receives it.
+    ///
+    /// Both extensions predate any reader: `audit_schema` and correction
+    /// discovery have been writing them since the memory-evolution plan
+    /// landed, while nothing downstream ever opened them. `BrainMaintenance.md`
+    /// §A.1 has meanwhile told the model that the schema census is in its
+    /// input, which it was not.
+    ///
+    /// A `quick` or `daydream` cycle takes no census of its own, so it reads
+    /// the last full cycle's — which is why `audited_at` travels with it.
+    fn maintenance_assessment(&self) -> crate::types::MaintenanceAssessment {
+        let audit: Option<SchemaAudit> = self.db.get_extension_as("schema_audit");
+        crate::types::MaintenanceAssessment {
+            audited_at: audit.as_ref().map(|audit| audit.audited_at),
+            predicates: audit.map(|audit| audit.predicates).unwrap_or_default(),
+            source_reliability: self
+                .db
+                .get_extension_as("source_reliability")
+                .unwrap_or_default(),
+        }
     }
 
     /// Bumps the incrementally-updated observability counters (plan M12).
@@ -1426,6 +1453,7 @@ impl Space {
             last_settlement: self.memory_settlement(),
             last_self_test: self.db.get_extension_as("memory_self_test"),
             last_shadow: self.db.get_extension_as("shadow_report"),
+            last_schema_audit: self.db.get_extension_as("schema_audit"),
         }
     }
 
@@ -1529,12 +1557,6 @@ impl Space {
         )
     }
 
-    /// The last per-predicate schema census, when one has run.
-    #[cfg(test)]
-    fn schema_audit(&self) -> Option<SchemaAudit> {
-        self.db.get_extension_as("schema_audit")
-    }
-
     /// Ledger rows corrected after `since_ms` — the scenario-mining signal
     /// (plan M9).
     pub async fn corrected_entities(
@@ -1608,17 +1630,18 @@ impl Space {
     /// Deterministic memory metabolism (plan M2/M3), run before each
     /// maintenance cycle. Three idempotent passes:
     ///
-    /// 1. **Reinforcement flush** (every scope): usage-ledger counters for
-    ///    recalled propositions are written onto graph metadata
-    ///    (`last_recalled_at`, `recall_count`), where the decay filter and
-    ///    the Recall/Maintenance prompts can see them.
-    /// 2. **Bulk confidence decay** (full scope only, self rate-limited via
-    ///    `decay_applied_at`): the Phase-7 decay the Maintenance prompt used
-    ///    to run by hand, now usage-modulated — recently recalled, pinned,
-    ///    superseded, and system-truth links are exempt.
-    /// 3. **Correction discovery** (every scope): newly superseded links are
+    /// 1. **Bulk disuse metabolism** (every scope, rate-limited to
+    ///    `DECAY_MIN_INTERVAL_MS` by the sweep's own `last_metabolized_at`
+    ///    filter): the Phase-7 decay the Maintenance prompt used to run by
+    ///    hand. Pinned Concepts are exempt. It decays
+    ///    `MnemonicState.memory_strength`, never Assertion confidence.
+    /// 2. **Correction discovery** (every scope): newly superseded links are
     ///    recorded in the ledger and aggregated per asserting actor into the
     ///    `source_reliability` extension.
+    /// 3. **Retention expiry and schema census** (`full` scope).
+    ///
+    /// Nothing here reads the usage ledger back into the graph: see the body
+    /// for why recall no longer reinforces what it touched.
     async fn settle_memory_metabolism(
         &self,
         scope: MaintenanceScope,
@@ -1646,55 +1669,27 @@ impl Space {
             ..Default::default()
         };
 
-        // 1) Reinforcement flush: drain dirty ledger rows in batches. The
-        // dirty flag — not a time-window watermark — marks pending work, so
-        // a row whose KIP write fails (or that arrives past a batch limit)
-        // stays dirty and is retried by every later settlement; usage counts
-        // can no longer be lost. Within one pass the `_id` cursor advances
-        // strictly, so persistently-failing rows can neither spin the loop
-        // nor occupy every batch window and starve the rows behind them.
-        let mut cursor = 0u64;
-        for _ in 0..SETTLEMENT_MAX_BATCHES {
-            let (rows, next_cursor) = self
-                .ledger
-                .unflushed_recalls(cursor, SETTLEMENT_BATCH_LIMIT)
-                .await?;
-            for row in &rows {
-                if !crate::assess::is_concept_entity_id(&row.entity) {
-                    // Only a Concept carries `MnemonicState`: the Facet is
-                    // declared `applicable_to: Concept`, and an Assertion's
-                    // confidence is a stance, never a usage signal — raising it
-                    // because something was read would be exactly the
-                    // "reinforcement = evidence" confusion KIP 2.0 forbids.
-                    // Usage of a Proposition stays ledger-only.
-                    self.ledger
-                        .mark_flushed(row._id, row.recall_count, now_ms)
-                        .await?;
-                    continue;
-                }
-                let request = reinforcement_request(
-                    &row.entity,
-                    policy.recall_reinforcement,
-                    row.last_recalled_at,
-                );
-                let response = self.execute_kip_settlement(request).await?;
-                if kip::succeeded(&response) {
-                    report.reinforced += 1;
-                    self.ledger
-                        .mark_flushed(row._id, row.recall_count, now_ms)
-                        .await?;
-                } else {
-                    // Stays dirty: retried on the next settlement.
-                    report.flush_retries += 1;
-                }
-            }
-            match next_cursor {
-                Some(next) => cursor = next,
-                None => break,
-            }
-        }
+        // There is deliberately no reinforcement pass here.
+        //
+        // Until this was removed, every completed recall's touched Concepts
+        // were drained out of the usage ledger and their
+        // `MnemonicState.memory_strength` raised by `recall_reinforcement`.
+        // That is the one thing the reference Recall policy forbids outright:
+        // §1 ("Recall MUST NOT ... change memory_strength, increment recall
+        // counters"), §32 ("Repeated Recall must not automatically increase
+        // memory_strength/confidence/salience"), invariant 2 ("Read does not
+        // reinforce memory"). Deferring the write to maintenance did not make
+        // reading stop reinforcing; it only moved where the reinforcement was
+        // written from.
+        //
+        // The ledger stays, as instrumentation: it still tells the dream
+        // self-test which memories have never been exercised, still feeds
+        // `entities_recalled` and the correction rate, and still supplies the
+        // scenario miner. What it no longer does is close a loop back into
+        // cognitive state. Reading is now observed and not rewarded — which is
+        // also why a recalled Concept is no longer spared the sweep below.
 
-        // 2) Bulk disuse metabolism, full scope only. This decays
+        // Bulk disuse metabolism, every scope. This decays
         // `MnemonicState.memory_strength` — how available a memory should be —
         // and never Assertion confidence: a fact nobody asked about lately is
         // no less credible, and KIP 2.0 forbids letting time erode a stance
@@ -1702,31 +1697,38 @@ impl Space {
         // has not been recalled recently"). A failing pass degrades —
         // corrections and the schema census below still run — but it must page
         // an operator rather than vanish into a debug log.
-        if scope == MaintenanceScope::Full {
-            report.decay_ran = true;
-            for _ in 0..SETTLEMENT_MAX_BATCHES {
-                let request = decay_request(&policy, now_ms, decay_min_interval_ms);
-                let response = self.execute_kip_settlement(request).await?;
-                if !kip::succeeded(&response) {
-                    log::error!(
-                        target: "brain",
-                        space_id = self.id;
-                        "memory-strength metabolism failed — disuse decay is NOT running \
-                         (graph past the full-scan engine cap?): {}",
-                        kip::error_message(&response)
-                    );
-                    report.decay_error = Some(kip::error_message(&response));
-                    break;
-                }
-                let updated = kip::changed(&response, "update");
-                report.decayed += updated;
-                if updated < SETTLEMENT_BATCH_LIMIT as u64 {
-                    break;
-                }
+        //
+        // The cadence is `DECAY_MIN_INTERVAL_MS`, enforced inside the sweep's
+        // own `last_metabolized_at` filter, not the cycle scope. Gating on
+        // `Full` as well used to look like caution and was a hole: full cycles
+        // are scheduled every 168 formations, so a Space forming slowly went
+        // months without metabolizing while `BrainMaintenance.md` §A.1 told
+        // the model the sweep had already run and not to do it by hand. With
+        // the interval doing the throttling, a scope that has nothing due
+        // costs one query that matches no rows and breaks on the first batch.
+        report.decay_ran = true;
+        for _ in 0..SETTLEMENT_MAX_BATCHES {
+            let request = decay_request(&policy, now_ms, decay_min_interval_ms);
+            let response = self.execute_kip_settlement(request).await?;
+            if !kip::succeeded(&response) {
+                log::error!(
+                    target: "brain",
+                    space_id = self.id;
+                    "memory-strength metabolism failed — disuse decay is NOT running \
+                     (graph past the full-scan engine cap?): {}",
+                    kip::error_message(&response)
+                );
+                report.decay_error = Some(kip::error_message(&response));
+                break;
+            }
+            let updated = kip::changed(&response, "update");
+            report.decayed += updated;
+            if updated < SETTLEMENT_BATCH_LIMIT as u64 {
+                break;
             }
         }
 
-        // 3) Correction discovery: Assertions an actor has revised. In KIP 1.x
+        // Correction discovery: Assertions an actor has revised. In KIP 1.x
         // this was a `metadata.superseded` flag the settlement could clear with
         // a second write; an Assertion is immutable, so the cursor is the Space
         // sequence coordinate instead — processed revisions fall behind the
@@ -1811,7 +1813,7 @@ impl Space {
             }
         }
 
-        // 4) Retention expiry, full scope only. Both halves are the host
+        // Retention expiry, full scope only. Both halves are the host
         // deciding *when* forgetting happens; the engine only ever decided
         // what may be forgotten. They are explicit calls rather than a
         // background timer for the reason the engine declines to run one: a
@@ -1847,7 +1849,6 @@ impl Space {
         self.bump_metrics(|metrics| {
             metrics.corrections += report.new_corrections;
             metrics.decayed += report.decayed;
-            metrics.reinforced += report.reinforced;
         });
         // Refresh the cached graph counters `memory_status` serves (M12:
         // readers never pay heavy queries).
@@ -2937,7 +2938,11 @@ LIMIT {window}"#
         let mut engine = Engine::builder()
             .with_management(management)
             .with_models(models.clone())
-            .register_tool(memory.clone())?
+            // `execute_kip`, but Formation only reaches the cognition-only
+            // subset through it; maintenance keeps the whole of KML. The raw
+            // `memory` handle stays available to host code, which is
+            // deterministic and not what the gate is for.
+            .register_tool(Arc::new(GuardedMemory::new(memory.clone())))?
             .register_tool(Arc::new(memory_r))?
             .register_tool(Arc::new(memory_tool))?
             .register_tool(Arc::new(note_tool))?
@@ -3229,6 +3234,8 @@ impl BrainHook for Hooks {
             timestamp: Some(rfc3339_datetime_now()),
             parameters: None,
             formation_id,
+            // Filled by `Space::maintenance` once the settlement has run.
+            assessment: None,
         };
         match space.maintenance(SELF_USER_ID, input).await {
             Ok(rt) => rt.conversation,
@@ -3552,41 +3559,6 @@ fn superseded_rows(result: &serde_json::Value) -> Vec<(String, u64, Option<Strin
         .unwrap_or_default()
 }
 
-/// Settlement write: reinforce one recalled Concept's mnemonic accessibility
-/// (plan M2 step 1).
-///
-/// Reinforcement raises `MnemonicState.memory_strength` — how available the
-/// memory should be — and touches nothing epistemic. Repetition is not
-/// evidence: being asked about something three times is not three reasons to
-/// believe it, so no Assertion's confidence moves here.
-///
-/// `COALESCE` supplies the baseline for a Concept that has never been
-/// metabolized, and `CLAMP` keeps the Facet inside its declared `[0, 1]`, so
-/// re-running the pass converges instead of drifting.
-fn reinforcement_request(entity: &str, gain: f64, last_recalled_ms: u64) -> Request {
-    let parameters = serde_json::Map::from_iter([
-        ("id".to_string(), serde_json::Value::from(entity)),
-        ("gain".to_string(), serde_json::Value::from(gain)),
-        (
-            "now".to_string(),
-            serde_json::Value::from(kip_timestamp(last_recalled_ms)),
-        ),
-        (
-            "baseline".to_string(),
-            serde_json::Value::from(DEFAULT_MEMORY_STRENGTH),
-        ),
-    ]);
-    kip::request_with(
-        r#"UPDATE ?c
-SET FACET "MnemonicState" {
-  memory_strength: CLAMP(ADD(COALESCE(?c.facets["MnemonicState"].memory_strength, :baseline), :gain), 0, 1),
-  last_metabolized_at: :now
-}
-WHERE { ?c {id: :id} }"#,
-        parameters,
-    )
-}
-
 /// Where the dream self-test's sampling window sits.
 ///
 /// A Space sequence coordinate, not a timestamp: it is the same monotonic
@@ -3855,7 +3827,7 @@ mod tests {
         init_conversation_collection, init_resource_collection,
     };
     use crate::{
-        agents::{BrainHook, SELF_USER_ID, TimedMemoryReadonly},
+        agents::{BrainHook, FormationAgent, MaintenanceAgent, SELF_USER_ID, TimedMemoryReadonly},
         kip,
         payload::StringOr,
         testkit::{app_state_core, create_loaded_space},
@@ -4811,47 +4783,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn usage_ledger_unflushed_recalls_pages_by_id_cursor() {
-        let app = test_app_state("usage_ledger_cursor");
-        let space = create_loaded_space(&app, "usage_ledger_cursor").await;
-
-        let entities = std::collections::BTreeSet::from([
-            "P:1:a".to_string(),
-            "P:2:b".to_string(),
-            "C:3".to_string(),
-        ]);
-        space.ledger.record_recall(&entities, 100).await.unwrap();
-
-        // Page through with limit 1: each page advances the cursor past the
-        // returned row, so a stuck (still-dirty) prefix row can never occupy
-        // the next window — the starvation shape this cursor exists for.
-        let mut cursor = 0u64;
-        let mut seen = Vec::new();
-        loop {
-            let (rows, next) = space.ledger.unflushed_recalls(cursor, 1).await.unwrap();
-            for row in &rows {
-                assert!(row._id > cursor, "pages must advance strictly by _id");
-                seen.push(row.entity.clone());
-            }
-            match next {
-                Some(next_cursor) => {
-                    assert!(next_cursor > cursor);
-                    cursor = next_cursor;
-                }
-                None => break,
-            }
-        }
-        seen.sort();
-        assert_eq!(seen, vec!["C:3", "P:1:a", "P:2:b"]);
-
-        // A cursor past every row scans nothing and reports exhaustion.
-        let (rows, next) = space.ledger.unflushed_recalls(u64::MAX, 1).await.unwrap();
-        assert!(rows.is_empty());
-        assert!(next.is_none());
-    }
-
-    #[tokio::test]
-    async fn usage_ledger_counts_corrections_and_flush_state() {
+    async fn usage_ledger_counts_recalls_and_corrections_without_touching_the_graph() {
         let app = test_app_state("usage_ledger");
         let space = create_loaded_space(&app, "usage_ledger").await;
 
@@ -4875,10 +4807,6 @@ mod tests {
             1
         );
 
-        let pending = space.ledger.unflushed_recalls(0, 100).await.unwrap().0;
-        assert_eq!(pending.len(), 2);
-        assert!(pending.iter().all(|row| row.dirty == 1));
-
         // Corrections record once per entity.
         assert!(
             space
@@ -4898,29 +4826,83 @@ mod tests {
         assert_eq!(row.correction_count, 1);
         assert_eq!(row.last_corrected_at, 300);
 
-        // Flushed rows drop out of the pending scan until recalled again.
-        space
-            .ledger
-            .mark_flushed(row._id, row.recall_count, 500)
+        // The counts stay in the ledger and reach the graph through nothing:
+        // the entities recalled above carry no `MnemonicState` at all, which
+        // is what "reading does not reinforce" has to look like from the
+        // graph's side.
+        assert_eq!(mnemonic_state(&space, "C:9").await, serde_json::Value::Null);
+    }
+
+    /// The gate is only worth anything if the engine really does tell the
+    /// tool which agent called it. `GuardedMemory` branches on
+    /// `BaseCtx::agent`, so this drives the real dispatch path — an agent
+    /// context, its `child_base` tool context — rather than the predicate,
+    /// which `kip.rs` already covers on its own.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn formation_cannot_administer_memory_but_maintenance_can() {
+        use anda_core::Tool;
+        use anda_engine::memory::KipArgs;
+
+        let app = test_app_state("formation_gate");
+        let space = create_loaded_space(&app, "formation_gate").await;
+        let guarded = crate::agents::GuardedMemory::new(space.memory.clone());
+
+        // A Concept to aim at, so a refusal cannot be confused with a miss.
+        seed_kip(
+            &space,
+            kip::request(
+                r#"MUTATE { UPSERT CONCEPT ?p { MATCH {type: "Person", key: "victim"} SET FIELDS {name: "Victim"} } }"#,
+            ),
+        )
+        .await;
+
+        let purge = || KipArgs {
+            command: Some(
+                r#"ARCHIVE ?c WHERE { ?c CONCEPT {type: "Person", key: "victim"} } LIMIT 1"#
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
+
+        // Formation: refused on what the command parses to.
+        let ctx = space
+            .ctx_for_test(SELF_USER_ID, FormationAgent::NAME)
+            .unwrap();
+        let out = guarded
+            .call(ctx.child_base("execute_kip").unwrap(), purge(), vec![])
             .await
             .unwrap();
-        let pending = space.ledger.unflushed_recalls(0, 100).await.unwrap().0;
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].entity, "C:9");
+        assert_eq!(out.is_error, Some(true));
+        let refusal = kip::error_message(&out.output);
+        assert!(refusal.contains("ARCHIVE"), "{refusal}");
 
-        // A recall recorded after the flush re-dirties the row: the flag —
-        // not a time watermark — decides retry, so late writes are never
-        // stranded outside a scan window.
-        space
-            .ledger
-            .record_recall(
-                &std::collections::BTreeSet::from(["P:1:prefers".to_string()]),
-                50, // deliberately older than the flush timestamp
+        // Formation's own writes still go through the same tool.
+        let write = guarded
+            .call(
+                ctx.child_base("execute_kip").unwrap(),
+                KipArgs {
+                    command: Some(
+                        r#"MUTATE { CREATE ACTIVITY ?a { SET FIELDS { activity_class: "extraction", status: "completed" } } }"#
+                            .to_string(),
+                    ),
+                    ..Default::default()
+                },
+                vec![],
             )
             .await
             .unwrap();
-        let pending = space.ledger.unflushed_recalls(0, 100).await.unwrap().0;
-        assert_eq!(pending.len(), 2);
+        assert_eq!(write.is_error, None, "{:?}", write.output);
+
+        // Maintenance: the same tool, the same command, admitted.
+        let ctx = space
+            .ctx_for_test(SELF_USER_ID, MaintenanceAgent::NAME)
+            .unwrap();
+        let out = guarded
+            .call(ctx.child_base("execute_kip").unwrap(), purge(), vec![])
+            .await
+            .unwrap();
+        assert_eq!(out.is_error, None, "{:?}", out.output);
+        assert_eq!(kip::changed(&out.output, "archive"), 1, "{:?}", out.output);
     }
 
     async fn seed_kip(space: &Space, request: anda_kip::Request) {
@@ -5046,7 +5028,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settlement_metabolizes_unused_and_reinforces_recalled_memories() {
+    async fn settlement_metabolizes_every_memory_and_reinforces_none() {
         let app = test_app_state("settlement");
         let space = create_loaded_space(&app, "settlement").await;
         let now_ms = unix_ms();
@@ -5057,7 +5039,9 @@ mod tests {
             concepts[2].clone(),
         );
 
-        // One Concept was surfaced by a recall; the others never were.
+        // One Concept was surfaced by a recall; the others never were. Under
+        // the reference Recall policy that must make no difference to the
+        // graph: reading is observed, never rewarded (§1, §32, invariant 2).
         space
             .ledger
             .record_recall(&BTreeSet::from([beta.clone()]), now_ms)
@@ -5068,30 +5052,29 @@ mod tests {
             .settle_memory_metabolism(MaintenanceScope::Full, now_ms)
             .await
             .unwrap();
-        assert_eq!(report.reinforced, 1, "{report:?}");
         assert!(report.decay_ran);
-        assert_eq!(report.decayed, 2, "{report:?}");
+        assert_eq!(report.decayed, 3, "{report:?}");
         assert_eq!(report.new_corrections, 0);
 
-        // Reinforcement raised the recalled Concept's accessibility (0.8 + 0.1)
-        // and stamped it, which also spares it from this cycle's metabolism.
-        let state = mnemonic_state(&space, &beta).await;
-        assert!((strength(&state) - 0.9).abs() < 1e-9, "{state}");
-        assert!(state["last_metabolized_at"].is_string(), "{state}");
-
-        // The untouched Concepts decayed by the policy factor (0.8 × 0.95).
-        for id in [&alpha, &gamma] {
+        // All three decayed by the policy factor (0.8 × 0.95), the recalled
+        // one included. It earned no gain and bought no exemption — the
+        // ledger row exists, and the graph does not know about it.
+        for id in [&alpha, &beta, &gamma] {
             let state = mnemonic_state(&space, id).await;
-            assert!((strength(&state) - 0.76).abs() < 1e-9, "{state}");
+            assert!((strength(&state) - 0.76).abs() < 1e-9, "{id}: {state}");
         }
+        assert_eq!(
+            space.ledger.get(&beta).await.unwrap().unwrap().recall_count,
+            1,
+            "the recall is still recorded, just not paid out"
+        );
 
-        // Idempotence: an immediate re-settlement neither re-decays (weekly
-        // rate limit) nor re-flushes (ledger flush marker).
+        // Idempotence: an immediate re-settlement does not re-decay (weekly
+        // rate limit).
         let report = space
             .settle_memory_metabolism(MaintenanceScope::Full, now_ms + 1)
             .await
             .unwrap();
-        assert_eq!(report.reinforced, 0, "{report:?}");
         assert_eq!(report.decayed, 0, "{report:?}");
 
         // Nothing decayed the *claims*: KIP 2.0 forbids letting time erode a
@@ -5151,7 +5134,13 @@ SUPERSEDING :old"#,
             .settle_memory_metabolism(MaintenanceScope::Quick, now_ms)
             .await
             .unwrap();
-        assert!(!report.decay_ran);
+        // Disuse metabolism is paced by `DECAY_MIN_INTERVAL_MS`, not by the
+        // cycle scope: a `quick` cycle sweeps too. These Concepts have never
+        // carried `MnemonicState`, so they metabolize from the baseline rather
+        // than being skipped — "the model forgot to set MnemonicState" must
+        // not mean "this memory never fades".
+        assert!(report.decay_ran);
+        assert!(report.decayed > 0, "{report:?}");
         assert_eq!(report.new_corrections, 1, "{report:?}");
         let row = space.ledger.get(&old).await.unwrap().unwrap();
         assert_eq!(row.correction_count, 1);
@@ -5765,7 +5754,6 @@ SUPERSEDING :old"#,
         assert_eq!(status.metrics.recalls_completed, 1);
         assert_eq!(status.metrics.entities_recalled, 1, "{status:?}");
         assert_eq!(status.metrics.corrections, 1);
-        assert_eq!(status.metrics.reinforced, 1);
         assert_eq!(status.probe_hit_rate, Some(0.5));
         assert_eq!(status.correction_rate, Some(1.0));
         assert!(status.graph.concepts > 0);
@@ -5775,12 +5763,28 @@ SUPERSEDING :old"#,
         // The full settlement also refreshed the per-predicate census. The
         // vocabulary is the Space's Schema Environment now, so the census
         // covers every declared predicate — including the ones nothing uses.
-        let audit = space.schema_audit().expect("schema audit stored");
+        let audit = status.last_schema_audit.expect("schema audit reported");
         // Two Propositions, not three: the revision above added an Assertion
         // about a tuple that already existed. A Proposition is the statement,
         // and how many actors have an opinion about it is a separate question.
         assert_eq!(audit.predicates.get("prefers"), Some(&2));
         assert_eq!(audit.predicates.get("same_as"), Some(&0));
+
+        // ... and the same census reaches the Maintenance prompt, which its
+        // deployment contract (§A.1) has always claimed. Correction discovery
+        // recorded one revision above, so the actor tally travels with it.
+        let assessment = space.maintenance_assessment();
+        assert_eq!(assessment.predicates.get("prefers"), Some(&2));
+        assert_eq!(assessment.audited_at, Some(audit.audited_at));
+        assert_eq!(
+            assessment
+                .source_reliability
+                .values()
+                .map(|source| source.corrections)
+                .sum::<u64>(),
+            1,
+            "{assessment:?}"
+        );
     }
 
     /// Shadow judge: always votes for answer B — with deterministic A/B

@@ -91,7 +91,7 @@ Consolidates, prunes, and optimizes the knowledge graph during scheduled or on-d
 4. **Stale Event Consolidation** — Extract semantic knowledge from old events (configurable threshold), create linked Preference/Fact nodes.
 5. **Duplicate Merging** — Find and merge similar concepts, updating all propositions.
 6. **Orphan Cleanup** — Assign domain-less concepts to appropriate domains.
-7. **Confidence Decay** — Age facts by reducing confidence scores (`confidence * decay_factor`).
+7. **Mnemonic metabolism** — run by the runtime settlement before the cycle, not by the agent: `MnemonicState.memory_strength * decay_factor` on Concepts due for it. Never `confidence`; a fact nobody has asked about lately is no less credible.
 
 **Key behaviors:**
 - Single-execution guard — only one maintenance cycle can run at a time per space.
@@ -107,22 +107,36 @@ policy; an absent policy means the compiled-in defaults, so setting nothing
 changes nothing. The policy is the evolution genome of
 `docs/memory_evolution_plan_cn.md` (module M-P).
 
-**Usage-modulated metabolism (selection pressure):** every completed recall
-records which graph entities it actually surfaced into an off-graph usage
-ledger (`memory_usage` collection). Before each maintenance cycle the runtime
-runs a deterministic settlement: recalled Concepts get their
-`MnemonicState` reinforced and `last_metabolized_at` stamped; full cycles then
-run the bulk metabolism in code (usage-modulated — recently recalled, pinned,
-and superseded elements are exempt; weekly rate-limited via
-`decay_applied_at`); newly superseded Assertions are recorded as corrections
-and aggregated per asserting actor into the `source_reliability` extension.
-What decays is `MnemonicState.memory_strength` — how *available* a memory
-should be — and never an Assertion's confidence: KIP 2.0 forbids letting time
-erode a stance, because a fact nobody has asked about in a month is no less
-credible. The LLM maintenance agent no longer runs bulk metabolism itself —
-"use it or lose it" is enforced by code, and reads stay reads (recall never
-mutates the graph it queries). The last settlement report is stored in the
-`memory_settlement` extension.
+**Mnemonic metabolism:** before each maintenance cycle the runtime runs a
+deterministic settlement that decays `MnemonicState.memory_strength` on
+Concepts due for it, stamping `last_metabolized_at`. Pinned Concepts are
+exempt. Every cycle sweeps; what paces it is the sweep's own weekly
+`last_metabolized_at` filter, not the cycle scope, because scope decides how
+much *cognitive* work a cycle does and gating metabolism on `full` as well
+meant a Space forming slowly went months without any. Newly superseded
+Assertions are recorded as corrections and aggregated per asserting actor into
+the `source_reliability` extension; full cycles also refresh the per-predicate
+census. Both reach the Maintenance prompt as its `assessment` block. What
+decays is `MnemonicState.memory_strength` — how *available* a memory should be
+— and never an Assertion's confidence: KIP 2.0 forbids letting time erode a
+stance, because a fact nobody has asked about in a month is no less credible.
+The LLM maintenance agent no longer runs bulk metabolism itself. The last
+settlement report is stored in the `memory_settlement` extension.
+
+**Reading does not reinforce.** Every completed recall still records which
+graph entities it surfaced, into an off-graph usage ledger (`memory_usage`
+collection) that the dream self-test, the health metrics and the scenario
+miner read. That record stops there. An earlier design closed the loop —
+settlement raised the recalled Concepts' `memory_strength` by a
+`recall_reinforcement` gain — and that is precisely what the reference Recall
+policy forbids (§1 "MUST NOT ... change memory_strength, increment recall
+counters", §32, invariant 2 "Read does not reinforce memory"). Deferring the
+write to maintenance did not make reading stop reinforcing; it only moved
+where the reinforcement was written from. So the writeback is gone: a recalled
+memory earns no gain and buys no exemption from the next sweep. Retrieval is
+observed, not rewarded — which is also the difference between a memory system
+and a popularity contest. The `recall_reinforcement` policy knob is retained
+for stored-policy compatibility and does nothing.
 
 **Retention expiry:** a full settlement also acts on the two clocks that say
 when something should stop being kept, which are not the same clock. An
@@ -175,14 +189,17 @@ when `found` is true.
 
 **Memory observability:** `GET /v1/{space_id}/memory_status` returns
 incrementally-maintained counters (recalls, probe hits/misses, self-test
-groundability, corrections, decay/reinforcement, forget) plus derived rates
+groundability, corrections, decay, forget) plus derived rates
 (probe hit rate, correction rate, mean self-reported uncertainty,
 maintenance tokens per recall — the memory-ROI proxy), graph counts
 including the `predicate_types` schema-sprawl indicator, and the latest
 settlement / self-test / shadow reports. Writers bump counters at write
 time; reading the status never runs heavy queries. Full-scope settlements
-also refresh a per-predicate link census (`schema_audit` extension) that
-backs the Maintenance prompt's predicate-merge guidance.
+also refresh a per-predicate link census, reported as `last_schema_audit`
+and handed to the Maintenance prompt as `assessment.predicates` — with the
+per-actor correction tallies as `assessment.source_reliability` — so the
+predicate-merge and contradiction guidance has real numbers rather than the
+model's impression of them.
 
 **Shadow evaluation (safe policy canary):**
 `POST /v1/{space_id}/management/shadow_eval` compares a candidate

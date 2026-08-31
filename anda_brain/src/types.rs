@@ -602,10 +602,49 @@ pub struct MaintenanceInput {
     /// The ID of the formation conversation that processed.
     #[serde(default)]
     pub formation_id: u64,
+
+    /// What the deterministic settlement measured, for the cycle's assessment
+    /// phase (reference policy §6).
+    ///
+    /// Runtime-filled: [`crate::space::Space::maintenance`] overwrites whatever
+    /// a caller sent, exactly like `formation_id`. A request body deciding what
+    /// the Brain believes about its own graph would be cognitive content
+    /// choosing its own evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assessment: Option<MaintenanceAssessment>,
 }
 
 fn default_trigger() -> String {
     "on_demand".to_string()
+}
+
+/// The settlement's measurements, handed to the Maintenance prompt.
+///
+/// Both halves were computed and stored long before they were shown to
+/// anybody: the census fed nothing, and the correction tallies fed nothing,
+/// while `BrainMaintenance.md` §A.1 told the model both were in its input.
+/// Reading them here is what makes that sentence true.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct MaintenanceAssessment {
+    /// Registered predicate → number of links using it, from the last
+    /// full-scope census. Vocabulary sprawl is visible here and nowhere else:
+    /// two predicates meaning one thing show up as two thin counts.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub predicates: BTreeMap<String, u64>,
+
+    /// When that census ran, in unix milliseconds. Absent when none has:
+    /// only full cycles take it, so a `quick` cycle reads the previous one's,
+    /// and the model deserves to know how old it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audited_at: Option<u64>,
+
+    /// Semantic actor → how often that actor's own claims needed revising.
+    ///
+    /// A reliability signal about a *source*, never about a Principal's
+    /// authority: an actor who corrects themselves often is one whose fresh
+    /// claims deserve a lower initial confidence, not one who may do less.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub source_reliability: BTreeMap<String, SourceReliability>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -692,7 +731,14 @@ pub struct MemoryPolicy {
     )]
     pub memory_strength_decay_factor: f64,
 
-    /// Stability gain per successful recall use (consumed from P1).
+    /// Retained for stored-policy compatibility; nothing reads it.
+    ///
+    /// This was the `memory_strength` gain a recall used to earn the Concepts
+    /// it surfaced. Reading must not reinforce what it read (reference Recall
+    /// policy §1, §32), so the settlement pass that spent this knob is gone.
+    /// The field stays so an existing `memory_policy` extension still
+    /// deserializes and a caller that still sends it is not rejected — setting
+    /// it simply has no effect.
     #[serde(default = "MemoryPolicy::default_recall_reinforcement")]
     pub recall_reinforcement: f64,
 
@@ -1033,22 +1079,17 @@ pub struct SourceReliability {
 pub struct MemorySettlementReport {
     pub settled_at: u64,
 
-    /// Propositions whose usage counters were flushed onto graph metadata.
-    pub reinforced: u64,
-
-    /// Propositions decayed by the bulk pass (full scope only).
+    /// Concepts whose `MnemonicState.memory_strength` the bulk pass decayed.
+    /// Zero is the ordinary answer: the sweep only touches Concepts last
+    /// metabolized more than `DECAY_MIN_INTERVAL_MS` ago.
     pub decayed: u64,
 
-    /// Whether the decay pass ran this cycle.
+    /// Whether the decay pass ran this cycle. Every scope runs it — the
+    /// interval filter, not the scope, is what paces the metabolism.
     pub decay_ran: bool,
 
     /// Superseded memories newly observed and recorded as corrections.
     pub new_corrections: u64,
-
-    /// Ledger rows whose graph flush failed and stayed dirty for the next
-    /// settlement to retry.
-    #[serde(default)]
-    pub flush_retries: u64,
 
     /// Set when the bulk decay pass failed (e.g. the engine's full-scan
     /// solution cap on large graphs) — decay did not complete this cycle.
@@ -1241,11 +1282,8 @@ pub struct MemoryMetrics {
     /// Corrections (superseded memories) settlement discovered.
     pub corrections: u64,
 
-    /// Propositions decayed by settlement.
+    /// Concepts decayed by settlement.
     pub decayed: u64,
-
-    /// Propositions whose usage counters were flushed onto the graph.
-    pub reinforced: u64,
 
     /// Structured recalls that carried an uncertainty self-report.
     pub uncertainty_reports: u64,
@@ -1298,6 +1336,12 @@ pub struct MemoryStatus {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_shadow: Option<ShadowReport>,
+
+    /// The last per-predicate census. `graph.predicate_types` says how many
+    /// predicates exist; this says how much each one carries, which is the
+    /// half that tells sprawl from breadth.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_schema_audit: Option<SchemaAudit>,
 }
 
 /// Graph-level counters included in `memory_status`.

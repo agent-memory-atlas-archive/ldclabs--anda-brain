@@ -49,16 +49,18 @@ pub struct MemoryUsage {
     /// Unix ms when the newest correction was observed.
     pub last_corrected_at: u64,
 
-    /// `recall_count` value already settled onto graph metadata; settlement
-    /// only flushes rows where `recall_count > flushed_recall_count`.
+    /// Vestigial: the `recall_count` already written back to graph metadata.
+    ///
+    /// Nothing writes recall counts back any more — reading must not reinforce
+    /// what it read (reference Recall policy §1, §32), so the settlement's
+    /// reinforcement pass was removed and this ledger became pure
+    /// instrumentation. The two fields below survive because they are indexed
+    /// columns of a live collection and dropping them is a storage migration,
+    /// not because anything reads them.
     pub flushed_recall_count: u64,
 
-    /// 1 while the row carries recall counts not yet settled onto graph
-    /// metadata (schema v2). Settlement scans this flag instead of a
-    /// time-window watermark, so a row whose KIP flush failed — or that
-    /// arrived past a batch limit — is retried forever instead of silently
-    /// falling out of the scan window. (u64 because AndaDB BTree indexes do
-    /// not support Bool.)
+    /// Vestigial companion of `flushed_recall_count`; see its docs. (u64
+    /// because AndaDB BTree indexes do not support Bool.)
     pub dirty: u64,
 
     pub updated_at: u64,
@@ -195,86 +197,6 @@ impl UsageLedger {
                 Ok(true)
             }
         }
-    }
-
-    /// Rows carrying recall counts not yet settled onto graph metadata.
-    /// Scans the `dirty` flag — not a time window — so a row whose flush
-    /// failed, or that arrived past a batch limit, keeps showing up until it
-    /// actually settles.
-    ///
-    /// Pages by `_id > after_id` so a prefix of persistently-failing rows
-    /// cannot occupy every batch window and starve the dirty rows behind
-    /// them. The id-set intersection is index-only; only the page's documents
-    /// are fetched. Returns the page plus `Some(last_scanned_id)` when more
-    /// dirty rows remain past it (`None` = scan exhausted).
-    pub async fn unflushed_recalls(
-        &self,
-        after_id: u64,
-        limit: usize,
-    ) -> Result<(Vec<MemoryUsage>, Option<u64>), DBError> {
-        let mut ids = self
-            .collection
-            .query_all_ids(Filter::And(vec![
-                Box::new(Filter::Field((
-                    "dirty".to_string(),
-                    RangeQuery::Eq(Fv::U64(1)),
-                ))),
-                Box::new(Filter::Field((
-                    "_id".to_string(),
-                    RangeQuery::Gt(Fv::U64(after_id)),
-                ))),
-            ]))
-            .await?;
-        ids.sort_unstable();
-        let next_cursor = if ids.len() > limit {
-            ids.get(limit.saturating_sub(1)).copied()
-        } else {
-            None
-        };
-        ids.truncate(limit);
-
-        let mut rows = Vec::with_capacity(ids.len());
-        for id in ids {
-            match self.collection.get_as::<MemoryUsage>(id).await {
-                Ok(row) if row.recall_count > row.flushed_recall_count => rows.push(row),
-                // Dirty without a pending delta, or removed while paging
-                // (forget cascade): nothing to settle.
-                Ok(_) | Err(_) => {}
-            }
-        }
-        Ok((rows, next_cursor))
-    }
-
-    /// Marks a row's recall counter as settled onto graph metadata. Re-reads
-    /// the row under the write lock: a recall recorded between the
-    /// settlement's scan and this call keeps the row dirty, so its delta is
-    /// picked up by the next settlement instead of being lost.
-    pub async fn mark_flushed(
-        &self,
-        id: u64,
-        recall_count: u64,
-        now_ms: u64,
-    ) -> Result<(), DBError> {
-        let _guard = self.write_lock.lock().await;
-        let current = match self.collection.get_as::<MemoryUsage>(id).await {
-            Ok(row) => row.recall_count,
-            // Row already removed (forget cascade racing the settlement
-            // scan): there is nothing left to settle for this entity, and
-            // erroring here would abort the whole reinforcement pass.
-            Err(_) => return Ok(()),
-        };
-        let dirty = if current > recall_count { 1 } else { 0 };
-        self.collection
-            .update(
-                id,
-                BTreeMap::from([
-                    ("flushed_recall_count".to_string(), Fv::U64(recall_count)),
-                    ("dirty".to_string(), Fv::U64(dirty)),
-                    ("updated_at".to_string(), Fv::U64(now_ms)),
-                ]),
-            )
-            .await?;
-        Ok(())
     }
 
     /// Records self-test retrievals (plan M7). Deliberately touches only
