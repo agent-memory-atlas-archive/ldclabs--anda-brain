@@ -655,17 +655,26 @@ pub struct MaintenanceAssessment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub space_seq: Option<u64>,
 
-    /// The armed Watches, so the cycle's Watch evaluation has a set to
+    /// The armed Watches, so the cycle's delta evaluation has a set to
     /// evaluate rather than a type name to go looking for.
     ///
     /// A Watch is attention, never authority: this list says what the Brain
     /// declared it was waiting for, and firing one grants nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub armed_watches: Vec<ArmedWatch>,
+
+    /// Watches that have fired and that nobody has decided about yet — the
+    /// action gate's queue.
+    ///
+    /// The runtime fires a silence Watch when its deadline passes, which is
+    /// arithmetic; what to do about it is not, and stays here until the cycle
+    /// records an `action_gate` outcome and disarms it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fired_watches: Vec<ArmedWatch>,
 }
 
 /// One armed Watch, as the Maintenance prompt receives it.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 pub struct ArmedWatch {
     pub id: String,
 
@@ -1122,6 +1131,47 @@ pub struct RecallOutput {
     pub failed_reason: Option<String>,
 }
 
+/// What one sweep did.
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct WatchSettlement {
+    /// Silence Watches whose `due_at` had passed and that this sweep fired.
+    pub fired: u64,
+
+    /// Watches that were due but whose fire did not commit — almost always
+    /// because the maintenance model changed the same Watch between the scan
+    /// and the write, which `EXPECT VERSION` refuses rather than clobbers.
+    /// They stay `armed` and the next sweep sees them again.
+    pub conflicted: u64,
+
+    /// Set when the scan itself failed: no Watch was evaluated this cycle, and
+    /// reporting zero fired would read as "nothing was due".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// What one Skill lifecycle pass decided.
+///
+/// The transitions themselves are deterministic code (see [`crate::skill`]);
+/// this is only the count, for the cycle's health report.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+pub struct SkillSettlement {
+    /// Skills whose tallies or standing moved.
+    pub graded: u64,
+
+    /// Lifecycle transitions recorded as `lifecycle_verdict` Activities.
+    pub transitions: u64,
+
+    /// Verdicts refused by `EXPECT VERSION` because the maintenance model
+    /// revised the Skill between the scan and the write. Nothing is lost: the
+    /// cursor did not advance, so the next pass re-reads the same outcomes.
+    pub conflicted: u64,
+
+    /// Set when the Skill scan failed: no Skill was graded this cycle, and
+    /// reporting zero transitions would read as "nothing was due".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// Per-source correction statistics (memory evolution plan, module M3),
 /// aggregated at settlement time into the `source_reliability` space
 /// extension. High correction counts mark a source whose facts deserve a
@@ -1150,6 +1200,14 @@ pub struct MemorySettlementReport {
 
     /// Superseded memories newly observed and recorded as corrections.
     pub new_corrections: u64,
+
+    /// What the Watch expiry sweep did this cycle.
+    #[serde(default)]
+    pub watches: WatchSettlement,
+
+    /// What the Skill lifecycle pass did this cycle.
+    #[serde(default)]
+    pub skills: SkillSettlement,
 
     /// Set when the bulk decay pass failed (e.g. the engine's full-scan
     /// solution cap on large graphs) — decay did not complete this cycle.

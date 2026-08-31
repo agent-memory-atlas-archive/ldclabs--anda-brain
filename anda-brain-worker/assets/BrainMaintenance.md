@@ -458,6 +458,17 @@ symbol the Cognitive Memory Profile already provides must never be redeclared.
   a snapshot that contains no outcomes would be exactly the author's-assertion
   promotion the lifecycle exists to replace. Name the Skill you think is due a
   verdict in the `summary`.
+
+  This is a capability gap, not a difference of opinion: the Rust deployment
+  runs that verdict as deterministic code before each cycle. Both deployments
+  agree on the rule that matters here — **the Brain never promotes.**
+- **Nothing fires a `silence` Watch here.** A `due_at` passing is arithmetic,
+  but this pass has no read with which to find the Watches whose deadline has
+  gone by, and no scheduled runtime pass of its own. So a Commitment whose
+  trigger is a silence Watch waits until a caller runs a cycle and you notice
+  it in your snapshot — which is not the same as attention, and worth saying
+  plainly rather than papering over. Form the Watch anyway; it is the record
+  of what was being waited for.
 - **Idempotency is recorded, not replayed**: a resend under a committed key
   fails rather than returning the first receipt.
 - Capsule import, hop quantifiers and grouped aggregation are not built.

@@ -146,6 +146,31 @@ observed, not rewarded — which is also the difference between a memory system
 and a popularity contest. The `recall_reinforcement` policy knob is retained
 for stored-policy compatibility and does nothing.
 
+**Waiting is active:** every settlement fires the `silence` Watches whose
+`due_at` has passed — the transition to `fired` and its `watch_fire` Activity,
+atomically and guarded by `EXPECT VERSION`. A deadline arriving is arithmetic,
+and arithmetic should not wait for a model to be scheduled, have context budget
+and notice. Firing produces attention and nothing else: no SleepTask, no
+outward act, and no `action_gate` outcome, because `act` / `ask` / `defer` /
+`silence` are all judgements about what the deadline *means*. Those wait in
+`assessment.fired_watches` for the maintenance cycle. `delta` Watches stay with
+the model: matching a condition written in prose is interpretation, not
+arithmetic.
+
+**The Skill lifecycle is code, not a prompt.** `proposed → trialed → adopted →
+revoked` moves only by deterministic verdict over graded Outcome Evidence under
+the Skill's `task_family` — Profile §14 rule 1: "the Brain proposes, compiles,
+and narrates; it never promotes." Every transition commits as a
+`lifecycle_verdict` Activity citing the Evidence it read, with the rule identity
+and comparison basis pinned in `parameters_digest` so an auditor can re-run it.
+Adoption is comparative (better than the recorded basis, not merely good) and
+provisional (a rate that falls back demotes to a re-trial); revocation uses the
+same margin in the other direction, plus the one asymmetry the Profile grants —
+a single high-severity matching-condition failure may revoke. A lifecycle that
+can only acquire cannot tell a habit from a superstition. The model's job is
+§11: compile a `proposed` Skill from contrastive Experience and attach the
+`task_family` that can grade it.
+
 **Retention expiry:** a full settlement also acts on the two clocks that say
 when something should stop being kept, which are not the same clock. An
 Assertion whose `valid_time.until` has passed is marked `expired` (§14.3) —

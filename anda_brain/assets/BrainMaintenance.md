@@ -383,6 +383,24 @@ must not redo its work by hand:
   deciding what should carry an expiry at all, and writing that with
   `SET RETENTION`. The sweep is what makes that write mean something rather
   than being recorded and never honoured.
+- **Silence Watch expiry.** Every armed `silence` Watch whose `due_at` had
+  passed is already `fired`, with its `watch_fire` Activity. A deadline
+  arriving is arithmetic and does not wait for a model to be scheduled and
+  notice. What is *not* done is the decision: firing produced attention and
+  nothing else, and `assessment.fired_watches` is the queue waiting for your
+  action gate. `delta` Watches are untouched — matching a condition written in
+  prose is interpretation, and that is yours.
+- **Skill lifecycle verdicts.** Every `proposed → trialed → adopted → revoked`
+  transition due on the graded Outcome Evidence has already run, as
+  deterministic code, recorded as a `lifecycle_verdict` Activity with its rule
+  identity and comparison basis in `parameters_digest`. Profile §14 is explicit
+  that this cannot be yours: **the Brain proposes, compiles and narrates; it
+  never promotes.** So do not transition a Skill's `status` by hand, and do not
+  write `SkillUtility` tallies — a Skill's standing is what its outcome stream
+  did, not what a reader of that stream concluded. What *is* yours is §11:
+  compile a `proposed` Skill from contrastive Experience and attach the
+  `task_family` that can grade it. A pattern no stream could prove wrong is an
+  Insight, not a Skill.
 - **Schema census** (`full` cycles). Per-predicate link counts are in
   `assessment.predicates`, stamped `assessment.audited_at` — a cheaper cycle
   reads the last full one's, so check the age before acting on it. Two
@@ -391,8 +409,8 @@ must not redo its work by hand:
 
 What is left for you is the cognitive work the reference policy describes:
 consolidation, contrastive Skill compilation, identity and contradiction review,
-Commitments and Watches, the SelfModel and the WorkingState, derivation review,
-retention decisions and the SleepTask queue.
+Commitments, delta Watches and the action gate, the SelfModel and the
+WorkingState, derivation review, retention decisions and the SleepTask queue.
 
 ## A.2 Request
 
@@ -415,9 +433,18 @@ retention decisions and the SleepTask queue.
       {
         "id": "C-88",
         "name": "Reply from the vendor",
+        "watch_class": "delta",
+        "condition": "any message from :vendor about the renewal",
+        "due_at": ""
+      }
+    ],
+    "fired_watches": [
+      {
+        "id": "C-91",
+        "name": "Invoice acknowledgement",
         "watch_class": "silence",
-        "condition": "no message from :vendor about the renewal",
-        "due_at": "2026-09-04T00:00:00Z"
+        "condition": "no acknowledgement from :billing",
+        "due_at": "2026-08-30T00:00:00Z"
       }
     ]
   }
@@ -434,17 +461,23 @@ they mean one thing is a question the Propositions answer, not the counts.
 `assessment.space_seq` is where its history stands, because §10, §17 and §18
 need both and neither is something you can work out from a snapshot.
 
-- **Watch evaluation (§10, §17).** Read `CHANGES AFTER SEQ` from the basis the
-  last `WorkingState` declared — or from `space_seq` when there is none — and
-  compare the committed changes against each armed Watch's `condition`. A
-  `delta` Watch fires on a match; a `silence` Watch fires when its `due_at` has
-  passed and nothing matched. Fire atomically: the `watch_fire` Activity, the
-  Watch's transition to `fired`, and the SleepTask it produces, in one
-  `MUTATE`. Then record what you decided to do about it as an `action_gate`
-  Activity with outcome `act`, `ask`, `defer` or `silence` — including when you
-  decided to do nothing, because restraint that leaves no trace is
-  indistinguishable from not having looked. **A fired Watch authorizes
-  nothing.** It produces attention, never an outward act.
+- **Watch evaluation (§10, §17), the delta half.** The runtime already fired
+  every `silence` Watch whose `due_at` had passed — a deadline arriving is
+  arithmetic, and A.1 covers it. What is yours is `delta`: read
+  `CHANGES AFTER SEQ` from the basis the last `WorkingState` declared, or from
+  `space_seq` when there is none, and compare the committed changes against
+  each armed Watch's `condition`. Deciding whether a change matches "the vendor
+  replied about the renewal" is interpretation, which is why it is not
+  arithmetic and not the runtime's. Fire atomically: the `watch_fire` Activity
+  and the transition to `fired`, in one `MUTATE`.
+- **The action gate (§17), for every fired Watch.** `assessment.fired_watches`
+  is the queue — Watches the runtime or you have fired and nobody has decided
+  about yet. Record the decision as an `action_gate` Activity with outcome
+  `act`, `ask`, `defer` or `silence`, then move the Watch to `disarmed` so it
+  leaves the queue. Record it **including when you decide to do nothing**:
+  restraint that leaves no trace is indistinguishable from never having looked.
+  **A fired Watch authorizes nothing.** It produces attention, never an
+  outward act.
 - **WorkingState refresh (§12, §18).** Rebuild the digest from open
   Commitments, armed Watches, contested slots and recent high-salience Events,
   link those inputs through `derived_from`, and stamp it with
