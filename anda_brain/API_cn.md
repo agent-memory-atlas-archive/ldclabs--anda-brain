@@ -68,8 +68,8 @@ export interface RecallInput {
 
 export interface MaintenanceParameters {
   stale_event_threshold_days?: number; // [1, 365]
-  confidence_decay_factor?: number; // (0, 1]
-  unsorted_max_backlog?: number; // [1, 10000]
+  memory_strength_decay_factor?: number; // (0, 1]；旧名 confidence_decay_factor 仍被接受
+  unconsolidated_max_backlog?: number; // [1, 10000]；旧名 unsorted_max_backlog 仍被接受
   orphan_max_count?: number; // [1, 10000]
 }
 

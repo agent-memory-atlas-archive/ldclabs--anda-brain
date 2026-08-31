@@ -49,17 +49,26 @@ Receives conversation messages and encodes them into structured memory within th
 **Processing pipeline:**
 1. Receives `FormationInput` (messages + optional context + timestamp).
 2. Creates a tracked `Conversation` record (status: `Submitted` → `Working` → `Completed` | `Failed`).
-3. LLM analyzes messages, extracting three types of memory:
-   - **Episodic memory** — Events with timestamps, participants, outcomes
-   - **Semantic memory** — Stable facts, preferences, relationships, domain knowledge
-   - **Cognitive memory** — Behavioral patterns, decision criteria, communication style
-4. Deduplicates against existing knowledge (SEARCH before CREATE).
-5. Encodes structured memory into the Cognitive Nexus via `execute_kip` tool.
+3. LLM classifies what the conversation is worth keeping, into the products the
+   Cognitive Memory Profile defines: `Evidence` for what was observed,
+   `Proposition` + `Assertion` for a truth-sensitive claim and whose stance it
+   is, `Event` for what happened, `Experience` + steps when the process itself
+   can teach future behavior, `Commitment` for a future obligation, and
+   `Insight` / `SelfModel` candidates. The empty write is a valid answer.
+4. Grounds against existing memory before writing (SEARCH before CREATE).
+5. Encodes it through the `execute_kip` tool, which on this path accepts KQL and
+   META in full and only the cognition subset of KML — administering memory in
+   bulk (`UPDATE`, `ARCHIVE`, `TOMBSTONE`, `PURGE`, `MERGE CONCEPT`) is refused
+   to a pass whose whole input is an untrusted conversation.
 
 **Key behaviors:**
 - Sequential processing with automatic queue draining — new conversations are picked up after the current one completes.
 - Atomic single-conversation processing via `processing_conversation` flag.
-- Schema auto-evolution — defines new concept types/predicates when needed.
+- New vocabulary enters through the host, never through KML. KIP 2.0 makes
+  Schema protected control state, so a command naming an undeclared type or
+  predicate is refused with `SchemaSymbolNotFound`; the model asks for one
+  through the `declare_memory_symbols` tool, and the host validates the name's
+  shape, caps how many a space may hold, and versions the result.
 
 ### Recall — Memory Retrieval (`recall_memory`)
 
@@ -71,12 +80,19 @@ Translates natural language queries into knowledge graph lookups and returns syn
 1. Receives `RecallInput` (query + optional context).
 2. Analyzes query intent (entity lookup, relationship traversal, attribute query, event recall, pattern detection, etc.).
 3. Grounds entities to actual graph nodes (resolves ambiguity).
-4. Executes structured KQL queries via read-only memory tools + conversation search.
-5. Iterative deepening — follows up with additional queries if needed (max 5 rounds).
-6. Synthesizes results into a coherent natural language answer.
+4. Executes structured KQL/META reads; belief questions go through `BELIEF`
+   projection rather than raw `FIND`, because a Proposition existing is not the
+   Proposition being true.
+5. Iterative deepening — follows up with additional queries if needed, up to
+   the space's `recall_max_rounds` (default 7).
+6. Synthesizes results into a coherent natural language answer, reporting
+   contested as contested and insufficient as insufficient.
 
 **Available tools:**
-- `MemoryReadonly` — Read-only access to the knowledge graph
+- `execute_kip_readonly` — KQL and META only, enforced on what each command
+  parses to. Recall has no write tool at all, and reading never reinforces what
+  it read.
+- `wiki_search` / `wiki_read` — with the `wiki` feature; absent otherwise.
 
 ### Maintenance — Memory Metabolism (`maintenance_memory`)
 
@@ -85,13 +101,18 @@ Consolidates, prunes, and optimizes the knowledge graph during scheduled or on-d
 **System prompt:** [BrainMaintenance.md](https://github.com/ldclabs/anda-brain/blob/main/anda_brain/assets/BrainMaintenance.md)
 
 **Processing phases (full scope):**
-1. **Assessment** — Audit memory health (read-only): `DESCRIBE PRIMER`, pending SleepTasks, unsorted items, orphans, stale events.
-2. **SleepTask Processing** — Handle queued actions: `consolidate_to_semantic`, `archive`, `merge_duplicates`, `reclassify`, `review`.
-3. **Unsorted Inbox** — Reclassify items to appropriate topic domains.
-4. **Stale Event Consolidation** — Extract semantic knowledge from old events (configurable threshold), create linked Preference/Fact nodes.
-5. **Duplicate Merging** — Find and merge similar concepts, updating all propositions.
-6. **Orphan Cleanup** — Assign domain-less concepts to appropriate domains.
-7. **Mnemonic metabolism** — run by the runtime settlement before the cycle, not by the agent: `MnemonicState.memory_strength * decay_factor` on Concepts due for it. Never `confidence`; a fact nobody has asked about lately is no less credible.
+1. **Assessment** — Audit memory health (read-only): `DESCRIBE PRIMER`, pending SleepTasks, unconsolidated Events and Experiences, orphans, stale events, plus the runtime's own `assessment` block (per-predicate census, correction tallies, armed and fired Watches, the current `space_seq`).
+2. **SleepTask Processing** — Handle queued work under the Profile's classes: `consolidate`, `review_conflict`, `review_skill`, `resolve_identity`, `review_retention`, `review_derived`, `refresh_self_model`, `inspect_quarantine`.
+3. **Semantic consolidation** — Compress clusters of Events, Experiences and Evidence into derived Assertions, keeping Activity lineage back to the sources. A summary is not a new epistemic root.
+4. **Procedural consolidation** — Compare successful against failed Experiences and compile a `proposed` Skill with the `task_family` that can grade it. A pattern no outcome stream could prove wrong is an Insight, not a Skill.
+5. **Identity review** — Review `same_as` suspicions, then `MERGE CONCEPT`, which is non-destructive: the source survives as merged historical identity.
+6. **Contradiction and derivation review** — Different actors' disagreement coexists; only an actor's own revision supersedes. After a revision, walk `LIST DEPENDENTS` and flag derived artifacts `stale` for review.
+7. **Mnemonic metabolism** — run by the runtime settlement before the cycle, not by the agent: `MnemonicState.memory_strength * decay_factor` on Concepts due for it. Never `confidence`; a fact nobody has asked about lately is no less credible. `salience` and `utility` stay with the agent — the sweep cannot make a per-memory judgement.
+8. **Commitments, Watches and the action gate** — Review what is owed and what is being waited for. The runtime has already fired the `silence` Watches whose deadline passed; the agent evaluates `delta` Watches against `CHANGES AFTER SEQ` and records what it decided about each fired one as an `action_gate` outcome (`act` / `ask` / `defer` / `silence`). See "Waiting is active" below.
+9. **SelfModel and WorkingState refresh** — Consolidate identity from evidence rather than from the latest conversation, and rebuild the digest the next waking session resumes from, stamped with the `basis_seq` it was built at.
+10. **Retention review** — Decide what should carry an expiry and write it with `SET RETENTION`; the full settlement's sweep is what makes that write mean something. See "Retention expiry" below.
+
+Skill lifecycle transitions are deliberately absent from this list: they are deterministic code, not agent work. See "The Skill lifecycle is code, not a prompt" below.
 
 **Key behaviors:**
 - Single-execution guard — only one maintenance cycle can run at a time per space.
@@ -307,7 +328,7 @@ Beyond the basic replay loop, the harness supports:
   The trajectory value is informational — the aggregated `total` stays the
   weighted mean of checkpoint totals (each of which used its own
   checkpoint-level evolution estimate) and is not recomputed from it.
-  `graph_health` reads real metabolism counters (unsorted backlog, orphans)
+  `graph_health` reads real metabolism counters (unconsolidated backlog, orphans)
   via read-only KIP instead of probe execution success.
 - **Shared-formation experiments** — `--shared-formation` (with multiple
   `--profile`) replays formation once per scenario, snapshots the space, and
@@ -694,8 +715,8 @@ Trigger a memory maintenance cycle. Runs asynchronously with single-execution gu
   "timestamp": "2026-03-10T03:00:00Z",
   "parameters": {
     "stale_event_threshold_days": 7,
-    "confidence_decay_factor": 0.95,
-    "unsorted_max_backlog": 20,
+    "memory_strength_decay_factor": 0.95,
+    "unconsolidated_max_backlog": 20,
     "orphan_max_count": 10
   }
 }
@@ -707,9 +728,15 @@ Trigger a memory maintenance cycle. Runs asynchronously with single-execution gu
 | `scope`                                 | `string` | No       | `full` (all phases) / `quick` (assessment + urgent tasks) / `daydream` (idle-time salience scoring & micro-consolidation, default) |
 | `timestamp`                             | `string` | No       | ISO 8601 timestamp                                        |
 | `parameters.stale_event_threshold_days` | `u32`    | No       | Days before events are considered stale (default: 7)      |
-| `parameters.confidence_decay_factor`    | `f64`    | No       | Decay multiplier per cycle (default: 0.95)                |
-| `parameters.unsorted_max_backlog`       | `u32`    | No       | Max unsorted items to process (default: 20)               |
+| `parameters.memory_strength_decay_factor` | `f64`  | No       | Multiplier disuse metabolism applies to `MnemonicState.memory_strength` (default: 0.95). Never to `confidence`: KIP 2.0 forbids letting time erode a stance. Accepted under its KIP 1.x name `confidence_decay_factor` for stored-policy compatibility. |
+| `parameters.unconsolidated_max_backlog` | `u32`    | No       | Events and Experiences that may sit without `consolidated_to` lineage (default: 20). Accepted as `unsorted_max_backlog`. |
 | `parameters.orphan_max_count`           | `u32`    | No       | Max orphans to process (default: 10)                      |
+
+The parameters are targets to work toward, not commands. The runtime fills an
+`assessment` block into the same input — the per-predicate census, correction
+tallies, armed and fired Watches, and the current `space_seq` — and overwrites
+whatever a caller sent there: a request body must not be able to tell the Brain
+what its own graph looks like.
 
 **Response:**
 ```json
