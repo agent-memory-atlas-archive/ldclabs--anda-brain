@@ -650,20 +650,32 @@ rules follow:
   instead of minting a second observation of one event.
 
 ```kip
-CREATE EVIDENCE ?e {
-  CLIENT KEY :evidence_key
-  SET FIELDS {
-    evidence_class: "user_statement",
-    payload: :payload,          // {"source": "chat_thread_123", "text": "I always prefer dark mode."}
-    observed_at: :observed_at
+MUTATE {
+  UPSERT CONCEPT ?alice { MATCH {type: "Person", key: :counterparty} SET FIELDS {name: :display_name} }
+
+  CREATE EVIDENCE ?e {
+    CLIENT KEY :evidence_key
+    SET FIELDS {
+      evidence_class: "user_statement",
+      payload: :payload,          // {"source": "chat_thread_123", "text": "I always prefer dark mode."}
+      observed_at: :observed_at
+    }
+    SET STRUCTURAL { ("source", ?alice) }
   }
-  SET STRUCTURAL { ("source", ?alice) }
 }
 ```
 
-Set `MnemonicState` on Concepts you create — `memory_strength` for how available
-this should be later, `salience` for how noteworthy it is. Neither is
-confidence.
+`?alice` has to be bound in the same `MUTATE` for `("source", ?alice)` to
+resolve — a handle is block-local, so an Evidence clause on its own referring to
+one is rejected before anything runs.
+
+Set `MnemonicState` on Concepts you create. Three members, three different
+questions, none of them confidence: `memory_strength` for how available this
+should be later, `salience` for how noteworthy it is, and `utility` for the
+admission bet — how much future decision value you are wagering this memory
+carries. Set `utility` whenever you set the other two (§4); Maintenance
+calibrates it against what actually got used, and it cannot calibrate a bet
+nobody recorded.
 
 ## A.7 What this engine has not built
 

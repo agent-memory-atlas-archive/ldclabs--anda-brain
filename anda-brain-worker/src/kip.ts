@@ -185,8 +185,35 @@ export function assertMaintenanceOperations(operations: readonly KipOperation[])
       if ('Purge' in clause || 'PurgePayload' in clause) {
         throw new Error('maintenance plans cannot issue KIP PURGE commands')
       }
+      assertBuilt(clause)
       assertBoundedSelection(clause, operation.parameters, MAX_MAINTENANCE_SELECTION)
     }
+  }
+}
+
+/**
+ * Clauses the engine parses and then refuses to run.
+ *
+ * `SET RETENTION` is legal KIP that `@ldclabs/kip-do` has not implemented, so
+ * it sailed through this gate and failed at execution — and because a batch is
+ * not a transaction, the commands *before* it had already committed while the
+ * request as a whole answered 422. Refusing at the gate makes the whole plan
+ * fail before anything runs, which is the outcome a caller can act on.
+ *
+ * Kept as an explicit list rather than a try/catch around execution: a plan
+ * rejected for naming an unbuilt capability should say so in the same breath
+ * as the other gates, and the deployment contract (§A.5) already tells the
+ * model this one is refused.
+ */
+const UNBUILT_CLAUSES = new Set(['SetRetention'])
+
+function assertBuilt(clause: MutationClause): void {
+  const name = clauseName(clause)
+  if (UNBUILT_CLAUSES.has(name)) {
+    throw new Error(
+      `${spelling(name)} is not implemented by this engine; say what should ` +
+        'expire in the summary rather than encoding a decision nothing enforces',
+    )
   }
 }
 
@@ -421,7 +448,22 @@ function assertBoundedSelection(
     | undefined
   if (!body || body.where_clauses === null || body.where_clauses === undefined) return
   if (!Array.isArray(body.where_clauses) || body.where_clauses.length === 0) return
-  if (body.limit === undefined) return
+
+  // `MERGE CONCEPT` is the one selecting clause KIP gives no `LIMIT` — its
+  // grammar has no slot for one, so `limit` is absent rather than null, and an
+  // early return here let `MERGE CONCEPT ?s INTO ?t WHERE { ?s CONCEPT {} … }`
+  // through as the only unbounded selection a plan could make. Merge is
+  // non-destructive, so this is a blast-radius bound, not a data-loss one:
+  // require the pattern to name its endpoints instead of sweeping for them.
+  if (body.limit === undefined) {
+    if ('MergeConcept' in clause) {
+      throw new Error(
+        'a MERGE CONCEPT takes no LIMIT, so its WHERE must identify exactly ' +
+          'the source and the target — merge duplicates one pair at a time',
+      )
+    }
+    return
+  }
 
   const limit = scalarInteger(body.limit ?? null, parameters)
   if (limit === undefined || limit > max) {

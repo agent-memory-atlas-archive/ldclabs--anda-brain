@@ -43,7 +43,14 @@ const EMPTY_USAGE: Usage = { input_tokens: 0, output_tokens: 0 }
  * Three bounded reads rather than a free look: the model gets one completion,
  * so what it does not see here it cannot go and fetch. Recent Events are the
  * consolidation backlog, open SleepTasks are the work it left itself, and the
- * least-available memories are where metabolism has something to say.
+ * longest-untouched Concepts are where consolidation and re-encoding have
+ * something to say.
+ *
+ * That third read orders by `updated_at`, not by `MnemonicState.memory_strength`:
+ * a Concept the model never gave the Facet has no strength to sort on, and
+ * sorting on a mostly-absent field would rank the graph by which memories
+ * happened to be annotated. `?c.facets` still rides along, so a Concept that
+ * does carry one can be judged on it.
  */
 const MAINTENANCE_SNAPSHOT: KipOperation[] = [
   {
@@ -166,7 +173,15 @@ export async function recallMemory(
   return {
     content: answer.value.answer,
     answer: answer.value.answer,
-    found: answer.value.found && memories.length > 0,
+    // The model's own report, not `&& memories.length > 0`. A citation is an
+    // element id lifted out of whatever the reads happened to project, and a
+    // `BELIEF` projection or an aggregate answers with values rather than ids
+    // — so ANDing the two reported "answered from absence" for answers that
+    // had evidence. That is the `insufficient` / `rejected` collapse the
+    // policy exists to prevent, arriving through the transport instead of the
+    // prose. Where the model reports nothing found, `memories` is the
+    // fallback.
+    found: answer.value.found,
     uncertainty: answer.value.uncertainty,
     memories,
     usage,

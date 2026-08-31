@@ -97,6 +97,14 @@ Consolidates, prunes, and optimizes the knowledge graph during scheduled or on-d
 - Single-execution guard — only one maintenance cycle can run at a time per space.
 - Non-destructive principle — archives before deleting, and weakens mnemonic accessibility rather than removing (never epistemic confidence).
 - Async execution — returns immediately with conversation ID; actual processing in background.
+- Two triggers, not one. Counting formation conversations paces a space that
+  is being written to (daydream every 21, quick every 42, full every 168); a
+  24-hour clock covers one that is not. Without the clock a space that stopped
+  ingesting stopped metabolizing entirely — no Commitment review, no retention
+  expiry, no self-test — which is not what "scheduled, threshold, or
+  change-driven" means. The clock fires from the background flush pass for
+  resident spaces and on load for spaces that had been evicted; a space that
+  has never formed anything is never due.
 
 **Memory policy:** each space carries an evolvable `MemoryPolicy` (stored in
 the `memory_policy` extension, set via `update_space`) that holds the numeric

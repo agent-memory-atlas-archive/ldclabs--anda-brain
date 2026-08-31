@@ -103,8 +103,9 @@ export interface MaintenanceInput {
   scope?: 'full' | 'quick' | 'daydream'
   timestamp?: string
   parameters?: {
+    memory_strength_decay_factor?: number
     stale_event_threshold_days?: number
-    unsorted_max_backlog?: number
+    unconsolidated_max_backlog?: number
     orphan_max_count?: number
   }
 }

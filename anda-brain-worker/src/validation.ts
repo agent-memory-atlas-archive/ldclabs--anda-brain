@@ -63,19 +63,29 @@ export function parseMaintenanceInput(value: unknown): MaintenanceInput {
     const raw = object(body.parameters, '`parameters` must be an object')
     // There is deliberately no `confidence_decay_factor`. KIP 2.0 forbids
     // decaying an Assertion's confidence over time: a fact nobody has asked
-    // about in a month is no less credible. What disuse decays is
-    // `MnemonicState.memory_strength`, which is accessibility, not truth — and
-    // that is Maintenance's own judgement rather than a request parameter.
+    // about in a month is no less credible. What `memory_strength_decay_factor`
+    // paces is `MnemonicState.memory_strength`, which is accessibility, not
+    // truth. The Rust service accepts the old name as an alias; this one does
+    // not accept it at all, because there is no stored history here to keep
+    // compatible with.
+    //
+    // The names match `anda_brain`'s `MaintenanceParameters` field for field,
+    // including its `unsorted_max_backlog` alias for `unconsolidated_max_backlog`:
+    // two products documented as one API have to accept one request body.
     parameters = {
+      memory_strength_decay_factor: boundedFraction(
+        raw.memory_strength_decay_factor,
+        'memory_strength_decay_factor',
+      ),
       stale_event_threshold_days: boundedInteger(
         raw.stale_event_threshold_days,
         'stale_event_threshold_days',
         1,
         365,
       ),
-      unsorted_max_backlog: boundedInteger(
-        raw.unsorted_max_backlog,
-        'unsorted_max_backlog',
+      unconsolidated_max_backlog: boundedInteger(
+        raw.unconsolidated_max_backlog ?? raw.unsorted_max_backlog,
+        'unconsolidated_max_backlog',
         1,
         10_000,
       ),
@@ -276,6 +286,18 @@ function parseContext(value: unknown): InputContext {
   }
   if (!context.counterparty && context.user) context.counterparty = context.user
   return context
+}
+
+/**
+ * A `(0, 1]` decay multiplier. Zero is excluded: a factor of zero is not slow
+ * forgetting, it is erasing every memory's accessibility in one sweep.
+ */
+function boundedFraction(value: unknown, name: string): number | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > 1) {
+    throw new ValidationError(`maintenance parameter \`${name}\` must be in (0, 1]`)
+  }
+  return value
 }
 
 function boundedInteger(

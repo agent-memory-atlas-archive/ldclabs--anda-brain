@@ -116,6 +116,16 @@ impl FormationAgent {
             .get_extension_as::<DocumentId>("brain_processed")
     }
 
+    /// Sets the formation watermark without processing anything, so a test can
+    /// stage "this Space has formed memory" without an LLM turn.
+    #[cfg(test)]
+    pub(crate) async fn set_processed_for_test(&self, id: DocumentId) {
+        self.conversations
+            .save_extension("brain_processed".to_string(), id.into())
+            .await
+            .unwrap();
+    }
+
     /// Resolves the Person Concept for a counterparty, creating it once.
     ///
     /// The counterparty handle is the Concept's `key` — immutable Space-local

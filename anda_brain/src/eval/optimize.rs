@@ -269,12 +269,11 @@ pub struct PolicyPatch {
 }
 
 /// Policy fields the optimizer may mutate: only knobs the runtime actually
-/// consumes. `version`, structural knobs, and the declared-but-unwired
-/// fields (`recall_reinforcement`, `correction_penalty`,
-/// `recall_search_threshold`, `recall_max_rounds`) stay out of the genome —
-/// mutating a knob nothing reads measures pure sampling noise, which the
-/// accept gate can mistake for an improvement. Wire a field into the
-/// runtime first, then add it here.
+/// consumes. `version`, structural knobs, and the fields no consumer reads
+/// (`recall_reinforcement`, `correction_penalty`, `recall_search_threshold`)
+/// stay out of the genome — mutating a knob nothing reads measures pure
+/// sampling noise, which the accept gate can mistake for an improvement. Wire
+/// a field into the runtime first, then add it here.
 pub const POLICY_PATCH_FIELDS: &[&str] = &[
     "memory_strength_decay_factor",
     "decay_floor",
@@ -282,6 +281,7 @@ pub const POLICY_PATCH_FIELDS: &[&str] = &[
     "unconsolidated_max_backlog",
     "orphan_max_count",
     "self_test_queries_per_cycle",
+    "recall_max_rounds",
 ];
 
 /// Mutation bound for fractional fields: at most ±50% of the current value
@@ -347,6 +347,9 @@ pub fn apply_policy_patch(
         "self_test_queries_per_cycle" => {
             next.self_test_queries_per_cycle =
                 bounded_u32(field, policy.self_test_queries_per_cycle, patch.value)?;
+        }
+        "recall_max_rounds" => {
+            next.recall_max_rounds = bounded_u32(field, policy.recall_max_rounds, patch.value)?;
         }
         other => {
             return Err(format!(

@@ -403,6 +403,12 @@ about in a month is no less credible than it was.
 
 `UPDATE ?c SET FACET "MnemonicState" { memory_strength: MUL(?c.facets["MnemonicState"].memory_strength, 0.97) } WHERE { … } LIMIT 20`
 
+The Facet's third member is yours too, and on a different clock. `utility` is
+the admission bet Formation recorded when it stored the memory; §13 calibrates
+it **on outcomes** — a memory a briefing drew on that helped, a bet that never
+paid out — and never as a side effect of reading. Where your snapshot shows
+what a memory did or failed to do, adjust it and say so in the `summary`.
+
 ## A.4 New vocabulary
 
 Consolidation sometimes needs a symbol the Space does not have. Name it in
@@ -412,10 +418,16 @@ symbol the Cognitive Memory Profile already provides must never be redeclared.
 
 ## A.5 What this engine has not built
 
-- **`SET RETENTION` is refused**, so §20 Retention Review and §25 Retention
-  Expiry have no mechanism here. Report what should expire in the `summary`;
-  encoding a retention decision as an ordinary attribute would claim an
-  enforcement that does not exist.
+- **`SET RETENTION` is refused at the gate**, so §20 Retention Review and §25
+  Retention Expiry have no mechanism here. The whole plan is rejected before
+  any command runs, so a batch that reaches for it loses its other commands
+  too — the batch is not a transaction, and half-committing before failing
+  would leave you unable to tell what landed. Report what should expire in the
+  `summary`; encoding a retention decision as an ordinary attribute would
+  claim an enforcement that does not exist.
+- **`MERGE CONCEPT` takes no `LIMIT`** — KIP gives its grammar no slot for
+  one — so its `WHERE` must identify exactly the source and the target. Merge
+  duplicates one pair at a time; a pattern that sweeps for them is refused.
 - **`SEARCH` is keyword-only**, over Concepts, Propositions, Evidence and
   Cognition. Semantic and hybrid modes, `AS OF SEQ`, and Assertions and
   Activities as targets are all refused. Useful for §9 Semantic Consolidation:
@@ -425,6 +437,18 @@ symbol the Cognitive Memory Profile already provides must never be redeclared.
   only. Name the revised root and what you suspect it fed in the `summary`;
   do not flag `DerivationState {status: "stale"}` on artifacts you reached by
   guessing which ones they were.
+- **The same limit closes §10/§17 Watch evaluation and §12/§18 WorkingState
+  refresh.** Evaluating an armed Watch means comparing it against
+  `CHANGES AFTER SEQ`, and stamping a `WorkingState` means knowing the
+  `basis_seq` it was built at — both are META reads this pass cannot issue,
+  and your snapshot carries neither the Watch set nor the Space's sequence.
+  So: form Watches and Commitments freely (Formation does, and they are
+  ordinary Concepts), but do not transition a Watch to `fired` from a snapshot
+  that could not have seen the change it waits for, and do not write a
+  `WorkingState` whose basis you would have to invent. A digest that misstates
+  what it was built at is worse than no digest, because Recall serves it as
+  though the basis were true. Name what looks due in the `summary` and let a
+  caller with read access run the evaluation through `execute_kip`.
 - **A Skill lifecycle verdict has no stream to run over here.** §12 moves
   `proposed → trialed → adopted → revoked` only by deterministic verdict over
   graded Outcome Evidence, and your snapshot carries recent Events, open

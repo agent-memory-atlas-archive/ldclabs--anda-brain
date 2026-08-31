@@ -593,6 +593,107 @@ describe('Anda Brain Worker', () => {
     }
   })
 
+  it('refuses a clause the engine parses but has not built', async () => {
+    // `SET RETENTION` used to pass the gate and fail at execution. A batch is
+    // not a transaction, so the commands before it had already committed while
+    // the request as a whole answered 422 — the caller could not tell what had
+    // landed. Now the whole plan is refused before anything runs.
+    const runtime = testEnv(
+      new FakeAi([
+        {
+          types: [],
+          predicates: [],
+          commands: [
+            'MUTATE { CREATE CONCEPT ?c { TYPE "Event" NAME "Kept" } }',
+            'SET RETENTION ?e { retention_class: "standard" } WHERE { ?e CONCEPT {} } LIMIT 5',
+          ],
+          summary: 'Expire some events.',
+        },
+      ]),
+    )
+    const space = uniqueSpace('maintenance-unbuilt')
+    const response = await post(runtime, space, 'maintenance', { scope: 'full' })
+    expect(response.status).toBe(422)
+    expect(await response.text()).toContain('SET RETENTION is not implemented')
+
+    // Nothing from the plan committed, including the legal first command.
+    const info = await get(runtime, space, 'info')
+    expect(((await info.json()) as { result: { concepts: number } }).result.concepts).toBe(1)
+  })
+
+  it('makes a merge name its endpoints instead of sweeping for them', async () => {
+    // The one selecting clause KIP gives no LIMIT, so the bound has to be on
+    // the pattern. Merge is non-destructive, which makes this a blast-radius
+    // rule rather than a data-loss one.
+    const runtime = testEnv(
+      new FakeAi([
+        {
+          types: [],
+          predicates: [],
+          commands: [
+            'MERGE CONCEPT ?dup INTO ?keep WHERE { ?dup CONCEPT {} ?keep CONCEPT {} }',
+          ],
+          summary: 'Merging duplicates.',
+        },
+      ]),
+    )
+    const response = await post(
+      runtime,
+      uniqueSpace('maintenance-merge'),
+      'maintenance',
+      { scope: 'full' },
+    )
+    expect(response.status).toBe(422)
+    expect(await response.text()).toContain('MERGE CONCEPT takes no LIMIT')
+  })
+
+  it('accepts the maintenance parameter names the Rust service documents', async () => {
+    const runtime = testEnv(
+      new FakeAi([{ types: [], predicates: [], commands: [], summary: 'Nothing to do.' }]),
+    )
+    const response = await post(
+      runtime,
+      uniqueSpace('maintenance-params'),
+      'maintenance',
+      {
+        scope: 'quick',
+        parameters: {
+          memory_strength_decay_factor: 0.95,
+          stale_event_threshold_days: 30,
+          unconsolidated_max_backlog: 20,
+          orphan_max_count: 20,
+        },
+      },
+    )
+    expect(response.status).toBe(200)
+
+    // ... and still refuses a decay factor that would erase accessibility in
+    // one sweep, rather than clamping it silently.
+    const bad = testEnv(new FakeAi([]))
+    const rejected = await post(bad, uniqueSpace('maintenance-params'), 'maintenance', {
+      parameters: { memory_strength_decay_factor: 0 },
+    })
+    expect(rejected.status).toBe(400)
+    expect(await rejected.text()).toContain('memory_strength_decay_factor')
+  })
+
+  it('designates the $self Concept its Recall policy claims to speak for', async () => {
+    // The Person was always bootstrapped; the designation was not, so
+    // `DESCRIBE PRIMER` reported no cognitive identity next to a prompt that
+    // opens "you operate on behalf of $self".
+    const runtime = testEnv(new FakeAi([]))
+    const space = uniqueSpace('self-identity')
+    const response = await post(runtime, space, 'execute_kip_readonly', {
+      command: 'DESCRIBE PRIMER',
+    })
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as {
+      result: { result: { cognitive_identity?: unknown } }[]
+    }
+    const identity = JSON.stringify(body.result[0]?.result?.cognitive_identity ?? null)
+    expect(identity).toContain('C-')
+  })
+
   it('metabolizes memory strength and reports the change', async () => {
     const space = uniqueSpace('maintenance-update')
     const runtime = testEnv(

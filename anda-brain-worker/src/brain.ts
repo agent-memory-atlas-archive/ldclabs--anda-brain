@@ -1,5 +1,6 @@
 import {
   KipDatabase,
+  tryParseElementId,
   type JsonMap,
   type KipResult,
   type ReadOptions,
@@ -17,7 +18,7 @@ import type { BrainStats, DeclaredVocabulary, Env } from './types.js'
 import { MemoryVocabulary, activeSet, activeVocabulary } from './vocabulary.js'
 
 const APP_BOOTSTRAP_KEY = '__anda_brain_worker_bootstrap_version'
-const APP_BOOTSTRAP_VERSION = '2'
+const APP_BOOTSTRAP_VERSION = '3'
 
 /** The key of the Person this brain speaks as when it asserts something. */
 export const SELF_ACTOR_KEY = '$self'
@@ -193,7 +194,43 @@ export class AndaBrain extends KipDatabase<Env> {
     if (result.status === 'failed') {
       throw new Error(`failed to initialize the brain's actor: ${result.error?.message}`)
     }
+    this.designateSelfConcept()
     this.ctx.storage.kv.put(APP_BOOTSTRAP_KEY, APP_BOOTSTRAP_VERSION)
     this.ctx.storage.kv.put(`${APP_BOOTSTRAP_KEY}:at`, new Date().toISOString())
+  }
+
+  /**
+   * Points the Space's §5.6 self identity at the `$self` Person just created.
+   *
+   * `DESCRIBE PRIMER` reports the authenticated Principal and the semantic
+   * `$self` as the two different things §64.2 requires it to distinguish, and
+   * this service puts that primer in front of every mode. Bootstrapping the
+   * Person and then leaving the designation empty put a primer saying this
+   * Space has no `$self` in the same context window as a Recall policy opening
+   * "you operate on behalf of `$self`, the owner of this MemorySpace".
+   *
+   * Protected Space configuration, so it goes through the Governance operation
+   * rather than KML: §5.6 forbids ordinary KML from creating or changing it,
+   * which is what stops cognitive content from deciding who the Brain is.
+   *
+   * Best-effort: a failure here costs orientation, not correctness, and must
+   * not leave a Space unable to open.
+   */
+  private designateSelfConcept(): void {
+    const found = super.executeKip(
+      'FIND(?c.id) WHERE { ?c CONCEPT {type: "Person", key: :key} } LIMIT 1',
+      { key: SELF_ACTOR_KEY },
+    )
+    if (found.status === 'failed') return
+    const rows = found.result
+    const id = Array.isArray(rows) && typeof rows[0] === 'string' ? rows[0] : undefined
+    if (id === undefined) return
+    const concept = tryParseElementId(id)
+    if (concept === null) return
+    try {
+      this.nexus.systemSession().designateSelf(concept)
+    } catch {
+      // Orientation, not authority: nothing this brain writes depends on it.
+    }
   }
 }

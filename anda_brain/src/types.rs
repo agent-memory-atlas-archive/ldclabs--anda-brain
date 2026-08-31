@@ -645,6 +645,50 @@ pub struct MaintenanceAssessment {
     /// claims deserve a lower initial confidence, not one who may do less.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub source_reliability: BTreeMap<String, SourceReliability>,
+
+    /// The Space's sequence coordinate as this cycle began.
+    ///
+    /// Two uses, both of which need a number the model cannot get from a
+    /// query: it is the `basis_seq` a refreshed `WorkingState` is stamped
+    /// with, and it is the coordinate a later `CHANGES AFTER SEQ` reads from.
+    /// Absent when the engine could not answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_seq: Option<u64>,
+
+    /// The armed Watches, so the cycle's Watch evaluation has a set to
+    /// evaluate rather than a type name to go looking for.
+    ///
+    /// A Watch is attention, never authority: this list says what the Brain
+    /// declared it was waiting for, and firing one grants nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub armed_watches: Vec<ArmedWatch>,
+}
+
+/// One armed Watch, as the Maintenance prompt receives it.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ArmedWatch {
+    pub id: String,
+
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+
+    /// `delta` (fire on a matching change) or `silence` (fire when `due_at`
+    /// passes without one). The two need different evidence, so the class is
+    /// not decoration.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub watch_class: String,
+
+    /// What counts as a matching change. The Profile fixes no condition
+    /// language; this deployment passes whatever was written through.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub condition: String,
+
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub summary: String,
+
+    /// When a silence Watch comes due, as written.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub due_at: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -742,7 +786,16 @@ pub struct MemoryPolicy {
     #[serde(default = "MemoryPolicy::default_recall_reinforcement")]
     pub recall_reinforcement: f64,
 
-    /// Confidence multiplier applied to corrected memories (consumed from P1).
+    /// Inert, and deliberately never to be consumed.
+    ///
+    /// This was declared as "confidence multiplier applied to corrected
+    /// memories" under KIP 1.x. KIP 2.0 forbids the operation it names: an
+    /// Assertion is immutable and its confidence is one actor's stance, so a
+    /// memory being corrected produces a *new* Assertion plus supersession —
+    /// never a coefficient applied to the old one. It stays declared because
+    /// `MemoryPolicy` is `deny_unknown_fields` and dropping a field would make
+    /// every stored policy that carries it fail to deserialize, silently
+    /// reverting that space to defaults. Nothing should ever wire it up.
     #[serde(default = "MemoryPolicy::default_correction_penalty")]
     pub correction_penalty: f64,
 
@@ -776,12 +829,19 @@ pub struct MemoryPolicy {
     #[serde(default = "MemoryPolicy::default_self_test_token_budget")]
     pub self_test_token_budget: u64,
 
-    /// Semantic search threshold for recall-side probes (consumed from P1).
+    /// Declared ahead of its consumer; nothing reads it yet.
+    ///
+    /// A relevance floor for recall-side probes. `probe_memory` currently
+    /// filters by element type instead, because a `SEARCH` score is BM25
+    /// relevance with no cross-query scale — a fixed threshold needs a
+    /// normalized score to mean anything, and this engine does not publish
+    /// one.
     #[serde(default = "MemoryPolicy::default_recall_search_threshold")]
     pub recall_search_threshold: f64,
 
-    /// Model-turn limit for one recall run (consumed from P1; until then the
-    /// compiled `RECALL_MAX_MODEL_TURNS` applies).
+    /// Model-turn limit for one recall run; `validate` holds it in `[1, 50]`.
+    /// The default equals the compiled fallback the recall agent uses when a
+    /// space has no policy, so an unset policy is not a behavior change.
     #[serde(default = "MemoryPolicy::default_recall_max_rounds")]
     pub recall_max_rounds: u32,
 

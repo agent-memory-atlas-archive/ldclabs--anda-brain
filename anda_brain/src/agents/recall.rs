@@ -31,13 +31,16 @@ use super::{
     BrainHook, SELF_USER_ID, append_runner_history, compact_runner_if_needed,
     push_completed_history,
 };
-use crate::types::RecallInput;
+use crate::types::{MemoryPolicy, RecallInput};
 #[cfg(feature = "wiki")]
 use crate::wiki::{WikiReadTool, WikiSearchTool};
 
 const RECALL_CONTEXT_TIMEOUT: Duration = Duration::from_secs(5);
 const RECALL_TOTAL_TIMEOUT: Duration = Duration::from_secs(180);
 const RECALL_PRIMER_CACHE_TTL_MS: u64 = 300_000;
+/// Fallback model-turn cap, used when the space has no policy of its own.
+/// Equal to `MemoryPolicy::default_recall_max_rounds`, so an unset policy is
+/// not a behavior change.
 const RECALL_MAX_MODEL_TURNS: usize = 7;
 const RECALL_HISTORY_LIMIT: usize = 1;
 pub const READONLY_KIP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -192,6 +195,13 @@ fn error_output(res: Response) -> ToolOutput<Response> {
     output
 }
 
+/// Reads the owning space's current [`MemoryPolicy`].
+///
+/// A closure rather than a stored snapshot: `update_space` can change the
+/// policy while the agent is alive, and a cap read once at construction is a
+/// cap that quietly ignores the operator who raised it.
+pub type MemoryPolicyReader = Arc<dyn Fn() -> MemoryPolicy + Send + Sync>;
+
 #[derive(Clone)]
 pub struct RecallAgent {
     pub conversations: Conversations,
@@ -204,6 +214,7 @@ pub struct RecallAgent {
     history: Arc<RwLock<VecDeque<Document>>>,
     primer_cache: Arc<RwLock<Option<CachedPrimer>>>,
     max_input_tokens: usize,
+    policy: MemoryPolicyReader,
 }
 
 impl RecallAgent {
@@ -214,6 +225,7 @@ impl RecallAgent {
         conversations_collection: Arc<Collection>,
         hook: Arc<dyn BrainHook>,
         max_input_tokens: usize,
+        policy: MemoryPolicyReader,
     ) -> Self {
         Self {
             conversations,
@@ -223,6 +235,24 @@ impl RecallAgent {
             history: Arc::new(RwLock::new(VecDeque::new())),
             primer_cache: Arc::new(RwLock::new(None)),
             max_input_tokens,
+            policy,
+        }
+    }
+
+    /// The model-turn cap for one recall run.
+    ///
+    /// `recall_max_rounds` was declared as a policy knob and read by nothing;
+    /// its default happens to equal the compiled fallback, so the gap was
+    /// invisible until an operator raised it and nothing changed.
+    ///
+    /// `MemoryPolicy::validate` holds the field in `[1, 50]`, so a zero can
+    /// only arrive from a stored policy that predates the check. Treating it
+    /// as unset rather than as "no turns at all" keeps such a space answering
+    /// recalls instead of failing every one of them instantly.
+    fn max_model_turns(&self) -> usize {
+        match (self.policy)().recall_max_rounds as usize {
+            0 => RECALL_MAX_MODEL_TURNS,
+            rounds => rounds,
         }
     }
 
@@ -499,6 +529,7 @@ impl Agent<AgentCtx> for RecallAgent {
             vec![],
         );
 
+        let max_model_turns = self.max_model_turns();
         let started_at = now_ms;
         let mut replace_initial_input = true;
         let mut persisted_runner_history_len = 0;
@@ -510,7 +541,7 @@ impl Agent<AgentCtx> for RecallAgent {
         // the failure handling live at exactly one place below the loop.
         let failure: Option<RecallFailure> = 'run: {
             loop {
-                if total_model_turns >= RECALL_MAX_MODEL_TURNS {
+                if total_model_turns >= max_model_turns {
                     break 'run Some(RecallFailure::TurnLimit);
                 }
 
@@ -607,10 +638,7 @@ impl Agent<AgentCtx> for RecallAgent {
             conversation.usage = runner.total_usage().clone();
             return match failure {
                 RecallFailure::TurnLimit => {
-                    let reason = format!(
-                        "recall exceeded model turn limit of {}",
-                        RECALL_MAX_MODEL_TURNS
-                    );
+                    let reason = format!("recall exceeded model turn limit of {max_model_turns}");
                     Ok(self.failed_output(conversation, reason, last_output).await)
                 }
                 RecallFailure::Timeout => {
@@ -1122,6 +1150,54 @@ mod tests {
         assert_eq!(
             stored.failed_reason.as_deref(),
             Some("recall exceeded model turn limit of 7")
+        );
+    }
+
+    /// `recall_max_rounds` was a declared policy knob nothing read: its
+    /// default equals the compiled fallback, so raising it changed nothing
+    /// and the gap was invisible. Same space, same looping model, one
+    /// `update_space` apart.
+    #[tokio::test]
+    async fn recall_turn_limit_follows_the_space_policy() {
+        use crate::types::{MemoryPolicy, UpdateSpaceInput};
+
+        let app = test_app_state_with_configured_completer(
+            "recall_policy_turn_limit",
+            CompactingToolLoopCompleter,
+            |model| {
+                model.context_window = 1;
+            },
+        );
+        let space = create_loaded_space(&app, "recall_policy_turn_limit").await;
+
+        space
+            .update(
+                UpdateSpaceInput {
+                    memory_policy: Some(MemoryPolicy {
+                        recall_max_rounds: 3,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                anda_engine::unix_ms(),
+            )
+            .await
+            .unwrap();
+
+        let ctx = space.ctx_for_test(SELF_USER_ID, RecallAgent::NAME).unwrap();
+        let output = Agent::<AgentCtx>::run(
+            space.recall.as_ref(),
+            ctx,
+            recall_prompt("loop until the guardrail stops it", None),
+            vec![],
+        )
+        .await
+        .unwrap();
+
+        let failed_reason = output.failed_reason.as_deref().unwrap_or_default();
+        assert!(
+            failed_reason.contains("recall exceeded model turn limit of 3"),
+            "{failed_reason}"
         );
     }
 }

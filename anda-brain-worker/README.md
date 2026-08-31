@@ -48,7 +48,7 @@ cd ../../anda-db/ts/kip-do && pnpm install && pnpm run build
 | 自动周期维护 | 未实现；由调用方或 Cron Trigger 调用 maintenance |
 | 全文检索（`SEARCH`） | 保留，keyword 模式，见「检索」一节 |
 | 派生闭包（`LIST DEPENDENTS`） | 保留，`DEPTH` 上限 8；但 maintenance 一次只出 KML，走不了这条读 |
-| 保留期（`SET RETENTION`） | 引擎未实现，因此没有到期清扫；Rust 服务两样都有 |
+| 保留期（`SET RETENTION`） | 引擎未实现，maintenance 闸门直接拒绝；Rust 服务两样都有 |
 | 载荷清除（`PURGE PAYLOAD`） | 引擎已实现；maintenance 计划里和 `PURGE` 一样被拒 |
 | 原子批（`execution.mode: "atomic"`） | 引擎未实现，请求会被拒绝而不是伪装成功 |
 
@@ -176,9 +176,11 @@ curl http://localhost:8787/v1/alice/maintenance \
   -d '{"trigger":"on_demand","scope":"daydream"}'
 ```
 
-Maintenance 可以用 KML 的全部动作，但 **`PURGE` 被拒绝**（不可逆，且模型读自己的快照不是决定「让某物从未存在」的地方；需要时走管理级 `execute_kip`）。**任何带 `WHERE` 选择的子句都必须带 `LIMIT 20` 或更小**——`UPDATE ?e … WHERE {}` 和 `ARCHIVE ?e WHERE {}` 是同一个风险换了个动词。
+Maintenance 可以用 KML 的全部动作，但 **`PURGE` 被拒绝**（不可逆，且模型读自己的快照不是决定「让某物从未存在」的地方；需要时走管理级 `execute_kip`）。**任何带 `WHERE` 选择的子句都必须带 `LIMIT 20` 或更小**——`UPDATE ?e … WHERE {}` 和 `ARCHIVE ?e WHERE {}` 是同一个风险换了个动词。`MERGE CONCEPT` 语法上没有 `LIMIT` 位置，所以对它的要求是 `WHERE` 必须精确指出源和目标，一次合并一对。
 
-请求参数里没有 `confidence_decay_factor`：2.0 禁止随时间衰减 Assertion 置信度。
+`SET RETENTION` 引擎未实现，**在闸门就被拒**而不是执行时才失败：批次不是事务，让它跑到执行会造成前面几条已提交、整个请求却报 422，调用方无从判断落了什么。
+
+请求参数：`memory_strength_decay_factor`、`stale_event_threshold_days`、`unconsolidated_max_backlog`（兼容旧名 `unsorted_max_backlog`）、`orphan_max_count`——与 Rust 服务的 `MaintenanceParameters` 逐字段对齐。没有 `confidence_decay_factor`：2.0 禁止随时间衰减 Assertion 置信度。
 
 ### Probe 与直接 KIP
 

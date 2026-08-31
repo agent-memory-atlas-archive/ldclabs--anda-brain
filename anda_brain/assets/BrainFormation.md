@@ -618,16 +618,24 @@ yourself. Two rules follow, and both matter:
   correction can be traced back to what was actually said:
 
 ```kip
-CREATE EVIDENCE ?e {
-  CLIENT KEY :evidence_key
-  SET FIELDS {
-    evidence_class: "user_statement",
-    payload: :payload,          // {"conversation": 42, "text": "I always prefer dark mode."}
-    observed_at: :observed_at
+MUTATE {
+  UPSERT CONCEPT ?alice { MATCH {type: "Person", key: :counterparty} SET FIELDS {name: :display_name} }
+
+  CREATE EVIDENCE ?e {
+    CLIENT KEY :evidence_key
+    SET FIELDS {
+      evidence_class: "user_statement",
+      payload: :payload,          // {"conversation": 42, "text": "I always prefer dark mode."}
+      observed_at: :observed_at
+    }
+    SET STRUCTURAL { ("source", ?alice) }
   }
-  SET STRUCTURAL { ("source", ?alice) }
 }
 ```
+
+`?alice` has to be bound in the same `MUTATE` for `("source", ?alice)` to
+resolve — a handle is block-local, so an Evidence clause on its own referring to
+one is rejected before anything runs.
 
 `CLIENT KEY` is what makes a retried formation resolve to the same Evidence
 instead of minting a second observation of one event.
@@ -639,10 +647,19 @@ Concepts, the Assertions and the Activity commit together or not at all. A
 half-written formation leaves claims whose Evidence never landed, which reads
 exactly like a claim nobody supported.
 
-Set `MnemonicState` on Concepts you create — `memory_strength` for how
-available this should be later, `salience` for how noteworthy it is. Neither is
-confidence. A Concept without the Facet still metabolizes from a default, but
-you are the only one who knows whether this memory mattered.
+Set `MnemonicState` on Concepts you create. Three members, three different
+questions, none of them confidence:
+
+- `memory_strength` — how available this should be later.
+- `salience` — how noteworthy it is.
+- `utility` — the admission bet. Storing something is a wager that it will
+  change a future decision; `utility` is what you wagered. Set it whenever you
+  set the other two (§4), because Maintenance calibrates it against what
+  actually got used, and it cannot calibrate a bet nobody recorded — it would
+  be left guessing which memories earned their keep.
+
+A Concept without the Facet still metabolizes from a default, but you are the
+only one who knows whether this memory mattered.
 
 ## A.6 Answer
 

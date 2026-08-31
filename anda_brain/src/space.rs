@@ -552,6 +552,14 @@ impl AppState {
             .cloned()?;
 
         entry.touch();
+        // A Space idle for nine minutes is evicted, so the background pass
+        // above never sees the quietest ones at all — the next time anybody
+        // opens this Space is the only moment its overdue cycle can be
+        // noticed. `autostart: false` forks are excluded: a shadow copy must
+        // not burn model calls or mutate itself mid-replay.
+        if autostart {
+            space.kick_scheduled_maintenance();
+        }
         Ok(space)
     }
 
@@ -608,10 +616,15 @@ impl AppState {
             }
 
             // Periodic flush for active spaces
-            if let Some(space) = entry.cell.get()
-                && let Err(err) = space.flush().await
-            {
-                log::error!(target: "brain", space_id = id; "periodic flush failed: {err:?}");
+            if let Some(space) = entry.cell.get() {
+                if let Err(err) = space.flush().await {
+                    log::error!(target: "brain", space_id = id; "periodic flush failed: {err:?}");
+                }
+                // ... and the clock-driven maintenance trigger. A Space that
+                // is read but never written to stays resident and never hits
+                // a counting threshold, so this is the only thing that
+                // metabolizes it.
+                space.kick_scheduled_maintenance();
             }
         }
     }
@@ -962,10 +975,7 @@ impl Space {
     /// override (optimizer runs, plan M10) or [`MemoryPolicy::default`],
     /// which reproduces the compiled-in behavior (plan module M-P).
     fn memory_policy(&self) -> MemoryPolicy {
-        self.db
-            .get_extension_as(MemoryPolicy::EXTENSION_KEY)
-            .or_else(MemoryPolicy::eval_override)
-            .unwrap_or_default()
+        memory_policy_of(&self.db)
     }
 
     pub fn get_byok(&self) -> Option<ModelConfig> {
@@ -1342,7 +1352,7 @@ impl Space {
         // phase. Overwritten rather than merged: like `formation_id`, this is
         // the runtime's account of its own graph, and a request body must not
         // be able to tell the Brain what its vocabulary looks like.
-        input.assessment = Some(self.maintenance_assessment());
+        input.assessment = Some(self.maintenance_assessment().await);
         let rt = self
             .engine
             .agent_run(
@@ -1378,7 +1388,7 @@ impl Space {
     ///
     /// A `quick` or `daydream` cycle takes no census of its own, so it reads
     /// the last full cycle's — which is why `audited_at` travels with it.
-    fn maintenance_assessment(&self) -> crate::types::MaintenanceAssessment {
+    async fn maintenance_assessment(&self) -> crate::types::MaintenanceAssessment {
         let audit: Option<SchemaAudit> = self.db.get_extension_as("schema_audit");
         crate::types::MaintenanceAssessment {
             audited_at: audit.as_ref().map(|audit| audit.audited_at),
@@ -1387,7 +1397,100 @@ impl Space {
                 .db
                 .get_extension_as("source_reliability")
                 .unwrap_or_default(),
+            space_seq: self.current_space_seq().await,
+            armed_watches: self.armed_watches().await,
         }
+    }
+
+    /// The Space's sequence coordinate right now.
+    ///
+    /// Read off the Space row rather than derived from a query: it is the
+    /// `basis_seq` a refreshed `WorkingState` has to be stamped with, and a
+    /// digest that guessed its own basis would be a derived view claiming a
+    /// consistency it does not have.
+    async fn current_space_seq(&self) -> Option<u64> {
+        use anda_cognitive_nexus::nexus::DEFAULT_SPACE;
+
+        match self.memory.nexus().store.current_seq(DEFAULT_SPACE).await {
+            Ok(seq) => Some(seq),
+            Err(err) => {
+                log::warn!(
+                    target: "brain",
+                    space_id = self.id;
+                    "reading the Space sequence for the maintenance assessment failed: {err:?}"
+                );
+                None
+            }
+        }
+    }
+
+    /// The Watches this Space is currently waiting on.
+    ///
+    /// Handed to the cycle because §10 and §17 ask it to evaluate the armed
+    /// Watch set, and a model that has to go looking for the set first will
+    /// often not look. A Watch fires into attention — a SleepTask or a wake
+    /// signal — and never into an action: this list is a reading, not a
+    /// licence.
+    ///
+    /// Bounded and best-effort. A Space with more armed Watches than one page
+    /// has a backlog the cycle should work through over several runs, and an
+    /// error here degrades the assessment rather than failing the cycle.
+    async fn armed_watches(&self) -> Vec<crate::types::ArmedWatch> {
+        const ARMED_WATCH_LIMIT: usize = 20;
+
+        let response = self
+            .execute_kip_readonly(kip::request(format!(
+                r#"FIND(?w.id, ?w.name, ?w.attributes)
+WHERE {{
+  ?w CONCEPT {{type: "Watch"}}
+  FILTER(?w.attributes.status == "armed")
+}}
+ORDER BY ?w.attributes.due_at
+LIMIT {ARMED_WATCH_LIMIT}"#
+            )))
+            .await;
+        let Ok(response) = response else {
+            return Vec::new();
+        };
+        if !kip::succeeded(&response) {
+            // A Space that has never declared a Watch resolves the type fine
+            // (the Profile declares it), so a failure here is a real one —
+            // but it costs the cycle one input, not the cycle.
+            log::warn!(
+                target: "brain",
+                space_id = self.id;
+                "reading armed Watches for the maintenance assessment failed: {}",
+                kip::error_message(&response)
+            );
+            return Vec::new();
+        }
+        let Some(rows) = kip::ok_result(&response).and_then(serde_json::Value::as_array) else {
+            return Vec::new();
+        };
+        rows.iter()
+            .filter_map(|row| {
+                let columns = row.as_array()?;
+                let attribute = |name: &str| {
+                    columns
+                        .get(2)
+                        .and_then(|attributes| attributes.get(name))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string()
+                };
+                Some(crate::types::ArmedWatch {
+                    id: columns
+                        .first()
+                        .and_then(serde_json::Value::as_str)?
+                        .to_string(),
+                    name: element_label(columns.get(1)?),
+                    watch_class: attribute("watch_class"),
+                    condition: attribute("condition"),
+                    summary: attribute("summary"),
+                    due_at: attribute("due_at"),
+                })
+            })
+            .collect()
     }
 
     /// Bumps the incrementally-updated observability counters (plan M12).
@@ -2246,6 +2349,73 @@ impl Space {
         ids.into_iter().collect()
     }
 
+    /// Whether this Space is overdue a maintenance cycle on the clock.
+    ///
+    /// Maintenance was reachable only by counting formation conversations
+    /// (daydream every 21, quick every 42, full every 168) or by an explicit
+    /// request. A Space that stops ingesting therefore stopped metabolizing
+    /// altogether: no Commitment review, no retention expiry, no self-test —
+    /// and the reference policy's triggers are "scheduled, threshold, or
+    /// change-driven", not threshold alone. Waiting is supposed to be active.
+    ///
+    /// A Space that has never formed anything is never overdue: there is
+    /// nothing to metabolize, and firing a cycle at every freshly created
+    /// Space would spend a model call to discover that.
+    fn maintenance_overdue(&self, now_ms: u64) -> bool {
+        let last = self.maintenance.get_processed_at().start_at;
+        if last == 0 {
+            // Never maintained. Due only once something has been formed —
+            // `get_processed` is the formation watermark, not a count of
+            // requests, so this is "memory exists" rather than "traffic
+            // happened".
+            return self.formation.get_processed().unwrap_or(0) > 0;
+        }
+        now_ms.saturating_sub(last) >= MAINTENANCE_MAX_INTERVAL_MS
+    }
+
+    /// Runs a scheduled maintenance cycle when the clock says one is due.
+    ///
+    /// `Full` rather than a cheaper scope on purpose: the passes a quiet Space
+    /// is missing — retention expiry, the schema census — are the full-only
+    /// ones, so a time-driven cycle that ran `quick` would fire on schedule
+    /// and still not do the work the schedule exists for.
+    ///
+    /// Everything that could go wrong here is already guarded: `maintenance`
+    /// claims the single-flight slot and refuses if formation or another cycle
+    /// holds it, so a busy Space simply waits for the next tick.
+    fn kick_scheduled_maintenance(self: &Arc<Self>) {
+        if self.is_processing() || !self.maintenance_overdue(unix_ms()) {
+            return;
+        }
+        let space = self.clone();
+        tokio::spawn(async move {
+            let input = MaintenanceInput {
+                trigger: "scheduled".to_string(),
+                scope: MaintenanceScope::Full,
+                timestamp: Some(rfc3339_datetime_now()),
+                parameters: None,
+                formation_id: 0,
+                assessment: None,
+            };
+            match space.maintenance(SELF_USER_ID, input).await {
+                Ok(output) => log::info!(
+                    target: "brain",
+                    space_id = space.id,
+                    conversation = output.conversation;
+                    "scheduled maintenance started on the clock"
+                ),
+                // "already in progress" is the ordinary answer on a busy
+                // Space, not a fault: the slot is held and the next tick
+                // will find the cycle already done.
+                Err(err) => log::debug!(
+                    target: "brain",
+                    space_id = space.id;
+                    "scheduled maintenance did not start: {err}"
+                ),
+            }
+        });
+    }
+
     /// Fires the dream self-test in the background (plan M7); called after a
     /// maintenance cycle completes. Skipped when disabled by policy or when
     /// a pass is already running.
@@ -2926,6 +3096,10 @@ LIMIT {window}"#
             recall_conversations,
             hooks.clone(),
             65535,
+            {
+                let db = db.clone();
+                Arc::new(move || memory_policy_of(&db))
+            },
         ));
         let maintenance = Arc::new(MaintenanceAgent::new(
             memory.clone(),
@@ -3416,6 +3590,16 @@ const SETTLEMENT_BATCH_LIMIT: usize = 500;
 /// Upper bound of decay batches per settlement (500 × 20 = 10k links).
 const SETTLEMENT_MAX_BATCHES: usize = 20;
 
+/// How long a Space may go without a maintenance cycle before the background
+/// pass runs one on the clock.
+///
+/// The counting triggers (21 / 42 / 168 formation conversations) pace a Space
+/// that is being written to; this is the floor for one that is not. A day is
+/// short enough that a due Commitment or a lapsed retention date is acted on
+/// while it still matters, and long enough that a mostly-idle Space costs one
+/// model call a day.
+const MAINTENANCE_MAX_INTERVAL_MS: u64 = 24 * 3_600 * 1_000;
+
 /// Bulk decay is a weekly-rate process (the factor is documented per week in
 /// BrainMaintenance.md); links decayed more recently than this are skipped,
 /// so daily maintenance cannot over-decay.
@@ -3466,6 +3650,19 @@ struct ShadowVerdict {
     winner: String,
     #[serde(default)]
     reason: String,
+}
+
+/// This Space's memory policy: the stored one, an eval override, or the
+/// compiled defaults.
+///
+/// A free function rather than only a [`Space`] method because the agents are
+/// built before the `Space` that owns them, and a policy knob read through a
+/// second copy of this fallback chain is a knob that eventually disagrees with
+/// itself.
+fn memory_policy_of(db: &AndaDB) -> MemoryPolicy {
+    db.get_extension_as(MemoryPolicy::EXTENSION_KEY)
+        .or_else(MemoryPolicy::eval_override)
+        .unwrap_or_default()
 }
 
 /// Graph metadata timestamps are RFC3339 strings (lexicographically
@@ -3823,8 +4020,8 @@ async fn copy_space_objects(
 #[cfg(test)]
 mod tests {
     use super::{
-        AppState, CorrectionWatermark, Hooks, Space, SpaceEntry, correction_watermark,
-        init_conversation_collection, init_resource_collection,
+        AppState, CorrectionWatermark, Hooks, MAINTENANCE_MAX_INTERVAL_MS, Space, SpaceEntry,
+        correction_watermark, init_conversation_collection, init_resource_collection,
     };
     use crate::{
         agents::{BrainHook, FormationAgent, MaintenanceAgent, SELF_USER_ID, TimedMemoryReadonly},
@@ -4905,6 +5102,33 @@ mod tests {
         assert_eq!(kip::changed(&out.output, "archive"), 1, "{:?}", out.output);
     }
 
+    /// Maintenance was reachable only by counting formation conversations, so
+    /// a Space that stopped ingesting stopped metabolizing: no Commitment
+    /// review, no retention expiry, no self-test. The reference policy's
+    /// triggers are "scheduled, threshold, or change-driven".
+    #[tokio::test]
+    async fn maintenance_comes_due_on_the_clock_not_only_on_traffic() {
+        let app = test_app_state("maintenance_clock");
+        let space = create_loaded_space(&app, "maintenance_clock").await;
+        let now_ms = unix_ms();
+
+        // A Space with nothing in it is never overdue: firing a cycle at every
+        // freshly created Space would spend a model call to learn there is
+        // nothing to consolidate.
+        assert!(!space.maintenance_overdue(now_ms));
+
+        // Formed something, never maintained: due now, whatever the count of
+        // conversations says.
+        space.formation.set_processed_for_test(1).await;
+        assert!(space.maintenance_overdue(now_ms));
+
+        // Maintained just now: not due again until the interval passes.
+        space.maintenance.set_start_at(now_ms).await.unwrap();
+        assert!(!space.maintenance_overdue(now_ms));
+        assert!(!space.maintenance_overdue(now_ms + MAINTENANCE_MAX_INTERVAL_MS - 1));
+        assert!(space.maintenance_overdue(now_ms + MAINTENANCE_MAX_INTERVAL_MS));
+    }
+
     async fn seed_kip(space: &Space, request: anda_kip::Request) {
         let response = space.execute_kip_settlement(request).await.unwrap();
         assert!(
@@ -5773,7 +5997,7 @@ SUPERSEDING :old"#,
         // ... and the same census reaches the Maintenance prompt, which its
         // deployment contract (§A.1) has always claimed. Correction discovery
         // recorded one revision above, so the actor tally travels with it.
-        let assessment = space.maintenance_assessment();
+        let assessment = space.maintenance_assessment().await;
         assert_eq!(assessment.predicates.get("prefers"), Some(&2));
         assert_eq!(assessment.audited_at, Some(audit.audited_at));
         assert_eq!(

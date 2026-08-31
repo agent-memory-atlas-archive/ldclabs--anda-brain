@@ -391,8 +391,8 @@ must not redo its work by hand:
 
 What is left for you is the cognitive work the reference policy describes:
 consolidation, contrastive Skill compilation, identity and contradiction review,
-Commitments, the SelfModel, derivation review, retention decisions and the
-SleepTask queue.
+Commitments and Watches, the SelfModel and the WorkingState, derivation review,
+retention decisions and the SleepTask queue.
 
 ## A.2 Request
 
@@ -409,7 +409,17 @@ SleepTask queue.
   "assessment": {
     "audited_at": 1756608000000,
     "predicates": {"prefers": 41, "works_on": 3, "works_at": 2},
-    "source_reliability": {"C-7": {"corrections": 4, "last_corrected_at": 1756512000000}}
+    "source_reliability": {"C-7": {"corrections": 4, "last_corrected_at": 1756512000000}},
+    "space_seq": 4213,
+    "armed_watches": [
+      {
+        "id": "C-88",
+        "name": "Reply from the vendor",
+        "watch_class": "silence",
+        "condition": "no message from :vendor about the renewal",
+        "due_at": "2026-09-04T00:00:00Z"
+      }
+    ]
   }
 }
 ```
@@ -419,6 +429,29 @@ settlement — not something a caller can set. It is read-only input to your
 assessment phase (§6), and it is a measurement, not a verdict: `works_on` and
 `works_at` sitting at 3 and 2 links is a *candidate* for review, and whether
 they mean one thing is a question the Propositions answer, not the counts.
+
+`assessment.armed_watches` is what this Space is waiting on and
+`assessment.space_seq` is where its history stands, because §10, §17 and §18
+need both and neither is something you can work out from a snapshot.
+
+- **Watch evaluation (§10, §17).** Read `CHANGES AFTER SEQ` from the basis the
+  last `WorkingState` declared — or from `space_seq` when there is none — and
+  compare the committed changes against each armed Watch's `condition`. A
+  `delta` Watch fires on a match; a `silence` Watch fires when its `due_at` has
+  passed and nothing matched. Fire atomically: the `watch_fire` Activity, the
+  Watch's transition to `fired`, and the SleepTask it produces, in one
+  `MUTATE`. Then record what you decided to do about it as an `action_gate`
+  Activity with outcome `act`, `ask`, `defer` or `silence` — including when you
+  decided to do nothing, because restraint that leaves no trace is
+  indistinguishable from not having looked. **A fired Watch authorizes
+  nothing.** It produces attention, never an outward act.
+- **WorkingState refresh (§12, §18).** Rebuild the digest from open
+  Commitments, armed Watches, contested slots and recent high-salience Events,
+  link those inputs through `derived_from`, and stamp it with
+  `basis_seq: :space_seq` — the value in your input, not one you inferred. Log
+  a `working_state_refresh` Activity. It is a derived view: Recall serves it
+  with its basis, and it is never cited as Evidence, not even for its own
+  inputs.
 
 `scope` is `daydream`, `quick` or `full`. These are this deployment's budget
 metaphors, not protocol semantics: a `quick` cycle does assessment, pending

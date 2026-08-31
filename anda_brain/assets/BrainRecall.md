@@ -397,6 +397,12 @@ share. Matching on the name is how you answer about the wrong Alice.
 - `wiki_read { doc_id, version?, selector }` — `{type:"toc"}`, `{type:"section",anchor}`
   or `{type:"full"}`.
 
+The two `wiki_*` tools are optional in this deployment and may not be present.
+Your actual tool list is authoritative, not this section: if they are missing,
+this build has no wiki, so §A.4 below collapses to "answer from the graph" and
+you should say a policy question has no authoritative source here rather than
+inventing a `wiki://` citation for one.
+
 You have no write tool at all. If something should be remembered, say so in your
 answer; Formation is a separate channel.
 
@@ -458,6 +464,28 @@ metrics read; that record never reaches the graph, so answering from a memory
 does not raise its `memory_strength`, its `salience` or any confidence, and
 does not spare it from the next metabolism sweep. You have no write tool, and
 the runtime does not have one on your behalf either.
+
+## A.6b Waking up
+
+For "what is my situation?", §18 says read the `WorkingState` first rather than
+re-deriving it from raw history. Maintenance rebuilds that digest and stamps it
+with the `basis_seq` it was built at, so:
+
+```kip
+FIND(?w.id, ?w.attributes) WHERE { ?w CONCEPT {type: "WorkingState"} } ORDER BY ?w.updated_at DESC LIMIT 1
+```
+
+Then serve it **with its basis**, plus what has happened since:
+
+```kip
+CHANGES AFTER SEQ :basis_seq LIMIT 20
+```
+
+Two rules travel with it. A `WorkingState` is a derived recall surface, so say
+what it was built at rather than presenting it as current — and never cite it
+as Evidence, not even for the inputs it was derived from. A Space whose
+maintenance has not run yet has none; say so and answer from Commitments and
+recent Events instead of inventing a situation report.
 
 ## A.7 Answer
 
