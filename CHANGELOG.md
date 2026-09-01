@@ -229,6 +229,71 @@ first two were quietly wrong here rather than loudly broken.
   radius, not a reversible one, and it leaves an Assertion pointing at an
   observation whose content is gone.
 
+### Added — the runtime mints the observation (Spec §71.1)
+
+Both engines shipped the ingestion context in the upstream round this project's
+audit asked for, and neither deployment used it. The reference Formation policy
+had been telling the model to prefer it since §7 was written, while both `# A.`
+contracts said the opposite back: there is no ingestion context here, so write
+the payload yourself. That is the fidelity risk §88.12 names, sitting in the hot
+path — a model retyping an observation truncates it, normalizes its whitespace,
+fixes its spelling or paraphrases it, and the record then says the source said
+something they did not, with a confidence and an actor attached.
+
+- **One Evidence per message, bound as `:msg1`…`:msg16`.** Minted before the
+  first command runs, from the bytes the runtime received, on every request a
+  formation pass makes. `evidence_class` comes from the speaker's role: a
+  transcript is not one observation, and flattening four turns into one payload
+  would leave a reader unable to tell the user's words from the assistant's.
+  Both contracts now say so, and keep `CREATE EVIDENCE` for what is genuinely
+  not one of these messages — something quoted inside one, a measurement, an
+  attached document.
+- **`client_key` is what makes it safe to attach everywhere.** The first mint
+  wins and the rest resolve to it, so four commands citing `:msg1` cite one
+  record and a resend does not double the observation. Its origin is
+  `context.source` when the caller sends one, and otherwise the best stable
+  identity each deployment has: the durable conversation row in the Rust
+  service, a digest of the envelope in the Worker, which is stateless and has
+  nothing better.
+- **Fixed: `AndaBrain.executeKip` was dropping every argument past `read`.**
+  Written to add `ensureInitialized`, it inherited a signature that stopped
+  where its author's attention did — the failure the comment above
+  `executeKipBatch` already warned about, in the same file. Besides `ingest`, it
+  was swallowing `idempotencyKey`: §26's "a timeout is not an abort", so a
+  resend of a lost write was writing a second time instead of returning the
+  first one's receipt.
+
+The two deployments differ on the first conversation with a new person. The Rust
+service upserts the counterparty's Person before the pass and can name it as the
+Evidence `source`; the Worker leaves that write to the model's own plan and has
+nothing to point at yet, so the source is omitted rather than filled with the
+handle — it must resolve to something a reader can follow. Attribution does not
+depend on it either way: who said the thing is `asserted_by` on the Assertion.
+
+### Changed — the two deployments run one maintenance policy
+
+The Rust service gated Formation by name and let every other agent fall through
+to the raw tool. That default-open `else` was the whole gap: its Maintenance
+kept `PURGE`, `PURGE PAYLOAD`, `legal_hold` and unbounded selections that the
+Worker's maintenance gate has refused since it was written. Two runtimes running
+one policy cannot differ on which verbs a model may reach, so
+`execute_maintenance_request` is the wider half of the same gate now, and
+`GuardedMemory` dispatches to one of two gates rather than to one or nothing.
+
+Erasure does not leave the deployment with it: the right-to-be-forgotten path
+already issues `PURGE` deterministically, from a request a person made. That is
+the distinction — who decided, not which verb.
+
+In the other direction, **the Worker was refusing every `MERGE CONCEPT` that
+carried a `WHERE`.** That rule read merge's missing `LIMIT` slot as a hole. It is
+not one: the block is a guard, and both engines resolve each operand separately
+and refuse one that binds more than one Concept — with a registry code, the
+counts found, and what to write instead. The gate was costing the legitimate
+one-pair case to duplicate a check that answers better.
+
+Both maintenance contracts now state what their gate holds back, and the Rust
+one picks up the `STRUCTURAL` note the Worker already had.
+
 ### Changed — re-synced to `anda-db` `87f7ab0`…`168be6f`
 
 Upstream closed the six engine gaps this project's own audit had reported, so
@@ -287,11 +352,8 @@ under two readers that did not notice.
   and a pass reading an untrusted conversation is the last thing that should
   decide how long anything is kept. Same refusal, honest reason.
 
-Known divergence, unchanged by this: the Rust service gates only the Formation
-agent, so its Maintenance keeps the full clause set — including `PURGE` and now
-a `legal_hold` the Worker refuses. The two deployments have different
-maintenance authority models, which predates this change and is a policy
-decision rather than a defect to fix here.
+The divergence this left — the Rust service gating only its Formation agent —
+is closed in the section above.
 
 ### Changed — re-synced to KIP 2.0 `12cfd4d` (`anda-db` `0f92200`…`86777c0`)
 
