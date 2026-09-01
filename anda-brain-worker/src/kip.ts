@@ -24,7 +24,7 @@ import {
   type Outcome,
   type Scalar,
 } from '@ldclabs/kip-do'
-import type { MemoryCitation } from './types.js'
+import type { MemoryCitation, Message } from './types.js'
 
 export const MAX_KIP_OPERATIONS = 4
 export const MAX_KIP_COMMAND_BYTES = 256 * 1024
@@ -37,6 +37,115 @@ export const MAX_MAINTENANCE_SELECTION = 20
 
 /** The most citations one answer carries. */
 const MAX_CITATIONS = 16
+
+/**
+ * The most messages one formation pass mints as Evidence.
+ *
+ * The newest ones, because a formation pass writes about what was just said and
+ * an envelope carrying an unbounded transcript is a request nobody bounded. The
+ * older turns are still in the prompt; what a message past this line loses is
+ * the *verbatim* record, so a claim resting on one has to be written the long
+ * way — which the contract says, so the model is not left guessing why `:msg17`
+ * does not resolve.
+ */
+export const MAX_INGESTED_MESSAGES = 16
+
+/**
+ * What a message's role makes it, as an Evidence class (Formation §7).
+ *
+ * A transcript is not one observation. Who said a thing is part of what was
+ * observed, and flattening four turns into one `payload` would leave a later
+ * reader unable to tell the user's words from the assistant's — which is the
+ * distinction an attributed claim rests on.
+ */
+const EVIDENCE_CLASS: Record<string, string> = {
+  user: 'user_statement',
+  assistant: 'agent_statement',
+  tool: 'tool_result',
+  system: 'message',
+}
+
+/** One Evidence record for the runtime to mint inside the statement (§71.1). */
+export interface IngestedEvidence {
+  key: string
+  evidence_class: string
+  payload: Json
+  observed_at?: string
+  source_actor?: string
+  client_key?: string
+}
+
+/** The `ingest` block of a request envelope. */
+export interface IngestContext {
+  evidence: IngestedEvidence[]
+}
+
+/**
+ * The observation this formation pass was called on, ready for the runtime to
+ * mint (Spec §71.1, Formation §7).
+ *
+ * The point is fidelity, and it is worth stating plainly: a model that retypes
+ * an observation into `CREATE EVIDENCE ... {payload: "…"}` truncates it,
+ * normalizes its whitespace, fixes its spelling, or paraphrases it — and the
+ * record then says the source said something it did not (§88.12). So the
+ * payload the runtime received is the payload that is stored, and the model
+ * only ever writes `:msg1`.
+ *
+ * `client_key` is what makes this safe to attach to every operation in the
+ * batch and to a resend: the first mint wins and the rest resolve to it. Its
+ * stability is only as good as `origin` — see `conversationOrigin`.
+ *
+ * `source_actor` has to name something a reader can follow — an element id or a
+ * canonical identity — and `context.counterparty` is a Concept *key*, so it is
+ * the caller's job to resolve one and `undefined` is an ordinary answer. This
+ * deployment leaves creating the counterparty's Person to the model's own plan,
+ * so a first conversation with someone mints Evidence without a source; the
+ * Rust service upserts it before the pass and always has one. Attribution does
+ * not depend on it either way: who said the thing is `asserted_by` on the
+ * Assertion.
+ */
+export function observationIngest(
+  messages: readonly Message[],
+  observedAt: string,
+  origin: string,
+  sourceActor?: string,
+): IngestContext | undefined {
+  const recent = messages.slice(-MAX_INGESTED_MESSAGES)
+  if (recent.length === 0) return undefined
+  // Numbered from the start of the kept window, so `:msg1` is the oldest
+  // message the model can cite and the numbering matches the order it reads
+  // them in.
+  const evidence = recent.map((message, index) => ({
+    key: `msg${index + 1}`,
+    evidence_class: EVIDENCE_CLASS[message.role] ?? 'message',
+    payload: message as unknown as Json,
+    observed_at: observedAt,
+    client_key: `${origin}:${index + 1}`,
+    ...(sourceActor === undefined || message.role !== 'user'
+      ? {}
+      : { source_actor: sourceActor }),
+  }))
+  return { evidence }
+}
+
+/**
+ * Whether this request already binds a name the ingest block would mint.
+ *
+ * §74 merges request- and operation-level parameters into one binding
+ * environment, so a collision at either level makes `:msg1` ambiguous and the
+ * engine refuses the whole request. A model that bound the name itself is
+ * writing Evidence the long way; let it, rather than failing its plan over a
+ * facility it did not ask for.
+ */
+export function claimsIngestKeys(
+  operations: readonly KipOperation[],
+  ingest: IngestContext,
+): boolean {
+  const keys = new Set(ingest.evidence.map((entry) => entry.key))
+  return operations.some((operation) =>
+    Object.keys(operation.parameters ?? {}).some((name) => keys.has(name)),
+  )
+}
 
 /** One command plus the values bound into its `:placeholders`. */
 export interface KipOperation {

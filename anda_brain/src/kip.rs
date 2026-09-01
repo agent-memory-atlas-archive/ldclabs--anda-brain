@@ -18,9 +18,10 @@
 //!   redo the work: the settlement passes recover by re-running an idempotent
 //!   write, never by treating the memory as unwritten.
 
+use anda_core::Message;
 use anda_kip::{
-    Command, ErrorObject, Executor, Json, KipError, KipValue, Map, MutationClause, Request,
-    Response, Scalar, TopLevelStatus, execute_request,
+    Command, ErrorObject, Executor, IngestContext, IngestEvidence, Json, KipError, KipValue, Map,
+    MutationClause, Request, Response, Scalar, TopLevelStatus, execute_request,
 };
 
 /// Builds a single-operation request from one command string.
@@ -131,6 +132,124 @@ pub async fn execute_readonly_request(executor: &impl Executor, request: &Reques
 /// Matches `MAX_MAINTENANCE_SELECTION` in the Worker's `src/kip.ts`: the two
 /// engines have to agree on a bound both deployment contracts quote.
 pub const MAX_GATED_SELECTION: u64 = 20;
+
+/// The most messages one formation pass mints as Evidence.
+///
+/// The newest ones, because a formation pass writes about what was just said
+/// and an envelope carrying an unbounded transcript is a request nobody
+/// bounded. The older turns are still in the prompt; what a message past this
+/// line loses is the *verbatim* record, so a claim resting on one has to be
+/// written the long way — which the contract says, so the model is not left
+/// guessing why `:msg17` does not resolve.
+///
+/// Matches `MAX_INGESTED_MESSAGES` in the Worker's `src/kip.ts`.
+pub const MAX_INGESTED_MESSAGES: usize = 16;
+
+/// What a message's role makes it, as an Evidence class (Formation §7).
+///
+/// A transcript is not one observation. Who said a thing is part of what was
+/// observed, and flattening four turns into one payload would leave a later
+/// reader unable to tell the user's words from the assistant's — which is the
+/// distinction an attributed claim rests on.
+fn evidence_class(role: &str) -> &'static str {
+    match role {
+        "user" => "user_statement",
+        "assistant" => "agent_statement",
+        "tool" => "tool_result",
+        _ => "message",
+    }
+}
+
+/// The observation a formation pass was called on, ready for the engine to
+/// mint (Spec §71.1, Formation §7).
+///
+/// The point is fidelity, and it is worth stating plainly: a model that retypes
+/// an observation into `CREATE EVIDENCE ... {payload: "…"}` truncates it,
+/// normalizes its whitespace, fixes its spelling, or paraphrases it — and the
+/// record then says the source said something they did not (§88.12). So the
+/// payload the runtime received is the payload that is stored, and the model
+/// only ever writes `:msg1`.
+///
+/// `client_key` is what makes this safe to attach to every request in a
+/// multi-turn pass and to a retry of the whole conversation: the first mint
+/// wins and the rest resolve to it (§52.1). `origin` is what its stability
+/// rests on.
+///
+/// `source_actor` has to name something a reader can follow — an element id or
+/// a canonical identity — and `context.counterparty` is a Concept *key*, so it
+/// is the caller's job to resolve one and `None` is an ordinary answer. Here
+/// the caller is [`FormationAgent::process_one`](crate::agents::FormationAgent),
+/// which upserts the counterparty's Person before the pass and therefore always
+/// has one; the Worker leaves that write to the model, so its first
+/// conversation with someone mints Evidence without a source. Attribution does
+/// not depend on it either way: who said the thing is `asserted_by` on the
+/// Assertion.
+pub fn observation_ingest(
+    messages: &[Message],
+    observed_at: &str,
+    origin: &str,
+    source_actor: Option<&str>,
+) -> Option<IngestContext> {
+    let start = messages.len().saturating_sub(MAX_INGESTED_MESSAGES);
+    let recent = &messages[start..];
+    if recent.is_empty() {
+        return None;
+    }
+    // Numbered from the start of the kept window, so `:msg1` is the oldest
+    // message the model can cite and the numbering matches the order it reads
+    // them in.
+    let evidence = recent
+        .iter()
+        .enumerate()
+        .map(|(index, message)| IngestEvidence {
+            key: format!("msg{}", index + 1),
+            evidence_class: evidence_class(&message.role).to_string(),
+            payload: serde_json::to_value(message).ok(),
+            observed_at: Some(observed_at.to_string()),
+            client_key: Some(format!("{origin}:{}", index + 1)),
+            source_actor: source_actor
+                .filter(|_| message.role == "user")
+                .map(str::to_string),
+            ..Default::default()
+        })
+        .collect();
+    Some(IngestContext {
+        evidence,
+        extensions: None,
+    })
+}
+
+/// Attaches the observation to a request that has room for it.
+///
+/// Nothing is attached when the caller already sent an ingest block, or when
+/// any binding the request carries claims one of the keys. §74 merges request-
+/// and operation-level parameters into one environment, so a collision at
+/// either level makes `:msg1` ambiguous and the engine refuses the whole
+/// request. A model that bound the name itself is writing Evidence the long
+/// way; let it, rather than failing its plan over a facility it did not ask
+/// for.
+pub fn attach_observation(request: &mut Request, observation: &IngestContext) {
+    if request.ingest.is_some() {
+        return;
+    }
+    let claimed = |parameters: Option<&Map<String, Json>>| {
+        parameters.is_some_and(|parameters| {
+            observation
+                .evidence
+                .iter()
+                .any(|entry| parameters.contains_key(&entry.key))
+        })
+    };
+    if claimed(request.parameters.as_ref())
+        || request
+            .operations
+            .iter()
+            .any(|operation| claimed(operation.parameters.as_ref()))
+    {
+        return;
+    }
+    request.ingest = Some(observation.clone());
+}
 
 /// Runs a whole request envelope on the cognition-only path.
 ///
@@ -590,5 +709,104 @@ mod tests {
             assert_eq!(cognition_refusal(&command, None), None);
             assert_eq!(maintenance_refusal(&command, None), None);
         }
+    }
+
+    fn said(role: &str, text: &str) -> Message {
+        Message {
+            role: role.to_string(),
+            content: vec![text.to_string().into()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn each_message_is_its_own_observation() {
+        let messages = [
+            said("user", "I always prefer dark mode."),
+            said("assistant", "Noted."),
+        ];
+        let ingest =
+            observation_ingest(&messages, "2026-08-20T00:00:00Z", "formation:chat-42", None)
+                .expect("two messages produce two entries");
+
+        let keys: Vec<_> = ingest.evidence.iter().map(|e| e.key.as_str()).collect();
+        assert_eq!(keys, ["msg1", "msg2"]);
+        // The class comes from who was speaking, which is a fact about the
+        // observation rather than a judgement about it.
+        let classes: Vec<_> = ingest
+            .evidence
+            .iter()
+            .map(|e| e.evidence_class.as_str())
+            .collect();
+        assert_eq!(classes, ["user_statement", "agent_statement"]);
+        // Whole messages, not extracted text: who said a thing is part of what
+        // was observed.
+        assert_eq!(
+            ingest.evidence[0].payload,
+            Some(serde_json::to_value(&messages[0]).unwrap())
+        );
+        let keys: Vec<_> = ingest
+            .evidence
+            .iter()
+            .map(|e| e.client_key.as_deref().unwrap())
+            .collect();
+        assert_eq!(keys, ["formation:chat-42:1", "formation:chat-42:2"]);
+
+        assert!(observation_ingest(&[], "2026-08-20T00:00:00Z", "x", None).is_none());
+    }
+
+    #[test]
+    fn only_the_newest_messages_are_minted() {
+        // A long transcript still produces a bounded envelope, and the window
+        // keeps the end of the conversation — which is what a formation pass
+        // writes about.
+        let messages: Vec<_> = (0..MAX_INGESTED_MESSAGES + 4)
+            .map(|n| said("user", &format!("turn {n}")))
+            .collect();
+        let ingest = observation_ingest(&messages, "2026-08-20T00:00:00Z", "o", None).unwrap();
+
+        assert_eq!(ingest.evidence.len(), MAX_INGESTED_MESSAGES);
+        assert_eq!(ingest.evidence[0].key, "msg1");
+        assert_eq!(
+            ingest.evidence[0].payload,
+            Some(serde_json::to_value(said("user", "turn 4")).unwrap())
+        );
+    }
+
+    #[test]
+    fn a_source_is_named_only_for_what_the_counterparty_said() {
+        let messages = [said("user", "hi"), said("assistant", "hello")];
+        let ingest =
+            observation_ingest(&messages, "2026-08-20T00:00:00Z", "o", Some("C-7")).unwrap();
+
+        // The assistant's turn is not the counterparty's, and an Evidence
+        // source that pointed at them anyway would say they said it.
+        assert_eq!(ingest.evidence[0].source_actor.as_deref(), Some("C-7"));
+        assert_eq!(ingest.evidence[1].source_actor, None);
+    }
+
+    #[test]
+    fn a_request_that_binds_the_name_itself_keeps_its_own_binding() {
+        let observation =
+            observation_ingest(&[said("user", "hi")], "2026-08-20T00:00:00Z", "o", None).unwrap();
+
+        let mut plain = request("MUTATE { CREATE ACTIVITY ?a { SET FIELDS {} } }");
+        attach_observation(&mut plain, &observation);
+        assert!(plain.ingest.is_some(), "the ordinary case attaches");
+
+        // §74 merges request- and operation-level parameters into one
+        // environment, so either level claiming `msg1` would make `:msg1`
+        // ambiguous and the engine would refuse the whole request. A model
+        // writing Evidence the long way gets to.
+        let mut claimed = request_with("MUTATE { CREATE ACTIVITY ?a { SET FIELDS {} } }", {
+            param("msg1", "mine")
+        });
+        attach_observation(&mut claimed, &observation);
+        assert!(claimed.ingest.is_none());
+
+        let mut per_operation = request("MUTATE { CREATE ACTIVITY ?a { SET FIELDS {} } }");
+        per_operation.operations[0].parameters = Some(param("msg1", "mine"));
+        attach_observation(&mut per_operation, &observation);
+        assert!(per_operation.ingest.is_none());
     }
 }

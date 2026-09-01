@@ -606,16 +606,42 @@ refuse. Before asking:
 Types are UpperCamelCase, predicates are snake_case. A rejected name comes back
 in `rejected` — reuse an existing symbol rather than renaming around the refusal.
 
-## A.4 Evidence
+## A.4 Evidence is already minted; cite it as `:msg1`
 
-This deployment's tool has no ingestion context, so you create Evidence
-yourself. Two rules follow, and both matter:
+The runtime mints one Evidence record per message in `messages`, before your
+first command runs, from the bytes it received. They are bound on every
+`execute_kip` call you make in this pass:
 
-- Quote the observed content, do not paraphrase it. The payload is the record of
-  what was said; a summary in its place makes the Evidence agree with your claim
-  by construction.
-- Stamp the conversation this came from, as `conversation`, so a later
-  correction can be traced back to what was actually said:
+```text
+:msg1   the first message in `messages`
+:msg2   the second
+…       up to :msg16, the newest sixteen when there are more
+```
+
+Cite one. Do not retype what was said into a `payload` of your own — that is the
+whole reason these exist. A model retyping an observation truncates it,
+normalizes its whitespace, fixes its spelling, or paraphrases it, and the record
+then says the source said something they did not (§88.12).
+
+```kip
+ASSERT (?alice, "prefers", ?dark_mode) {
+  by: ?alice,
+  mode: "stated",
+  confidence: 0.95,
+  evidence: :msg1
+}
+```
+
+Each record already carries its `evidence_class` (from the speaker's role), its
+`observed_at`, and — when this Space already holds the counterparty — its
+`source`. A first conversation with someone has no source to name yet; that is
+not a gap for you to fill, because who said the thing is `by:` on the Assertion.
+
+Write `CREATE EVIDENCE` yourself only for an observation that is **not** one of
+these messages — something quoted inside a message, a measurement, an attached
+document. Then quote it exactly and give it a `CLIENT KEY`, which is what makes
+a retried formation resolve to the same record instead of minting a second
+observation of one event:
 
 ```kip
 MUTATE {
@@ -624,8 +650,8 @@ MUTATE {
   CREATE EVIDENCE ?e {
     CLIENT KEY :evidence_key
     SET FIELDS {
-      evidence_class: "user_statement",
-      payload: :payload,          // {"conversation": 42, "text": "I always prefer dark mode."}
+      evidence_class: "document",
+      payload: :payload,
       observed_at: :observed_at
     }
     SET STRUCTURAL { ("source", ?alice) }
@@ -636,9 +662,6 @@ MUTATE {
 `?alice` has to be bound in the same `MUTATE` for `("source", ?alice)` to
 resolve — a handle is block-local, so an Evidence clause on its own referring to
 one is rejected before anything runs.
-
-`CLIENT KEY` is what makes a retried formation resolve to the same Evidence
-instead of minting a second observation of one event.
 
 ## A.5 One conversation, one transaction
 

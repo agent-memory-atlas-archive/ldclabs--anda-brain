@@ -15,8 +15,10 @@ import {
   conceptLookupCommand,
   countChanges,
   countWrites,
+  claimsIngestKeys,
   firstKipError,
   keepReadonlyOperations,
+  observationIngest,
   type KipOperation,
 } from './kip.js'
 import {
@@ -113,7 +115,25 @@ export async function formMemory(
   // `SchemaSymbolNotFound` and takes the whole statement with it.
   const vocabulary = await declareVocabulary(brain, plan.value)
 
-  const results = operations.length ? await brain.executeFormationPlan(operations) : []
+  // The observation rides the envelope, so the model's commands cite `:msg1`
+  // instead of retyping what was said (§71.1). Built only when there is a plan
+  // to attach it to: a pass that stored nothing has nothing to mint Evidence
+  // for, and an Evidence record for a claim nobody made is indistinguishable
+  // later from an observation somebody chose not to act on.
+  const ingest = operations.length
+    ? observationIngest(
+        input.messages,
+        timestamp,
+        await conversationOrigin(input, timestamp),
+        await counterpartyElement(brain, input.context?.counterparty),
+      )
+    : undefined
+  const results = operations.length
+    ? await brain.executeFormationPlan(
+        operations,
+        ingest && !claimsIngestKeys(operations, ingest) ? ingest : undefined,
+      )
+    : []
   throwOnKipError(results, 'formation KIP failed')
 
   return {
@@ -122,6 +142,72 @@ export async function formMemory(
     commands: operations.length,
     ...(vocabulary ? { vocabulary } : {}),
     usage: plan.usage,
+  }
+}
+
+/**
+ * The stable name this conversation's minted Evidence is keyed under.
+ *
+ * `context.source` is the caller's own thread identity and is what a
+ * `client_key` wants: resending the same thread resolves to the Evidence the
+ * first attempt minted rather than duplicating it (§52.1).
+ *
+ * Without one, the digest of the envelope stands in. It is honest about what it
+ * can promise — a byte-identical resend dedupes, and anything else is a
+ * different observation — and it still does the job that matters within a
+ * single pass, where four commands citing `:msg1` must reach one record. The
+ * timestamp is in the digest deliberately: the same sentence said twice on
+ * different days is two observations, not one.
+ */
+async function conversationOrigin(
+  input: FormationInput,
+  timestamp: string,
+): Promise<string> {
+  const source = input.context?.source
+  if (source) return `formation:${source}`
+  const bytes = new TextEncoder().encode(
+    JSON.stringify({ messages: input.messages, timestamp }),
+  )
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))
+  const hex = Array.from(digest.slice(0, 16), (byte) =>
+    byte.toString(16).padStart(2, '0'),
+  ).join('')
+  return `formation:sha256:${hex}`
+}
+
+/**
+ * The counterparty's element id, when this Space already holds one.
+ *
+ * An ingested Evidence source must resolve to something a reader can follow, so
+ * it is an id or a canonical identity — never the `context.counterparty`
+ * handle, which is a Concept *key*. A first conversation with someone therefore
+ * has no source to name, and the Evidence is minted without one rather than
+ * with a source that resolves to nothing.
+ *
+ * Failure is not raised: an ingest block is an improvement on the model
+ * retyping the payload, and losing the whole formation because a lookup
+ * stumbled would be a worse trade than losing the source link.
+ */
+async function counterpartyElement(
+  brain: BrainRpc,
+  counterparty: string | undefined,
+): Promise<string | undefined> {
+  if (!counterparty) return undefined
+  try {
+    const [found] = await brain.executeKipReadonlyBatch([
+      {
+        command:
+          'FIND(?person.id) WHERE { ?person CONCEPT {type: "Person", key: :key} } LIMIT 1',
+        parameters: { key: counterparty },
+      },
+    ])
+    if (found?.status !== 'succeeded') return undefined
+    const row = Array.isArray(found.result) ? found.result[0] : undefined
+    if (typeof row === 'string') return row
+    const id = (row as { id?: unknown } | undefined)?.id
+    return typeof id === 'string' ? id : undefined
+  } catch {
+    return undefined
   }
 }
 

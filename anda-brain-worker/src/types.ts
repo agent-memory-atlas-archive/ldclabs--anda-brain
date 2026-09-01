@@ -1,5 +1,5 @@
 import type { KipResult } from '@ldclabs/kip-do'
-import type { KipExecution, KipOperation } from './kip.js'
+import type { IngestContext, KipExecution, KipOperation } from './kip.js'
 
 export type JsonObject = Record<string, unknown>
 
@@ -27,7 +27,10 @@ export interface BrainRpc {
     predicates: readonly string[],
   ): Promise<DeclaredVocabulary>
   describePrimer(): Promise<KipResult>
-  executeFormationPlan(operations: readonly KipOperation[]): Promise<KipResult[]>
+  executeFormationPlan(
+    operations: readonly KipOperation[],
+    ingest?: IngestContext,
+  ): Promise<KipResult[]>
   executeKip(command: string, params?: Record<string, unknown>): Promise<KipResult>
   executeKipBatch(
     operations: readonly KipOperation[],

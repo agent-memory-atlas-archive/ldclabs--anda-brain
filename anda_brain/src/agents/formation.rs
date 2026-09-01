@@ -12,7 +12,7 @@ use anda_engine::{
     extension::note::{NoteTool, load_notes, load_notes_from_legacy},
     local_date_hour,
     memory::{Conversation, ConversationRef, ConversationStatus, MemoryManagement},
-    unix_ms,
+    rfc3339_datetime, rfc3339_datetime_now, unix_ms,
 };
 use parking_lot::RwLock;
 use serde_json::json;
@@ -400,10 +400,11 @@ impl FormationAgent {
             }
         };
 
-        let counterparty = serde_json::from_str::<FormationInput>(&prompt)
-            .ok()
-            .and_then(|input| input.context)
-            .and_then(|input_ctx| input_ctx.counterparty);
+        let input = serde_json::from_str::<FormationInput>(&prompt).ok();
+        let counterparty = input
+            .as_ref()
+            .and_then(|input| input.context.as_ref())
+            .and_then(|input_ctx| input_ctx.counterparty.clone());
 
         let now_ms = unix_ms();
         // The context sources are independent; fetch them concurrently (same
@@ -425,6 +426,39 @@ impl FormationAgent {
                 }
             },
         );
+
+        // The observation this pass was called on, for the runtime to mint as
+        // Evidence (Spec §71.1). Set unconditionally — see [`Observation`] —
+        // and before the completion, so every `execute_kip` the model makes
+        // inherits it.
+        //
+        // `context.source` is the caller's own thread identity and is the
+        // better `client_key` origin when it is there. The conversation row is
+        // the fallback rather than a digest of the envelope, because this
+        // deployment retries the same durable conversation: the id is the
+        // logical identity a retry actually shares.
+        ctx.base.set_state(super::Observation(
+            input
+                .as_ref()
+                .and_then(|input| {
+                    let origin = match input.context.as_ref().and_then(|c| c.source.as_deref()) {
+                        Some(source) => format!("formation:{source}"),
+                        None => format!("formation:conversation:{}", conversation._id),
+                    };
+                    crate::kip::observation_ingest(
+                        &input.messages,
+                        &input.timestamp.clone().unwrap_or_else(|| {
+                            rfc3339_datetime(now_ms).unwrap_or_else(rfc3339_datetime_now)
+                        }),
+                        &origin,
+                        counterparty_info
+                            .as_ref()
+                            .and_then(|person| person.get("id"))
+                            .and_then(Json::as_str),
+                    )
+                })
+                .map(Arc::new),
+        ));
 
         // add history conversations to provide more context for recall
         let chat_history: Vec<Document> = { self.history.read().iter().cloned().collect() };

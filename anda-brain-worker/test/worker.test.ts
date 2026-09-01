@@ -99,6 +99,78 @@ describe('Anda Brain Worker', () => {
     expect(JSON.stringify(await recalled.json())).toContain('Alice concise answers')
   })
 
+  it('mints the observation itself, so the model never retypes it', async () => {
+    // §71.1, and the point is fidelity: the payload stored is the payload the
+    // runtime received. The plan below never contains the sentence — it cites
+    // `:msg1` — so finding the sentence verbatim in the Evidence proves it did
+    // not pass through model-generated text on the way in (§88.12).
+    const said = 'Please keep answers concise — I mean it, ≤ 3 sentences.'
+    const plan = {
+      types: [],
+      predicates: [],
+      commands: [
+        `MUTATE {
+          UPSERT CONCEPT ?alice { MATCH {type: "Person", key: "alice"} SET FIELDS { name: "Alice" } }
+          CREATE CONCEPT ?concise {
+            TYPE "Preference"
+            NAME "Alice concise answers"
+            SET ATTRIBUTES { preference_class: "communication" }
+          }
+          ASSERT ?a (?alice, "prefers", ?concise) {
+            by: ?alice, mode: "stated", confidence: 0.95, evidence: :msg1
+          }
+        }`,
+      ],
+      summary: 'Stored Alice’s response-style preference.',
+    }
+    const space = uniqueSpace('formation-ingest')
+    const runtime = testEnv(new FakeAi([plan, plan]))
+    const send = () =>
+      post(runtime, space, 'formation', {
+        messages: [{ role: 'user', content: said }],
+        context: { counterparty: 'alice', source: 'chat_thread_123' },
+        timestamp: '2026-08-20T00:00:00Z',
+      })
+
+    expect(await text(await send())).toBe('')
+
+    const read = async () =>
+      (
+        (await (
+          await post(runtime, space, 'execute_kip_readonly', {
+            command:
+              'FIND(?e.payload, ?e.evidence_class, ?e.observed_at) WHERE { ?e EVIDENCE {} } LIMIT 5',
+          })
+        ).json()) as { result: { result: unknown[] }[] }
+      ).result[0]?.result
+
+    expect(await read()).toEqual([
+      [
+        // The whole message, role included: who said a thing is part of what
+        // was observed, and a bare string would lose it. Verbatim, em dash and
+        // `≤` intact — the plan above never contains this sentence.
+        { mode: 'inline', inline: { role: 'user', content: said } },
+        // From the speaker's role, not from anything the model chose.
+        'user_statement',
+        '2026-08-20T00:00:00.000Z',
+      ],
+    ])
+
+    // And the Assertion cites it, which is what makes the record evidence for
+    // something rather than an observation nobody acted on.
+    const cited = await post(runtime, space, 'execute_kip_readonly', {
+      command: 'FIND(?a.evidence) WHERE { ?a ASSERTION {} } LIMIT 5',
+    })
+    expect(JSON.stringify(await cited.json())).toContain('E-1')
+
+    // Sent again, `context.source` gives the mint a stable `client_key`, so the
+    // resend resolves to the record the first attempt wrote (§52.1). Without
+    // that, a caller whose response was lost would double every observation it
+    // ever made.
+    expect(await text(await send())).toBe('')
+    expect(await read()).toHaveLength(1)
+  })
+
   it('publishes a symbol the Profile does not have, then writes with it', async () => {
     const space = uniqueSpace('vocabulary')
     const runtime = testEnv(

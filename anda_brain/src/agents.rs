@@ -44,6 +44,22 @@ pub(crate) fn first_row(result: Json) -> Json {
     }
 }
 
+/// The observation the running formation pass was called on (Spec §71.1).
+///
+/// Carried through the context's extension state rather than through the
+/// tool's arguments, because the arguments are the model's and this is not: a
+/// field the model could write would let a conversation nominate its own
+/// Evidence payload, which is the fabrication the mechanism exists to prevent.
+/// A tool call's `BaseCtx` is a child of the agent's and inherits its state at
+/// creation, so setting it once before the completion covers every
+/// `execute_kip` the pass makes.
+///
+/// `None` is a real value and has to be set: formation processes conversations
+/// one after another on the same context, and leaving the previous one's
+/// observation in place would mint the wrong Evidence for the next.
+#[derive(Clone)]
+pub(crate) struct Observation(pub Option<Arc<anda_kip::IngestContext>>);
+
 /// `execute_kip`, with each writing agent's clause gate applied to it.
 ///
 /// One tool serves both writing agents because both deployment contracts name
@@ -111,10 +127,17 @@ impl Tool<BaseCtx> for GuardedMemory {
             return self.memory.call(ctx, args, resources).await;
         }
 
-        let request = match args.into_request() {
+        let mut request = match args.into_request() {
             Ok(request) => request,
             Err(err) => return Ok(error_output(Response::from(err))),
         };
+        // The observation rides the envelope so the model's commands cite
+        // `:msg1` instead of retyping what was said. Attached here rather than
+        // where the request is built because this is the only seam that knows
+        // both the pass it belongs to and the request it is going on.
+        if formation && let Some(Observation(Some(observation))) = ctx.get_state::<Observation>() {
+            kip::attach_observation(&mut request, &observation);
+        }
         let nexus = self.memory.nexus();
         let nexus = nexus.as_ref();
         Ok(error_output(if formation {

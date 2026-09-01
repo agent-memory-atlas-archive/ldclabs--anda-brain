@@ -5343,6 +5343,102 @@ mod tests {
         );
     }
 
+    /// The runtime's copy of what was said is the copy that gets stored.
+    ///
+    /// Spec §71.1 exists because a model retyping an observation into a
+    /// `payload` truncates it, normalizes its whitespace, fixes its spelling or
+    /// paraphrases it, and the record then says the source said something they
+    /// did not (§88.12). The command below never contains the sentence — it
+    /// cites `:msg1` — so finding the sentence verbatim proves it did not pass
+    /// through model-generated text on the way in.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_runtime_mints_the_observation_the_model_only_cites() {
+        use anda_core::Tool;
+        use anda_engine::memory::KipArgs;
+
+        let app = test_app_state("formation_ingest");
+        let space = create_loaded_space(&app, "formation_ingest").await;
+        let guarded = crate::agents::GuardedMemory::new(space.memory.clone());
+
+        let said = "Please keep answers concise — I mean it, ≤ 3 sentences.";
+        let messages = vec![anda_core::Message {
+            role: "user".to_string(),
+            content: vec![said.to_string().into()],
+            ..Default::default()
+        }];
+        let observation =
+            kip::observation_ingest(&messages, "2026-08-20T00:00:00Z", "formation:chat-42", None)
+                .expect("one message, one entry");
+
+        let ctx = space
+            .ctx_for_test(SELF_USER_ID, FormationAgent::NAME)
+            .unwrap();
+        ctx.base
+            .set_state(crate::agents::Observation(Some(Arc::new(observation))));
+
+        let plan = || KipArgs {
+            command: Some(
+                r#"MUTATE {
+  UPSERT CONCEPT ?alice { MATCH {type: "Person", key: "alice"} SET FIELDS {name: "Alice"} }
+  CREATE CONCEPT ?concise {
+    TYPE "Preference"
+    NAME "Alice concise answers"
+    SET ATTRIBUTES {preference_class: "communication"}
+  }
+  ASSERT ?a (?alice, "prefers", ?concise) {
+    by: ?alice, mode: "stated", confidence: 0.95, evidence: :msg1
+  }
+}"#
+                .to_string(),
+            ),
+            ..Default::default()
+        };
+        let written = guarded
+            .call(ctx.child_base("execute_kip").unwrap(), plan(), vec![])
+            .await
+            .unwrap();
+        assert_eq!(written.is_error, None, "{:?}", written.output);
+
+        let stored = |space: Arc<Space>| async move {
+            let response = space
+                .execute_kip_readonly(kip::request(
+                    "FIND(?e.payload, ?e.evidence_class, ?e.observed_at) WHERE { ?e EVIDENCE {} } \
+                     LIMIT 5",
+                ))
+                .await
+                .unwrap();
+            kip::ok_result(&response)
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        };
+        let rows = stored(space.clone()).await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            rows[0],
+            serde_json::json!([
+                // The whole message, role included — who said a thing is part
+                // of what was observed — and byte for byte, em dash and `≤`
+                // intact.
+                {"mode": "inline", "inline": serde_json::to_value(&messages[0]).unwrap()},
+                // From the speaker's role, never from anything a model chose.
+                "user_statement",
+                "2026-08-20T00:00:00.000Z",
+            ])
+        );
+
+        // The same pass writing again resolves to the record it already minted
+        // rather than observing the same sentence twice: the `client_key` is
+        // what makes attaching this to every request in a multi-turn formation
+        // safe (§52.1).
+        let again = guarded
+            .call(ctx.child_base("execute_kip").unwrap(), plan(), vec![])
+            .await
+            .unwrap();
+        assert_eq!(again.is_error, None, "{:?}", again.output);
+        assert_eq!(stored(space.clone()).await.len(), 1);
+    }
+
     /// The lifecycle end to end, against a real graph: compile a Skill, feed
     /// its family graded Outcome Evidence, and watch deterministic code —
     /// never a model — move it. Profile §14 rule 1: "The Brain proposes,

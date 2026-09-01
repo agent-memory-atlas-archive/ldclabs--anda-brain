@@ -11,6 +11,7 @@ import {
   assertFormationOperations,
   assertMaintenanceOperations,
   assertReadonlyOperations,
+  type IngestContext,
   type KipExecution,
   type KipOperation,
 } from './kip.js'
@@ -63,37 +64,50 @@ export class AndaBrain extends KipDatabase<Env> {
     return activeSet(activeVocabulary(this.nexus))
   }
 
+  /**
+   * Every argument is forwarded. All of them, every time.
+   *
+   * This override exists to call `ensureInitialized` and for nothing else, and
+   * an override written for one reason drops the parameters it did not think
+   * about — silently, because the base class simply sees `undefined`. Both of
+   * the ones this signature was missing are the kind that fail quietly:
+   *
+   * - `ingest` is where the observation's real bytes are (§71.1), so losing it
+   *   turns `:msg1` into an unbound parameter, and the model is told its
+   *   command is malformed for a facility the runtime failed to deliver;
+   * - `idempotencyKey` is §26's "a timeout is not an abort" — drop it and a
+   *   resend of a lost write is a second write instead of the first one's
+   *   receipt.
+   *
+   * `executeKipBatch` below is the same rule for the same reason, and the
+   * batch's own footgun is `execution`: defaulting it would run a batch the
+   * caller asked to stop at the first failure as `independent`, committing
+   * writes it asked to have skipped, while the answer still said `sequence`
+   * because the envelope reports what was requested.
+   */
   override executeKip(
     command: string,
     params: JsonMap = {},
     context?: RequestContext,
     read?: ReadOptions,
+    ingest?: IngestContext,
+    idempotencyKey?: string,
   ): KipResult {
     this.ensureInitialized()
-    return super.executeKip(command, params, context, read)
+    return super.executeKip(command, params, context, read, ingest, idempotencyKey)
   }
 
-  /**
-   * `execution` is forwarded, not defaulted.
-   *
-   * The base class decides `sequence` / `on_error` from the request envelope
-   * and hands the decision down to this method. Dropping the argument here —
-   * which an override that only needed `ensureInitialized` would do by
-   * omission — would run a batch the caller asked to stop at the first failure
-   * as `independent`, committing writes it asked to have skipped, and the
-   * answer would still say `sequence` because the envelope reports what was
-   * requested.
-   */
   override executeKipBatch(
     operations: readonly KipOperation[],
     context?: RequestContext,
     read?: ReadOptions,
     execution?: KipExecution,
+    ingest?: IngestContext,
   ): KipResult[] {
     this.ensureInitialized()
     return execution === undefined
-      ? super.executeKipBatch(operations, context, read)
-      : super.executeKipBatch(operations, context, read, execution)
+      ? super.executeKipBatch(operations, context, read, undefined, ingest)
+      : super.executeKipBatch(operations, context, read, execution, ingest)
   }
 
   /** KQL and META only, decided by what each command parses to. */
@@ -108,10 +122,22 @@ export class AndaBrain extends KipDatabase<Env> {
       : super.executeKipBatch(operations, undefined, undefined, execution)
   }
 
-  executeFormationPlan(operations: readonly KipOperation[]): KipResult[] {
+  /**
+   * Runs a formation plan, with the observation it was formed from.
+   *
+   * `ingest` is the envelope's §71.1 block: the runtime's own copy of what was
+   * said, minted as Evidence inside each statement's transaction so the bytes
+   * never pass through model-generated text. It rides every operation in the
+   * batch and dedupes on `client_key`, so four commands citing `:msg1` cite one
+   * Evidence record rather than minting four.
+   */
+  executeFormationPlan(
+    operations: readonly KipOperation[],
+    ingest?: IngestContext,
+  ): KipResult[] {
     assertFormationOperations(operations)
     this.ensureInitialized()
-    return super.executeKipBatch(operations)
+    return super.executeKipBatch(operations, undefined, undefined, undefined, ingest)
   }
 
   executeMaintenancePlan(operations: readonly KipOperation[]): KipResult[] {
