@@ -200,11 +200,11 @@ export function assertMaintenanceOperations(operations: readonly KipOperation[])
  * for. A model may make that judgement.
  *
  * `legal_hold` is the member it may not touch, in either direction. A hold
- * blocks erasure for everyone, so content that could set one could make itself
- * undeletable — §19.1 names that attack by its shape — and content that could
- * clear one could unblock an erasure somebody placed a hold to stop. Neither is
- * a decision to reach from a graph snapshot; both go through the administrative
- * `execute_kip` endpoint, where a human is the one asking.
+ * blocks erasure for everyone (§60.6), so content that could set one could make
+ * itself undeletable, and content that could clear one could unblock an erasure
+ * somebody placed a hold to stop. Neither is a decision to reach from a graph
+ * snapshot; both go through the administrative `execute_kip` endpoint, where a
+ * human is the one asking.
  *
  * Checked on the member name, which the grammar fixes, so a parameterized value
  * cannot smuggle it past: `{legal_hold: :whatever}` is refused on the name

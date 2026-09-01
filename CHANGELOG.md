@@ -245,9 +245,8 @@ under two readers that did not notice.
 
   What replaces it is narrower and is not about the engine: **a maintenance plan
   may not place or lift a `legal_hold`.** A hold blocks erasure for everyone, so
-  a plan that could place one could make its own cognition undeletable — §19.1
-  names that attack by its shape — and one that could clear it could unblock an
-  erasure somebody placed a hold to stop. Neither is a decision to reach from a
+  a plan that could place one could make its own cognition undeletable, and one
+  that could clear it could unblock an erasure somebody placed a hold to stop. Neither is a decision to reach from a
   graph snapshot; both go through the administrative `execute_kip` endpoint.
   Refused on the member name, which the grammar fixes, so `{legal_hold:
   :whatever}` does not smuggle it past.

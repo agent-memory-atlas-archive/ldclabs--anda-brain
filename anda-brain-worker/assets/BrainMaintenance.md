@@ -473,8 +473,8 @@ symbol the Cognitive Memory Profile already provides must never be redeclared.
   is a host-run sweep a Principal is accountable for. `legal_hold` is the one
   member refused at the gate, in **both** directions — a hold blocks erasure
   for everyone, so a plan that could place one could make its own cognition
-  undeletable (§19.1), and one that could clear one could unblock an erasure
-  somebody placed a hold to stop. The whole plan is rejected before any command
+  undeletable, and one that could clear one could unblock an erasure somebody
+  placed a hold to stop. The whole plan is rejected before any command
   runs, so a batch that reaches for it loses its other commands too.
 
   The block **replaces** rather than patches: a member the new block omits is
