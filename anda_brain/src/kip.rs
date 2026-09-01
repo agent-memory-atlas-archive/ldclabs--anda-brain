@@ -145,9 +145,10 @@ pub const MAX_GATED_SELECTION: u64 = 20;
 /// memory in bulk from a selection, and a pass whose entire input is an
 /// untrusted conversation is the last thing that should hold them. The
 /// reference policy assumes an authority model this deployment cannot express
-/// — every agent runs as the Space's system Principal, so Governance grants
-/// cannot separate them — and this gate is where that separation lives
-/// instead. Maintenance keeps the full set.
+/// — every agent runs as the Space's system Principal, and the KIP request
+/// envelope carries no Principal of its own, so Governance grants cannot
+/// separate the agents — and this gate is where that separation lives instead.
+/// [`execute_maintenance_request`] is the wider half of it.
 ///
 /// Reads are untouched: Formation has to ground before it writes (reference
 /// policy §11), so KQL and META pass through.
@@ -176,6 +177,10 @@ fn cognition_refusal(command: &Command, parameters: Option<&Map<String, Json>>) 
     };
     for clause in &statement.clauses {
         let verb = match clause {
+            // `RETRACT ASSERTION` is the only one of these that selects, and
+            // the shared bound below is what keeps an unbounded
+            // `RETRACT ASSERTION ?a WHERE { ?a ASSERTION {} }` from
+            // withdrawing every claim in the Space in one statement.
             MutationClause::CreateConcept(_)
             | MutationClause::UpsertConcept(_)
             | MutationClause::EnsureProposition(_)
@@ -184,26 +189,12 @@ fn cognition_refusal(command: &Command, parameters: Option<&Map<String, Json>>) 
             | MutationClause::CreateActivity(_)
             | MutationClause::SupersedeAssertion(_)
             | MutationClause::CorrectEvidence(_)
-            | MutationClause::TransitionActivity(_) => continue,
-
-            // Allowed, but it selects: an unbounded `RETRACT ASSERTION ?a
-            // WHERE { ?a ASSERTION {} }` would withdraw every claim in the
-            // Space in one statement.
-            MutationClause::RetractAssertion(retract) => {
-                if retract
-                    .where_clauses
-                    .as_ref()
-                    .is_none_or(|clauses| clauses.is_empty())
-                {
-                    continue;
+            | MutationClause::TransitionActivity(_)
+            | MutationClause::RetractAssertion(_) => {
+                if let Some(refusal) = unbounded_selection(clause, parameters) {
+                    return Some(refusal);
                 }
-                return match selection_limit(retract.limit.as_ref(), parameters) {
-                    Some(limit) if limit <= MAX_GATED_SELECTION => None,
-                    _ => Some(format!(
-                        "a RETRACT ASSERTION that selects with WHERE must carry \
-                         LIMIT {MAX_GATED_SELECTION} or less"
-                    )),
-                };
+                continue;
             }
 
             MutationClause::Update(_) => "UPDATE",
@@ -222,6 +213,131 @@ fn cognition_refusal(command: &Command, parameters: Option<&Map<String, Json>>) 
         ));
     }
     None
+}
+
+/// Runs a whole request envelope on the maintenance path.
+///
+/// Maintenance administers memory, so it keeps the verbs Formation does not:
+/// `UPDATE`, `SET RETENTION`, `ARCHIVE`, `TOMBSTONE` and `MERGE CONCEPT` are
+/// the custodial work the reference policy asks it for. Three things it still
+/// does not get, and each for its own reason:
+///
+/// - **`PURGE` and `PURGE PAYLOAD`.** Erasure is irreversible, and a model
+///   reading a snapshot of its own graph is not where "this should stop having
+///   existed" gets decided. This deployment already erases — the right-to-be-
+///   forgotten path in [`crate::space`] issues `PURGE` itself, deterministically,
+///   from a request a person made. `PURGE PAYLOAD` is refused on the same
+///   grounds rather than lesser ones: it leaves the Evidence record, its digest
+///   and its citations standing and destroys the bytes underneath them, so an
+///   Assertion keeps citing an observation whose content is gone.
+/// - **`legal_hold`, in either direction.** A hold blocks erasure for everyone
+///   (Spec §60.3), so a plan that could place one could make its own cognition
+///   undeletable, and one that could lift one could unblock an erasure somebody
+///   placed a hold to stop. Setting a retention class and an `expires_at` is
+///   ordinary lifecycle judgement and stays; the hold is not.
+/// - **An unbounded selection.** `ARCHIVE ?e WHERE { ?e CONCEPT {} }` and
+///   `UPDATE ?e SET ATTRIBUTES {…} WHERE { ?e CONCEPT {} }` are one hazard
+///   wearing two verbs, so the bound is on the selection rather than on a verb
+///   by name.
+///
+/// `MERGE CONCEPT` takes no `LIMIT` and needs none: both engines resolve each
+/// operand to exactly one Concept and refuse a pattern that binds several,
+/// which is a better answer than anything this gate could give.
+///
+/// Matches `assertMaintenanceOperations` in the Worker's `src/kip.ts`. The two
+/// deployments run different engines and the same policy, and a verb one of
+/// them refuses is not a verb the other may quietly keep.
+pub async fn execute_maintenance_request(executor: &impl Executor, request: &Request) -> Response {
+    let commands = match request.parse_operations() {
+        Ok(commands) => commands,
+        Err(err) => return Response::from(err).with_request_id(request.request_id.clone()),
+    };
+    for command in &commands {
+        if let Some(refusal) = maintenance_refusal(command, request.parameters.as_ref()) {
+            return Response::from(KipError::not_authorized(refusal))
+                .with_request_id(request.request_id.clone());
+        }
+    }
+
+    execute_request(executor, request).await
+}
+
+/// Why the maintenance path refuses this command, if it does.
+fn maintenance_refusal(
+    command: &Command,
+    parameters: Option<&Map<String, Json>>,
+) -> Option<String> {
+    let Command::Kml(statement) = command else {
+        return None;
+    };
+    for clause in &statement.clauses {
+        match clause {
+            MutationClause::Purge(_) | MutationClause::PurgePayload(_) => {
+                return Some(
+                    "maintenance cannot issue PURGE or PURGE PAYLOAD; erasure is irreversible \
+                     and this deployment runs it deterministically from a person's forget \
+                     request, never from a maintenance plan. ARCHIVE and TOMBSTONE are yours"
+                        .to_string(),
+                );
+            }
+
+            // Checked on the member name, which the grammar fixes, so a
+            // parameterised value cannot smuggle it past: `{legal_hold: :x}`
+            // is refused on the name alone, before anything is evaluated.
+            MutationClause::SetRetention(retention)
+                if retention
+                    .values
+                    .iter()
+                    .any(|(name, _)| name == "legal_hold") =>
+            {
+                return Some(
+                    "maintenance cannot place or lift a legal hold; set a retention class and \
+                     an expires_at, and leave the hold to a person"
+                        .to_string(),
+                );
+            }
+
+            _ => {}
+        }
+
+        if let Some(refusal) = unbounded_selection(clause, parameters) {
+            return Some(refusal);
+        }
+    }
+    None
+}
+
+/// Why this clause's selection is too wide, if it is.
+///
+/// `None` for a clause that names its target outright: the bound exists to
+/// stop a *pattern* from reaching further than the writer meant, and
+/// `ARCHIVE "C-7"` reaches exactly one element by construction.
+fn unbounded_selection(
+    clause: &MutationClause,
+    parameters: Option<&Map<String, Json>>,
+) -> Option<String> {
+    let (verb, where_clauses, limit) = match clause {
+        MutationClause::Update(c) => ("UPDATE", &c.where_clauses, &c.limit),
+        MutationClause::RetractAssertion(c) => ("RETRACT ASSERTION", &c.where_clauses, &c.limit),
+        MutationClause::SetRetention(c) => ("SET RETENTION", &c.where_clauses, &c.limit),
+        MutationClause::Archive(c) => ("ARCHIVE", &c.where_clauses, &c.limit),
+        MutationClause::Tombstone(c) => ("TOMBSTONE", &c.where_clauses, &c.limit),
+        MutationClause::Purge(c) => ("PURGE", &c.where_clauses, &c.limit),
+        MutationClause::PurgePayload(c) => ("PURGE PAYLOAD", &c.where_clauses, &c.limit),
+        _ => return None,
+    };
+    if where_clauses
+        .as_ref()
+        .is_none_or(|clauses| clauses.is_empty())
+    {
+        return None;
+    }
+    match selection_limit(limit.as_ref(), parameters) {
+        Some(limit) if limit <= MAX_GATED_SELECTION => None,
+        _ => Some(format!(
+            "a {verb} that selects with WHERE must carry LIMIT {MAX_GATED_SELECTION} or less"
+        )),
+    }
 }
 
 /// The positive integer a `LIMIT` slot holds, resolving a `:parameter` against
@@ -389,5 +505,90 @@ mod tests {
 }"#;
         let refusal = cognition_refusal(&parsed(smuggled), None).expect("refused");
         assert!(refusal.contains("PURGE"), "{refusal}");
+    }
+
+    #[test]
+    fn the_maintenance_gate_admits_the_custodial_verbs() {
+        for command in [
+            // Reads, and the vocabulary review §15 asks for.
+            r#"FIND(?c.id) WHERE { ?c CONCEPT {} } LIMIT 20"#,
+            "LIST PREDICATES LIMIT 500",
+            // The custodial work the reference policy asks maintenance for.
+            r#"UPDATE ?c SET FACET "MnemonicState" {salience: 0.9} WHERE { ?c CONCEPT {} } LIMIT 20"#,
+            r#"ARCHIVE ?c WHERE { ?c CONCEPT {} } LIMIT 20"#,
+            r#"TOMBSTONE ?c WHERE { ?c CONCEPT {} } LIMIT 20"#,
+            // Verbatim from the deployment contract: `STRUCTURAL` over a Core
+            // reference field is how §16 and §26 find what a corrected
+            // observation was resting under.
+            r#"ARCHIVE ?a WHERE { STRUCTURAL (?a, "evidence", :e) } LIMIT 20"#,
+            // Retention without a hold: §20's judgement, which is a model's.
+            r#"SET RETENTION ?e { retention_class: "standard", expires_at: "2027-01-01T00:00:00Z" } WHERE { ?e EVIDENCE {} } LIMIT 20"#,
+            // Naming the target outright reaches one element by construction,
+            // so there is nothing for a bound to do.
+            "ARCHIVE \"C-7\"",
+            // No LIMIT slot, and none needed: both engines refuse an operand
+            // that binds more than one Concept.
+            r#"MERGE CONCEPT ?dup INTO ?canonical WHERE { ?dup CONCEPT {key: "alice-2"} ?canonical CONCEPT {key: "alice"} }"#,
+        ] {
+            assert_eq!(
+                maintenance_refusal(&parsed(command), None),
+                None,
+                "should be admitted: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_maintenance_gate_refuses_erasure_and_holds() {
+        for (command, expected) in [
+            // Erasure is a person's decision, run deterministically.
+            (
+                r#"PURGE ?c WHERE { ?c CONCEPT {} } LIMIT 5 CONFIRM "PURGE""#,
+                "PURGE",
+            ),
+            (r#"PURGE :victim CONFIRM "PURGE""#, "PURGE"),
+            (r#"PURGE PAYLOAD :e CONFIRM "PURGE""#, "PURGE PAYLOAD"),
+            // Placing a hold and lifting one are the same gate: `SET
+            // RETENTION` replaces the block rather than patching it.
+            (
+                r#"SET RETENTION :e { retention_class: "standard", legal_hold: true }"#,
+                "legal hold",
+            ),
+            (
+                r#"SET RETENTION :e { retention_class: "standard", legal_hold: false }"#,
+                "legal hold",
+            ),
+            // The member name is fixed by the grammar, so a parameterised
+            // value never reaches evaluation.
+            (
+                r#"SET RETENTION :e { legal_hold: :whatever }"#,
+                "legal hold",
+            ),
+            // One hazard, several verbs: the bound is on the selection.
+            (r#"ARCHIVE ?c WHERE { ?c CONCEPT {} }"#, "LIMIT 20 or less"),
+            (
+                r#"UPDATE ?c SET FACET "MnemonicState" {salience: 0.9} WHERE { ?c CONCEPT {} } LIMIT 500"#,
+                "LIMIT 20 or less",
+            ),
+        ] {
+            let refusal = maintenance_refusal(&parsed(command), None)
+                .unwrap_or_else(|| panic!("should be refused: {command}"));
+            assert!(refusal.contains(expected), "{command}: {refusal}");
+        }
+    }
+
+    /// The two gates are one policy read from two sides, so a verb the wider
+    /// one holds back must not be reachable through the narrower one either.
+    #[test]
+    fn nothing_formation_may_write_is_something_maintenance_may_not() {
+        for command in [
+            r#"MUTATE { ASSERT (:alice, "prefers", :dark) { by: :alice, mode: "stated" } }"#,
+            r#"CORRECT EVIDENCE :old BY :new"#,
+            r#"RETRACT ASSERTION ?a WHERE { ?a ASSERTION {asserted_by: :alice} } LIMIT 5"#,
+        ] {
+            let command = parsed(command);
+            assert_eq!(cognition_refusal(&command, None), None);
+            assert_eq!(maintenance_refusal(&command, None), None);
+        }
     }
 }

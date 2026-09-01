@@ -44,7 +44,7 @@ pub(crate) fn first_row(result: Json) -> Json {
     }
 }
 
-/// `execute_kip`, with Formation's clause allowlist applied to Formation.
+/// `execute_kip`, with each writing agent's clause gate applied to it.
 ///
 /// One tool serves both writing agents because both deployment contracts name
 /// `execute_kip` and the definition ships with the protocol; branching on the
@@ -53,13 +53,22 @@ pub(crate) fn first_row(result: Json) -> Json {
 /// tool call, which the engine sets when it dispatches — not anything the
 /// model can write.
 ///
+/// Formation gets the cognition subset and Maintenance the custodial one; the
+/// two gates and the reasons for each verb they hold back live in
+/// [`kip::execute_cognition_request`] and [`kip::execute_maintenance_request`].
+/// Every other caller reaches the ungated tool, which is what host code needs:
+/// the settlement passes and the forget path are deterministic, and a gate on
+/// what a *model* may plan has nothing to say about them.
+///
 /// Why a wrapper rather than a Governance grant: every agent here executes as
 /// the Space's system Principal ([`anda_cognitive_nexus::CognitiveNexus`]'s
-/// `Executor` impl runs `system_session()`), so the reference Maintenance
-/// policy §2 distinction between granted and ungranted permissions has nothing
-/// to attach to. Until the engine can hand an agent a scoped session, this is
-/// where "Formation writes cognition; it does not administer memory" is
-/// actually enforced instead of merely written down.
+/// `Executor` impl runs `system_session()`), and the KIP request envelope
+/// carries no Principal of its own — §35's `context` explicitly grants neither
+/// identity nor authority — so the reference Maintenance policy §2 distinction
+/// between granted and ungranted permissions has nothing to attach to. Until
+/// the engine can hand an agent a scoped session, this is where "Formation
+/// writes cognition; it does not administer memory" is actually enforced
+/// instead of merely written down.
 #[derive(Clone)]
 pub struct GuardedMemory {
     memory: Arc<MemoryManagement>,
@@ -97,7 +106,8 @@ impl Tool<BaseCtx> for GuardedMemory {
         args: Self::Args,
         resources: Vec<Resource>,
     ) -> Result<ToolOutput<Self::Output>, BoxError> {
-        if ctx.agent != FormationAgent::NAME {
+        let formation = ctx.agent == FormationAgent::NAME;
+        if !formation && ctx.agent != MaintenanceAgent::NAME {
             return self.memory.call(ctx, args, resources).await;
         }
 
@@ -106,9 +116,12 @@ impl Tool<BaseCtx> for GuardedMemory {
             Err(err) => return Ok(error_output(Response::from(err))),
         };
         let nexus = self.memory.nexus();
-        Ok(error_output(
-            kip::execute_cognition_request(nexus.as_ref(), &request).await,
-        ))
+        let nexus = nexus.as_ref();
+        Ok(error_output(if formation {
+            kip::execute_cognition_request(nexus, &request).await
+        } else {
+            kip::execute_maintenance_request(nexus, &request).await
+        }))
     }
 }
 

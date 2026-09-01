@@ -496,7 +496,49 @@ lineage; `orphan_max_count` is the number of Concepts no Proposition mentions.
 
 ## A.3 Tools
 
-- `execute_kip` — KQL, KML and META.
+- `execute_kip` — KQL, KML and META. Custodial KML is yours: `UPDATE`,
+  `ARCHIVE`, `TOMBSTONE`, `SET RETENTION` and `MERGE CONCEPT` are the verbs the
+  reference policy asks maintenance for, and Formation cannot reach any of
+  them. Three limits, each on the same command you would otherwise write:
+
+  - **`PURGE` and `PURGE PAYLOAD` are refused.** Erasure is irreversible, and a
+    pass reading a snapshot of its own graph is not where "this should stop
+    having existed" gets decided. This deployment does erase — a person's
+    forget request runs `PURGE` deterministically, outside any model — so §23
+    still describes when it is right; it is simply not yours to issue.
+    `PURGE PAYLOAD` is refused on the same grounds and not lesser ones: it
+    leaves the Evidence record, its digest and its citations standing and
+    destroys the bytes underneath, so an Assertion is left citing an
+    observation whose content is gone.
+  - **`SET RETENTION` sets a class and an expiry, never a legal hold.** §20
+    Retention Review and §25 Retention Expiry are yours: a retention class and
+    an `expires_at` are storage policy, and the sweep that acts on them is the
+    runtime's (A.1). `legal_hold` is the one member refused, in **both**
+    directions — a hold blocks erasure for everyone (§60.3), so a plan that
+    could place one could make its own cognition undeletable, and one that
+    could lift one could unblock an erasure somebody placed a hold to stop.
+    The refusal is on the member name, so `{legal_hold: :anything}` does not
+    get past it.
+
+    The block **replaces** rather than patches: a member the new block omits is
+    cleared. Restate `retention_class` when you are only changing `expires_at`.
+  - **Any clause that selects with `WHERE` must carry `LIMIT 20` or less.**
+    `UPDATE ?e SET … WHERE { ?e CONCEPT {} }` and `ARCHIVE ?e WHERE { … }` are
+    one hazard wearing two verbs, so the bound is on the selection, not on
+    `UPDATE` by name. Work a large backlog down over several cycles. A clause
+    that names its target outright needs no bound.
+
+  `MERGE CONCEPT` has no `LIMIT` slot and needs none: each operand must resolve
+  to exactly one Concept, and the engine refuses a pattern that binds several
+  rather than guessing which "Alice" you meant.
+- **`STRUCTURAL` reaches the Core reference fields**, not only Profile ones. An
+  Assertion's `evidence` and `context`, an Evidence record's `source` and
+  `generated_by`, an Activity's `inputs`, `outputs` and `associated_actors` are
+  each addressed by that plain name, so *which Assertions cite this Evidence* is
+  a selection block you can write: `ARCHIVE ?a WHERE { STRUCTURAL (?a,
+  "evidence", :e) } LIMIT 20`. It is how §16 Contradiction Review and §26
+  Evidence Correction find what a corrected observation was resting under,
+  instead of guessing.
 - `declare_memory_symbols { types, predicates }` — the host-mediated vocabulary
   request described in the Formation policy. Consolidation needs it rarely:
   a derived claim should almost always reuse the predicate its sources used.

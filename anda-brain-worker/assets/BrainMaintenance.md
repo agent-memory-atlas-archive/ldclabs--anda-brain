@@ -479,9 +479,11 @@ symbol the Cognitive Memory Profile already provides must never be redeclared.
 
   The block **replaces** rather than patches: a member the new block omits is
   cleared. Restate `retention_class` when you are only changing `expires_at`.
-- **`MERGE CONCEPT` takes no `LIMIT`** — KIP gives its grammar no slot for
-  one — so its `WHERE` must identify exactly the source and the target. Merge
-  duplicates one pair at a time; a pattern that sweeps for them is refused.
+- **`MERGE CONCEPT` takes no `LIMIT`** — KIP gives its grammar no slot for one,
+  because its `WHERE` is a guard rather than a selector. Each operand must
+  resolve to exactly one Concept; a pattern that binds several is refused with
+  the counts it found, because identity is never chosen by description. Merge
+  duplicates one pair at a time.
 - **`SEARCH` is keyword-only**, over Concepts, Propositions, Evidence and
   Cognition. Semantic and hybrid modes, `AS OF SEQ`, and Assertions and
   Activities as targets are all refused. Useful for §9 Semantic Consolidation:

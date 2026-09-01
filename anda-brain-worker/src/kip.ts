@@ -455,21 +455,14 @@ function assertBoundedSelection(
   if (!body || body.where_clauses === null || body.where_clauses === undefined) return
   if (!Array.isArray(body.where_clauses) || body.where_clauses.length === 0) return
 
-  // `MERGE CONCEPT` is the one selecting clause KIP gives no `LIMIT` — its
-  // grammar has no slot for one, so `limit` is absent rather than null, and an
-  // early return here let `MERGE CONCEPT ?s INTO ?t WHERE { ?s CONCEPT {} … }`
-  // through as the only unbounded selection a plan could make. Merge is
-  // non-destructive, so this is a blast-radius bound, not a data-loss one:
-  // require the pattern to name its endpoints instead of sweeping for them.
-  if (body.limit === undefined) {
-    if ('MergeConcept' in clause) {
-      throw new Error(
-        'a MERGE CONCEPT takes no LIMIT, so its WHERE must identify exactly ' +
-          'the source and the target — merge duplicates one pair at a time',
-      )
-    }
-    return
-  }
+  // `MERGE CONCEPT` is the one selecting clause KIP gives no `LIMIT`: its
+  // grammar has no slot for one, so `limit` is absent rather than null. That
+  // is not a hole. Its `WHERE` is a guard, not a selector — both engines
+  // resolve each operand separately and refuse an operand that binds more than
+  // one Concept, naming the count and asking for a stable identity. Refusing
+  // every guarded merge here instead would cost the legitimate one-pair case
+  // and buy an error worse than the engine's own.
+  if (body.limit === undefined) return
 
   const limit = scalarInteger(body.limit ?? null, parameters)
   if (limit === undefined || limit > max) {

@@ -5221,8 +5221,14 @@ mod tests {
     /// `BaseCtx::agent`, so this drives the real dispatch path — an agent
     /// context, its `child_base` tool context — rather than the predicate,
     /// which `kip.rs` already covers on its own.
+    ///
+    /// Both halves, because the divergence this closes was a default-open
+    /// `else`: Formation was gated by name and every other agent fell through
+    /// to the raw tool. Maintenance being admitted where Formation is refused
+    /// proves the branch; Maintenance being refused where nobody is admitted
+    /// proves it is a branch and not a bypass.
     #[tokio::test(flavor = "multi_thread")]
-    async fn formation_cannot_administer_memory_but_maintenance_can() {
+    async fn each_writing_agent_reaches_its_own_half_of_the_gate() {
         use anda_core::Tool;
         use anda_engine::memory::KipArgs;
 
@@ -5230,11 +5236,14 @@ mod tests {
         let space = create_loaded_space(&app, "formation_gate").await;
         let guarded = crate::agents::GuardedMemory::new(space.memory.clone());
 
-        // A Concept to aim at, so a refusal cannot be confused with a miss.
+        // Concepts to aim at, so a refusal cannot be confused with a miss.
         seed_kip(
             &space,
             kip::request(
-                r#"MUTATE { UPSERT CONCEPT ?p { MATCH {type: "Person", key: "victim"} SET FIELDS {name: "Victim"} } }"#,
+                r#"MUTATE {
+  UPSERT CONCEPT ?p { MATCH {type: "Person", key: "victim"} SET FIELDS {name: "Victim"} }
+  UPSERT CONCEPT ?b { MATCH {type: "Person", key: "bystander"} SET FIELDS {name: "Bystander"} }
+}"#,
             ),
         )
         .await;
@@ -5286,6 +5295,52 @@ mod tests {
             .unwrap();
         assert_eq!(out.is_error, None, "{:?}", out.output);
         assert_eq!(kip::changed(&out.output, "archive"), 1, "{:?}", out.output);
+
+        // ... and still refused the two things no plan gets: erasure, and a
+        // hold that would block somebody else's. Aimed at a Concept the
+        // archive above did not touch, so the survival check below reads a
+        // live element rather than an archived one.
+        for (command, expected) in [
+            (
+                r#"PURGE ?c WHERE { ?c CONCEPT {type: "Person", key: "bystander"} } LIMIT 1 CONFIRM "PURGE""#,
+                "PURGE",
+            ),
+            (
+                r#"SET RETENTION ?c { retention_class: "standard", legal_hold: true } WHERE { ?c CONCEPT {type: "Person", key: "bystander"} } LIMIT 1"#,
+                "legal hold",
+            ),
+        ] {
+            let out = guarded
+                .call(
+                    ctx.child_base("execute_kip").unwrap(),
+                    KipArgs {
+                        command: Some(command.to_string()),
+                        ..Default::default()
+                    },
+                    vec![],
+                )
+                .await
+                .unwrap();
+            assert_eq!(out.is_error, Some(true), "{command}");
+            let refusal = kip::error_message(&out.output);
+            assert!(refusal.contains(expected), "{command}: {refusal}");
+        }
+
+        // The Concept the purge aimed at is still there, so the refusal was a
+        // refusal and not a failed erasure.
+        let survivor = space
+            .execute_kip_readonly(kip::request(
+                r#"FIND(?c.id) WHERE { ?c CONCEPT {type: "Person", key: "bystander"} } LIMIT 1"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            kip::ok_result(&survivor)
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(1),
+            "{survivor:?}"
+        );
     }
 
     /// The lifecycle end to end, against a real graph: compile a Skill, feed

@@ -839,7 +839,9 @@ describe('Anda Brain Worker', () => {
   })
 
   it('refuses a legal hold in a maintenance plan, in either direction', async () => {
-    // §19.1 names this attack by its shape: content that could place a hold
+    // §60.3: a hold blocks erasure for everyone, whatever the reference
+    // policy says, and the authority to set or lift one SHOULD be scoped apart
+    // from ordinary retention management. Content that could place a hold
     // could make itself undeletable, and content that could clear one could
     // unblock an erasure somebody placed a hold to stop. Neither is a decision
     // to reach from a graph snapshot.
@@ -870,30 +872,41 @@ describe('Anda Brain Worker', () => {
     expect(((await info.json()) as { result: { concepts: number } }).result.concepts).toBe(1)
   })
 
-  it('makes a merge name its endpoints instead of sweeping for them', async () => {
-    // The one selecting clause KIP gives no LIMIT, so the bound has to be on
-    // the pattern. Merge is non-destructive, which makes this a blast-radius
-    // rule rather than a data-loss one.
+  it('leaves a sweeping merge to the engine, which refuses it better', async () => {
+    // `MERGE CONCEPT` is the one selecting clause KIP gives no LIMIT, and the
+    // gate used to read that as a hole and refuse every guarded merge. It is
+    // not one: the WHERE is a guard, and the engine resolves each operand
+    // separately and refuses one that binds more than one Concept — naming the
+    // counts and asking for a stable identity, which is a better answer than
+    // the gate could give and does not cost the legitimate one-pair case.
     const runtime = testEnv(
       new FakeAi([
         {
           types: [],
           predicates: [],
           commands: [
-            'MERGE CONCEPT ?dup INTO ?keep WHERE { ?dup CONCEPT {} ?keep CONCEPT {} }',
+            'MUTATE { CREATE CONCEPT ?a { TYPE "Event" NAME "First" SET ATTRIBUTES {summary: "one event"} } }',
+            'MUTATE { CREATE CONCEPT ?b { TYPE "Event" NAME "Second" SET ATTRIBUTES {summary: "another event"} } }',
+            'MERGE CONCEPT ?dup INTO ?keep WHERE { ?dup CONCEPT {type: "Event"} ?keep CONCEPT {type: "Event"} }',
           ],
           summary: 'Merging duplicates.',
         },
       ]),
     )
-    const response = await post(
-      runtime,
-      uniqueSpace('maintenance-merge'),
-      'maintenance',
-      { scope: 'full' },
-    )
+    const space = uniqueSpace('maintenance-merge')
+    const response = await post(runtime, space, 'maintenance', { scope: 'full' })
+
+    // The gate passed it, so the two creates ran; the merge is what failed,
+    // and it failed with the engine's own diagnosis — a registry code a caller
+    // can switch on, the counts that made it ambiguous, and what to write
+    // instead. None of that is available to a gate reading the parse tree.
     expect(response.status).toBe(422)
-    expect(await response.text()).toContain('MERGE CONCEPT takes no LIMIT')
+    const failure = await response.text()
+    expect(failure).toContain('IdentitySelectorRequired')
+    expect(failure).toContain('needs exactly one source and one target')
+
+    const info = await get(runtime, space, 'info')
+    expect(((await info.json()) as { result: { concepts: number } }).result.concepts).toBe(3)
   })
 
   it('accepts the maintenance parameter names the Rust service documents', async () => {
