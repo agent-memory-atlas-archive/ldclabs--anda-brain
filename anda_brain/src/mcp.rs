@@ -1423,13 +1423,11 @@ fn space_id_from_mcp_path(path: &str, prefix: &str) -> Result<String, ErrorData>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testkit::{app_state_core, models_with_completer};
+    use crate::testkit::{app_state_core, models_with_completer, signed_token, signing_key};
     use anda_core::{AgentOutput, BoxPinFut, CompletionRequest};
     use anda_engine::model::{CompletionFeaturesDyn, reqwest};
-    use cose2::{CoseMap, Label, Sign1Message, Value as CoseValue, cwt::Claims, iana};
     use http::{HeaderMap, header};
-    use ic_auth_types::ByteBufB64;
-    use ic_cose_types::cose::ed25519::{SigningKey, VerifyingKey, ed25519_sign};
+    use ic_cose_types::cose::ed25519::VerifyingKey;
 
     #[derive(Debug)]
     struct FinalCompleter;
@@ -1489,40 +1487,6 @@ mod tests {
             auth_token: String::new(),
             sharding: None,
         }
-    }
-
-    fn test_signing_key() -> SigningKey {
-        SigningKey::from_bytes(&[9u8; 32])
-    }
-
-    fn signed_token(
-        signing_key: &SigningKey,
-        user: Principal,
-        audience: &str,
-        scope: &str,
-    ) -> String {
-        let claims = Claims {
-            subject: Some(user.to_string()),
-            audience: Some(audience.to_string()),
-            extra: CoseMap::from_iter([(
-                Label::Int(iana::CWTClaimScope),
-                CoseValue::Text(scope.to_string()),
-            )]),
-            ..Default::default()
-        };
-        let payload = claims.to_vec().unwrap();
-        let mut sign1 = Sign1Message::new(Some(payload));
-        let tbs_data = sign1
-            .prepare_signature(Some(Label::Int(iana::AlgorithmEdDSA)), None, None)
-            .unwrap();
-        sign1
-            .set_signature(
-                ed25519_sign(signing_key.as_bytes(), &tbs_data)
-                    .to_bytes()
-                    .to_vec(),
-            )
-            .unwrap();
-        ByteBufB64(sign1.to_vec().unwrap()).to_string()
     }
 
     #[test]
@@ -1784,7 +1748,7 @@ mod tests {
 
         // Auth enabled: an empty bearer is an anonymous caller, not the
         // synthetic dev CWT.
-        let signing_key = test_signing_key();
+        let signing_key = signing_key(9);
         let app = test_app_state("mcp_wiki_acl", vec![signing_key.verifying_key()]);
         let space_id = "mcp_wiki_acl_space";
         app.admin_create_space(
@@ -2025,7 +1989,7 @@ mod tests {
 
     #[tokio::test]
     async fn remote_auto_create_requires_write_cwt_before_creating_space() {
-        let signing_key = test_signing_key();
+        let signing_key = signing_key(9);
         let app = test_app_state("mcp_auto_create_auth", vec![signing_key.verifying_key()]);
         let server = AndaBrainMcpServer::new(
             app.clone(),

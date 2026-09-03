@@ -508,6 +508,40 @@ and the `action_gate` Activity class were in the reference policies and in none
 of the five copies — which is the failure mode of hand-maintained copies, and
 the reason the syntax card was taken out of the prompts in the first place.
 
+### Changed — four seams, so the rules can be read without their hosts
+
+Nothing here changes behaviour; every one of these was a place where the rule
+and the machinery that ran it were the same code, and the rule could only be
+exercised by standing the machinery up.
+
+- **The settlement takes a `RunKip` port**, the way the Worker's did in
+  `e3a79fb`. Disuse decay, correction discovery, silence-Watch expiry and the
+  Skill lifecycle rule move out of `Space` into `anda_brain/src/settlement/`,
+  behind one command in, one result out, with `readonly` picking the gate.
+  `Space` is one adapter and the module's own tests are the other — which is
+  what lets the batch ceiling, the correction watermark and the degraded-cycle
+  paths be tested without building a graph that produces the outcome stream
+  you want to judge. `skill.rs` and `watch.rs` become its command builders and
+  row readers rather than crate-level modules, and the passes now decide
+  rather than act: `scan_corrections` reads the page and works out the cursor
+  it earned, while the usage ledger and the `source_reliability` aggregate
+  stay with the `Space` that owns them.
+- **Admission rules have names.** `authorize` took the token scope and the
+  admission mode as separate arguments, so every one of its 28 call sites
+  restated a pairing this service only means four of. `authz::read_public`,
+  `read_lenient`, `credentialed` and `cwt_only` name them instead;
+  `read_lenient` returns the space alone, because an endpoint that never
+  verified the caller's token has no ACL view to hand back. The MCP channel
+  still reaches `authorize`, whose mode is genuinely a variable there.
+- **Eval reporting is a module, not a binary.** `EvalCommandReport` and the
+  summary rendering move to `anda_brain::eval::report` — pure functions from a
+  report to a string, previously reachable only by running an eval.
+- **`WikiService`'s unscoped reads are private.** `read`, `verify`,
+  `list_versions` and `acl_defaults` apply no label check and existed beside
+  their `_scoped` counterparts, where picking the wrong one is an ACL bypass
+  rather than a bug. The CWT test fixture, hand-copied into three test
+  modules, moves to `testkit`.
+
 ### Fixed
 
 - **`IS_NULL` over a dot path now works** (`anda_cognitive_nexus`). Reading an

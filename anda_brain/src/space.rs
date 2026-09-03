@@ -17,7 +17,7 @@ use anda_engine::{
     management::Management,
     memory::{Conversation, ConversationStatus, Conversations, MemoryManagement, MemoryTool},
     model::{Model, ModelConfig as EngineModelConfig, Models, reqwest},
-    rfc3339_datetime, rfc3339_datetime_now, unix_ms,
+    rfc3339_datetime_now, unix_ms,
 };
 use anda_kip::{KipError, KipErrorCode, Request, Response, execute_request};
 use ic_auth_types::ByteBufB64;
@@ -52,13 +52,14 @@ use crate::{
     assess, kip,
     ledger::{MissCache, UsageLedger},
     payload::StringOr,
+    settlement,
     types::{
         AddSpaceTokenInput, CWToken, FormationInput, FormationStatus, MaintenanceInput,
         MaintenanceScope, MemoryForgetEntity, MemoryForgetInput, MemoryForgetReport,
         MemoryGraphCounters, MemoryMetrics, MemoryPolicy, MemorySettlementReport, MemoryStatus,
         ModelConfig, ProbeOutput, RecallInput, RecallOutput, SchemaAudit, SelfTestReport,
-        ShadowEvalInput, ShadowReport, ShadowSample, SkillSettlement, SourceReliability, SpaceInfo,
-        SpaceTier, SpaceToken, TokenScope, UpdateSpaceInput, WatchSettlement,
+        ShadowEvalInput, ShadowReport, ShadowSample, SourceReliability, SpaceInfo, SpaceTier,
+        SpaceToken, TokenScope, UpdateSpaceInput,
     },
 };
 
@@ -1597,7 +1598,7 @@ LIMIT {WATCH_LIMIT}"#
                 self,
                 &format!(
                     "FIND(COUNT(?link)) WHERE {{ ?link (?s, {}, ?o) }}",
-                    kip_string_literal(&name)
+                    kip::string_literal(&name)
                 ),
             )
             .await;
@@ -1709,36 +1710,10 @@ LIMIT {WATCH_LIMIT}"#
         *self.judge_model.write().expect("judge model lock poisoned") = Some(Arc::new(model));
     }
 
-    /// Executes a settlement-built write KIP request. Only deterministic,
-    /// code-generated commands go through here — never model output.
-    ///
-    /// A timeout answers `outcome_unknown` rather than an error: the write may
-    /// already have committed (Spec §80.3), and reporting a clean failure would
-    /// invite a caller to redo work that is durable. Every settlement command
-    /// writes absolute values, so the honest answer costs nothing but a re-run
-    /// on the next cycle.
-    async fn execute_kip_settlement(&self, request: Request) -> Result<Response, BoxError> {
-        let nexus = self.memory.nexus();
-        match timeout(
-            SETTLEMENT_KIP_TIMEOUT,
-            execute_request(nexus.as_ref(), &request),
-        )
-        .await
-        {
-            Ok(res) => Ok(res),
-            Err(_) => Ok(Response::outcome_unknown(KipError::new(
-                KipErrorCode::OutcomeUnknown,
-                format!(
-                    "settlement KIP execution timed out after {} seconds; whether it committed is \
-                     unknown until the transaction is looked up",
-                    SETTLEMENT_KIP_TIMEOUT.as_secs()
-                ),
-            ))),
-        }
-    }
-
     /// Deterministic memory metabolism (plan M2/M3), run before each
-    /// maintenance cycle. Three idempotent passes:
+    /// maintenance cycle. The passes themselves live in [`crate::settlement`],
+    /// behind its `RunKip` port; this is what a Space owes them and what it
+    /// does with what they decide:
     ///
     /// 1. **Bulk disuse metabolism** (every scope, rate-limited to
     ///    `DECAY_MIN_INTERVAL_MS` by the sweep's own `last_metabolized_at`
@@ -1747,8 +1722,10 @@ LIMIT {WATCH_LIMIT}"#
     ///    `MnemonicState.memory_strength`, never Assertion confidence.
     /// 2. **Correction discovery** (every scope): newly superseded links are
     ///    recorded in the ledger and aggregated per asserting actor into the
-    ///    `source_reliability` extension.
-    /// 3. **Retention expiry and schema census** (`full` scope).
+    ///    `source_reliability` extension. The scan is the settlement's; the
+    ///    ledger and the extension are this Space's, so it applies them here.
+    /// 3. **Watch expiry** and the **Skill lifecycle** (every scope), then
+    ///    **retention expiry and the schema census** (`full` scope).
     ///
     /// Nothing here reads the usage ledger back into the graph: see the body
     /// for why recall no longer reinforces what it touched.
@@ -1798,136 +1775,44 @@ LIMIT {WATCH_LIMIT}"#
         // scenario miner. What it no longer does is close a loop back into
         // cognitive state. Reading is now observed and not rewarded — which is
         // also why a recalled Concept is no longer spared the sweep below.
-
-        // Bulk disuse metabolism, every scope. This decays
-        // `MnemonicState.memory_strength` — how available a memory should be —
-        // and never Assertion confidence: a fact nobody asked about lately is
-        // no less credible, and KIP 2.0 forbids letting time erode a stance
-        // (Profile: "Do not decay epistemic confidence merely because a fact
-        // has not been recalled recently"). A failing pass degrades —
-        // corrections and the schema census below still run — but it must page
-        // an operator rather than vanish into a debug log.
-        //
-        // The cadence is `DECAY_MIN_INTERVAL_MS`, enforced inside the sweep's
-        // own `last_metabolized_at` filter, not the cycle scope. Gating on
-        // `Full` as well used to look like caution and was a hole: full cycles
-        // are scheduled every 168 formations, so a Space forming slowly went
-        // months without metabolizing while `BrainMaintenance.md` §A.1 told
-        // the model the sweep had already run and not to do it by hand. With
-        // the interval doing the throttling, a scope that has nothing due
-        // costs one query that matches no rows and breaks on the first batch.
         report.decay_ran = true;
-        for _ in 0..SETTLEMENT_MAX_BATCHES {
-            let request = decay_request(&policy, now_ms, decay_min_interval_ms);
-            let response = self.execute_kip_settlement(request).await?;
-            if !kip::succeeded(&response) {
-                log::error!(
-                    target: "brain",
-                    space_id = self.id;
-                    "memory-strength metabolism failed — disuse decay is NOT running \
-                     (graph past the full-scan engine cap?): {}",
-                    kip::error_message(&response)
-                );
-                report.decay_error = Some(kip::error_message(&response));
-                break;
-            }
-            let updated = kip::changed(&response, "update");
-            report.decayed += updated;
-            if updated < SETTLEMENT_BATCH_LIMIT as u64 {
-                break;
-            }
-        }
+        let decay = settlement::metabolize(self, &policy, now_ms, decay_min_interval_ms).await;
+        report.decayed = decay.decayed;
+        report.decay_error = decay.error;
 
-        // Correction discovery: Assertions an actor has revised. In KIP 1.x
-        // this was a `metadata.superseded` flag the settlement could clear with
-        // a second write; an Assertion is immutable, so the cursor is the Space
-        // sequence coordinate instead — processed revisions fall behind the
-        // watermark, and a backlog larger than one batch drains across cycles
-        // rather than starving new corrections behind the first LIMIT-full.
         let after: u64 = self.db.get_extension_as("correction_cursor").unwrap_or(0);
-        let scan = self
-            .execute_kip_readonly(kip::request_with(
-                format!(
-                    "FIND(?a.id, ?a._system.space_seq, ?a.asserted_by) WHERE {{\n  ?a ASSERTION {{}}\n  FILTER(?a.lifecycle.status == \"superseded\")\n  FILTER(?a._system.space_seq > :after)\n}}\nORDER BY ?a._system.space_seq\nLIMIT {SETTLEMENT_BATCH_LIMIT}"
-                ),
-                kip::param("after", after),
-            ))
-            .await;
-        match scan {
-            Ok(response) if kip::succeeded(&response) => {
-                let rows = kip::ok_result(&response).cloned().unwrap_or_default();
-                let parsed = superseded_rows(&rows);
-                let page_full = rows
-                    .as_array()
-                    .is_some_and(|rows| rows.len() >= SETTLEMENT_BATCH_LIMIT);
-                let seqs: Vec<u64> = parsed.iter().map(|(_, seq, _)| *seq).collect();
-                let watermark = match correction_watermark(&seqs, page_full, after) {
-                    CorrectionWatermark::Consumed(seq) => seq,
-                    CorrectionWatermark::Truncated(seq) => {
-                        log::error!(
-                            target: "brain",
-                            space_id = self.id,
-                            space_seq = seq;
-                            "one transaction superseded more Assertions than a settlement page \
-                             holds ({SETTLEMENT_BATCH_LIMIT}); the remainder at this coordinate \
-                             will not be recorded as corrections"
-                        );
-                        seq
-                    }
-                };
-                for (entity, _, actor) in parsed {
-                    if !self.ledger.record_correction(&entity, now_ms).await? {
-                        continue;
-                    }
-                    report.new_corrections += 1;
-                    // Whose claim needed revising. KIP 1.x kept a free-text
-                    // `metadata.source`; 2.0 attributes a claim to a semantic
-                    // actor, and that actor is the reliability signal — this is
-                    // not a statement about the caller's authority.
-                    let Some(actor) = actor else { continue };
-                    let _ = self.db.set_extension_from_with(
-                        "source_reliability".to_string(),
-                        |value| {
-                            let mut map: BTreeMap<String, SourceReliability> =
-                                value.unwrap_or_default();
-                            let entry = map.entry(actor.clone()).or_default();
-                            entry.corrections += 1;
-                            entry.last_corrected_at = now_ms;
-                            Some(map)
-                        },
-                    );
-                }
-                if watermark > after {
-                    self.db
-                        .set_extension_from("correction_cursor".to_string(), watermark);
-                }
+        let corrections = settlement::scan_corrections(self, after).await;
+        report.correction_scan_error = corrections.error;
+        for row in corrections.rows {
+            if !self
+                .ledger
+                .record_correction(&row.assertion, now_ms)
+                .await?
+            {
+                continue;
             }
-            Ok(response) => {
-                log::error!(
-                    target: "brain",
-                    space_id = self.id;
-                    "correction discovery scan failed — new corrections are NOT being \
-                     recorded (graph past the full-scan engine cap?): {}",
-                    kip::error_message(&response)
-                );
-                report.correction_scan_error = Some(kip::error_message(&response));
-            }
-            Err(err) => {
-                log::error!(
-                    target: "brain",
-                    space_id = self.id;
-                    "correction discovery scan failed — new corrections are NOT being \
-                     recorded: {err:?}"
-                );
-                report.correction_scan_error = Some(err.to_string());
-            }
+            report.new_corrections += 1;
+            let Some(actor) = row.actor else { continue };
+            let _ = self
+                .db
+                .set_extension_from_with("source_reliability".to_string(), |value| {
+                    let mut map: BTreeMap<String, SourceReliability> = value.unwrap_or_default();
+                    let entry = map.entry(actor.clone()).or_default();
+                    entry.corrections += 1;
+                    entry.last_corrected_at = now_ms;
+                    Some(map)
+                });
+        }
+        if corrections.watermark > after {
+            self.db
+                .set_extension_from("correction_cursor".to_string(), corrections.watermark);
         }
 
         // Watch expiry, every scope. A deadline passing does not care how
         // expensive the cycle it landed in was, and a silence Watch that
         // waited for a `full` cycle would be a promise the Brain kept only
         // when it was already busy.
-        report.watches = self.sweep_due_watches(now_ms).await;
+        report.watches = settlement::sweep_watches(self, now_ms).await;
         if let Some(error) = &report.watches.error {
             log::error!(
                 target: "brain",
@@ -1939,7 +1824,7 @@ LIMIT {WATCH_LIMIT}"#
         // Skill lifecycle verdicts, every scope. Profile §14 rule 1 puts these
         // in deterministic code rather than in a prompt: the Brain proposes,
         // compiles and narrates; it never promotes.
-        report.skills = self.settle_skill_lifecycle(now_ms).await;
+        report.skills = settlement::settle_skills(self, now_ms).await;
         if let Some(error) = &report.skills.error {
             log::error!(
                 target: "brain",
@@ -2037,7 +1922,7 @@ LIMIT {WATCH_LIMIT}"#
         let mut errors: Vec<String> = Vec::new();
 
         match session
-            .expire_lapsed_assertions(DEFAULT_SPACE, SETTLEMENT_BATCH_LIMIT)
+            .expire_lapsed_assertions(DEFAULT_SPACE, settlement::SETTLEMENT_BATCH_LIMIT)
             .await
         {
             Ok(expired) => report.expired_assertions = expired.len() as u64,
@@ -2048,7 +1933,7 @@ LIMIT {WATCH_LIMIT}"#
             .sweep_expired(
                 DEFAULT_SPACE,
                 RetentionAction::Archive,
-                SETTLEMENT_BATCH_LIMIT,
+                settlement::SETTLEMENT_BATCH_LIMIT,
             )
             .await
         {
@@ -2063,193 +1948,6 @@ LIMIT {WATCH_LIMIT}"#
 
         if !errors.is_empty() {
             report.error = Some(errors.join("; "));
-        }
-        report
-    }
-
-    /// Fires the silence Watches whose deadline has passed.
-    ///
-    /// See [`crate::watch`] for why this half is the runtime's and the delta
-    /// half is the model's. Errors are reported rather than propagated: a
-    /// cycle that could not sweep is degraded, not failed.
-    async fn sweep_due_watches(&self, now_ms: u64) -> WatchSettlement {
-        use crate::watch;
-
-        let now = kip_timestamp(now_ms);
-        let mut report = WatchSettlement::default();
-
-        let scan = self
-            .execute_kip_readonly(watch::due_silence_watches_request(&now))
-            .await;
-        let response = match scan {
-            Ok(response) if kip::succeeded(&response) => response,
-            Ok(response) => {
-                report.error = Some(kip::error_message(&response));
-                return report;
-            }
-            Err(err) => {
-                report.error = Some(err.to_string());
-                return report;
-            }
-        };
-        let Some(result) = kip::ok_result(&response) else {
-            return report;
-        };
-
-        for due in watch::due_watches(result) {
-            let response = match self
-                .execute_kip_settlement(watch::fire_watch_request(&due, &now))
-                .await
-            {
-                Ok(response) => response,
-                Err(err) => {
-                    report.error = Some(err.to_string());
-                    return report;
-                }
-            };
-            if kip::succeeded(&response) {
-                report.fired += 1;
-            } else if watch::is_version_conflict(&response) {
-                // The maintenance model moved this Watch between the scan and
-                // the write. It stays armed; the next sweep re-reads it.
-                report.conflicted += 1;
-            } else {
-                log::warn!(
-                    target: "brain",
-                    space_id = self.id,
-                    watch = due.id;
-                    "firing a due silence Watch failed: {}",
-                    kip::error_message(&response)
-                );
-                report.conflicted += 1;
-            }
-        }
-        report
-    }
-
-    /// Runs the deterministic Skill lifecycle rule over graded outcomes.
-    ///
-    /// See [`crate::skill`] for the rule and why it lives in code. Errors are
-    /// reported rather than propagated: a cycle that could not grade is
-    /// degraded, not failed.
-    async fn settle_skill_lifecycle(&self, now_ms: u64) -> SkillSettlement {
-        use crate::skill;
-
-        let now = kip_timestamp(now_ms);
-        let mut report = SkillSettlement::default();
-
-        let scan = self.execute_kip_readonly(skill::skills_request()).await;
-        let response = match scan {
-            Ok(response) if kip::succeeded(&response) => response,
-            Ok(response) => {
-                report.error = Some(kip::error_message(&response));
-                return report;
-            }
-            Err(err) => {
-                report.error = Some(err.to_string());
-                return report;
-            }
-        };
-        let Some(result) = kip::ok_result(&response) else {
-            return report;
-        };
-
-        for row in skill::skill_rows(result) {
-            // One read per Skill rather than one grouped read: the window is
-            // per-Skill and per-cursor, and a Skill that has never been graded
-            // starts from a different coordinate than one that has.
-            let outcomes = self
-                .execute_kip_readonly(skill::outcomes_request(
-                    &row.id,
-                    &row.task_family,
-                    row.cursor,
-                ))
-                .await;
-            let Ok(outcomes) = outcomes else { continue };
-            if !kip::succeeded(&outcomes) {
-                log::warn!(
-                    target: "brain",
-                    space_id = self.id,
-                    skill = row.id;
-                    "reading graded outcomes failed: {}",
-                    kip::error_message(&outcomes)
-                );
-                continue;
-            }
-            let Some(window) = kip::ok_result(&outcomes).map(skill::tally) else {
-                continue;
-            };
-            if window.graded == 0 {
-                // Nothing attributed to this Skill since the last verdict, so
-                // there is nothing to judge and no reason to price the family
-                // aggregate below.
-                continue;
-            }
-
-            // The baseline a trial is measured against: the whole family up to
-            // the end of this window, from which `decide` subtracts what was
-            // linked to this Skill (Profile §6.5). Read every pass rather than
-            // only when a trial opens, because which arm of the rule fires is
-            // not known until the tallies are in.
-            let family = self
-                .execute_kip_readonly(skill::family_tally_request(&row.task_family, window.cursor))
-                .await;
-            let Ok(family) = family else { continue };
-            if !kip::succeeded(&family) {
-                log::warn!(
-                    target: "brain",
-                    space_id = self.id,
-                    skill = row.id;
-                    "reading the task family's baseline failed: {}",
-                    kip::error_message(&family)
-                );
-                continue;
-            }
-            let family = kip::ok_result(&family)
-                .map(skill::family_tally)
-                .unwrap_or_default();
-
-            let Some(verdict) = skill::decide(&row, &window, &family) else {
-                // No new graded outcome: an idle stream writes nothing.
-                continue;
-            };
-
-            let response = match self
-                .execute_kip_settlement(skill::verdict_request(&row, &verdict, &window, &now))
-                .await
-            {
-                Ok(response) => response,
-                Err(err) => {
-                    report.error = Some(err.to_string());
-                    return report;
-                }
-            };
-            if kip::succeeded(&response) {
-                report.graded += 1;
-                if verdict.transition.is_some() {
-                    report.transitions += 1;
-                    log::info!(
-                        target: "brain",
-                        space_id = self.id,
-                        skill = row.id;
-                        "skill lifecycle verdict: {}",
-                        verdict.rationale
-                    );
-                }
-            } else if crate::watch::is_version_conflict(&response) {
-                // The cursor did not advance, so the next pass re-reads the
-                // same outcomes and reaches the same verdict.
-                report.conflicted += 1;
-            } else {
-                log::warn!(
-                    target: "brain",
-                    space_id = self.id,
-                    skill = row.id;
-                    "recording a lifecycle verdict failed: {}",
-                    kip::error_message(&response)
-                );
-                report.conflicted += 1;
-            }
         }
         report
     }
@@ -2349,12 +2047,12 @@ LIMIT {WATCH_LIMIT}"#
             return Err(format!("`{entity}` is not an element id (C-*, P-* or A-*)").into());
         }
         let class = if pinned {
-            PINNED_RETENTION_CLASS
+            settlement::PINNED_RETENTION_CLASS
         } else {
-            STANDARD_RETENTION_CLASS
+            settlement::STANDARD_RETENTION_CLASS
         };
         let response = self
-            .execute_kip_settlement(kip::request_with(
+            .run_kip_settlement(kip::request_with(
                 "SET RETENTION :id { retention_class: :class }",
                 serde_json::Map::from_iter([
                     ("id".to_string(), serde_json::Value::from(entity)),
@@ -2468,7 +2166,7 @@ LIMIT {WATCH_LIMIT}"#
             // the engine still leaves an identity stub so dangling references
             // resolve to "erased" rather than to nothing.
             match self
-                .execute_kip_settlement(kip::request_with(
+                .run_kip_settlement(kip::request_with(
                     "PURGE :id REFERENCE POLICY \"authorized_cascade\" CONFIRM \"PURGE\"",
                     kip::param("id", entity.as_str()),
                 ))
@@ -2851,7 +2549,7 @@ LIMIT {window}"#
                 continue;
             }
             match self
-                .execute_kip_settlement(self_test_task_request(candidate, query, now_ms))
+                .run_kip_settlement(self_test_task_request(candidate, query, now_ms))
                 .await
             {
                 Ok(response) if kip::succeeded(&response) => report.reencode_tasks += 1,
@@ -3465,6 +3163,53 @@ LIMIT {window}"#
     }
 }
 
+impl Space {
+    /// Executes a settlement-built write KIP request. Only deterministic,
+    /// code-generated commands go through here — never model output.
+    ///
+    /// A timeout answers `outcome_unknown` rather than an error: the write may
+    /// already have committed (Spec §80.3), and reporting a clean failure would
+    /// invite a caller to redo work that is durable. Every settlement command
+    /// writes absolute values, so the honest answer costs nothing but a re-run
+    /// on the next cycle.
+    async fn run_kip_settlement(&self, request: Request) -> Result<Response, BoxError> {
+        let nexus = self.memory.nexus();
+        match timeout(
+            SETTLEMENT_KIP_TIMEOUT,
+            execute_request(nexus.as_ref(), &request),
+        )
+        .await
+        {
+            Ok(res) => Ok(res),
+            Err(_) => Ok(Response::outcome_unknown(KipError::new(
+                KipErrorCode::OutcomeUnknown,
+                format!(
+                    "settlement KIP execution timed out after {} seconds; whether it committed is \
+                     unknown until the transaction is looked up",
+                    SETTLEMENT_KIP_TIMEOUT.as_secs()
+                ),
+            ))),
+        }
+    }
+}
+
+/// The settlement's adapter onto this Space's graph: `readonly` picks between
+/// the two executors the Space already has, so a pass cannot reach the write
+/// path by choosing the wrong one.
+impl settlement::RunKip for Space {
+    fn space_id(&self) -> &str {
+        &self.id
+    }
+
+    async fn run_kip(&self, request: Request, readonly: bool) -> Result<Response, BoxError> {
+        if readonly {
+            self.execute_kip_readonly(request).await
+        } else {
+            self.run_kip_settlement(request).await
+        }
+    }
+}
+
 struct Hooks {
     db: Arc<AndaDB>,
     space: OnceLock<Weak<Space>>,
@@ -3803,12 +3548,6 @@ impl Space {
 /// Timeout for one settlement-built write KIP command.
 const SETTLEMENT_KIP_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Per-command row limit for bulk settlement passes.
-const SETTLEMENT_BATCH_LIMIT: usize = 500;
-
-/// Upper bound of decay batches per settlement (500 × 20 = 10k links).
-const SETTLEMENT_MAX_BATCHES: usize = 20;
-
 /// How long a Space may go without a maintenance cycle before the background
 /// pass runs one on the clock.
 ///
@@ -3828,18 +3567,6 @@ const DECAY_MIN_INTERVAL_MS: u64 = 7 * 24 * 3_600 * 1_000;
 /// so re-encoded memories eventually get their grounding re-verified.
 const SELF_TEST_RETEST_MS: u64 = 30 * 24 * 3_600 * 1_000;
 
-/// `MnemonicState.memory_strength` assumed for a Concept that has never been
-/// metabolized. The Facet's members are all optional, so reinforcement has to
-/// supply a baseline before it can add to one.
-const DEFAULT_MEMORY_STRENGTH: f64 = 0.5;
-
-/// The `retention.retention_class` a pinned memory carries.
-///
-/// KIP 1.x pinning was a `metadata.pinned` flag; 2.0 has no generic metadata
-/// bag, and "keep this out of the metabolism ladder" is a storage-lifecycle
-/// statement, which is what the retention block is for. Retention also lives on
-/// every element kind, so one class keeps pinning working for Concepts and
-/// Propositions alike.
 /// The `key` of the Concept this brain treats as its semantic self (§5.6).
 ///
 /// A `key`, not a name: a key is immutable identity and a name is a mutable
@@ -3847,18 +3574,6 @@ const DEFAULT_MEMORY_STRENGTH: f64 = 0.5;
 /// Person — so a Space has one only where the wiki digest minted it as the
 /// actor its extracted claims are attributed to.
 pub(crate) const SELF_ACTOR_KEY: &str = "$self";
-
-const PINNED_RETENTION_CLASS: &str = "pinned";
-
-/// The `retention_class` an unpinned element returns to.
-const STANDARD_RETENTION_CLASS: &str = "standard";
-
-/// Renders a KIP string literal with backslashes and quotes escaped.
-/// The crate's single escaping implementation — reuse it instead of
-/// inlining `.replace()` chains that can drift apart.
-pub(crate) fn kip_string_literal(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
-}
 
 const SHADOW_JUDGE_INSTRUCTIONS: &str = r#"You compare two answers an AI memory system gave to the same user query under two different internal configurations. Pick the answer that better serves the user: correct use of remembered facts, honoring later corrections, honest uncertainty. Ignore style differences.
 
@@ -3884,12 +3599,6 @@ fn memory_policy_of(db: &AndaDB) -> MemoryPolicy {
         .unwrap_or_default()
 }
 
-/// Graph metadata timestamps are RFC3339 strings (lexicographically
-/// comparable in KQL filters).
-fn kip_timestamp(now_ms: u64) -> String {
-    rfc3339_datetime(now_ms).unwrap_or_else(rfc3339_datetime_now)
-}
-
 /// Strips the recall self-report footer from assistant text in a chat
 /// history (plan M4): `content` is stripped by the callers, and the history
 /// must not re-leak the markup to clients that read it.
@@ -3907,72 +3616,6 @@ fn strip_recall_meta_from_history(history: &mut [anda_core::Message]) {
             }
         }
     }
-}
-
-/// How far a correction page may advance the cursor, and whether anything was
-/// lost getting there.
-enum CorrectionWatermark {
-    /// Every coordinate up to this one was read whole.
-    Consumed(u64),
-    /// One coordinate held more rows than a page, so advancing past it drops
-    /// the remainder. Reported so an operator hears about it.
-    Truncated(u64),
-}
-
-/// Chooses the cursor a correction page has actually earned.
-///
-/// `_system.space_seq` is the *transaction* coordinate, so one commit stamps
-/// every Assertion it revised with the same number, and the scan's `>` filter
-/// cannot page inside one coordinate. A full page therefore hands its trailing
-/// coordinate back and stops one short of it — re-reading costs nothing,
-/// because `record_correction` dedupes, while advancing past a half-read
-/// coordinate drops the rest of it for good.
-///
-/// The one case with no good answer is a full page that is *entirely* one
-/// coordinate: standing still re-reads it forever and never reaches the
-/// corrections behind it, so the cursor advances and says so.
-fn correction_watermark(seqs: &[u64], page_full: bool, after: u64) -> CorrectionWatermark {
-    let Some(last) = seqs.last().copied() else {
-        return CorrectionWatermark::Consumed(after);
-    };
-    if !page_full {
-        // A short page means the scan reached the end of the backlog, so every
-        // coordinate in it was read whole.
-        return CorrectionWatermark::Consumed(last.max(after));
-    }
-    match seqs.iter().copied().filter(|seq| *seq < last).max() {
-        Some(seq) => CorrectionWatermark::Consumed(seq.max(after)),
-        None => CorrectionWatermark::Truncated(last),
-    }
-}
-
-/// Reads the rows of the correction-discovery scan —
-/// `FIND(?a.id, ?a._system.space_seq, ?a.asserted_by)` — into
-/// `(assertion id, space sequence, asserting actor)`.
-fn superseded_rows(result: &serde_json::Value) -> Vec<(String, u64, Option<String>)> {
-    let element_id = |value: &serde_json::Value| -> Option<String> {
-        match value {
-            serde_json::Value::String(id) => Some(id.clone()),
-            serde_json::Value::Object(map) => map
-                .get("id")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string),
-            _ => None,
-        }
-    };
-    result
-        .as_array()
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|row| {
-                    let columns = row.as_array()?;
-                    let id = columns.first().and_then(serde_json::Value::as_str)?;
-                    let seq = columns.get(1).and_then(serde_json::Value::as_u64)?;
-                    Some((id.to_string(), seq, columns.get(2).and_then(element_id)))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// Where the dream self-test's sampling window sits.
@@ -4119,7 +3762,7 @@ fn self_test_task_request(candidate: &SelfTestCandidate, query: &str, now_ms: u6
         ("summary".to_string(), serde_json::Value::from(summary)),
         (
             "created_at".to_string(),
-            serde_json::Value::from(kip_timestamp(now_ms)),
+            serde_json::Value::from(kip::timestamp(now_ms)),
         ),
         (
             "target".to_string(),
@@ -4139,73 +3782,6 @@ fn self_test_task_request(candidate: &SelfTestCandidate, query: &str, now_ms: u6
   }
   SET STRUCTURAL { ("about", :target) }
 }"#,
-        parameters,
-    )
-}
-
-/// Settlement write: one disuse-metabolism batch (plan M2 step 2).
-///
-/// This decays `MnemonicState.memory_strength` on Concepts — accessibility, not
-/// truth. KIP 1.x decayed `metadata.confidence` on every link, which is exactly
-/// what the Profile now forbids: a fact nobody has asked about in a month is no
-/// less credible, and an Assertion is immutable in any case.
-///
-/// Two exemptions survive the port. A Concept metabolized inside the rate window
-/// is skipped, which also makes the filter the intra-settlement batch cursor:
-/// rows stamped `now` by this pass stop matching, so an interval of `0` still
-/// terminates and merely disables the *cross-cycle* limit — and since
-/// reinforcement stamps the same field, a Concept a recall just touched is
-/// spared for a full window. A pinned Concept is exempt through its retention
-/// class.
-///
-/// A Concept that has never carried the Facet is metabolized from a baseline
-/// rather than skipped: leaving it out would make "the model forgot to set
-/// MnemonicState" mean "this memory never fades", which is not a decision
-/// anybody made.
-fn decay_request(policy: &MemoryPolicy, now_ms: u64, decay_min_interval_ms: u64) -> Request {
-    let parameters = serde_json::Map::from_iter([
-        (
-            "baseline".to_string(),
-            serde_json::Value::from(DEFAULT_MEMORY_STRENGTH),
-        ),
-        (
-            "factor".to_string(),
-            serde_json::Value::from(policy.memory_strength_decay_factor),
-        ),
-        (
-            "floor".to_string(),
-            serde_json::Value::from(policy.decay_floor),
-        ),
-        (
-            "now".to_string(),
-            serde_json::Value::from(kip_timestamp(now_ms)),
-        ),
-        (
-            "metabolized_before".to_string(),
-            serde_json::Value::from(kip_timestamp(now_ms.saturating_sub(decay_min_interval_ms))),
-        ),
-        (
-            "pinned".to_string(),
-            serde_json::Value::from(PINNED_RETENTION_CLASS),
-        ),
-        (
-            "limit".to_string(),
-            serde_json::Value::from(SETTLEMENT_BATCH_LIMIT),
-        ),
-    ]);
-    kip::request_with(
-        r#"UPDATE ?c
-SET FACET "MnemonicState" {
-  memory_strength: CLAMP(MUL(COALESCE(?c.facets["MnemonicState"].memory_strength, :baseline), :factor), :floor, 1.0),
-  last_metabolized_at: :now
-}
-WHERE {
-  ?c CONCEPT {}
-  FILTER(IS_NULL(?c.retention.retention_class) || ?c.retention.retention_class != :pinned)
-  FILTER(IS_NULL(?c.facets["MnemonicState"].last_metabolized_at) || ?c.facets["MnemonicState"].last_metabolized_at < :metabolized_before)
-  FILTER(IS_NULL(?c.facets["MnemonicState"].memory_strength) || ?c.facets["MnemonicState"].memory_strength > :floor)
-}
-LIMIT :limit"#,
         parameters,
     )
 }
@@ -4239,14 +3815,15 @@ async fn copy_space_objects(
 #[cfg(test)]
 mod tests {
     use super::{
-        AppState, CorrectionWatermark, Hooks, MAINTENANCE_MAX_INTERVAL_MS, Space, SpaceEntry,
-        correction_watermark, init_conversation_collection, init_resource_collection,
+        AppState, Hooks, MAINTENANCE_MAX_INTERVAL_MS, Space, SpaceEntry,
+        init_conversation_collection, init_resource_collection,
     };
+    use crate::settlement;
     use crate::{
         agents::{BrainHook, FormationAgent, MaintenanceAgent, SELF_USER_ID, TimedMemoryReadonly},
         kip,
         payload::StringOr,
-        testkit::{app_state_core, create_loaded_space},
+        testkit::{app_state_core, create_loaded_space, signed_token, signing_key},
         types::{
             AddSpaceTokenInput, FormationInput, InputContext, MaintenanceInput,
             MaintenanceParameters, MaintenanceScope, MemoryPolicy, ModelConfig, RecallInput,
@@ -4264,9 +3841,7 @@ mod tests {
         model::{CompletionFeaturesDyn, Model, Models},
         unix_ms,
     };
-    use cose2::{CoseMap, Label, Sign1Message, Value, cwt::Claims, iana};
-    use ic_auth_types::ByteBufB64;
-    use ic_cose_types::cose::ed25519::{SigningKey, VerifyingKey, ed25519_sign};
+    use ic_cose_types::cose::ed25519::{SigningKey, VerifyingKey};
     use object_store::memory::InMemory;
     use std::collections::BTreeSet;
     use std::sync::Arc;
@@ -4400,10 +3975,6 @@ mod tests {
         app_state_core(name, Arc::new(Models::default()), vec![key], "test", 0)
     }
 
-    fn test_signing_key() -> SigningKey {
-        SigningKey::from_bytes(&[7u8; 32])
-    }
-
     fn test_app_state_with_signing_key(name: &str, signing_key: &SigningKey) -> AppState {
         app_state_core(
             name,
@@ -4412,36 +3983,6 @@ mod tests {
             "test",
             0,
         )
-    }
-
-    fn signed_token(
-        signing_key: &SigningKey,
-        user: Principal,
-        audience: &str,
-        scope: &str,
-    ) -> String {
-        let claims = Claims {
-            subject: Some(user.to_string()),
-            audience: Some(audience.to_string()),
-            extra: CoseMap::from_iter([(
-                Label::Int(iana::CWTClaimScope),
-                Value::Text(scope.to_string()),
-            )]),
-            ..Default::default()
-        };
-        let payload = claims.to_vec().unwrap();
-        let mut sign1 = Sign1Message::new(Some(payload));
-        let tbs_data = sign1
-            .prepare_signature(Some(Label::Int(iana::AlgorithmEdDSA)), None, None)
-            .unwrap();
-        sign1
-            .set_signature(
-                ed25519_sign(signing_key.as_bytes(), &tbs_data)
-                    .to_bytes()
-                    .to_vec(),
-            )
-            .unwrap();
-        ByteBufB64(sign1.to_vec().unwrap()).to_string()
     }
 
     fn test_app_state_with_models(name: &str, models: Arc<Models>) -> AppState {
@@ -4705,7 +4246,7 @@ mod tests {
 
     #[test]
     fn app_state_accepts_valid_signed_tokens_and_rejects_scope_mismatches() {
-        let signing_key = test_signing_key();
+        let signing_key = signing_key(7);
         let app = test_app_state_with_signing_key("signed_auth", &signing_key);
         let now_ms = 1_725_000_000_000;
 
@@ -5677,7 +5218,7 @@ WHERE { ?s CONCEPT {type: "Skill", key: "redeploy"} } LIMIT 1"#,
 
         // Runs nobody attributed to the Skill grade nothing: rule 7 makes the
         // link the only path from an outcome to a tally.
-        let report = space.settle_skill_lifecycle(now_ms).await;
+        let report = settlement::settle_skills(space.as_ref(), now_ms).await;
         assert_eq!(report.error, None, "{report:?}");
         assert_eq!(report.graded, 0, "{report:?}");
         assert_eq!(standing(&space).await.0, "proposed");
@@ -5690,7 +5231,7 @@ WHERE { ?s CONCEPT {type: "Skill", key: "redeploy"} } LIMIT 1"#,
             &[("success", 0.5), ("failure", 0.2), ("failure", 0.2)],
         )
         .await;
-        let report = space.settle_skill_lifecycle(now_ms).await;
+        let report = settlement::settle_skills(space.as_ref(), now_ms).await;
         assert_eq!(report.error, None, "{report:?}");
         assert_eq!(report.transitions, 1, "{report:?}");
         assert_eq!(standing(&space).await.0, "trialed");
@@ -5702,7 +5243,7 @@ WHERE { ?s CONCEPT {type: "Skill", key: "redeploy"} } LIMIT 1"#,
 
         // The stream then does better than that baseline, over enough runs.
         grade(&space, &skill_id, &[("success", 0.5); 6]).await;
-        let report = space.settle_skill_lifecycle(now_ms).await;
+        let report = settlement::settle_skills(space.as_ref(), now_ms).await;
         assert_eq!(report.transitions, 1, "{report:?}");
         let (status, utility, graded) = standing(&space).await;
         assert_eq!(status, "adopted");
@@ -5711,7 +5252,7 @@ WHERE { ?s CONCEPT {type: "Skill", key: "redeploy"} } LIMIT 1"#,
 
         // Idempotent: the cursor advanced, so a replayed pass grades nothing
         // and cannot promote on arithmetic instead of evidence.
-        let report = space.settle_skill_lifecycle(now_ms).await;
+        let report = settlement::settle_skills(space.as_ref(), now_ms).await;
         assert_eq!(report.graded, 0, "{report:?}");
         assert_eq!(standing(&space).await.1, utility);
 
@@ -5719,7 +5260,7 @@ WHERE { ?s CONCEPT {type: "Skill", key: "redeploy"} } LIMIT 1"#,
         // without waiting for a re-verdict — the Profile's one sanctioned
         // asymmetry, and it favours demotion.
         grade(&space, &skill_id, &[("failure", 0.95)]).await;
-        let report = space.settle_skill_lifecycle(now_ms).await;
+        let report = settlement::settle_skills(space.as_ref(), now_ms).await;
         assert_eq!(report.transitions, 1, "{report:?}");
         assert_eq!(standing(&space).await.0, "revoked");
 
@@ -5738,7 +5279,10 @@ WHERE { ?s CONCEPT {type: "Skill", key: "redeploy"} } LIMIT 1"#,
                 .unwrap_or_default();
         assert_eq!(digests.len(), 3, "{digests:?}");
         for digest in &digests {
-            assert!(digest.contains(crate::skill::VERDICT_RULE), "{digest}");
+            assert!(
+                digest.contains(crate::settlement::skill::VERDICT_RULE),
+                "{digest}"
+            );
             assert!(digest.contains("window=("), "{digest}");
             assert!(digest.contains("basis_seq="), "{digest}");
             assert!(digest.contains("baseline="), "{digest}");
@@ -5800,8 +5344,8 @@ WHERE { ?s CONCEPT {type: "Skill", key: "redeploy"} } LIMIT 1"#,
         let app = test_app_state("watch_expiry");
         let space = create_loaded_space(&app, "watch_expiry").await;
         let now_ms = unix_ms();
-        let past = super::kip_timestamp(now_ms.saturating_sub(86_400_000));
-        let future = super::kip_timestamp(now_ms.saturating_add(86_400_000));
+        let past = kip::timestamp(now_ms.saturating_sub(86_400_000));
+        let future = kip::timestamp(now_ms.saturating_add(86_400_000));
 
         for (key, class, due) in [
             ("overdue", "silence", past.as_str()),
@@ -5836,7 +5380,7 @@ WHERE { ?s CONCEPT {type: "Skill", key: "redeploy"} } LIMIT 1"#,
             .await;
         }
 
-        let report = space.sweep_due_watches(now_ms).await;
+        let report = settlement::sweep_watches(space.as_ref(), now_ms).await;
         assert_eq!(report.error, None, "{report:?}");
         assert_eq!(report.fired, 1, "{report:?}");
 
@@ -5876,7 +5420,7 @@ WHERE { ?s CONCEPT {type: "Skill", key: "redeploy"} } LIMIT 1"#,
 
         // Idempotent: the fired Watch is no longer armed, so a second sweep
         // finds nothing and cannot fire it twice.
-        let again = space.sweep_due_watches(now_ms).await;
+        let again = settlement::sweep_watches(space.as_ref(), now_ms).await;
         assert_eq!(again.fired, 0, "{again:?}");
 
         // The decision is still outstanding, and the next cycle is handed the
@@ -5925,7 +5469,7 @@ WHERE { ?s CONCEPT {type: "Skill", key: "redeploy"} } LIMIT 1"#,
     }
 
     async fn seed_kip(space: &Space, request: anda_kip::Request) {
-        let response = space.execute_kip_settlement(request).await.unwrap();
+        let response = space.run_kip_settlement(request).await.unwrap();
         assert!(
             kip::succeeded(&response),
             "seed failed: {}",
@@ -6228,38 +5772,6 @@ SUPERSEDING :old"#,
         assert!(!miss.found);
         let repeat = space.probe_memory(&long_query, None).await.unwrap();
         assert!(!repeat.negative_cached);
-    }
-
-    /// The correction cursor advances only over coordinates it read whole.
-    #[test]
-    fn the_correction_cursor_never_steps_over_a_half_read_coordinate() {
-        let consumed = |w| match w {
-            CorrectionWatermark::Consumed(seq) => seq,
-            CorrectionWatermark::Truncated(seq) => panic!("unexpectedly truncated at {seq}"),
-        };
-
-        // A short page reached the end of the backlog: every coordinate in it
-        // was read whole, so the cursor takes the last one.
-        assert_eq!(consumed(correction_watermark(&[7, 9, 9], false, 3)), 9);
-        // Nothing to read leaves the cursor alone.
-        assert_eq!(consumed(correction_watermark(&[], false, 3)), 3);
-        assert_eq!(consumed(correction_watermark(&[], true, 3)), 3);
-
-        // A full page stops one coordinate short: `space_seq` is the
-        // transaction coordinate, so the trailing 9s may have more behind them
-        // and the next scan has to see them again.
-        assert_eq!(consumed(correction_watermark(&[7, 8, 9, 9], true, 3)), 8);
-        // Never backwards, whatever the page held.
-        assert_eq!(consumed(correction_watermark(&[7, 8, 9, 9], true, 8)), 8);
-
-        // A full page that is entirely one coordinate has no good answer:
-        // standing still would re-read it forever, so it advances and says so.
-        match correction_watermark(&[9, 9, 9], true, 3) {
-            CorrectionWatermark::Truncated(seq) => assert_eq!(seq, 9),
-            CorrectionWatermark::Consumed(seq) => {
-                panic!("a page of one coordinate cannot be fully consumed, got {seq}")
-            }
-        }
     }
 
     /// A full settlement honours what retention wrote, and keeps the record

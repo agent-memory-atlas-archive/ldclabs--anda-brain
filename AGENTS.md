@@ -39,7 +39,14 @@ without those siblings will not build.
   them with the protocol, and `agents::prompts::language_reference()` puts them
   in the model's context at completion time.
 - `anda_brain/src/kip.rs`: the KIP 2.0 envelope seam (request builders, the
-  read-only gate, two-level response reading).
+  read-only gate, two-level response reading, and the KIP string/timestamp
+  literal helpers).
+- `anda_brain/src/settlement/`: the deterministic settlement — disuse decay,
+  correction discovery, silence-Watch expiry, and the Skill lifecycle rule —
+  behind a `RunKip` port (one command in, one result out, `readonly` picking
+  the gate). `Space` is one adapter; the module's own tests are the other, so
+  the rules are exercised without building a graph. `skill.rs` and `watch.rs`
+  live here as its command builders and row readers.
 - `anda_brain/src/vocabulary.rs`: this Space's Schema Package and the
   `declare_memory_symbols` tool. Schema is protected control state in KIP 2.0 —
   KML cannot declare a type, so new vocabulary enters through the host here.

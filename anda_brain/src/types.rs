@@ -1174,7 +1174,8 @@ pub struct WatchSettlement {
 
 /// What one Skill lifecycle pass decided.
 ///
-/// The transitions themselves are deterministic code (see [`crate::skill`]);
+/// The transitions themselves are deterministic code (see
+/// [`crate::settlement::skill`]);
 /// this is only the count, for the cycle's health report.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 pub struct SkillSettlement {

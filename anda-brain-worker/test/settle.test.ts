@@ -5,7 +5,7 @@
  * verdict rule can be exercised across every arm without building five graphs
  * to produce five outcome streams. The HTTP suite still covers one path against
  * a real nexus; what is here is the rule table, which is the half that has to
- * agree with `anda_brain/src/skill.rs` decision for decision.
+ * agree with `anda_brain/src/settlement/skill.rs` decision for decision.
  */
 
 import type { KipResult } from '@ldclabs/kip-do'

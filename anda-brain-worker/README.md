@@ -83,7 +83,7 @@ cd ../../anda-db/ts/kip-do && pnpm install && pnpm run build
   Skill 之外的 family 计数、判决所需的挂钩 outcome 配额），分数写进 `GradingState`，
   修正后的准入押注写进 `MnemonicState.utility`——记录不是预测，两者都不是权限。
 
-  规则常量与 `anda_brain/src/skill.rs` 逐一对齐，`VERDICT_RULE` 两边**必须相同**：
+  规则常量与 `anda_brain/src/settlement/skill.rs` 逐一对齐，`VERDICT_RULE` 两边**必须相同**：
   一个 Skill 在 Rust 侧被采纳、在 Worker 侧被撤销，会让这个规则标识变成谎话。
 
 模型拿到的 `assessment` 块（`space_seq`、armed / fired Watch 集合、每谓词链接数）

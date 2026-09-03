@@ -15,13 +15,12 @@ mod legacy_upgrade;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod payload;
-pub(crate) mod skill;
+pub(crate) mod settlement;
 pub mod space;
 #[cfg(test)]
 pub(crate) mod testkit;
 pub mod types;
 pub(crate) mod vocabulary;
-pub(crate) mod watch;
 #[cfg(feature = "wiki")]
 pub(crate) mod wiki;
 

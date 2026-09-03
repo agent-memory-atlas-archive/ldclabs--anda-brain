@@ -241,7 +241,7 @@ where
 
 /// Builds the semantic search command for an assertion probe. The search
 /// text is embedded in a KQL string literal via the crate's shared escaping
-/// helper ([`crate::space::kip_string_literal`]).
+/// helper ([`crate::kip::string_literal`]).
 pub fn assertion_search_request(search: &str, threshold: f64, limit: usize) -> Request {
     // MODE is omitted deliberately: the engine picks hybrid where it has
     // semantic capability and keyword otherwise, whereas asking for `semantic`

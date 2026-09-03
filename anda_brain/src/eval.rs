@@ -8,6 +8,8 @@
 pub mod judge;
 pub mod mine;
 pub mod optimize;
+#[doc(hidden)]
+pub mod report;
 pub mod run;
 
 use anda_core::{AgentOutput, BoxError, CompletionRequest, ContentPart, Json, Message, Usage};

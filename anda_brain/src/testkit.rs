@@ -10,7 +10,9 @@ use anda_engine::{
     model::{CompletionFeaturesDyn, Model, Models, reqwest},
     unix_ms,
 };
-use ic_cose_types::cose::ed25519::VerifyingKey;
+use cose2::{CoseMap, Label, Sign1Message, Value, cwt::Claims, iana};
+use ic_auth_types::ByteBufB64;
+use ic_cose_types::cose::ed25519::{SigningKey, VerifyingKey, ed25519_sign};
 use object_store::memory::InMemory;
 use std::{collections::BTreeSet, sync::Arc};
 
@@ -91,4 +93,49 @@ pub(crate) async fn create_loaded_space(app: &AppState, id: &str) -> Arc<Space> 
     .unwrap();
 
     app.load_space(id, false).await.unwrap()
+}
+
+/// A deterministic ED25519 signing key.
+///
+/// `seed` exists only so two tests in one process can hold distinct
+/// identities; nothing here is a secret, and the key is reproducible on
+/// purpose so a failing assertion names the same principal every run.
+pub(crate) fn signing_key(seed: u8) -> SigningKey {
+    SigningKey::from_bytes(&[seed; 32])
+}
+
+/// Mints a CWT the way a real client does: a COSE_Sign1 over the claims,
+/// EdDSA-signed and base64-encoded as the `Authorization` header carries it.
+///
+/// Every channel's auth tests need one, and three hand-copied versions of
+/// this is three chances for a channel to be tested against a token shape the
+/// service would never receive.
+pub(crate) fn signed_token(
+    signing_key: &SigningKey,
+    user: Principal,
+    audience: &str,
+    scope: &str,
+) -> String {
+    let claims = Claims {
+        subject: Some(user.to_string()),
+        audience: Some(audience.to_string()),
+        extra: CoseMap::from_iter([(
+            Label::Int(iana::CWTClaimScope),
+            Value::Text(scope.to_string()),
+        )]),
+        ..Default::default()
+    };
+    let payload = claims.to_vec().unwrap();
+    let mut sign1 = Sign1Message::new(Some(payload));
+    let tbs_data = sign1
+        .prepare_signature(Some(Label::Int(iana::AlgorithmEdDSA)), None, None)
+        .unwrap();
+    sign1
+        .set_signature(
+            ed25519_sign(signing_key.as_bytes(), &tbs_data)
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+    ByteBufB64(sign1.to_vec().unwrap()).to_string()
 }

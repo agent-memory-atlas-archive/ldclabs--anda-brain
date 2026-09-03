@@ -19,6 +19,7 @@
 //!   write, never by treating the memory as unwritten.
 
 use anda_core::Message;
+use anda_engine::{rfc3339_datetime, rfc3339_datetime_now};
 use anda_kip::{
     Command, ElementReference, ErrorObject, Executor, IngestContext, IngestEvidence, Json,
     KipError, KipValue, Map, MutationClause, Request, Response, Scalar, TopLevelStatus,
@@ -28,6 +29,19 @@ use anda_kip::{
 /// Builds a single-operation request from one command string.
 pub fn request(command: impl Into<String>) -> Request {
     Request::single(command)
+}
+
+/// Renders a KIP string literal with backslashes and quotes escaped.
+/// The crate's single escaping implementation — reuse it instead of
+/// inlining `.replace()` chains that can drift apart.
+pub fn string_literal(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// Graph metadata timestamps are RFC3339 strings (lexicographically
+/// comparable in KQL filters).
+pub fn timestamp(now_ms: u64) -> String {
+    rfc3339_datetime(now_ms).unwrap_or_else(rfc3339_datetime_now)
 }
 
 /// Builds a single-operation request with its parameter bindings.
