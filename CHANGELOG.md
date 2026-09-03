@@ -240,6 +240,16 @@ a lie.
   installation*, taking the whole publish down and leaving the Space unable to
   grow its vocabulary again. Refused at the tool now, where the answer is one
   rejected name.
+- **A KIP 1.x space still migrates itself, and this sync does not touch that
+  path.** The element collections a migration creates are new, so the
+  `plane_versions` column added here is in them from the start, and the
+  Cognitive Memory Profile installs against a store that has never held one.
+  Pinned by `legacy_upgrade::a_kip_1x_space_migrates_onto_the_vocabulary_this_service_activates`.
+  Worth restating for an operator, because none of it happens at startup: the
+  migration runs per space on first access, so the service comes up before
+  anything has moved and the first request touching a space is what pays for it.
+  Back up the object store first — the 1.x collections are dropped in place and
+  the migration is one-way.
 - **What did not change, and why it is worth saying.** The silence sweep still
   does not prove it has consumed the Change Stream through the coordinate
   current at `due_at`, which §5.11 now asks of an evaluator before it may

@@ -804,6 +804,23 @@ truth-neutral Proposition plus a positive Assertion — without one, nothing wou
 be believed after the migration, because silence in 2.0 means *insufficient*
 rather than assent.
 
+Three things to know before you start it:
+
+- **Back up the object store first.** The staging is copy-then-drop, so nothing
+  is read into memory and destroyed — but the migration does drop the 1.x
+  `concepts` and `propositions` collections in place, and it is **one-way**: a
+  KIP 1.x build reopening the same store afterwards will not find its
+  collections. The original rows survive in `kip_legacy_v1` and stay
+  inspectable, which is not the same as being able to roll back.
+- **It runs per space, on first access — not at startup.** Spaces are
+  lazy-loaded, so the service comes up before anything has migrated, and the
+  first request that touches a space is what pays for it and where a failure
+  surfaces. A large space makes that one request slow; a crash mid-way resumes
+  on the next attempt rather than starting over.
+- **Migrate one space at a time if you can.** Nothing serialises them, and each
+  is independent, so a problem found on a small space is a problem you have not
+  yet had on the rest.
+
 Migrated claims carry `mode: "imported"`, and 1.x `(type, name)` identity becomes
 a 2.0 `key`, so counterparty lookups keep resolving. Types the Cognitive Memory
 Profile also declares are adopted onto it; a type only this deployment used keeps

@@ -219,6 +219,10 @@ For complex businesses, Vector RAG is insufficient. Enterprises have structured 
 
 KIP 2.0 separates what 1.x kept in one graph — meaning, belief, evidence, provenance, mnemonic state, retention, governance and schema. The single distinction the rest follows from is that **a statement existing is not the statement being true**: a Proposition is truth-neutral, an Assertion is one actor's stance about it with its evidence, and what is currently believed is projected from those rather than stored. That is what lets Brain tell you "Alice said X, and Bob disagrees" instead of quietly picking a winner — and why it never answers "no" when the truthful answer is "I have no basis for that".
 
+#### Upgrading a running KIP 1.x deployment
+
+Install the new build and restart: each space migrates itself the first time it is accessed, and the migration is resumable. Back up the object store first — the 1.x collections are dropped in place and the migration is one-way, so an older build cannot reopen the store afterwards. The 1.x rows are kept verbatim in `kip_legacy_v1`, and the usage ledger does not survive because 2.0 re-mints element ids; the memories themselves do. See [Upgrading a space written by a KIP 1.x build](./anda_brain/README.md#upgrading-a-space-written-by-a-kip-1x-build) for what the migration will and will not invent.
+
 ### Anda DB
 
 [**Anda DB**](https://github.com/ldclabs/anda-db) is the embedded database engine driving the cognitive nexus. Written in Rust for extreme performance and memory safety, it natively supports graph traversals, multimodal data, and vector similarity—all optimized for AI workloads.
