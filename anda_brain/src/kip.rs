@@ -20,8 +20,9 @@
 
 use anda_core::Message;
 use anda_kip::{
-    Command, ErrorObject, Executor, IngestContext, IngestEvidence, Json, KipError, KipValue, Map,
-    MutationClause, Request, Response, Scalar, TopLevelStatus, execute_request,
+    Command, ElementReference, ErrorObject, Executor, IngestContext, IngestEvidence, Json,
+    KipError, KipValue, Map, MutationClause, Request, Response, Scalar, TopLevelStatus,
+    execute_request, transition_state,
 };
 
 /// Builds a single-operation request from one command string.
@@ -84,22 +85,49 @@ pub fn error_message(response: &Response) -> String {
 
 /// How many elements a committed mutation changed under the given op.
 ///
-/// A KML result is `{handles, changes: [{id, kind, op, version}, ...]}`; there
-/// is no scalar "updated" count, and a sweep that reported the whole `changes`
-/// length would count the elements a single statement touched incidentally.
+/// A KML result is `{handles, changes: [...]}` carrying one §36.1 Change
+/// Envelope entry per element; there is no scalar "updated" count, and a sweep
+/// that reported the whole `changes` length would count the elements a single
+/// statement touched incidentally.
+///
+/// The ops are `create`, `update`, `lifecycle`, `retention`, `merge`, `purge`
+/// and `payload_purge`. Since KIP 2.0 collapsed the lifecycle statements into
+/// one `TRANSITION` (§52.5), every move reports `lifecycle` and the state it
+/// moved to lives in `state.to` — so a caller counting retractions or archives
+/// wants [`transitioned`] rather than this.
 pub fn changed(response: &Response, op: &str) -> u64 {
+    count_changes(response, |change| {
+        change.get("op").and_then(Json::as_str) == Some(op)
+    })
+}
+
+/// How many elements a committed mutation moved *to* the given lifecycle state.
+///
+/// `TRANSITION` is one statement for nine states, so the op alone no longer
+/// says what happened: an archive and a retraction are both `lifecycle`, and
+/// counting the op would let a sweep report the wrong work. §36.1 puts the
+/// move in `state.from` / `state.to`, and this reads the half that says what
+/// the element became.
+pub fn transitioned(response: &Response, to: &str) -> u64 {
+    count_changes(response, |change| {
+        change.get("op").and_then(Json::as_str) == Some("lifecycle")
+            && change
+                .get("state")
+                .and_then(|state| state.get("to"))
+                .and_then(Json::as_str)
+                == Some(to)
+    })
+}
+
+/// The Change Envelope entries of the first result that match.
+fn count_changes(response: &Response, matches: impl Fn(&Json) -> bool) -> u64 {
     let Some(result) = ok_result(response) else {
         return 0;
     };
     result
         .get("changes")
         .and_then(Json::as_array)
-        .map(|changes| {
-            changes
-                .iter()
-                .filter(|change| change.get("op").and_then(Json::as_str) == Some(op))
-                .count() as u64
-        })
+        .map(|changes| changes.iter().filter(|change| matches(change)).count() as u64)
         .unwrap_or(0)
 }
 
@@ -209,7 +237,7 @@ pub fn observation_ingest(
             client_key: Some(format!("{origin}:{}", index + 1)),
             source_actor: source_actor
                 .filter(|_| message.role == "user")
-                .map(str::to_string),
+                .map(ElementReference::by_id),
             ..Default::default()
         })
         .collect();
@@ -256,11 +284,21 @@ pub fn attach_observation(request: &mut Request, observation: &IngestContext) {
 /// Formation encodes what it observed: Concepts, the Propositions relating
 /// them, the Evidence they rest on, the Assertions that take a stance, and the
 /// corrections that revise one — which in KIP 2.0 is a *new* Assertion plus
-/// supersession, so `SUPERSEDE` and `CORRECT EVIDENCE` belong here even though
-/// they change a claim's standing.
+/// supersession, so `TRANSITION ... TO "superseded" BY` and `TO "corrected" BY`
+/// belong here even though they change a claim's standing.
 ///
-/// What is refused is refused deliberately. `UPDATE`, `SET RETENTION`,
-/// `ARCHIVE`, `TOMBSTONE`, `PURGE`, `PURGE PAYLOAD` and `MERGE CONCEPT` act on
+/// The six lifecycle statements collapsed into one `TRANSITION` in KIP 2.0
+/// (§52.5), so the split that used to fall between verbs now falls inside one:
+/// the cognitive moves (`retracted`, `superseded`, `corrected`, and an
+/// Activity's own `running` / `completed` / `failed` / `cancelled`) stay,
+/// `archived` and `tombstoned` do not. A state written as a `:parameter` is
+/// resolved against the request's bindings first, and refused when it cannot
+/// be — otherwise the collapse would have handed Formation a binding-shaped
+/// way to tombstone.
+///
+/// What is refused is refused deliberately. `UPDATE`, `SET RETENTION`, `PURGE`,
+/// `PURGE PAYLOAD` and `MERGE CONCEPT` — and the removal half of
+/// `TRANSITION` — act on
 /// memory in bulk from a selection, and a pass whose entire input is an
 /// untrusted conversation is the last thing that should hold them. The
 /// reference policy assumes an authority model this deployment cannot express
@@ -296,30 +334,53 @@ fn cognition_refusal(command: &Command, parameters: Option<&Map<String, Json>>) 
     };
     for clause in &statement.clauses {
         let verb = match clause {
-            // `RETRACT ASSERTION` is the only one of these that selects, and
-            // the shared bound below is what keeps an unbounded
-            // `RETRACT ASSERTION ?a WHERE { ?a ASSERTION {} }` from
+            // `TRANSITION` is the only one of these that selects, and the
+            // shared bound below is what keeps an unbounded
+            // `TRANSITION ?a TO "retracted" WHERE { ?a ASSERTION {} }` from
             // withdrawing every claim in the Space in one statement.
             MutationClause::CreateConcept(_)
             | MutationClause::UpsertConcept(_)
             | MutationClause::EnsureProposition(_)
             | MutationClause::CreateEvidence(_)
             | MutationClause::CreateAssertion(_)
-            | MutationClause::CreateActivity(_)
-            | MutationClause::SupersedeAssertion(_)
-            | MutationClause::CorrectEvidence(_)
-            | MutationClause::TransitionActivity(_)
-            | MutationClause::RetractAssertion(_) => {
+            | MutationClause::CreateActivity(_) => {
                 if let Some(refusal) = unbounded_selection(clause, parameters) {
                     return Some(refusal);
                 }
                 continue;
             }
 
+            MutationClause::Transition(transition) => {
+                match transition_state_of(transition, parameters) {
+                    Some(state) if COGNITIVE_TRANSITIONS.contains(&state) => {
+                        if let Some(refusal) = unbounded_selection(clause, parameters) {
+                            return Some(refusal);
+                        }
+                        continue;
+                    }
+                    Some(state) => {
+                        return Some(format!(
+                            "formation cannot TRANSITION memory to \"{state}\"; it corrects \
+                             cognition (retracted / superseded / corrected) and runs its own \
+                             Activities. Removing memory belongs to maintenance"
+                        ));
+                    }
+                    // A `:parameter` nothing in this request binds to a
+                    // literal. Refused rather than guessed: the engine would
+                    // resolve it later, and "later" is past this gate.
+                    None => {
+                        return Some(
+                            "formation must write the TRANSITION state as a literal this \
+                             request can be read against; a state bound elsewhere cannot be \
+                             checked before it runs"
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+
             MutationClause::Update(_) => "UPDATE",
             MutationClause::SetRetention(_) => "SET RETENTION",
-            MutationClause::Archive(_) => "ARCHIVE",
-            MutationClause::Tombstone(_) => "TOMBSTONE",
             MutationClause::Purge(_) => "PURGE",
             MutationClause::PurgePayload(_) => "PURGE PAYLOAD",
             MutationClause::MergeConcept(_) => "MERGE CONCEPT",
@@ -327,17 +388,49 @@ fn cognition_refusal(command: &Command, parameters: Option<&Map<String, Json>>) 
 
         return Some(format!(
             "formation cannot issue {verb}; it writes cognition (CREATE / UPSERT / ENSURE / \
-             ASSERT) and corrects it (SUPERSEDE / RETRACT / CORRECT EVIDENCE). Administering \
-             memory in bulk belongs to maintenance"
+             ASSERT) and corrects it (TRANSITION to retracted / superseded / corrected). \
+             Administering memory in bulk belongs to maintenance"
         ));
     }
     None
 }
 
+/// The lifecycle states the cognition-only path may name (§52.5).
+///
+/// Everything §52.5 registers except `archived` and `tombstoned`: correcting a
+/// claim is cognition, and removing memory is custody.
+const COGNITIVE_TRANSITIONS: &[&str] = &[
+    transition_state::RETRACTED,
+    transition_state::SUPERSEDED,
+    transition_state::CORRECTED,
+    transition_state::RUNNING,
+    transition_state::COMPLETED,
+    transition_state::FAILED,
+    transition_state::CANCELLED,
+];
+
+/// The state a `TRANSITION` names, resolving a `:parameter` against the
+/// request's own bindings.
+///
+/// `None` means the gate cannot know — an unbound parameter, or one bound to
+/// something that is not a string — which every caller here treats as a
+/// refusal rather than as permission.
+fn transition_state_of<'a>(
+    transition: &'a anda_kip::Transition,
+    parameters: Option<&'a Map<String, Json>>,
+) -> Option<&'a str> {
+    match &transition.to {
+        Scalar::Literal(KipValue::String(state)) => Some(state.as_str()),
+        Scalar::Param(name) => parameters?.get(name)?.as_str(),
+        _ => None,
+    }
+}
+
 /// Runs a whole request envelope on the maintenance path.
 ///
 /// Maintenance administers memory, so it keeps the verbs Formation does not:
-/// `UPDATE`, `SET RETENTION`, `ARCHIVE`, `TOMBSTONE` and `MERGE CONCEPT` are
+/// `UPDATE`, `SET RETENTION`, `TRANSITION` — including to `archived` and
+/// `tombstoned` — and `MERGE CONCEPT` are
 /// the custodial work the reference policy asks it for. Three things it still
 /// does not get, and each for its own reason:
 ///
@@ -354,10 +447,10 @@ fn cognition_refusal(command: &Command, parameters: Option<&Map<String, Json>>) 
 ///   undeletable, and one that could lift one could unblock an erasure somebody
 ///   placed a hold to stop. Setting a retention class and an `expires_at` is
 ///   ordinary lifecycle judgement and stays; the hold is not.
-/// - **An unbounded selection.** `ARCHIVE ?e WHERE { ?e CONCEPT {} }` and
-///   `UPDATE ?e SET ATTRIBUTES {…} WHERE { ?e CONCEPT {} }` are one hazard
-///   wearing two verbs, so the bound is on the selection rather than on a verb
-///   by name.
+/// - **An unbounded selection.** `TRANSITION ?e TO "archived" WHERE { ?e
+///   CONCEPT {} }` and `UPDATE ?e SET ATTRIBUTES {…} WHERE { ?e CONCEPT {} }`
+///   are one hazard wearing two verbs, so the bound is on the selection rather
+///   than on a verb by name.
 ///
 /// `MERGE CONCEPT` takes no `LIMIT` and needs none: both engines resolve each
 /// operand to exactly one Concept and refuse a pattern that binds several,
@@ -395,7 +488,8 @@ fn maintenance_refusal(
                 return Some(
                     "maintenance cannot issue PURGE or PURGE PAYLOAD; erasure is irreversible \
                      and this deployment runs it deterministically from a person's forget \
-                     request, never from a maintenance plan. ARCHIVE and TOMBSTONE are yours"
+                     request, never from a maintenance plan. TRANSITION to archived or \
+                     tombstoned is yours"
                         .to_string(),
                 );
             }
@@ -430,17 +524,16 @@ fn maintenance_refusal(
 ///
 /// `None` for a clause that names its target outright: the bound exists to
 /// stop a *pattern* from reaching further than the writer meant, and
-/// `ARCHIVE "C-7"` reaches exactly one element by construction.
+/// `TRANSITION "C-7" TO "archived"` reaches exactly one element by
+/// construction.
 fn unbounded_selection(
     clause: &MutationClause,
     parameters: Option<&Map<String, Json>>,
 ) -> Option<String> {
     let (verb, where_clauses, limit) = match clause {
         MutationClause::Update(c) => ("UPDATE", &c.where_clauses, &c.limit),
-        MutationClause::RetractAssertion(c) => ("RETRACT ASSERTION", &c.where_clauses, &c.limit),
+        MutationClause::Transition(c) => ("TRANSITION", &c.where_clauses, &c.limit),
         MutationClause::SetRetention(c) => ("SET RETENTION", &c.where_clauses, &c.limit),
-        MutationClause::Archive(c) => ("ARCHIVE", &c.where_clauses, &c.limit),
-        MutationClause::Tombstone(c) => ("TOMBSTONE", &c.where_clauses, &c.limit),
         MutationClause::Purge(c) => ("PURGE", &c.where_clauses, &c.limit),
         MutationClause::PurgePayload(c) => ("PURGE PAYLOAD", &c.where_clauses, &c.limit),
         _ => return None,
@@ -543,11 +636,11 @@ mod tests {
 }"#,
             // Correction preserves history, so its verbs are cognition too.
             r#"MUTATE { ASSERT (:alice, "prefers", :light) { by: :alice, mode: "stated" } SUPERSEDING :old }"#,
-            r#"CORRECT EVIDENCE :old BY :new"#,
-            r#"TRANSITION ACTIVITY :act TO "completed""#,
+            r#"TRANSITION :old TO "corrected" BY :new"#,
+            r#"TRANSITION :act TO "completed""#,
             // A bounded retraction of one's own claim.
-            r#"RETRACT ASSERTION ?a WHERE { ?a ASSERTION {asserted_by: :alice} } LIMIT 5"#,
-            r#"RETRACT ASSERTION :a"#,
+            r#"TRANSITION ?a TO "retracted" WHERE { ?a ASSERTION {asserted_by: :alice} } LIMIT 5"#,
+            r#"TRANSITION :a TO "retracted""#,
         ] {
             assert_eq!(
                 cognition_refusal(&parsed(command), None),
@@ -571,10 +664,13 @@ mod tests {
                 r#"SET RETENTION ?c { retention_class: "standard" } WHERE { ?c CONCEPT {} } LIMIT 5"#,
                 "SET RETENTION",
             ),
-            (r#"ARCHIVE ?c WHERE { ?c CONCEPT {} } LIMIT 5"#, "ARCHIVE"),
             (
-                r#"TOMBSTONE ?c WHERE { ?c CONCEPT {} } LIMIT 5"#,
-                "TOMBSTONE",
+                r#"TRANSITION ?c TO "archived" WHERE { ?c CONCEPT {} } LIMIT 5"#,
+                "archived",
+            ),
+            (
+                r#"TRANSITION ?c TO "tombstoned" WHERE { ?c CONCEPT {} } LIMIT 5"#,
+                "tombstoned",
             ),
             (
                 r#"PURGE ?c WHERE { ?c CONCEPT {} } LIMIT 5 CONFIRM "PURGE""#,
@@ -596,15 +692,15 @@ mod tests {
     fn a_selecting_retraction_must_say_how_much_it_may_withdraw() {
         // Allowed by verb, refused by blast radius: without a bound this
         // withdraws every claim in the Space in one statement.
-        let unbounded = r#"RETRACT ASSERTION ?a WHERE { ?a ASSERTION {} }"#;
+        let unbounded = r#"TRANSITION ?a TO "retracted" WHERE { ?a ASSERTION {} }"#;
         assert!(cognition_refusal(&parsed(unbounded), None).is_some());
 
-        let over_budget = r#"RETRACT ASSERTION ?a WHERE { ?a ASSERTION {} } LIMIT 500"#;
+        let over_budget = r#"TRANSITION ?a TO "retracted" WHERE { ?a ASSERTION {} } LIMIT 500"#;
         assert!(cognition_refusal(&parsed(over_budget), None).is_some());
 
         // A parameterised limit resolves against the envelope's own bindings,
         // so a model is not pushed into splicing the number into the text.
-        let bound = r#"RETRACT ASSERTION ?a WHERE { ?a ASSERTION {} } LIMIT :n"#;
+        let bound = r#"TRANSITION ?a TO "retracted" WHERE { ?a ASSERTION {} } LIMIT :n"#;
         assert_eq!(
             cognition_refusal(&parsed(bound), Some(&param("n", 5))),
             None
@@ -612,6 +708,35 @@ mod tests {
         assert!(cognition_refusal(&parsed(bound), Some(&param("n", 5000))).is_some());
         // An unbound `:n` is not a bound at all.
         assert!(cognition_refusal(&parsed(bound), None).is_some());
+    }
+
+    #[test]
+    fn a_transition_state_the_gate_cannot_read_is_refused() {
+        // Six statements collapsed into one, so the split now falls inside the
+        // statement. A state the gate cannot resolve to a literal is refused
+        // rather than guessed: the engine would resolve it later, and "later"
+        // is past this gate — which would have handed an untrusted conversation
+        // a binding-shaped way to tombstone.
+        let parameterised = r#"TRANSITION :a TO :state"#;
+        assert_eq!(
+            cognition_refusal(&parsed(parameterised), Some(&param("state", "retracted"))),
+            None,
+            "a bound cognitive state resolves and passes"
+        );
+        let refusal =
+            cognition_refusal(&parsed(parameterised), Some(&param("state", "tombstoned")))
+                .expect("a bound removal state is refused on the state it names");
+        assert!(refusal.contains("tombstoned"), "{refusal}");
+
+        for parameters in [
+            None,
+            Some(param("other", "retracted")),
+            Some(param("state", 7)),
+        ] {
+            let refusal = cognition_refusal(&parsed(parameterised), parameters.as_ref())
+                .expect("an unreadable state is refused");
+            assert!(refusal.contains("literal"), "{refusal}");
+        }
     }
 
     #[test]
@@ -634,17 +759,17 @@ mod tests {
             "LIST PREDICATES LIMIT 500",
             // The custodial work the reference policy asks maintenance for.
             r#"UPDATE ?c SET FACET "MnemonicState" {salience: 0.9} WHERE { ?c CONCEPT {} } LIMIT 20"#,
-            r#"ARCHIVE ?c WHERE { ?c CONCEPT {} } LIMIT 20"#,
-            r#"TOMBSTONE ?c WHERE { ?c CONCEPT {} } LIMIT 20"#,
+            r#"TRANSITION ?c TO "archived" WHERE { ?c CONCEPT {} } LIMIT 20"#,
+            r#"TRANSITION ?c TO "tombstoned" WHERE { ?c CONCEPT {} } LIMIT 20"#,
             // Verbatim from the deployment contract: `STRUCTURAL` over a Core
             // reference field is how §16 and §26 find what a corrected
             // observation was resting under.
-            r#"ARCHIVE ?a WHERE { STRUCTURAL (?a, "evidence", :e) } LIMIT 20"#,
+            r#"TRANSITION ?a TO "archived" WHERE { STRUCTURAL (?a, "evidence", :e) } LIMIT 20"#,
             // Retention without a hold: §20's judgement, which is a model's.
             r#"SET RETENTION ?e { retention_class: "standard", expires_at: "2027-01-01T00:00:00Z" } WHERE { ?e EVIDENCE {} } LIMIT 20"#,
             // Naming the target outright reaches one element by construction,
             // so there is nothing for a bound to do.
-            "ARCHIVE \"C-7\"",
+            r#"TRANSITION "C-7" TO "archived""#,
             // No LIMIT slot, and none needed: both engines refuse an operand
             // that binds more than one Concept.
             r#"MERGE CONCEPT ?dup INTO ?canonical WHERE { ?dup CONCEPT {key: "alice-2"} ?canonical CONCEPT {key: "alice"} }"#,
@@ -684,7 +809,10 @@ mod tests {
                 "legal hold",
             ),
             // One hazard, several verbs: the bound is on the selection.
-            (r#"ARCHIVE ?c WHERE { ?c CONCEPT {} }"#, "LIMIT 20 or less"),
+            (
+                r#"TRANSITION ?c TO "archived" WHERE { ?c CONCEPT {} }"#,
+                "LIMIT 20 or less",
+            ),
             (
                 r#"UPDATE ?c SET FACET "MnemonicState" {salience: 0.9} WHERE { ?c CONCEPT {} } LIMIT 500"#,
                 "LIMIT 20 or less",
@@ -702,8 +830,8 @@ mod tests {
     fn nothing_formation_may_write_is_something_maintenance_may_not() {
         for command in [
             r#"MUTATE { ASSERT (:alice, "prefers", :dark) { by: :alice, mode: "stated" } }"#,
-            r#"CORRECT EVIDENCE :old BY :new"#,
-            r#"RETRACT ASSERTION ?a WHERE { ?a ASSERTION {asserted_by: :alice} } LIMIT 5"#,
+            r#"TRANSITION :old TO "corrected" BY :new"#,
+            r#"TRANSITION ?a TO "retracted" WHERE { ?a ASSERTION {asserted_by: :alice} } LIMIT 5"#,
         ] {
             let command = parsed(command);
             assert_eq!(cognition_refusal(&command, None), None);
@@ -781,7 +909,10 @@ mod tests {
 
         // The assistant's turn is not the counterparty's, and an Evidence
         // source that pointed at them anyway would say they said it.
-        assert_eq!(ingest.evidence[0].source_actor.as_deref(), Some("C-7"));
+        assert_eq!(
+            ingest.evidence[0].source_actor,
+            Some(ElementReference::by_id("C-7"))
+        );
         assert_eq!(ingest.evidence[1].source_actor, None);
     }
 

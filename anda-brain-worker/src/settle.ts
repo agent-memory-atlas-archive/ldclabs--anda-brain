@@ -43,7 +43,7 @@ import type { ArmedWatch, SettlementReport, SkillSettlement, WatchSettlement } f
  * recomputing a verdict must get the same answer whichever deployment wrote it.
  * Bump both together, never one.
  */
-export const VERDICT_RULE = 'anda-brain/skill-verdict@1'
+export const VERDICT_RULE = 'anda-brain/skill-verdict@2'
 
 /** Graded outcomes a trial needs before any verdict may move it. */
 const TRIAL_MIN_OUTCOMES = 5
@@ -78,10 +78,14 @@ const DECAY_MIN_INTERVAL_MS = 7 * 24 * 3_600 * 1_000
 /** Per-command row limit for the bulk sweep. */
 const DECAY_BATCH_LIMIT = 200
 
-/** Deployment-local Skill attributes; see `anda_brain::skill`. */
+/**
+ * The deployment-local Skill attribute; see `anda_brain::skill`.
+ *
+ * The one piece of bookkeeping no Profile facet has a slot for: the highest
+ * outcome coordinate already counted. `TrialState.basis_seq` is a different
+ * number — where the *trial* opened — so it cannot stand in for this one.
+ */
 const CURSOR_ATTR = 'verdict_cursor'
-const BASIS_ATTR = 'trial_basis'
-const BASIS_N_ATTR = 'trial_basis_n'
 
 // --- watch expiry -----------------------------------------------------------
 
@@ -95,7 +99,7 @@ const BASIS_N_ATTR = 'trial_basis_n'
 export function dueSilenceWatchesCommand(now: string): KipOperation {
   return {
     command:
-      'FIND(?w.id, ?w.name, ?w.attributes, ?w._system.version) WHERE { ' +
+      'FIND(?w.id, ?w.name, ?w.attributes, ?w._system.plane_versions.attributes) WHERE { ' +
       '?w CONCEPT {type: "Watch"} ' +
       'FILTER(?w.attributes.status == "armed") ' +
       'FILTER(?w.attributes.watch_class == "silence") ' +
@@ -136,9 +140,15 @@ export function dueWatches(result: unknown): DueWatch[] {
 }
 
 function readWatch(id: string, name: unknown, attributes: unknown): ArmedWatch {
+  // `Watch.condition` is `string | object` since §5.11 gave the structured
+  // filter a baseline form. A reader that only took the string case would
+  // render a structured condition as the empty string — "this Watch declares
+  // no condition", the one thing a Watch always does.
   const attribute = (key: string): string => {
     const value = isObject(attributes) ? attributes[key] : undefined
-    return typeof value === 'string' ? value : ''
+    if (typeof value === 'string') return value
+    if (value === undefined || value === null) return ''
+    return JSON.stringify(value)
   }
   return {
     id,
@@ -157,20 +167,32 @@ function readWatch(id: string, name: unknown, attributes: unknown): ArmedWatch {
  * Rust sweep makes, for the same reasons. The runtime knows the date passed; it
  * does not know what that means, and recording `defer` on the model's behalf
  * would be fabricating a decision nobody made. **A fired Watch grants nothing.**
+ *
+ * `CLIENT KEY` makes the firing idempotent under concurrent evaluators (§5.11):
+ * two sweeps that saw the same passed deadline resolve to one `watch_fire`
+ * rather than writing two for one silence. The guard names the attributes plane
+ * (§35.1) so a `MnemonicState` sweep over the same Concept cannot hold a Watch
+ * armed past its deadline for a reason having nothing to do with the Watch.
  */
 export function fireWatchCommand(watch: DueWatch, now: string): KipOperation {
   return {
     command: `MUTATE {
   UPDATE :watch
-    EXPECT VERSION :version
     SET ATTRIBUTES { status: "fired", fired_at: :now }
+    EXPECT VERSION :version OF ATTRIBUTES
 
   CREATE ACTIVITY ?fire {
+    CLIENT KEY :fire_key
     SET FIELDS { activity_class: "watch_fire", status: "completed" }
     SET STRUCTURAL { ("inputs", :watch) }
   }
 }`,
-    parameters: { watch: watch.id, version: watch.version, now },
+    parameters: {
+      watch: watch.id,
+      version: watch.version,
+      now,
+      fire_key: `watch_fire:${watch.id}:silence:${watch.watch.due_at}`,
+    },
   }
 }
 
@@ -186,11 +208,62 @@ export interface SkillRow {
   version: number
   status: SkillStatus
   task_family: string
+  /** Highest Outcome Evidence `space_seq` already counted into the tallies. */
   cursor: number
-  basis: number | undefined
+  /** `TrialState` (§6.5) — the basis an open trial is measured against. */
+  trial: TrialBasis | undefined
+  /** `GradingState` (§6.2) — linked graded outcomes only. */
   success_count: number
   failure_count: number
   graded_count: number
+}
+
+/**
+ * The recorded comparison basis of an open trial (Profile §6.5).
+ *
+ * Stored as tallies rather than as the rate they imply: a verdict whose basis
+ * was only ever a rounded number cannot be recomputed, and rule 2 asks for the
+ * comparison to be recoverable rather than merely rememberable.
+ */
+export interface TrialBasis {
+  /** The `space_seq` the trial opened at. */
+  basis_seq: number
+  /** The family's outcomes up to `basis_seq` that were *not* linked here. */
+  baseline_success: number
+  baseline_failure: number
+  baseline_graded: number
+  /** Linked graded outcomes the rule needs before it will decide. */
+  quota: number
+}
+
+/**
+ * The rate the family was running at without this Skill, or `undefined` when
+ * nothing in the baseline came out one way or the other.
+ *
+ * An empty baseline is an honest `undefined`, not a zero: a family this Skill
+ * is the first to be tried in has no "how things were going", and reading that
+ * as 0.0 would let any success at all clear the bar.
+ */
+export function baselineRate(trial: TrialBasis): number | undefined {
+  return successRate(trial.baseline_success, trial.baseline_failure)
+}
+
+/**
+ * The whole family's graded outcomes up to a coordinate, linked or not.
+ *
+ * Read as one grouped aggregate rather than as a page of rows: the baseline is
+ * a count over a stream that may be far larger than any window this pass would
+ * read, and a truncated baseline would quietly become a comparison against the
+ * most recent few runs.
+ */
+export interface FamilyTally {
+  success: number
+  failure: number
+  graded: number
+}
+
+export function emptyFamilyTally(): FamilyTally {
+  return { success: 0, failure: 0, graded: 0 }
 }
 
 /** A tally over one window of Outcome Evidence. */
@@ -222,7 +295,8 @@ export interface Verdict {
   /** `undefined` when the Skill stays where it is and only its tallies move. */
   transition: SkillStatus | undefined
   rationale: string
-  basis: number | undefined
+  /** The `TrialState` to write when this verdict opens (or re-opens) a trial. */
+  trial: TrialBasis | undefined
 }
 
 /**
@@ -230,31 +304,52 @@ export interface Verdict {
  *
  * Mirrors `anda_brain::skill::decide` decision for decision. Profile §14 rule 1:
  * "the Brain proposes, compiles, and narrates; it never promotes."
+ *
+ * `family` is the whole stream up to the window's end, read only to build a
+ * baseline when a trial opens: the baseline is the family minus this Skill's
+ * own linked outcomes (§6.5).
  */
-export function decide(skill: SkillRow, window: Tally): Verdict | undefined {
+export function decide(
+  skill: SkillRow,
+  window: Tally,
+  family: FamilyTally,
+): Verdict | undefined {
   if (window.graded === 0) return undefined
 
   const success = skill.success_count + window.success
   const failure = skill.failure_count + window.failure
   const graded = skill.graded_count + window.graded
   const rate = successRate(success, failure)
-  const basis = skill.basis ?? 0
+  // Only meaningful where a trial opens; built here so every arm that opens one
+  // records the same baseline for the same window.
+  const opening: TrialBasis = {
+    basis_seq: window.cursor,
+    baseline_success: Math.max(0, family.success - success),
+    baseline_failure: Math.max(0, family.failure - failure),
+    baseline_graded: Math.max(0, family.graded - graded),
+    quota: TRIAL_MIN_OUTCOMES,
+  }
+  const trial = skill.trial ?? opening
+  const basis = baselineRate(trial) ?? 0
+  const quota = Math.max(1, trial.quota)
   const tallyOnly = (why: string): Verdict => ({
     transition: undefined,
-    rationale: `${why}: ${success} success / ${failure} failure over ${graded} graded under \`${skill.task_family}\``,
-    basis: undefined,
+    rationale: `${why}: ${success} success / ${failure} failure over ${graded} linked graded under \`${skill.task_family}\``,
+    trial: undefined,
   })
 
   switch (skill.status) {
-    // A trial opens as soon as the stream produces anything, and records what
-    // the family was already running at — that basis is what makes the later
-    // verdict comparative rather than absolute (rule 2).
-    case 'proposed':
+    // A trial opens as soon as an attributed outcome arrives, and records what
+    // the rest of the family was already running at — that baseline is what
+    // makes the later verdict comparative rather than absolute (rule 2).
+    case 'proposed': {
+      const openingRate = baselineRate(opening)
       return {
         transition: 'trialed',
-        rationale: `trial opened on ${window.graded} graded outcome(s) under \`${skill.task_family}\`; basis ${rate === undefined ? 'none' : rate.toFixed(3)}`,
-        basis: rate,
+        rationale: `trial opened on ${window.graded} linked graded outcome(s) under \`${skill.task_family}\`; baseline ${openingRate === undefined ? 'none' : openingRate.toFixed(3)} over ${opening.baseline_graded} unlinked outcome(s)`,
+        trial: opening,
       }
+    }
 
     case 'trialed': {
       // The Profile's one sanctioned asymmetry, and it favours demotion.
@@ -262,44 +357,46 @@ export function decide(skill: SkillRow, window: Tally): Verdict | undefined {
         return {
           transition: 'revoked',
           rationale: `revoked on a high-severity matching-condition failure (magnitude >= ${HIGH_SEVERITY}) under \`${skill.task_family}\``,
-          basis: undefined,
+          trial: undefined,
         }
       }
-      if (rate === undefined || graded < TRIAL_MIN_OUTCOMES) {
+      if (rate === undefined || graded < quota) {
         return tallyOnly('trial still gathering outcomes')
       }
       if (rate >= basis + VERDICT_MARGIN) {
         return {
           transition: 'adopted',
-          rationale: `adopted: ${rate.toFixed(3)} over ${graded} graded outcome(s) beats the recorded basis ${basis.toFixed(3)} by at least ${VERDICT_MARGIN}`,
-          basis: undefined,
+          rationale: `adopted: ${rate.toFixed(3)} over ${graded} linked graded outcome(s) beats the recorded baseline ${basis.toFixed(3)} by at least ${VERDICT_MARGIN}`,
+          trial: undefined,
         }
       }
       if (rate <= basis - VERDICT_MARGIN) {
         return {
           transition: 'revoked',
-          rationale: `revoked: ${rate.toFixed(3)} over ${graded} graded outcome(s) trails the recorded basis ${basis.toFixed(3)} by at least ${VERDICT_MARGIN}`,
-          basis: undefined,
+          rationale: `revoked: ${rate.toFixed(3)} over ${graded} linked graded outcome(s) trails the recorded baseline ${basis.toFixed(3)} by at least ${VERDICT_MARGIN}`,
+          trial: undefined,
         }
       }
-      return tallyOnly('trial inconclusive against its basis')
+      return tallyOnly('trial inconclusive against its baseline')
     }
 
     // Adoption is provisional: the stream keeps grading, and a rate that falls
-    // back demotes to a new trial rather than to nothing (rule 4).
+    // back demotes to a new trial rather than to nothing (rule 4). The re-trial
+    // writes a fresh `TrialState`, because the baseline it will be judged
+    // against is the family as it stands now.
     case 'adopted': {
       if (window.severeFailure) {
         return {
           transition: 'revoked',
           rationale: `revoked: a high-severity matching-condition failure under \`${skill.task_family}\` does not wait for a re-verdict`,
-          basis: undefined,
+          trial: undefined,
         }
       }
-      if (rate !== undefined && graded >= TRIAL_MIN_OUTCOMES && rate < basis) {
+      if (rate !== undefined && graded >= quota && rate < basis) {
         return {
           transition: 'trialed',
-          rationale: `demoted to re-trial: ${rate.toFixed(3)} has fallen back to its pre-adoption basis ${basis.toFixed(3)}`,
-          basis: rate,
+          rationale: `demoted to re-trial: ${rate.toFixed(3)} has fallen back to its pre-adoption baseline ${basis.toFixed(3)}`,
+          trial: opening,
         }
       }
       return tallyOnly('adoption still holding')
@@ -309,21 +406,22 @@ export function decide(skill: SkillRow, window: Tally): Verdict | undefined {
     case 'revoked':
       return {
         transition: 'trialed',
-        rationale: `re-entry: ${window.graded} new graded outcome(s) under \`${skill.task_family}\` open a fresh trial`,
-        basis: rate,
+        rationale: `re-entry: ${window.graded} new linked graded outcome(s) under \`${skill.task_family}\` open a fresh trial`,
+        trial: opening,
       }
   }
 }
 
 /** The Skills this Space holds, with the state the rule needs. */
 export function skillsCommand(): KipOperation {
-  // The facet is projected by name, not as the whole `facets` object: a
+  // Each facet is projected by name, not as the whole `facets` object: a
   // projected `?s.facets` comes back keyed by full schema ref, and a reader
   // looking up the local name would silently find nothing and grade every
   // Skill from zero.
   return {
     command:
-      'FIND(?s.id, ?s.name, ?s.attributes, ?s.facets["SkillUtility"], ?s._system.version) ' +
+      'FIND(?s.id, ?s.name, ?s.attributes, ?s.facets["GradingState"], ' +
+      '?s.facets["TrialState"], ?s._system.plane_versions.attributes) ' +
       `WHERE { ?s CONCEPT {type: "Skill"} } LIMIT ${SKILL_SCAN_LIMIT}`,
   }
 }
@@ -340,12 +438,12 @@ export function skillRows(result: unknown): SkillRow[] {
   const rows: SkillRow[] = []
   for (const row of result) {
     if (!Array.isArray(row)) continue
-    const [id, name, attributes, utility, version] = row
+    const [id, name, attributes, grading, trialState, version] = row
     if (typeof id !== 'string' || typeof version !== 'number') continue
     const attribute = (key: string): unknown =>
       isObject(attributes) ? attributes[key] : undefined
     const tally = (key: string): number => {
-      const value = isObject(utility) ? utility[key] : undefined
+      const value = isObject(grading) ? grading[key] : undefined
       return typeof value === 'number' ? value : 0
     }
     const taskFamily = attribute('task_family')
@@ -353,7 +451,6 @@ export function skillRows(result: unknown): SkillRow[] {
     if (typeof taskFamily !== 'string' || taskFamily === '') continue
     if (typeof status !== 'string' || !SKILL_STATUSES.includes(status as SkillStatus)) continue
     const cursor = attribute(CURSOR_ATTR)
-    const basis = attribute(BASIS_ATTR)
     rows.push({
       id,
       name: typeof name === 'string' ? name : '',
@@ -361,7 +458,7 @@ export function skillRows(result: unknown): SkillRow[] {
       status: status as SkillStatus,
       task_family: taskFamily,
       cursor: typeof cursor === 'number' ? cursor : 0,
-      basis: typeof basis === 'number' ? basis : undefined,
+      trial: readTrialState(trialState),
       success_count: tally('success_count'),
       failure_count: tally('failure_count'),
       graded_count: tally('graded_count'),
@@ -371,21 +468,116 @@ export function skillRows(result: unknown): SkillRow[] {
 }
 
 /**
- * The Outcome Evidence for one task family that this Skill has not counted.
+ * Reads a `TrialState` facet into the basis a verdict compares against.
+ *
+ * `basis_seq` is the one member the Profile makes required, so a facet without
+ * it is a trial nobody opened and answers `undefined` — the next verdict then
+ * opens one properly instead of judging against zeroes it invented.
+ */
+function readTrialState(facet: unknown): TrialBasis | undefined {
+  if (!isObject(facet)) return undefined
+  const count = (key: string): number => {
+    const value = facet[key]
+    return typeof value === 'number' ? value : 0
+  }
+  if (typeof facet.basis_seq !== 'number') return undefined
+  const quota = facet.quota
+  return {
+    basis_seq: facet.basis_seq,
+    baseline_success: count('baseline_success_count'),
+    baseline_failure: count('baseline_failure_count'),
+    baseline_graded: count('baseline_graded_count'),
+    quota: typeof quota === 'number' && quota > 0 ? quota : TRIAL_MIN_OUTCOMES,
+  }
+}
+
+/**
+ * The Outcome Evidence **linked to a decision that applied this Skill** and not
+ * yet counted — the treatment set (Profile §8.1, §14 rule 7).
+ *
+ * The two hops are the attribution, and neither is optional. An instrument
+ * writes an `outcome_observation` Activity naming the `action_gate` decision it
+ * observed among its `inputs` and the Outcome Evidence among its `outputs`; the
+ * gate names the Skill it applied among its own `inputs`. Joining on
+ * `task_family` alone would let one Skill be promoted by another Skill's runs,
+ * which is the failure rule 7 exists to name.
  *
  * The cursor is a Space sequence coordinate: without it a replayed pass would
  * count the same run twice and promote on arithmetic rather than evidence.
  */
-export function outcomesCommand(taskFamily: string, after: number): KipOperation {
+export function outcomesCommand(
+  skill: string,
+  taskFamily: string,
+  after: number,
+): KipOperation {
   return {
     command:
       'FIND(?e.id, ?e._system.space_seq, ?e.facets["OutcomeRecord"]) WHERE { ' +
+      '?gate ACTIVITY {activity_class: "action_gate"} ' +
+      'STRUCTURAL (?gate, "inputs", :skill) ' +
+      '?obs ACTIVITY {activity_class: "outcome_observation"} ' +
+      'STRUCTURAL (?obs, "inputs", ?gate) ' +
       '?e EVIDENCE {evidence_class: "outcome"} ' +
+      'STRUCTURAL (?obs, "outputs", ?e) ' +
       'FILTER(?e.facets["OutcomeRecord"].task_family == :family) ' +
       'FILTER(?e._system.space_seq > :after) ' +
       `} ORDER BY ?e._system.space_seq LIMIT ${OUTCOME_WINDOW}`,
-    parameters: { family: taskFamily, after },
+    parameters: { skill, family: taskFamily, after },
   }
+}
+
+/**
+ * The whole family's graded outcomes up to a coordinate — the stream a trial's
+ * baseline is drawn from (Profile §6.5).
+ *
+ * One grouped aggregate (§44.6) rather than a page of rows. It counts the
+ * linked outcomes too; the caller subtracts this Skill's own, which is cheaper
+ * and more exact than asking the engine for a negation.
+ */
+export function familyTallyCommand(taskFamily: string, upto: number): KipOperation {
+  return {
+    command:
+      'FIND(?e.facets["OutcomeRecord"].outcome_status, COUNT(?e)) WHERE { ' +
+      '?e EVIDENCE {evidence_class: "outcome"} ' +
+      'FILTER(?e.facets["OutcomeRecord"].task_family == :family) ' +
+      'FILTER(?e._system.space_seq <= :upto) ' +
+      '}',
+    parameters: { family: taskFamily, upto },
+  }
+}
+
+/**
+ * Reads the grouped family aggregate.
+ *
+ * `unknown` is not a grade, so it is counted nowhere — the same rule the window
+ * tally applies, because a baseline graded on a different vocabulary than the
+ * treatment set is not a comparison.
+ */
+export function familyTally(result: unknown): FamilyTally {
+  const family = emptyFamilyTally()
+  if (!Array.isArray(result)) return family
+  for (const row of result) {
+    if (!Array.isArray(row)) continue
+    const [status, count] = row
+    if (typeof count !== 'number') continue
+    switch (status) {
+      case 'success':
+        family.success += count
+        family.graded += count
+        break
+      case 'failure':
+        family.failure += count
+        family.graded += count
+        break
+      case 'partial':
+      case 'aborted':
+        family.graded += count
+        break
+      default:
+        break
+    }
+  }
+  return family
 }
 
 /**
@@ -435,11 +627,19 @@ export function tally(result: unknown): Tally {
 /**
  * Writes one verdict: the guarded transition and its provenance, atomically.
  *
- * `inputs` is the graded Outcome Evidence and `outputs` is the Skill it moved
- * (Profile §12) — the other way round would read as though the Skill caused the
- * runs that graded it. `parameters_digest` pins rule identity and comparison
- * basis, because `Activity` is a Core kind whose `SET FIELDS` takes only Core
- * fields and because that is where the Profile says to put them.
+ * `inputs` is the linked Outcome Evidence and `outputs` is the Skill it moved
+ * (Profile §9) — the other way round would read as though the Skill caused the
+ * runs that graded it. `parameters_digest` pins rule identity and the window,
+ * because `Activity` is a Core kind whose `SET FIELDS` takes only Core fields
+ * and because that is where the Profile says to put them; the basis lives on
+ * the Skill's own `TrialState`.
+ *
+ * Three facets, three jobs (§6.1, §6.2, §6.5): `GradingState` takes the tallies
+ * of what happened, `MnemonicState.utility` takes the revised bet on what will,
+ * and `TrialState` — only when this verdict opens a trial — takes what the next
+ * one will measure against. The 2.0 draft carried all three in one
+ * `SkillUtility` facet; splitting them is what stops a tally from reading as a
+ * forecast.
  */
 export function verdictCommand(
   skill: SkillRow,
@@ -451,13 +651,16 @@ export function verdictCommand(
   const success = skill.success_count + window.success
   const failure = skill.failure_count + window.failure
   const graded = skill.graded_count + window.graded
-  // Procedural standing, never truth and never permission.
+  // The revised admission bet: the observed share of decided linked runs that
+  // worked. Procedural standing, never truth and never permission.
   const utility = successRate(success, failure) ?? 0
 
-  const basisForDigest = verdict.basis ?? skill.basis
+  const basis = verdict.trial ?? skill.trial
+  const basisRate = basis === undefined ? undefined : baselineRate(basis)
   const digest =
     `rule=${VERDICT_RULE} family=${skill.task_family} ` +
-    `basis=${basisForDigest === undefined ? 'none' : basisForDigest.toFixed(3)} ` +
+    `basis_seq=${basis === undefined ? 'none' : basis.basis_seq} ` +
+    `baseline=${basisRate === undefined ? 'none' : basisRate.toFixed(3)} ` +
     `window=(${skill.cursor},${window.cursor}] ` +
     `tally=${success}s/${failure}f/${graded}g verdict=${skill.status}->${status}`
 
@@ -473,12 +676,29 @@ export function verdictCommand(
     now,
     digest,
   }
-  let basisAssignment = ''
-  if (verdict.basis !== undefined) {
-    parameters.basis = verdict.basis
-    parameters.basis_n = window.graded
-    basisAssignment = `, ${BASIS_ATTR}: :basis, ${BASIS_N_ATTR}: :basis_n`
+  // `TrialState` is rewritten only by a verdict that opens a trial (§6.5); a
+  // verdict that decides one leaves the basis it was decided against standing,
+  // so the decision stays checkable after the fact.
+  let trialState = ''
+  if (verdict.trial !== undefined) {
+    parameters.basis_seq = verdict.trial.basis_seq
+    parameters.b_success = verdict.trial.baseline_success
+    parameters.b_failure = verdict.trial.baseline_failure
+    parameters.b_graded = verdict.trial.baseline_graded
+    parameters.quota = verdict.trial.quota
+    parameters.rule = VERDICT_RULE
+    trialState = `
+    SET FACET "TrialState" {
+      opened_at: :now,
+      basis_seq: :basis_seq,
+      baseline_success_count: :b_success,
+      baseline_failure_count: :b_failure,
+      baseline_graded_count: :b_graded,
+      quota: :quota,
+      rule_id: :rule
+    }`
   }
+
   const inputs = window.evidence
     .map((id, index) => {
       parameters[`e${index}`] = id
@@ -489,15 +709,15 @@ export function verdictCommand(
   return {
     command: `MUTATE {
   UPDATE :skill
-    EXPECT VERSION :version
-    SET ATTRIBUTES { status: :status, ${CURSOR_ATTR}: :cursor${basisAssignment} }
-    SET FACET "SkillUtility" {
-      utility: :utility,
+    SET ATTRIBUTES { status: :status, ${CURSOR_ATTR}: :cursor }
+    SET FACET "GradingState" {
       success_count: :success,
       failure_count: :failure,
       graded_count: :graded,
       last_verdict_at: :now
     }
+    SET FACET "MnemonicState" { utility: :utility }${trialState}
+    EXPECT VERSION :version OF ATTRIBUTES
 
   CREATE ACTIVITY ?verdict {
     SET FIELDS {
@@ -561,7 +781,7 @@ export function decayHorizon(nowMs: number): number {
 export function watchesCommand(status: string): KipOperation {
   return {
     command:
-      'FIND(?w.id, ?w.name, ?w.attributes, ?w._system.version) WHERE { ' +
+      'FIND(?w.id, ?w.name, ?w.attributes, ?w._system.plane_versions.attributes) WHERE { ' +
       '?w CONCEPT {type: "Watch"} ' +
       'FILTER(?w.attributes.status == :status) ' +
       `} ORDER BY ?w.attributes.due_at LIMIT ${WATCH_SWEEP_LIMIT}`,

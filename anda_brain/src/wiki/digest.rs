@@ -808,7 +808,8 @@ impl WikiDigest {
                 anda_kip::execute_request(self.memory.nexus().as_ref(), &retract_request(fact))
                     .await;
             if kip::succeeded(&response) {
-                retracted += usize::try_from(kip::changed(&response, "retract")).unwrap_or(0);
+                retracted +=
+                    usize::try_from(kip::transitioned(&response, "retracted")).unwrap_or(0);
             } else {
                 log::warn!(
                     target: "brain",
@@ -1452,7 +1453,7 @@ fn retract_request(fact: &DigestedFact) -> Request {
         ("self_key".to_string(), json!(SELF_ACTOR_KEY)),
     ]);
     kip::request_with(
-        r#"RETRACT ASSERTION ?a
+        r#"TRANSITION ?a TO "retracted"
 WHERE {
   ?s CONCEPT {type: :st, key: :sn}
   ?o CONCEPT {type: :ot, key: :on}
@@ -1627,7 +1628,10 @@ mod tests {
         let retract = retract_request(&facts[0]);
         retract.validate().unwrap();
         let command = retract.operations[0].command.clone().unwrap();
-        assert!(command.starts_with("RETRACT ASSERTION ?a"), "{command}");
+        assert!(
+            command.starts_with(r#"TRANSITION ?a TO "retracted""#),
+            "{command}"
+        );
         assert!(command.contains("asserted_by: ?self"), "{command}");
     }
 

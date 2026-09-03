@@ -175,6 +175,80 @@ of the Rust one:
 - No data migration: `kip-do` never reached production, so no Durable Object
   holds 1.x data and the Worker starts clean.
 
+### Changed — re-synced to KIP 2.0 `793af73` (`anda-db` `d092cae`…`bb27dc0`)
+
+Upstream collapsed six lifecycle statements into one, gave the Change Envelope
+its own schema, and — the change with the most reach here — rebuilt how a Skill
+is graded. Both deployments move together; the rule identity is shared, so a
+Skill adopted on one engine and revoked on the other would make `VERDICT_RULE`
+a lie.
+
+- **One `TRANSITION`, and the Formation gate now splits on state.** `RETRACT
+  ASSERTION`, `SUPERSEDE ASSERTION`, `CORRECT EVIDENCE`, `TRANSITION ACTIVITY`,
+  `ARCHIVE` and `TOMBSTONE` are one statement: `TRANSITION target TO "state"`
+  (§52.5). Formation used to be separated from custody by which verbs it could
+  name, and one statement now carries both — so the gate reads the state
+  instead. `retracted`, `superseded`, `corrected` and the four Activity statuses
+  pass; `archived` and `tombstoned` do not. A state written as a `:parameter` is
+  resolved against the request's own bindings and **refused when it cannot be**,
+  because otherwise the collapse would have handed an untrusted conversation a
+  binding-shaped way to tombstone. `EXPECT STATE` is gone — a move from the
+  wrong state fails `InvalidLifecycleTransition` — and `EXPECT VERSION` is now
+  the trailing guard, which the settlement writes as `OF ATTRIBUTES` so a
+  `MnemonicState` sweep over the same Concept cannot spoil a Watch fire or a
+  Skill verdict it never touched.
+- **An outcome grades a Skill only if something links it to one.** Profile §14
+  rule 7 — *attribution before counting*: the treatment set is the Outcome
+  Evidence reachable through an `outcome_observation` Activity that names an
+  `action_gate` decision, where that gate names the Skill among its `inputs`. An
+  outcome that merely shares the `task_family` is now the **baseline**, never a
+  grade, so two Skills in one family are judged by their own runs rather than by
+  each other's. The verdict reads the linked window and one grouped aggregate
+  over the family (§44.6, which both engines gained in this range), and the
+  difference is the baseline it records.
+- **`SkillUtility` split into three facets.** `GradingState` holds the tallies,
+  `TrialState` the recorded basis of an open trial — the coordinate it opened
+  at, the family's tallies excluding this Skill, the quota of linked outcomes,
+  and the rule that will decide — and `MnemonicState.utility` the admission bet,
+  revised by verdicts. One facet holding all three is how a record of what
+  happened starts reading as a forecast. The basis moved off two deployment-local
+  attributes (`trial_basis`, `trial_basis_n`) onto `TrialState`, so a verdict is
+  recomputable from state alone; `verdict_cursor` stays, because no Profile
+  facet has a slot for "how far I have counted". `VERDICT_RULE` is
+  `anda-brain/skill-verdict@2` in both deployments.
+- **A Change Envelope entry is `{op, kind, id, state, refs, touched, planes}`**
+  (§36.1). `TRANSITION` reports `op: "lifecycle"` for all nine states, so
+  counting the op no longer says what happened: `kip::transitioned(response,
+  "retracted")` reads `state.to`, and the Worker's `retired` count does the
+  same. `set_retention` is spelled `retention`. `snapshot_seq` and `status`
+  moved into the namespaced extension the schema leaves room for.
+- **`ingest.evidence[].source_actor` is an element reference**, `{id}` or
+  `{type, key}`, never a name (§71.1). The Worker's own ingest types are now
+  aliases of the engine's rather than local restatements — a local copy would
+  have gone on compiling while meaning something the engine refuses.
+- **A silence Watch fires idempotently.** The `watch_fire` Activity carries
+  `CLIENT KEY watch_fire:<watch id>:silence:<due_at>` (§5.11), so two evaluators
+  that saw the same passed deadline resolve to one firing. `Watch.condition` is
+  `string | object` now that §5.11 gave the structured filter a baseline form;
+  both deployments carry an object condition through as compact JSON rather than
+  rendering it as the empty string, which would have read as "this Watch
+  declares no condition".
+- **`declare_memory_symbols` refuses a Core element kind as a Concept type.**
+  §20.13 forbids a package from shadowing one, and Core exports no Concept types
+  at all — so `LIST TYPES` never reports `Assertion`, the borrowed set could not
+  catch it, and a model proposing it would have been refused at *package
+  installation*, taking the whole publish down and leaving the Space unable to
+  grow its vocabulary again. Refused at the tool now, where the answer is one
+  rejected name.
+- **What did not change, and why it is worth saying.** The silence sweep still
+  does not prove it has consumed the Change Stream through the coordinate
+  current at `due_at`, which §5.11 now asks of an evaluator before it may
+  conclude silence. The delta half of Watch evaluation belongs to the
+  maintenance model here, and nothing records how far that has read — so the
+  guard would need runtime delta matching against the new structured condition,
+  which is a feature rather than a sync. The window it leaves is a silence
+  Watch firing while a matching change waits for the next maintenance cycle.
+
 ### Changed — re-synced to KIP 2.0 `40e655f`
 
 `anda-db` moved the two engines onto the Specification below the syntax and

@@ -32,7 +32,7 @@ Fix what is wrong, without falsifying what happened:
 
 - Missing memory → write it, in one more atomic `MUTATE`.
 - A claim you attributed or worded wrongly → a **new** Assertion with `SUPERSEDING` the old one. Never `UPDATE` an Assertion; the engine refuses it, and rewriting a stance would make the record disagree with the conversation it came from.
-- Wrong Evidence → `CORRECT EVIDENCE :old BY :new`, never an edit in place.
-- Something that should not have been stored at all → `TOMBSTONE`, and say so in your output.
+- Wrong Evidence → `TRANSITION :old TO "corrected" BY :new`, never an edit in place.
+- Something that should not have been stored at all → say so in your output. `TRANSITION ... TO "tombstoned"` is maintenance's, not yours.
 
 Nothing here is repaired by making the past less true.

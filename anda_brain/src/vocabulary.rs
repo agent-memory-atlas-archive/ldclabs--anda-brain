@@ -348,6 +348,15 @@ pub fn is_type_name(name: &str) -> bool {
     name.len() <= MAX_SYMBOL_CHARS
         && name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
         && name.chars().all(|c| c.is_ascii_alphanumeric())
+        // §20.13: a package MUST NOT define a symbol that shadows a reserved
+        // Core symbol name. Core exports the five element kinds and no Concept
+        // types at all, so `LIST TYPES` never reports them and the borrowed set
+        // cannot catch this one — a model proposing `Assertion` would pass every
+        // other check here and be refused at *package installation*, which
+        // takes the whole publish down and leaves the Space unable to grow its
+        // vocabulary again. Refused here instead, where the answer is one
+        // rejected name.
+        && !anda_kip::CORE_ELEMENT_KINDS.contains(&name)
 }
 
 /// A predicate name: snake_case, starting with a lowercase letter.
@@ -589,6 +598,19 @@ mod tests {
             vocabulary.predicates,
             BTreeSet::from(["fine_one".to_string()])
         );
+    }
+
+    #[test]
+    fn a_core_kind_is_not_a_concept_type_this_package_may_declare() {
+        // §20.13: a package MUST NOT shadow a reserved Core symbol name. Core
+        // exports no Concept types, so `LIST TYPES` never reports the five
+        // element kinds and the borrowed set cannot catch this. Refused here
+        // rather than at package installation, where it would take the whole
+        // publish down and leave the Space unable to grow its vocabulary at all.
+        let mut vocabulary = MemoryVocabulary::default();
+        let rejected = vocabulary.extend(["Assertion", "Evidence", "Project"], []);
+        assert_eq!(rejected, vec!["Assertion", "Evidence"]);
+        assert_eq!(vocabulary.types, BTreeSet::from(["Project".to_string()]));
     }
 
     #[test]

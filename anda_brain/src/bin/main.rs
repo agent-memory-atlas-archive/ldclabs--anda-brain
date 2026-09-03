@@ -2208,7 +2208,7 @@ mod tests {
                     "id": "pref",
                     "probe": {
                       "kip": "2.0",
-                      "operations": [{"command": "TOMBSTONE :target"}],
+                      "operations": [{"command": "TRANSITION :target TO \"tombstoned\""}],
                       "parameters": {"target": "C-1"}
                     }
                   }]

@@ -316,11 +316,33 @@ export function activeVocabulary(nexus: CognitiveNexus): SchemaPackage | null {
  * `medical device` would otherwise become three types meaning one thing — and,
  * unlike a 1.x graph node, a published symbol cannot be tidied away.
  */
+/**
+ * The Core element kinds, which a package may not shadow (§20.13).
+ *
+ * Mirrors `anda_kip::CORE_ELEMENT_KINDS`, spelled here because `@ldclabs/kip-do`
+ * does not re-export it from its root. Five names fixed by the Core package;
+ * they do not move.
+ */
+const CORE_ELEMENT_KINDS: readonly string[] = [
+  'Concept',
+  'Proposition',
+  'Assertion',
+  'Evidence',
+  'Activity',
+]
+
 export function isTypeName(name: string): boolean {
   return (
     name.length > 0 &&
     name.length <= MAX_SYMBOL_CHARS &&
-    /^[A-Z][A-Za-z0-9]*$/.test(name)
+    /^[A-Z][A-Za-z0-9]*$/.test(name) &&
+    // Core exports the element kinds and no Concept types at all, so
+    // `LIST TYPES` never reports them and the borrowed set cannot catch this.
+    // A model proposing `Assertion` would pass every other check and be refused
+    // at *package installation*, taking the whole publish down and leaving the
+    // Space unable to grow its vocabulary again. Refused here, where the answer
+    // is one rejected name.
+    !CORE_ELEMENT_KINDS.includes(name)
   )
 }
 

@@ -159,6 +159,7 @@ dependencies = [
  "serde_json",
  "sha3",
  "tokio",
+ "unicode-normalization",
 ]
 
 [[package]]

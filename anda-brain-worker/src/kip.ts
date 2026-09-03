@@ -20,6 +20,8 @@ import {
   type JsonMap,
   type KipResult,
   type MetaCommand,
+  type IngestContext,
+  type IngestEvidence,
   type MutationClause,
   type Outcome,
   type Scalar,
@@ -66,19 +68,18 @@ const EVIDENCE_CLASS: Record<string, string> = {
 }
 
 /** One Evidence record for the runtime to mint inside the statement (§71.1). */
-export interface IngestedEvidence {
-  key: string
-  evidence_class: string
-  payload: Json
-  observed_at?: string
-  source_actor?: string
-  client_key?: string
-}
+/**
+ * One Evidence record to mint inside the request's transaction scope.
+ *
+ * The engine's own type, not a copy of it. `source_actor` became an element
+ * reference — `{id}` or `{type, key}`, never a name (§71.1, §88.1) — and a
+ * local restatement would have gone on compiling while meaning something the
+ * engine refuses.
+ */
+export type IngestedEvidence = IngestEvidence
 
 /** The `ingest` block of a request envelope. */
-export interface IngestContext {
-  evidence: IngestedEvidence[]
-}
+export type { IngestContext }
 
 /**
  * The observation this formation pass was called on, ready for the runtime to
@@ -95,8 +96,9 @@ export interface IngestContext {
  * batch and to a resend: the first mint wins and the rest resolve to it. Its
  * stability is only as good as `origin` — see `conversationOrigin`.
  *
- * `source_actor` has to name something a reader can follow — an element id or a
- * canonical identity — and `context.counterparty` is a Concept *key*, so it is
+ * `source_actor` has to name something a reader can follow — an element
+ * reference, `{id}` or `{type, key}` — and `context.counterparty` is a Concept
+ * *key* without its type, so it is
  * the caller's job to resolve one and `undefined` is an ordinary answer. This
  * deployment leaves creating the counterparty's Person to the model's own plan,
  * so a first conversation with someone mints Evidence without a source; the
@@ -123,7 +125,7 @@ export function observationIngest(
     client_key: `${origin}:${index + 1}`,
     ...(sourceActor === undefined || message.role !== 'user'
       ? {}
-      : { source_actor: sourceActor }),
+      : { source_actor: { id: sourceActor } }),
   }))
   return { evidence }
 }
@@ -141,7 +143,7 @@ export function claimsIngestKeys(
   operations: readonly KipOperation[],
   ingest: IngestContext,
 ): boolean {
-  const keys = new Set(ingest.evidence.map((entry) => entry.key))
+  const keys = new Set((ingest.evidence ?? []).map((entry) => entry.key))
   return operations.some((operation) =>
     Object.keys(operation.parameters ?? {}).some((name) => keys.has(name)),
   )
@@ -180,12 +182,11 @@ export interface KipExecution {
  * Formation encodes what was observed: Concepts, the Propositions relating
  * them, the Evidence they rest on and the Assertions that take a stance. It
  * also corrects — which in KIP 2.0 is a *new* Assertion plus supersession, so
- * `SUPERSEDE` and `RETRACT` belong here even though they change a claim's
- * standing.
+ * `TRANSITION` belongs here even though it changes a claim's standing.
  *
- * What is missing is deliberate. `UPDATE`, `ARCHIVE`, `TOMBSTONE`, `PURGE` and
- * `MERGE` act on memory in bulk from a selection, and a formation pass reading
- * an untrusted conversation is the last thing that should hold them.
+ * What is missing is deliberate. `UPDATE`, `PURGE` and `MERGE` act on memory in
+ * bulk from a selection, and a formation pass reading an untrusted conversation
+ * is the last thing that should hold them.
  */
 const FORMATION_CLAUSES = new Set([
   'CreateConcept',
@@ -194,10 +195,25 @@ const FORMATION_CLAUSES = new Set([
   'CreateEvidence',
   'CreateAssertion',
   'CreateActivity',
-  'RetractAssertion',
-  'SupersedeAssertion',
-  'CorrectEvidence',
-  'TransitionActivity',
+  'Transition',
+])
+
+/**
+ * The lifecycle states Formation may name (§52.5).
+ *
+ * KIP 2.0 collapsed six lifecycle statements into one `TRANSITION`, so the
+ * split that used to fall between verbs now falls inside one: correcting
+ * cognition stays, removing memory does not. Everything §52.5 registers except
+ * `archived` and `tombstoned`.
+ */
+const FORMATION_TRANSITIONS = new Set([
+  'retracted',
+  'superseded',
+  'corrected',
+  'running',
+  'completed',
+  'failed',
+  'cancelled',
 ])
 
 export function assertOperationBatch(operations: readonly KipOperation[]): void {
@@ -260,8 +276,26 @@ export function assertFormationOperations(operations: readonly KipOperation[]): 
       if (!FORMATION_CLAUSES.has(name)) {
         throw new Error(
           `formation cannot issue ${spelling(name)}; it writes cognition ` +
-            '(CREATE / UPSERT / ENSURE / ASSERT) and corrects it (SUPERSEDE / RETRACT)',
+            '(CREATE / UPSERT / ENSURE / ASSERT) and corrects it ' +
+            '(TRANSITION to retracted / superseded / corrected)',
         )
+      }
+      if ('Transition' in clause) {
+        const state = transitionState(clause.Transition.to, operation.parameters)
+        if (state === undefined) {
+          throw new Error(
+            'formation must write the TRANSITION state as a literal this request ' +
+              'can be read against; a state bound elsewhere cannot be checked ' +
+              'before it runs',
+          )
+        }
+        if (!FORMATION_TRANSITIONS.has(state)) {
+          throw new Error(
+            `formation cannot TRANSITION memory to "${state}"; it corrects ` +
+              'cognition (retracted / superseded / corrected) and runs its own ' +
+              'Activities. Removing memory belongs to maintenance',
+          )
+        }
       }
       assertBoundedSelection(clause, operation.parameters, MAX_MAINTENANCE_SELECTION)
     }
@@ -396,21 +430,20 @@ function outcomeOf(result: KipResult): Outcome | undefined {
 }
 
 /**
- * How many elements a batch changed under the given op.
+ * The lifecycle states that retire an element rather than advance it.
  *
- * A KML outcome is `{handles, changes: [{id, kind, op, version}, …]}`; there is
- * no scalar count, and reporting the whole `changes` length would count the
- * elements one statement touched incidentally.
+ * `TRANSITION` reports one op — `lifecycle` — for nine states, so the op alone
+ * no longer says whether a memory was withdrawn or an Activity simply started
+ * running. §36.1 puts the move in `state.to`, and this is the half of it the
+ * API's `retired` count has always meant.
  */
-function countChangeOps(results: readonly KipResult[]): Record<string, number> {
-  const counts: Record<string, number> = {}
-  for (const result of results) {
-    for (const change of outcomeOf(result)?.changes ?? []) {
-      counts[change.op] = (counts[change.op] ?? 0) + 1
-    }
-  }
-  return counts
-}
+const RETIRING_STATES = new Set([
+  'retracted',
+  'superseded',
+  'corrected',
+  'archived',
+  'tombstoned',
+])
 
 /** What one write produced, in the shape the API has always reported. */
 export function countChanges(results: readonly KipResult[]): {
@@ -420,17 +453,34 @@ export function countChanges(results: readonly KipResult[]): {
   retired: number
   merged: number
 } {
-  const counts = countChangeOps(results)
-  const created = counts.create ?? 0
-  const updated = (counts.update ?? 0) + (counts.transition ?? 0) + (counts.retention ?? 0)
-  const retired =
-    (counts.archive ?? 0) +
-    (counts.tombstone ?? 0) +
-    (counts.retract ?? 0) +
-    (counts.supersede ?? 0) +
-    (counts.correct ?? 0) +
-    (counts.purge ?? 0)
-  const merged = counts.merge ?? 0
+  let created = 0
+  let updated = 0
+  let retired = 0
+  let merged = 0
+  for (const result of results) {
+    for (const change of outcomeOf(result)?.changes ?? []) {
+      switch (change.op) {
+        case 'create':
+          created += 1
+          break
+        case 'update':
+        case 'retention':
+          updated += 1
+          break
+        case 'lifecycle':
+          if (RETIRING_STATES.has(change.state?.to ?? '')) retired += 1
+          else updated += 1
+          break
+        case 'merge':
+          merged += 1
+          break
+        case 'purge':
+        case 'payload_purge':
+          retired += 1
+          break
+      }
+    }
+  }
   return { total: created + updated + retired + merged, created, updated, retired, merged }
 }
 
@@ -547,11 +597,36 @@ function spelling(name: string): string {
 }
 
 /**
+ * The state a `TRANSITION` names, resolving a `:parameter` against the
+ * operation's own bindings.
+ *
+ * `undefined` means the gate cannot know — an unbound parameter, or one bound
+ * to something that is not a string — which the caller treats as a refusal
+ * rather than as permission. Otherwise the collapse into one statement would
+ * have handed Formation a binding-shaped way to tombstone.
+ */
+function transitionState(
+  scalar: Scalar,
+  parameters: JsonMap | undefined,
+): string | undefined {
+  if ('Literal' in scalar) {
+    const literal = scalar.Literal
+    if (typeof literal === 'object' && literal !== null && 'String' in literal) {
+      return literal.String
+    }
+    return undefined
+  }
+  const bound = parameters?.[scalar.Param]
+  return typeof bound === 'string' ? bound : undefined
+}
+
+/**
  * A clause that selects with `WHERE` must say how much it may select.
  *
  * `UPDATE ?e SET ATTRIBUTES {…} WHERE { ?e CONCEPT {} }` and
- * `ARCHIVE ?e WHERE { ?e CONCEPT {} }` are the same hazard wearing two verbs,
- * so the bound is on the selection rather than on `UPDATE` by name.
+ * `TRANSITION ?e TO "archived" WHERE { ?e CONCEPT {} }` are the same hazard
+ * wearing two verbs, so the bound is on the selection rather than on `UPDATE`
+ * by name.
  */
 function assertBoundedSelection(
   clause: MutationClause,
@@ -619,7 +694,8 @@ function assertBoundedMeta(
     // mutation text past the read-only gate is exactly what the gate is for.
     throw new Error('model read plans cannot preview KML')
   }
-  // DESCRIBE, VALIDATE, VERIFY and SNAPSHOT are bounded metadata reads.
+  // DESCRIBE (including `DESCRIBE SNAPSHOT`, which absorbed the standalone
+  // `SNAPSHOT` command), VALIDATE and VERIFY are bounded metadata reads.
 }
 
 function assertLimit(

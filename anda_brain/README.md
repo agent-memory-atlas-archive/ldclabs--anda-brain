@@ -58,8 +58,9 @@ Receives conversation messages and encodes them into structured memory within th
 4. Grounds against existing memory before writing (SEARCH before CREATE).
 5. Encodes it through the `execute_kip` tool, which on this path accepts KQL and
    META in full and only the cognition subset of KML — administering memory in
-   bulk (`UPDATE`, `ARCHIVE`, `TOMBSTONE`, `PURGE`, `MERGE CONCEPT`) is refused
-   to a pass whose whole input is an untrusted conversation.
+   bulk (`UPDATE`, `SET RETENTION`, `PURGE`, `MERGE CONCEPT`, and `TRANSITION`
+   to `archived` or `tombstoned`) is refused to a pass whose whole input is an
+   untrusted conversation.
 
 **Key behaviors:**
 - Sequential processing with automatic queue draining — new conversations are picked up after the current one completes.
@@ -179,18 +180,33 @@ the model: matching a condition written in prose is interpretation, not
 arithmetic.
 
 **The Skill lifecycle is code, not a prompt.** `proposed → trialed → adopted →
-revoked` moves only by deterministic verdict over graded Outcome Evidence under
-the Skill's `task_family` — Profile §14 rule 1: "the Brain proposes, compiles,
-and narrates; it never promotes." Every transition commits as a
-`lifecycle_verdict` Activity citing the Evidence it read, with the rule identity
-and comparison basis pinned in `parameters_digest` so an auditor can re-run it.
-Adoption is comparative (better than the recorded basis, not merely good) and
+revoked` moves only by deterministic verdict over Outcome Evidence — Profile
+§14 rule 1: "the Brain proposes, compiles, and narrates; it never promotes."
+
+Which outcomes count is rule 7, *attribution before counting*: an outcome grades
+a Skill only when it is **linked** to a decision that applied it — an
+`action_gate` Activity naming the Skill among its `inputs`, and the instrument's
+`outcome_observation` Activity naming that gate among its own. An outcome that
+merely shares the `task_family` is the **baseline** the trial is measured
+against, never a grade, so two Skills in one family are judged by their own runs
+rather than by each other's.
+
+Every transition commits as a `lifecycle_verdict` Activity citing the linked
+Evidence it read, with the rule identity pinned in `parameters_digest` and the
+basis on the Skill's own `TrialState` — the coordinate the trial opened at, the
+family's tallies excluding this Skill, and the quota of linked outcomes the rule
+needs — so an auditor can re-run it from state alone. The tallies live in
+`GradingState` and the revised admission bet in `MnemonicState.utility`: a
+record of what happened is not a forecast, and neither is authority.
+
+Adoption is comparative (better than the recorded baseline, not merely good) and
 provisional (a rate that falls back demotes to a re-trial); revocation uses the
 same margin in the other direction, plus the one asymmetry the Profile grants —
 a single high-severity matching-condition failure may revoke. A lifecycle that
 can only acquire cannot tell a habit from a superstition. The model's job is
-§11: compile a `proposed` Skill from contrastive Experience and attach the
-`task_family` that can grade it.
+§11: compile a `proposed` Skill from contrastive Experience, attach the
+`task_family` its baseline comes from, and set the admission bet at
+compilation.
 
 **Retention expiry:** a full settlement also acts on the two clocks that say
 when something should stop being kept, which are not the same clock. An

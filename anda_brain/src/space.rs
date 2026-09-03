@@ -1482,9 +1482,8 @@ LIMIT {WATCH_LIMIT}"#
                     columns
                         .get(2)
                         .and_then(|attributes| attributes.get(name))
-                        .and_then(serde_json::Value::as_str)
+                        .map(crate::types::attribute_text)
                         .unwrap_or_default()
-                        .to_string()
                 };
                 Some(crate::types::ArmedWatch {
                     id: columns
@@ -2157,10 +2156,14 @@ LIMIT {WATCH_LIMIT}"#
 
         for row in skill::skill_rows(result) {
             // One read per Skill rather than one grouped read: the window is
-            // per-family and per-cursor, and a Skill that has never been
-            // graded starts from a different coordinate than one that has.
+            // per-Skill and per-cursor, and a Skill that has never been graded
+            // starts from a different coordinate than one that has.
             let outcomes = self
-                .execute_kip_readonly(skill::outcomes_request(&row.task_family, row.cursor))
+                .execute_kip_readonly(skill::outcomes_request(
+                    &row.id,
+                    &row.task_family,
+                    row.cursor,
+                ))
                 .await;
             let Ok(outcomes) = outcomes else { continue };
             if !kip::succeeded(&outcomes) {
@@ -2176,7 +2179,37 @@ LIMIT {WATCH_LIMIT}"#
             let Some(window) = kip::ok_result(&outcomes).map(skill::tally) else {
                 continue;
             };
-            let Some(verdict) = skill::decide(&row, &window) else {
+            if window.graded == 0 {
+                // Nothing attributed to this Skill since the last verdict, so
+                // there is nothing to judge and no reason to price the family
+                // aggregate below.
+                continue;
+            }
+
+            // The baseline a trial is measured against: the whole family up to
+            // the end of this window, from which `decide` subtracts what was
+            // linked to this Skill (Profile §6.5). Read every pass rather than
+            // only when a trial opens, because which arm of the rule fires is
+            // not known until the tallies are in.
+            let family = self
+                .execute_kip_readonly(skill::family_tally_request(&row.task_family, window.cursor))
+                .await;
+            let Ok(family) = family else { continue };
+            if !kip::succeeded(&family) {
+                log::warn!(
+                    target: "brain",
+                    space_id = self.id,
+                    skill = row.id;
+                    "reading the task family's baseline failed: {}",
+                    kip::error_message(&family)
+                );
+                continue;
+            }
+            let family = kip::ok_result(&family)
+                .map(skill::family_tally)
+                .unwrap_or_default();
+
+            let Some(verdict) = skill::decide(&row, &window, &family) else {
                 // No new graded outcome: an idle stream writes nothing.
                 continue;
             };
@@ -2332,7 +2365,7 @@ LIMIT {WATCH_LIMIT}"#
         if !kip::succeeded(&response) {
             return Err(format!("pin failed: {}", kip::error_message(&response)).into());
         }
-        Ok(kip::changed(&response, "set_retention"))
+        Ok(kip::changed(&response, "retention"))
     }
 
     /// Privacy-grade deletion (plan M6): physically removes entities from
@@ -5248,11 +5281,10 @@ mod tests {
         )
         .await;
 
-        let purge = || KipArgs {
-            command: Some(
-                r#"ARCHIVE ?c WHERE { ?c CONCEPT {type: "Person", key: "victim"} } LIMIT 1"#
-                    .to_string(),
-            ),
+        const ARCHIVE_VICTIM: &str = r#"TRANSITION ?c TO "archived"
+WHERE { ?c CONCEPT {type: "Person", key: "victim"} } LIMIT 1"#;
+        let archive = || KipArgs {
+            command: Some(ARCHIVE_VICTIM.to_string()),
             ..Default::default()
         };
 
@@ -5261,12 +5293,12 @@ mod tests {
             .ctx_for_test(SELF_USER_ID, FormationAgent::NAME)
             .unwrap();
         let out = guarded
-            .call(ctx.child_base("execute_kip").unwrap(), purge(), vec![])
+            .call(ctx.child_base("execute_kip").unwrap(), archive(), vec![])
             .await
             .unwrap();
         assert_eq!(out.is_error, Some(true));
         let refusal = kip::error_message(&out.output);
-        assert!(refusal.contains("ARCHIVE"), "{refusal}");
+        assert!(refusal.contains("archived"), "{refusal}");
 
         // Formation's own writes still go through the same tool.
         let write = guarded
@@ -5290,11 +5322,16 @@ mod tests {
             .ctx_for_test(SELF_USER_ID, MaintenanceAgent::NAME)
             .unwrap();
         let out = guarded
-            .call(ctx.child_base("execute_kip").unwrap(), purge(), vec![])
+            .call(ctx.child_base("execute_kip").unwrap(), archive(), vec![])
             .await
             .unwrap();
         assert_eq!(out.is_error, None, "{:?}", out.output);
-        assert_eq!(kip::changed(&out.output, "archive"), 1, "{:?}", out.output);
+        assert_eq!(
+            kip::transitioned(&out.output, "archived"),
+            1,
+            "{:?}",
+            out.output
+        );
 
         // ... and still refused the two things no plan gets: erasure, and a
         // hold that would block somebody else's. Aimed at a Concept the
@@ -5469,7 +5506,78 @@ mod tests {
         )
         .await;
 
-        async fn grade(space: &Space, outcomes: &[(&str, f64)]) {
+        // The gate below has to name the Skill it applied, and a Structural
+        // Reference names an element, never a key.
+        let skill_id = {
+            let response = space
+                .execute_kip_readonly(kip::request(
+                    r#"FIND(?s.id) WHERE { ?s CONCEPT {type: "Skill", key: "redeploy"} } LIMIT 1"#,
+                ))
+                .await
+                .unwrap();
+            let rows = kip::ok_result(&response).cloned().unwrap_or_default();
+            let row = rows
+                .as_array()
+                .and_then(|rows| rows.first())
+                .cloned()
+                .unwrap_or_default();
+            // A single-projection row may come back bare or as a one-column
+            // array depending on the shape the engine chose; take either.
+            let id = match row.as_array().and_then(|columns| columns.first()) {
+                Some(value) => value.clone(),
+                None => row,
+            };
+            id.as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| panic!("the seeded Skill has an id: {rows}"))
+        };
+
+        // One graded run, attributed the way Profile §8.1 requires: a gate
+        // that names the Skill it applied, and an instrument's observation
+        // that names the gate and the outcome it wrote. Without both hops the
+        // outcome belongs to the family's baseline and grades nothing.
+        async fn grade(space: &Space, skill_id: &str, outcomes: &[(&str, f64)]) {
+            for (status, magnitude) in outcomes {
+                seed_kip(
+                    space,
+                    kip::request_with(
+                        r#"MUTATE {
+  CREATE ACTIVITY ?gate {
+    SET FIELDS { activity_class: "action_gate", status: "completed" }
+    SET FACET "DecisionRecord" { decision: "act", rationale: "redeploy under the compiled Skill" }
+    SET STRUCTURAL { ("inputs", :skill) }
+  }
+  CREATE EVIDENCE ?e {
+    SET FIELDS {
+      evidence_class: "outcome",
+      payload: {instrument: "ci", run: "x"},
+      observed_at: "2026-08-31T00:00:00Z"
+    }
+    SET FACET "OutcomeRecord" {
+      task_family: "deploy",
+      outcome_status: :status,
+      magnitude: :magnitude
+    }
+  }
+  CREATE ACTIVITY ?obs {
+    SET FIELDS { activity_class: "outcome_observation", status: "completed" }
+    SET STRUCTURAL { ("inputs", ?gate) ("outputs", ?e) }
+  }
+}"#,
+                        serde_json::Map::from_iter([
+                            ("skill".to_string(), serde_json::Value::from(skill_id)),
+                            ("status".to_string(), serde_json::Value::from(*status)),
+                            ("magnitude".to_string(), serde_json::Value::from(*magnitude)),
+                        ]),
+                    ),
+                )
+                .await;
+            }
+        }
+
+        /// An outcome in the same family that nobody attributed to the Skill:
+        /// it belongs to the baseline and must never move a lifecycle.
+        async fn unattributed(space: &Space, outcomes: &[(&str, f64)]) {
             for (status, magnitude) in outcomes {
                 seed_kip(
                     space,
@@ -5478,7 +5586,7 @@ mod tests {
   CREATE EVIDENCE ?e {
     SET FIELDS {
       evidence_class: "outcome",
-      payload: {instrument: "ci", run: "x"},
+      payload: {instrument: "ci", run: "other"},
       observed_at: "2026-08-31T00:00:00Z"
     }
     SET FACET "OutcomeRecord" {
@@ -5501,7 +5609,7 @@ mod tests {
         async fn standing(space: &Space) -> (String, f64, u64) {
             let response = space
                 .execute_kip_readonly(kip::request(
-                    r#"FIND(?s.attributes.status, ?s.facets["SkillUtility"].utility, ?s.facets["SkillUtility"].graded_count)
+                    r#"FIND(?s.attributes.status, ?s.facets["MnemonicState"].utility, ?s.facets["GradingState"].graded_count)
 WHERE { ?s CONCEPT {type: "Skill", key: "redeploy"} } LIMIT 1"#,
                 ))
                 .await
@@ -5530,10 +5638,55 @@ WHERE { ?s CONCEPT {type: "Skill", key: "redeploy"} } LIMIT 1"#,
             )
         }
 
-        // A poor first showing opens the trial and records the basis it will
-        // later be judged against — 1 of 3, so 0.333.
+        /// The trial's recorded baseline rate and how many runs it counted.
+        async fn trial_state(space: &Space) -> Option<(f64, u64)> {
+            let response = space
+                .execute_kip_readonly(kip::request(
+                    r#"FIND(?s.facets["TrialState"])
+WHERE { ?s CONCEPT {type: "Skill", key: "redeploy"} } LIMIT 1"#,
+                ))
+                .await
+                .unwrap();
+            let rows = kip::ok_result(&response).cloned().unwrap_or_default();
+            let row = rows.as_array()?.first()?.clone();
+            let facet = match row.as_array().and_then(|columns| columns.first()) {
+                Some(value) => value.clone(),
+                None => row,
+            };
+            let count = |name: &str| facet.get(name).and_then(serde_json::Value::as_u64);
+            let success = count("baseline_success_count")?;
+            let failure = count("baseline_failure_count")?;
+            let graded = count("baseline_graded_count")?;
+            let decided = success + failure;
+            (decided > 0).then(|| (success as f64 / decided as f64, graded))
+        }
+
+        // The family was already running at 1 success in 4 before anybody
+        // tried this Skill. Those runs are nobody's treatment set — they are
+        // what "how things were going" means (§6.5).
+        unattributed(
+            &space,
+            &[
+                ("success", 0.2),
+                ("failure", 0.2),
+                ("failure", 0.2),
+                ("failure", 0.2),
+            ],
+        )
+        .await;
+
+        // Runs nobody attributed to the Skill grade nothing: rule 7 makes the
+        // link the only path from an outcome to a tally.
+        let report = space.settle_skill_lifecycle(now_ms).await;
+        assert_eq!(report.error, None, "{report:?}");
+        assert_eq!(report.graded, 0, "{report:?}");
+        assert_eq!(standing(&space).await.0, "proposed");
+
+        // A poor first showing opens the trial and records the baseline it
+        // will later be judged against — the family's 1 of 4, so 0.250.
         grade(
             &space,
+            &skill_id,
             &[("success", 0.5), ("failure", 0.2), ("failure", 0.2)],
         )
         .await;
@@ -5541,9 +5694,14 @@ WHERE { ?s CONCEPT {type: "Skill", key: "redeploy"} } LIMIT 1"#,
         assert_eq!(report.error, None, "{report:?}");
         assert_eq!(report.transitions, 1, "{report:?}");
         assert_eq!(standing(&space).await.0, "trialed");
+        assert_eq!(
+            trial_state(&space).await,
+            Some((0.25, 4)),
+            "the baseline is the family without this Skill's own runs"
+        );
 
-        // The stream then does better than the basis, over enough runs.
-        grade(&space, &[("success", 0.5); 6]).await;
+        // The stream then does better than that baseline, over enough runs.
+        grade(&space, &skill_id, &[("success", 0.5); 6]).await;
         let report = space.settle_skill_lifecycle(now_ms).await;
         assert_eq!(report.transitions, 1, "{report:?}");
         let (status, utility, graded) = standing(&space).await;
@@ -5560,16 +5718,15 @@ WHERE { ?s CONCEPT {type: "Skill", key: "redeploy"} } LIMIT 1"#,
         // One severe matching-condition failure revokes an adopted Skill
         // without waiting for a re-verdict — the Profile's one sanctioned
         // asymmetry, and it favours demotion.
-        grade(&space, &[("failure", 0.95)]).await;
+        grade(&space, &skill_id, &[("failure", 0.95)]).await;
         let report = space.settle_skill_lifecycle(now_ms).await;
         assert_eq!(report.transitions, 1, "{report:?}");
         assert_eq!(standing(&space).await.0, "revoked");
 
-        // Every move left a recomputable verdict behind.
-        // Every move left a recomputable verdict behind: Profile §12 wants the
-        // graded Evidence as `inputs`, the Skill it moved as `outputs`, and
-        // the rule identity plus comparison basis pinned in
-        // `parameters_digest` so an auditor can re-run it.
+        // Every move left a recomputable verdict behind: Profile §9 wants the
+        // linked Evidence as `inputs`, the Skill it moved as `outputs`, the
+        // rule identity pinned in `parameters_digest`, and the basis on the
+        // Skill's own `TrialState` — so an auditor can re-run it from state.
         let activities = space
             .execute_kip_readonly(kip::request(
                 r#"FIND(?a.parameters_digest) WHERE { ?a ACTIVITY {activity_class: "lifecycle_verdict"} } LIMIT 20"#,
@@ -5583,11 +5740,10 @@ WHERE { ?s CONCEPT {type: "Skill", key: "redeploy"} } LIMIT 1"#,
         for digest in &digests {
             assert!(digest.contains(crate::skill::VERDICT_RULE), "{digest}");
             assert!(digest.contains("window=("), "{digest}");
-            assert!(digest.contains("basis="), "{digest}");
+            assert!(digest.contains("basis_seq="), "{digest}");
+            assert!(digest.contains("baseline="), "{digest}");
         }
 
-        // The Evidence is what the verdict read; the Skill is what it moved.
-        // The other way round would read as though the Skill caused the runs.
         // The Evidence is what the verdict read; the Skill is what it moved.
         // The other way round would read as though the Skill caused the runs
         // that graded it.

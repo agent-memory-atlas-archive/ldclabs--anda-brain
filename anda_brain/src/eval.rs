@@ -3803,7 +3803,9 @@ mod tests {
                             // A mutation as a probe: read-only is decided by
                             // what the command parses to, so the plan check
                             // catches it before a run does.
-                            probe: Some(crate::kip::request(r#"TOMBSTONE :x"#.to_string())),
+                            probe: Some(crate::kip::request(
+                                r#"TRANSITION :x TO "tombstoned""#.to_string(),
+                            )),
                             search_threshold: Some(2.0),
                             search_limit: Some(0),
                             answer_terms: vec![String::new()],

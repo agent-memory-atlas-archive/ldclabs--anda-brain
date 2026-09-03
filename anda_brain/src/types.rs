@@ -687,8 +687,15 @@ pub struct ArmedWatch {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub watch_class: String,
 
-    /// What counts as a matching change. The Profile fixes no condition
-    /// language; this deployment passes whatever was written through.
+    /// What counts as a matching change.
+    ///
+    /// The Profile's baseline form is a structured filter over Change Envelope
+    /// entries — `{element | slot | type, ops, touched, text}` (§5.11) — with a
+    /// plain string as the Brain-interpreted fallback. Carried here as text
+    /// either way: this deployment passes the condition through to the model
+    /// that evaluates it and never interprets it itself, so a structured
+    /// condition travels as its compact JSON rather than as a shape this type
+    /// would have to keep in step with the Profile.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub condition: String,
 
@@ -698,6 +705,22 @@ pub struct ArmedWatch {
     /// When a silence Watch comes due, as written.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub due_at: String,
+}
+
+/// One Watch attribute as text, whatever shape it was written in.
+///
+/// `Watch.condition` is `string | object` since the Profile gave the
+/// structured filter a baseline form (§5.11). A reader that only accepted a
+/// string would render a structured condition as the empty string — which
+/// reads as "this Watch declares no condition", the one thing a Watch always
+/// does. An object comes back as its compact JSON, which is what the model
+/// that evaluates it reads anyway.
+pub fn attribute_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

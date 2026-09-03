@@ -49,9 +49,9 @@ without those siblings will not build.
 - `anda-brain-worker/`: a compact Cloudflare Worker port on `@ldclabs/kip-do`,
   a second and independent KIP 2.0 engine. It shares the invariants below but
   not the code; its capabilities differ (no atomic batch across operations, no
-  semantic search, no `SET RETENTION` and therefore no retention expiry) and
-  `anda-brain-worker/README.md` is the authority on which. Its prompts are
-  vendored under `anda-brain-worker/assets/` and inlined by
+  semantic search, and no retention-expiry sweep — `SET RETENTION` itself the
+  engine has) and `anda-brain-worker/README.md` is the authority on which. Its
+  prompts are vendored under `anda-brain-worker/assets/` and inlined by
   `pnpm run codegen:prompts`.
 - `deploy/`, `anda-brain-demo/`, `anda-brain-openclaw/`, `anda-cli/`: deployment
   and integration material. Do not change these unless the task is explicitly
@@ -151,6 +151,17 @@ confidently repeat things nobody claimed:
   `MnemonicState.memory_strength`, which is accessibility, not truth.
 - Corrections are a new Assertion plus supersession. Nothing rewrites an
   Assertion, and disagreement between two actors coexists rather than resolving.
+  KIP 2.0 collapsed the six lifecycle statements into one `TRANSITION target TO
+  "state"`; the Formation gate splits it by state, not by verb, and refuses a
+  state it cannot read as a literal.
+- An outcome grades a Skill only when it is *linked* to a decision that applied
+  it — an `action_gate` Activity naming the Skill among its `inputs`, and the
+  instrument's `outcome_observation` Activity naming that gate among its own
+  (Profile §8.1, §14 rule 7). An outcome that merely shares the `task_family` is
+  the baseline a trial is measured against, never a grade. Tallies live in
+  `GradingState`, the recorded basis in `TrialState`, the revised bet in
+  `MnemonicState.utility` — three facets because a record is not a forecast and
+  neither is authority.
 - Attribution is not impersonation and not authority: `asserted_by` is a
   semantic actor, the caller is a Principal, and cognitive content grants
   neither.

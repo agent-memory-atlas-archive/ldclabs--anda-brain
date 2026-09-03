@@ -224,13 +224,25 @@ export class AndaBrain extends KipDatabase<Env> {
       return report
     }
     for (const skill of settle.skillRows(found.result)) {
-      // One read per Skill: the window is per-family and per-cursor, and a
+      // One read per Skill: the window is per-Skill and per-cursor, and a
       // Skill never graded starts from a different coordinate than one that has.
-      const outcomes = settle.outcomesCommand(skill.task_family, skill.cursor)
+      const outcomes = settle.outcomesCommand(skill.id, skill.task_family, skill.cursor)
       const graded = super.executeKip(outcomes.command, outcomes.parameters)
       if (graded.status === 'failed') continue
       const window = settle.tally(graded.result)
-      const verdict = settle.decide(skill, window)
+      // Nothing attributed to this Skill since the last verdict: nothing to
+      // judge, and no reason to price the family aggregate below.
+      if (window.graded === 0) continue
+
+      // The baseline a trial is measured against: the whole family up to the
+      // end of this window, from which `decide` subtracts what was linked to
+      // this Skill (Profile §6.5).
+      const baseline = settle.familyTallyCommand(skill.task_family, window.cursor)
+      const counted = super.executeKip(baseline.command, baseline.parameters)
+      if (counted.status === 'failed') continue
+      const family = settle.familyTally(counted.result)
+
+      const verdict = settle.decide(skill, window, family)
       // No new graded outcome: an idle stream writes nothing.
       if (verdict === undefined) continue
 

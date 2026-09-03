@@ -50,7 +50,7 @@ const WATCH_SWEEP_LIMIT: usize = 20;
 pub(crate) fn due_silence_watches_request(now: &str) -> anda_kip::Request {
     kip::request_with(
         format!(
-            r#"FIND(?w.id, ?w.name, ?w.attributes, ?w._system.version)
+            r#"FIND(?w.id, ?w.name, ?w.attributes, ?w._system.plane_versions.attributes)
 WHERE {{
   ?w CONCEPT {{type: "Watch"}}
   FILTER(?w.attributes.status == "armed")
@@ -91,9 +91,8 @@ pub(crate) fn due_watches(result: &Json) -> Vec<DueWatch> {
                 columns
                     .get(2)
                     .and_then(|attributes| attributes.get(name))
-                    .and_then(Json::as_str)
+                    .map(crate::types::attribute_text)
                     .unwrap_or_default()
-                    .to_string()
             };
             Some(DueWatch {
                 watch: ArmedWatch {
@@ -133,22 +132,41 @@ pub(crate) fn due_watches(result: &Json) -> Vec<DueWatch> {
 ///
 /// No outward action of any kind. A fired Watch grants nothing.
 ///
-/// `EXPECT VERSION` is what makes the sweep safe to run beside the maintenance
-/// model: if the model disarmed or re-armed this Watch since the scan, the
-/// write is refused rather than applied over its work.
+/// `CLIENT KEY` is what makes the firing idempotent under concurrent
+/// evaluators (Profile §5.11): the key is `watch_fire:<watch id>:silence:<due
+/// at>`, so a second evaluator that saw the same passed deadline resolves to
+/// the first mint (§52.1) instead of writing a second `watch_fire` for one
+/// silence. The deadline is in the key rather than the wall clock, because two
+/// evaluators firing the same Watch are firing it for the same reason.
+///
+/// `EXPECT VERSION ... OF ATTRIBUTES` is what makes the sweep safe to run
+/// beside the maintenance model: if the model disarmed or re-armed this Watch
+/// since the scan, the write is refused rather than applied over its work.
+/// Guarding the attributes plane rather than the whole element (§35.1) is what
+/// keeps a `MnemonicState` decay sweep over the same Concept from spoiling a
+/// fire it did not touch — a conflict there would leave the Watch armed past
+/// its deadline for a reason having nothing to do with the Watch.
 pub(crate) fn fire_watch_request(watch: &DueWatch, now: &str) -> anda_kip::Request {
     let parameters = Map::from_iter([
         ("watch".to_string(), Json::from(watch.id.as_str())),
         ("version".to_string(), Json::from(watch.version)),
         ("now".to_string(), Json::from(now)),
+        (
+            "fire_key".to_string(),
+            Json::from(format!(
+                "watch_fire:{}:silence:{}",
+                watch.id, watch.watch.due_at
+            )),
+        ),
     ]);
     kip::request_with(
         r#"MUTATE {
   UPDATE :watch
-    EXPECT VERSION :version
     SET ATTRIBUTES { status: "fired", fired_at: :now }
+    EXPECT VERSION :version OF ATTRIBUTES
 
   CREATE ACTIVITY ?fire {
+    CLIENT KEY :fire_key
     SET FIELDS { activity_class: "watch_fire", status: "completed" }
     SET STRUCTURAL { ("inputs", :watch) }
   }
@@ -220,21 +238,58 @@ mod tests {
     }
 
     #[test]
+    fn a_structured_condition_survives_being_read() {
+        // §5.11 gave `condition` a baseline structured form, so it is
+        // `string | object` now. Reading only the string case would render a
+        // structured condition as the empty string — "this Watch declares no
+        // condition", which is the one thing a Watch always does.
+        let rows = json!([[
+            "C-9",
+            "Migration reply",
+            {
+                "watch_class": "silence",
+                "condition": {
+                    "slot": {"subject": "C-1", "predicate": "replied_about"},
+                    "ops": ["create"]
+                },
+                "summary": "Escalate if nothing by Thursday",
+                "due_at": "2026-08-30T00:00:00Z",
+                "status": "armed"
+            },
+            2
+        ]]);
+        let due = due_watches(&rows);
+        assert_eq!(due.len(), 1);
+        assert!(due[0].watch.condition.contains("replied_about"), "{due:?}");
+    }
+
+    #[test]
     fn firing_records_attention_and_grants_nothing() {
         let watch = DueWatch {
             id: "C-7".to_string(),
             version: 3,
-            watch: ArmedWatch::default(),
+            watch: ArmedWatch {
+                due_at: "2026-08-30T00:00:00Z".to_string(),
+                ..Default::default()
+            },
         };
         let request = fire_watch_request(&watch, "2026-08-31T00:00:00Z");
         let command = request.operations[0].command.as_deref().unwrap();
+
+        // Idempotent under concurrent evaluators: two sweeps that saw the same
+        // passed deadline resolve to one `watch_fire`, not two (§5.11).
+        assert!(command.contains("CLIENT KEY :fire_key"), "{command}");
+        assert_eq!(
+            request.parameters.as_ref().unwrap()["fire_key"],
+            Json::from("watch_fire:C-7:silence:2026-08-30T00:00:00Z")
+        );
 
         // The transition and its provenance commit together: a Watch marked
         // fired with no Activity saying why is a state change nobody can audit.
         assert!(command.contains(r#"status: "fired""#));
         assert!(command.contains(r#"activity_class: "watch_fire""#));
         // Guarded, so racing the maintenance model yields instead of clobbers.
-        assert!(command.contains("EXPECT VERSION :version"));
+        assert!(command.contains("EXPECT VERSION :version OF ATTRIBUTES"));
 
         // What firing must NOT do. The outward decision is the action gate's,
         // and the gate is cognition — the runtime knows the date passed, not

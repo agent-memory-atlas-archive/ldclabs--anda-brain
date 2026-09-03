@@ -176,9 +176,12 @@ describe('Anda Brain Worker', () => {
     const runtime = testEnv(
       new FakeAi([
         {
-          types: ['Project'],
-          // `drug` is malformed as a type and `Treats` as a predicate; both come
-          // back refused rather than published under a tidied-up name.
+          // `Assertion` is a Core element kind, which §20.13 forbids a package
+          // from shadowing — refused here rather than at package installation,
+          // where it would take the whole publish down.
+          types: ['Project', 'Assertion'],
+          // `Treats` is malformed as a predicate; it comes back refused rather
+          // than published under a tidied-up name.
           predicates: ['works_on', 'Treats'],
           commands: [
             `MUTATE {
@@ -201,7 +204,7 @@ describe('Anda Brain Worker', () => {
       package_ref: 'kip://anda-brain/memory@1.0.1',
       types: ['Project'],
       predicates: ['works_on'],
-      rejected: ['Treats'],
+      rejected: ['Assertion', 'Treats'],
     })
     expect(body.result.stored.propositions).toBe(1)
 
@@ -361,7 +364,7 @@ describe('Anda Brain Worker', () => {
         {
           types: [],
           predicates: [],
-          commands: [plan, `SUPERSEDE ASSERTION :old BY :new`],
+          commands: [plan, `TRANSITION :old TO "superseded" BY :new`],
           summary: 'Alice no longer prefers dark mode.',
         },
       ]),
@@ -378,7 +381,7 @@ describe('Anda Brain Worker', () => {
     expect(created.error).toBeUndefined()
 
     const superseded = await post(runtime, space, 'execute_kip', {
-      command: 'SUPERSEDE ASSERTION :old BY :new',
+      command: 'TRANSITION :old TO "superseded" BY :new',
       parameters: { old: handles.a, new: created.extensions['kip-do/outcome'].handles.b },
     })
     const receipt = (await superseded.json<Record<string, any>>()).result[0]
@@ -570,7 +573,8 @@ describe('Anda Brain Worker', () => {
     const space = uniqueSpace('noeffect')
     const runtime = testEnv(new FakeAi([]))
     const body = {
-      command: 'ARCHIVE ?c WHERE { ?c CONCEPT {type: "Person", key: "nobody"} } LIMIT 1',
+      command:
+        'TRANSITION ?c TO "archived" WHERE { ?c CONCEPT {type: "Person", key: "nobody"} } LIMIT 1',
     }
     const response = await post(runtime, space, 'execute_kip', body)
     expect(response.status).toBe(200)
@@ -595,6 +599,29 @@ describe('Anda Brain Worker', () => {
     })
     expect(response.status).toBe(422)
     expect(await response.text()).toContain('formation cannot issue PURGE')
+  })
+
+  it('rejects a formation TRANSITION that removes memory, or hides its state', async () => {
+    // Six statements collapsed into one, so the split between cognition and
+    // custody now falls inside `TRANSITION`. The gate reads the state — and
+    // refuses one it cannot resolve to a literal, because the engine would
+    // resolve it later and "later" is past the gate.
+    for (const [command, expected] of [
+      ['TRANSITION :a TO "tombstoned"', 'formation cannot TRANSITION memory to'],
+      ['TRANSITION :a TO :state', 'as a literal'],
+    ] as const) {
+      const runtime = testEnv(
+        new FakeAi([{ types: [], predicates: [], commands: [command], summary: 'unsafe' }]),
+      )
+      const response = await post(
+        runtime,
+        uniqueSpace('formation-transition'),
+        'formation',
+        { messages: [{ role: 'user', content: 'Forget that.' }] },
+      )
+      expect(response.status, command).toBe(422)
+      expect(await response.text()).toContain(expected)
+    }
   })
 
   it('rejects a formation plan that tries to read instead of write', async () => {
@@ -634,7 +661,7 @@ describe('Anda Brain Worker', () => {
   it('rejects an unbounded maintenance selection, whichever verb it wears', async () => {
     for (const command of [
       'UPDATE ?event SET ATTRIBUTES { status: "archived" } WHERE { ?event CONCEPT {type: "Event"} }',
-      'ARCHIVE ?event WHERE { ?event CONCEPT {type: "Event"} }',
+      'TRANSITION ?event TO "archived" WHERE { ?event CONCEPT {type: "Event"} }',
     ]) {
       const runtime = testEnv(
         new FakeAi([
@@ -739,8 +766,8 @@ describe('Anda Brain Worker', () => {
   it('moves a Skill on its outcome stream alone, never on assertion', async () => {
     // Profile §14 rule 1: "the Brain proposes, compiles, and narrates; it
     // never promotes." The model is given no say here, and is not asked.
-    // Four cycles below, each of which still ends in one completion.
-    const runtime = testEnv(new FakeAi(Array.from({ length: 4 }, () => ({ types: [], predicates: [], commands: [], summary: 'Nothing to do.' }))))
+    // Five cycles below, each of which still ends in one completion.
+    const runtime = testEnv(new FakeAi(Array.from({ length: 5 }, () => ({ types: [], predicates: [], commands: [], summary: 'Nothing to do.' }))))
     const space = uniqueSpace('skill-lifecycle')
 
     const created = await post(runtime, space, 'execute_kip', {
@@ -758,9 +785,29 @@ describe('Anda Brain Worker', () => {
     })
     expect(created.status, await text(created)).toBe(200)
 
+    // The gate below has to name the Skill it applied, and a Structural
+    // Reference names an element, never a key.
+    const skillId = await (async () => {
+      const found = await post(runtime, space, 'execute_kip_readonly', {
+        command:
+          'FIND(?s.id) WHERE { ?s CONCEPT {type: "Skill", key: "redeploy"} } LIMIT 1',
+      })
+      const rows = ((await found.json()) as any).result[0].result
+      return String(Array.isArray(rows[0]) ? rows[0][0] : rows[0])
+    })()
+
+    // One graded run, attributed the way Profile §8.1 requires: a gate that
+    // names the Skill it applied, and an instrument's observation that names
+    // the gate and the outcome it wrote. Without both hops the outcome belongs
+    // to the family's baseline and grades nothing (§14 rule 7).
     const grade = async (status: string, magnitude: number) => {
       const written = await post(runtime, space, 'execute_kip', {
         command: `MUTATE {
+  CREATE ACTIVITY ?gate {
+    SET FIELDS { activity_class: "action_gate", status: "completed" }
+    SET FACET "DecisionRecord" { decision: "act", rationale: "redeploy under the Skill" }
+    SET STRUCTURAL { ("inputs", :skill) }
+  }
   CREATE EVIDENCE ?e {
     SET FIELDS {
       evidence_class: "outcome", payload: {instrument: "ci"},
@@ -770,8 +817,31 @@ describe('Anda Brain Worker', () => {
       task_family: "deploy", outcome_status: :status, magnitude: :magnitude
     }
   }
+  CREATE ACTIVITY ?obs {
+    SET FIELDS { activity_class: "outcome_observation", status: "completed" }
+    SET STRUCTURAL { ("inputs", ?gate) ("outputs", ?e) }
+  }
 }`,
-        parameters: { status, magnitude },
+        parameters: { skill: skillId, status, magnitude },
+      })
+      expect(written.status, await text(written)).toBe(200)
+    }
+
+    /** An outcome in the family that nobody attributed: baseline, never a grade. */
+    const unattributed = async (status: string) => {
+      const written = await post(runtime, space, 'execute_kip', {
+        command: `MUTATE {
+  CREATE EVIDENCE ?e {
+    SET FIELDS {
+      evidence_class: "outcome", payload: {instrument: "ci", run: "other"},
+      observed_at: "2026-08-31T00:00:00Z"
+    }
+    SET FACET "OutcomeRecord" {
+      task_family: "deploy", outcome_status: :status, magnitude: 0.2
+    }
+  }
+}`,
+        parameters: { status },
       })
       expect(written.status, await text(written)).toBe(200)
     }
@@ -784,20 +854,30 @@ describe('Anda Brain Worker', () => {
     const standing = async () => {
       const response = await post(runtime, space, 'execute_kip_readonly', {
         command:
-          'FIND(?s.attributes.status, ?s.facets["SkillUtility"].utility, ?s.facets["SkillUtility"].graded_count) ' +
+          'FIND(?s.attributes.status, ?s.facets["MnemonicState"].utility, ?s.facets["GradingState"].graded_count) ' +
           'WHERE { ?s CONCEPT {type: "Skill", key: "redeploy"} } LIMIT 1',
       })
       return ((await response.json()) as any).result[0].result[0] as [string, number, number]
     }
 
-    // A poor first showing opens the trial and records the basis (1 of 3).
+    // The family was already running at 1 in 4 before anybody tried this
+    // Skill. Those runs are nobody's treatment set — they are the baseline
+    // (§6.5), and on their own they move nothing (§14 rule 7).
+    await unattributed('success')
+    await unattributed('failure')
+    await unattributed('failure')
+    await unattributed('failure')
+    expect(await cycle()).toMatchObject({ graded: 0, transitions: 0 })
+    expect((await standing())[0]).toBe('proposed')
+
+    // A poor first showing opens the trial and records that baseline.
     await grade('success', 0.5)
     await grade('failure', 0.2)
     await grade('failure', 0.2)
     expect(await cycle()).toMatchObject({ transitions: 1 })
     expect((await standing())[0]).toBe('trialed')
 
-    // The stream then beats that basis over enough runs. Adoption is
+    // The stream then beats that baseline over enough runs. Adoption is
     // comparative — better than things were going, not merely good.
     for (let i = 0; i < 6; i += 1) await grade('success', 0.5)
     expect(await cycle()).toMatchObject({ transitions: 1 })
@@ -829,8 +909,10 @@ describe('Anda Brain Worker', () => {
     for (const [digest, inputs, outputs] of rows) {
       // The rule identity is shared with `anda_brain` on purpose: an auditor
       // must get the same answer whichever deployment wrote the verdict.
-      expect(digest).toContain('anda-brain/skill-verdict@1')
+      expect(digest).toContain('anda-brain/skill-verdict@2')
       expect(digest).toContain('window=(')
+      expect(digest).toContain('basis_seq=')
+      expect(digest).toContain('baseline=')
       expect(inputs.every((r: any) => String(r.id).startsWith('E-'))).toBe(true)
       expect(outputs).toHaveLength(1)
       expect(String(outputs[0].id)).toMatch(/^C-\d+$/)

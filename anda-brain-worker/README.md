@@ -49,7 +49,7 @@ cd ../../anda-db/ts/kip-do && pnpm install && pnpm run build
 | 确定性 settlement（代谢 / Watch 到期 / Skill 判决） | 保留，见下节 |
 | 全文检索（`SEARCH`） | 保留，keyword 模式，见「检索」一节 |
 | 派生闭包（`LIST DEPENDENTS`） | 保留，`DEPTH` 上限 8；但 maintenance 一次只出 KML，走不了这条读 |
-| 保留期（`SET RETENTION`） | 引擎未实现，maintenance 闸门直接拒绝；Rust 服务两样都有 |
+| 保留期（`SET RETENTION`） | 引擎已实现，maintenance 可以写；但没有到期清扫，Rust 服务两样都有 |
 | 载荷清除（`PURGE PAYLOAD`） | 引擎已实现；maintenance 计划里和 `PURGE` 一样被拒 |
 | 原子批（`execution.mode: "atomic"`） | 引擎未实现，请求会被拒绝而不是伪装成功 |
 
@@ -71,11 +71,20 @@ cd ../../anda-db/ts/kip-do && pnpm install && pnpm run build
   `action_gate`、不做任何对外动作**——日子到了是算术，那意味着什么不是。决定留给
   下一轮的 `assessment.fired_watches` 队列。`delta` Watch 仍归模型：匹配一句散文写
   的 condition 是解释。
-- **Skill 生命周期判决**：`proposed → trialed → adopted → revoked` 只按 graded
-  Outcome Evidence 的确定性规则走。Profile §14 规则 1 点名了执行者——**「the Brain
-  proposes, compiles, and narrates; it never promotes」**——所以它在代码里。规则常量
-  与 `anda_brain/src/skill.rs` 逐一对齐，`VERDICT_RULE` 两边**必须相同**：一个 Skill
-  在 Rust 侧被采纳、在 Worker 侧被撤销，会让这个规则标识变成谎话。
+- **Skill 生命周期判决**：`proposed → trialed → adopted → revoked` 只按 Outcome
+  Evidence 的确定性规则走。Profile §14 规则 1 点名了执行者——**「the Brain
+  proposes, compiles, and narrates; it never promotes」**——所以它在代码里。
+
+  哪些 outcome 算数是规则 7（*attribution before counting*）：一条 outcome 只有**挂
+  在应用了这个 Skill 的决定上**才算——`action_gate` Activity 的 `inputs` 里点名这个
+  Skill，仪器写的 `outcome_observation` Activity 的 `inputs` 里点名那个 gate。只是
+  `task_family` 相同的 outcome 属于**基线**，永远不是分数；否则同一个 family 里的两
+  个 Skill 会互相判决对方。基线在开庭时写进 Skill 的 `TrialState`（开庭坐标、这个
+  Skill 之外的 family 计数、判决所需的挂钩 outcome 配额），分数写进 `GradingState`，
+  修正后的准入押注写进 `MnemonicState.utility`——记录不是预测，两者都不是权限。
+
+  规则常量与 `anda_brain/src/skill.rs` 逐一对齐，`VERDICT_RULE` 两边**必须相同**：
+  一个 Skill 在 Rust 侧被采纳、在 Worker 侧被撤销，会让这个规则标识变成谎话。
 
 模型拿到的 `assessment` 块（`space_seq`、armed / fired Watch 集合、每谓词链接数）
 也是 runtime 读好的：它只有一次 completion，**输入里没有的信号就是它不会履行的职责**。
@@ -179,7 +188,7 @@ curl http://localhost:8787/v1/alice/formation \
 
 `context.counterparty` 是 Concept 的 **key**（不可变身份），不是 name（可变标签）。
 
-Formation 只能写认知：`CREATE CONCEPT`、`UPSERT CONCEPT`、`ENSURE PROPOSITION`、`CREATE EVIDENCE / ASSERTION / ACTIVITY`、`ASSERT`、`TRANSITION ACTIVITY`，以及用于更正的 `RETRACT` / `SUPERSEDE` / `CORRECT EVIDENCE`。`UPDATE`、`ARCHIVE`、`TOMBSTONE`、`PURGE`、`MERGE CONCEPT` 会在 Durable Object 内被拒绝。
+Formation 只能写认知：`CREATE CONCEPT`、`UPSERT CONCEPT`、`ENSURE PROPOSITION`、`CREATE EVIDENCE / ASSERTION / ACTIVITY`、`ASSERT`，以及用于更正和自身 Activity 的 `TRANSITION`——状态限于 `retracted` / `superseded` / `corrected` / `running` / `completed` / `failed` / `cancelled`。`TRANSITION ... TO "archived"`、`TO "tombstoned"` 以及 `UPDATE`、`PURGE`、`MERGE CONCEPT` 会在 Durable Object 内被拒绝。状态必须写成字面量：闸门读不到的参数化状态一律拒绝，否则「六条语句合并成一条 `TRANSITION`」就等于给 Formation 开了一条以绑定值 tombstone 的路。
 
 ### Recall
 
@@ -204,9 +213,9 @@ curl http://localhost:8787/v1/alice/maintenance \
   -d '{"trigger":"on_demand","scope":"daydream"}'
 ```
 
-Maintenance 可以用 KML 的全部动作，但 **`PURGE` 被拒绝**（不可逆，且模型读自己的快照不是决定「让某物从未存在」的地方；需要时走管理级 `execute_kip`）。**任何带 `WHERE` 选择的子句都必须带 `LIMIT 20` 或更小**——`UPDATE ?e … WHERE {}` 和 `ARCHIVE ?e WHERE {}` 是同一个风险换了个动词。`MERGE CONCEPT` 语法上没有 `LIMIT` 位置，所以对它的要求是 `WHERE` 必须精确指出源和目标，一次合并一对。
+Maintenance 可以用 KML 的全部动作，但 **`PURGE` 被拒绝**（不可逆，且模型读自己的快照不是决定「让某物从未存在」的地方；需要时走管理级 `execute_kip`）。**任何带 `WHERE` 选择的子句都必须带 `LIMIT 20` 或更小**——`UPDATE ?e … WHERE {}` 和 `TRANSITION ?e TO "archived" WHERE {}` 是同一个风险换了个动词。`MERGE CONCEPT` 语法上没有 `LIMIT` 位置，所以对它的要求是 `WHERE` 必须精确指出源和目标，一次合并一对。
 
-`SET RETENTION` 引擎未实现，**在闸门就被拒**而不是执行时才失败：批次不是事务，让它跑到执行会造成前面几条已提交、整个请求却报 422，调用方无从判断落了什么。
+`SET RETENTION` 引擎已实现，maintenance 可以写保留期类别和 `expires_at`；被拒的只有 `legal_hold` 这一个成员，两个方向都拒——法务保留会挡住所有人的擦除，不是模型读一张快照就该做的决定。到期清扫本身 Worker 没有，写下的 `expires_at` 要靠调用方或 Rust 服务去执行。
 
 请求参数：`memory_strength_decay_factor`、`stale_event_threshold_days`、`unconsolidated_max_backlog`（兼容旧名 `unsorted_max_backlog`）、`orphan_max_count`——与 Rust 服务的 `MaintenanceParameters` 逐字段对齐。没有 `confidence_decay_factor`：2.0 禁止随时间衰减 Assertion 置信度。
 
