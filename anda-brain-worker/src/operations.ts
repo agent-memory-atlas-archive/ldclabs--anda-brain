@@ -10,13 +10,10 @@ import {
   MAX_KIP_OPERATIONS,
   assertFormationOperations,
   assertMaintenanceOperations,
-  citationsFromLookup,
-  collectCitations,
+  citationsFrom,
   conceptLookupCommand,
   countChanges,
   countWrites,
-  claimsIngestKeys,
-  firstKipError,
   keepReadonlyOperations,
   observationIngest,
   type KipOperation,
@@ -33,6 +30,7 @@ import type {
   Env,
   FormationInput,
   MaintenanceInput,
+  MutationPlan,
   RecallInput,
   Usage,
 } from './types.js'
@@ -96,43 +94,22 @@ export async function formMemory(
     formationMessages(primer, input, timestamp),
   )
 
-  // Gate before publishing. Parsing resolves no symbols, so the gate does not
-  // need the vocabulary — and declaring first would let a plan the gate is
-  // about to refuse still mint a schema version and spend part of the Space's
-  // symbol cap on words nothing ever wrote.
-  const operations = plan.value.commands.map((command) => ({ command }))
-  try {
-    if (operations.length > 0) assertFormationOperations(operations)
-  } catch (error) {
-    throw new OperationError(
-      error instanceof Error ? error.message : 'invalid formation plan',
-      422,
-    )
-  }
-
-  // Then schema, before any command runs: KML cannot declare a symbol, so a
-  // command naming one the Space does not resolve fails with
-  // `SchemaSymbolNotFound` and takes the whole statement with it.
-  const vocabulary = await declareVocabulary(brain, plan.value)
+  const { operations, vocabulary } = await preparePlan(
+    brain,
+    plan.value,
+    assertFormationOperations,
+    'formation',
+  )
 
   // The observation rides the envelope, so the model's commands cite `:msg1`
-  // instead of retyping what was said (§71.1). Built only when there is a plan
-  // to attach it to: a pass that stored nothing has nothing to mint Evidence
-  // for, and an Evidence record for a claim nobody made is indistinguishable
-  // later from an observation somebody chose not to act on.
-  const ingest = operations.length
-    ? observationIngest(
-        input.messages,
-        timestamp,
-        await conversationOrigin(input, timestamp),
-        await counterpartyElement(brain, input.context?.counterparty),
-      )
-    : undefined
+  // instead of retyping what was said (§71.1).
+  const ingest = observationIngest(operations, input.messages, {
+    at: timestamp,
+    origin: await conversationOrigin(input, timestamp),
+    sourceActor: await counterpartyElement(brain, input.context?.counterparty),
+  })
   const results = operations.length
-    ? await brain.executeFormationPlan(
-        operations,
-        ingest && !claimsIngestKeys(operations, ingest) ? ingest : undefined,
-      )
+    ? await brain.executeFormationPlan(operations, ingest)
     : []
   throwOnKipError(results, 'formation KIP failed')
 
@@ -245,10 +222,7 @@ export async function recallMemory(
   const planFailures = results
     .slice(1)
     .flatMap((result) => (result.status === 'failed' ? [result.error?.code ?? 'Unknown'] : []))
-  const memories = collectCitations(
-    results.slice(1),
-    citationsFromLookup(grounding?.result),
-  )
+  const memories = citationsFrom(grounding, results.slice(1))
   const answer = await createRecallAnswer(
     env.AI,
     model,
@@ -279,6 +253,27 @@ export async function recallMemory(
   }
 }
 
+/**
+ * A memory lookup with no model in it.
+ *
+ * The same deterministic `SEARCH` that grounds recall, answered on its own. A
+ * miss is a miss on the index, not an absence, which is why the answer reports
+ * what it found rather than whether the memory exists.
+ */
+export async function probeMemory(
+  brain: BrainRpc,
+  input: RecallInput,
+): Promise<unknown> {
+  const [probe] = await brain.executeKipReadonlyBatch([
+    conceptLookupCommand(input.query, 8),
+  ])
+  if (probe === undefined || probe.status === 'failed') {
+    throw new OperationError('probe KIP failed', 422, probe?.error)
+  }
+  const memories = citationsFrom(probe)
+  return { found: memories.length > 0, memories }
+}
+
 export async function maintainMemory(
   env: Env,
   brain: BrainRpc,
@@ -302,17 +297,12 @@ export async function maintainMemory(
     maintenanceMessages(input, { snapshot, assessment }, timestamp),
   )
 
-  const operations = plan.value.commands.map((command) => ({ command }))
-  try {
-    if (operations.length > 0) assertMaintenanceOperations(operations)
-  } catch (error) {
-    throw new OperationError(
-      error instanceof Error ? error.message : 'invalid maintenance plan',
-      422,
-    )
-  }
-
-  const vocabulary = await declareVocabulary(brain, plan.value)
+  const { operations, vocabulary } = await preparePlan(
+    brain,
+    plan.value,
+    assertMaintenanceOperations,
+    'maintenance',
+  )
 
   const results = operations.length ? await brain.executeMaintenancePlan(operations) : []
   throwOnKipError(results, 'maintenance KIP failed')
@@ -329,18 +319,40 @@ export async function maintainMemory(
 }
 
 /**
- * Publishes the symbols a plan asked for, when it asked for any.
+ * Turns a mutation plan into runnable operations: gate first, then schema.
  *
- * A refusal is not fatal: the plan's other commands are still writable, and the
- * one that needed the refused symbol will fail on its own with an error naming
- * the symbol — which is a better message than a blanket rejection here.
+ * The order is the whole point, and both writing modes need it. Parsing
+ * resolves no symbols, so the gate does not need the vocabulary — and declaring
+ * first would let a plan the gate is about to refuse still mint a schema
+ * version and spend part of the Space's symbol cap on words nothing ever wrote.
+ * Schema then goes in before any command runs, because KML cannot declare a
+ * symbol: a command naming one the Space does not resolve fails with
+ * `SchemaSymbolNotFound` and takes the whole statement with it.
+ *
+ * A refused *symbol* is not fatal, unlike a refused command: the plan's other
+ * commands are still writable, and the one that needed it will fail on its own
+ * with an error naming the symbol — a better message than a blanket rejection.
  */
-async function declareVocabulary(
+async function preparePlan(
   brain: BrainRpc,
-  plan: { types: string[]; predicates: string[] },
-): Promise<DeclaredVocabulary | undefined> {
-  if (plan.types.length === 0 && plan.predicates.length === 0) return undefined
-  return brain.declareSymbols(plan.types, plan.predicates)
+  plan: MutationPlan,
+  gate: (operations: readonly KipOperation[]) => void,
+  mode: string,
+): Promise<{ operations: KipOperation[]; vocabulary?: DeclaredVocabulary }> {
+  const operations = plan.commands.map((command) => ({ command }))
+  try {
+    if (operations.length > 0) gate(operations)
+  } catch (error) {
+    throw new OperationError(
+      error instanceof Error ? error.message : `invalid ${mode} plan`,
+      422,
+    )
+  }
+  if (plan.types.length === 0 && plan.predicates.length === 0) return { operations }
+  return {
+    operations,
+    vocabulary: await brain.declareSymbols(plan.types, plan.predicates),
+  }
 }
 
 function resultOrThrow(result: KipResult, message: string): unknown {
@@ -349,6 +361,6 @@ function resultOrThrow(result: KipResult, message: string): unknown {
 }
 
 function throwOnKipError(results: readonly KipResult[], message: string): void {
-  const failure = firstKipError(results)
+  const failure = results.find((result) => result.status === 'failed')?.error
   if (failure) throw new OperationError(message, 422, failure)
 }

@@ -252,6 +252,7 @@ curl http://localhost:8787/v1/alice/execute_kip_readonly \
 
 - API Key 为空会关闭鉴权，只适合本地开发。
 - 只读、Formation、Maintenance 三道闸门都按命令**解析出来的语义**判断，而不是请求里的标签；Worker 和 Durable Object 两层都会校验。
+  只读那条还有第三层：Durable Object 把引擎自己的 `readonly` 标志一并传下去，由语句路径内部再判一次 `parseKip` 的结论。闸门是给出答案的那个——它在任何东西跑之前就点名拒绝的命令；引擎标志是底板，上面漏了只会赔上一个 `ReadonlyViolation` 的 operation，而不是一次已提交的写入。
 - 模型看到的对话、查询和图谱内容都被标记为数据，不能改变系统规则。
 - 原始 `execute_kip` 是管理接口；不要把密钥交给不可信客户端。
 - 一个空间对应一个 Durable Object，KIP 存储操作会在其中串行提交；AI 规划仍可能并行运行，高吞吐场景应拆分空间。

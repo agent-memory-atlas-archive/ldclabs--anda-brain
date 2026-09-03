@@ -31,6 +31,7 @@ import {
   type Json,
   type SchemaPackage,
 } from '@ldclabs/kip-do'
+import type { DeclaredVocabulary } from './types.js'
 
 /**
  * The package id this brain publishes its own vocabulary under.
@@ -39,7 +40,7 @@ import {
  * carry meanings other engines are expected to share, and a predicate one
  * conversation happened to use is not one of them.
  */
-export const MEMORY_PACKAGE_ID = 'kip://anda-brain/memory'
+const MEMORY_PACKAGE_ID = 'kip://anda-brain/memory'
 
 /**
  * Cap on how many symbols one Space's vocabulary may hold.
@@ -50,10 +51,10 @@ export const MEMORY_PACKAGE_ID = 'kip://anda-brain/memory'
  * Space that has introduced this many distinct predicates is accumulating
  * synonyms, and the answer is to reuse what it has.
  */
-export const MAX_SYMBOLS = 512
+const MAX_SYMBOLS = 512
 
 /** Longest symbol name the brain will publish. */
-export const MAX_SYMBOL_CHARS = 64
+const MAX_SYMBOL_CHARS = 64
 
 /** The vocabulary of one Space. */
 export class MemoryVocabulary {
@@ -134,15 +135,19 @@ export class MemoryVocabulary {
     return this.types.size + this.predicates.size
   }
 
-  /** Whether the Space can already resolve every one of these symbols. */
-  covers(types: Iterable<string>, predicates: Iterable<string>): boolean {
-    for (const name of types) {
-      if (!this.types.has(name) && !this.borrowedTypes.has(name)) return false
+  /**
+   * This vocabulary as the API reports it.
+   *
+   * Sorted, because a caller diffing two of these should see what changed
+   * rather than what arrived first.
+   */
+  declared(rejected: string[] = []): DeclaredVocabulary {
+    return {
+      package_ref: this.packageRef(),
+      types: [...this.types].sort(),
+      predicates: [...this.predicates].sort(),
+      rejected,
     }
-    for (const name of predicates) {
-      if (!this.predicates.has(name) && !this.borrowedPredicates.has(name)) return false
-    }
-    return true
   }
 
   /**
@@ -310,13 +315,6 @@ export function activeVocabulary(nexus: CognitiveNexus): SchemaPackage | null {
 }
 
 /**
- * A Concept type name: UpperCamelCase, alphanumeric.
- *
- * Enforced here rather than left to the model, because `drug`, `Drug` and
- * `medical device` would otherwise become three types meaning one thing — and,
- * unlike a 1.x graph node, a published symbol cannot be tidied away.
- */
-/**
  * The Core element kinds, which a package may not shadow (§20.13).
  *
  * Mirrors `anda_kip::CORE_ELEMENT_KINDS`, spelled here because `@ldclabs/kip-do`
@@ -331,7 +329,14 @@ const CORE_ELEMENT_KINDS: readonly string[] = [
   'Activity',
 ]
 
-export function isTypeName(name: string): boolean {
+/**
+ * A Concept type name: UpperCamelCase, alphanumeric.
+ *
+ * Enforced here rather than left to the model, because `drug`, `Drug` and
+ * `medical device` would otherwise become three types meaning one thing — and,
+ * unlike a 1.x graph node, a published symbol cannot be tidied away.
+ */
+function isTypeName(name: string): boolean {
   return (
     name.length > 0 &&
     name.length <= MAX_SYMBOL_CHARS &&
@@ -347,7 +352,7 @@ export function isTypeName(name: string): boolean {
 }
 
 /** A predicate name: snake_case, starting with a lowercase letter. */
-export function isPredicateName(name: string): boolean {
+function isPredicateName(name: string): boolean {
   return (
     name.length > 0 &&
     name.length <= MAX_SYMBOL_CHARS &&

@@ -21,7 +21,6 @@ import {
   type KipResult,
   type MetaCommand,
   type IngestContext,
-  type IngestEvidence,
   type MutationClause,
   type Outcome,
   type Scalar,
@@ -29,13 +28,13 @@ import {
 import type { MemoryCitation, Message } from './types.js'
 
 export const MAX_KIP_OPERATIONS = 4
-export const MAX_KIP_COMMAND_BYTES = 256 * 1024
+const MAX_KIP_COMMAND_BYTES = 256 * 1024
 
 /** The most rows a model-planned read may ask for. */
-export const MAX_MODEL_RESULTS = 20
+const MAX_MODEL_RESULTS = 20
 
 /** The most elements one maintenance clause may select. */
-export const MAX_MAINTENANCE_SELECTION = 20
+const MAX_MAINTENANCE_SELECTION = 20
 
 /** The most citations one answer carries. */
 const MAX_CITATIONS = 16
@@ -50,7 +49,7 @@ const MAX_CITATIONS = 16
  * way — which the contract says, so the model is not left guessing why `:msg17`
  * does not resolve.
  */
-export const MAX_INGESTED_MESSAGES = 16
+const MAX_INGESTED_MESSAGES = 16
 
 /**
  * What a message's role makes it, as an Evidence class (Formation §7).
@@ -66,17 +65,6 @@ const EVIDENCE_CLASS: Record<string, string> = {
   tool: 'tool_result',
   system: 'message',
 }
-
-/** One Evidence record for the runtime to mint inside the statement (§71.1). */
-/**
- * One Evidence record to mint inside the request's transaction scope.
- *
- * The engine's own type, not a copy of it. `source_actor` became an element
- * reference — `{id}` or `{type, key}`, never a name (§71.1, §88.1) — and a
- * local restatement would have gone on compiling while meaning something the
- * engine refuses.
- */
-export type IngestedEvidence = IngestEvidence
 
 /** The `ingest` block of a request envelope. */
 export type { IngestContext }
@@ -107,13 +95,15 @@ export type { IngestContext }
  * Assertion.
  */
 export function observationIngest(
+  operations: readonly KipOperation[],
   messages: readonly Message[],
-  observedAt: string,
-  origin: string,
-  sourceActor?: string,
+  observed: { at: string; origin: string; sourceActor?: string },
 ): IngestContext | undefined {
   const recent = messages.slice(-MAX_INGESTED_MESSAGES)
-  if (recent.length === 0) return undefined
+  // A pass that stored nothing has nothing to mint Evidence for, and an
+  // Evidence record for a claim nobody made is indistinguishable later from an
+  // observation somebody chose not to act on.
+  if (operations.length === 0 || recent.length === 0) return undefined
   // Numbered from the start of the kept window, so `:msg1` is the oldest
   // message the model can cite and the numbering matches the order it reads
   // them in.
@@ -121,32 +111,23 @@ export function observationIngest(
     key: `msg${index + 1}`,
     evidence_class: EVIDENCE_CLASS[message.role] ?? 'message',
     payload: message as unknown as Json,
-    observed_at: observedAt,
-    client_key: `${origin}:${index + 1}`,
-    ...(sourceActor === undefined || message.role !== 'user'
+    observed_at: observed.at,
+    client_key: `${observed.origin}:${index + 1}`,
+    ...(observed.sourceActor === undefined || message.role !== 'user'
       ? {}
-      : { source_actor: { id: sourceActor } }),
+      : { source_actor: { id: observed.sourceActor } }),
   }))
-  return { evidence }
-}
 
-/**
- * Whether this request already binds a name the ingest block would mint.
- *
- * §74 merges request- and operation-level parameters into one binding
- * environment, so a collision at either level makes `:msg1` ambiguous and the
- * engine refuses the whole request. A model that bound the name itself is
- * writing Evidence the long way; let it, rather than failing its plan over a
- * facility it did not ask for.
- */
-export function claimsIngestKeys(
-  operations: readonly KipOperation[],
-  ingest: IngestContext,
-): boolean {
-  const keys = new Set((ingest.evidence ?? []).map((entry) => entry.key))
-  return operations.some((operation) =>
+  // §74 merges request- and operation-level parameters into one binding
+  // environment, so a name this block would mint that the plan already binds
+  // makes `:msg1` ambiguous and the engine refuses the whole request. A model
+  // that bound the name itself is writing Evidence the long way; let it, rather
+  // than failing its plan over a facility it did not ask for.
+  const keys = new Set(evidence.map((entry) => entry.key))
+  const claimed = operations.some((operation) =>
     Object.keys(operation.parameters ?? {}).some((name) => keys.has(name)),
   )
+  return claimed ? undefined : { evidence }
 }
 
 /** One command plus the values bound into its `:placeholders`. */
@@ -216,7 +197,7 @@ const FORMATION_TRANSITIONS = new Set([
   'cancelled',
 ])
 
-export function assertOperationBatch(operations: readonly KipOperation[]): void {
+function assertOperationBatch(operations: readonly KipOperation[]): void {
   if (operations.length === 0) {
     throw new Error('a KIP request needs at least one operation')
   }
@@ -253,7 +234,7 @@ export function assertReadonlyOperations(operations: readonly KipOperation[]): v
  * whatever came back, so a `FIND` with no `LIMIT` decides how much of the graph
  * ends up in a prompt.
  */
-export function assertBoundedReadonlyOperations(
+function assertBoundedReadonlyOperations(
   operations: readonly KipOperation[],
   maxResults: number,
 ): void {
@@ -408,13 +389,6 @@ export function conceptLookupCommand(query: string, limit = 8): KipOperation {
   }
 }
 
-/** The first failure in a batch, whichever operation it sits at. */
-export function firstKipError(
-  results: readonly KipResult[],
-): KipResult['error'] | undefined {
-  return results.find((result) => result.status === 'failed')?.error
-}
-
 /**
  * What a mutation actually committed.
  *
@@ -517,7 +491,7 @@ export function countWrites(results: readonly KipResult[]): {
  * The score is deliberately not carried into the citation. It is retrieval
  * relevance, and a number sitting beside a memory is read as confidence (§2.10).
  */
-export function citationsFromLookup(result: Json | undefined): MemoryCitation[] {
+function citationsFromLookup(result: Json | undefined): MemoryCitation[] {
   const hits = isObject(result) ? result.hits : undefined
   if (!Array.isArray(hits)) return []
   const citations: MemoryCitation[] = []
@@ -540,22 +514,28 @@ export function citationsFromLookup(result: Json | undefined): MemoryCitation[] 
 }
 
 /**
- * Element ids anywhere in a model-planned read's results.
+ * What an answer rests on: the grounding hits, then whatever the planned reads
+ * turned up.
  *
- * A planned command projects whatever it liked, so nothing here knows which
- * column holds what. An id alone is still a usable citation — it names an
- * element a reader can go and look at — and claiming a type or a name that was
- * never projected would be worse than omitting them.
+ * The two halves are read differently and both ways are deliberate. A `SEARCH`
+ * answer is a shaped envelope, so its hits yield a name and a type. A planned
+ * command projected whatever it liked, so nothing here knows which column holds
+ * what and an id alone is all that can honestly be claimed — which is still a
+ * usable citation, because it names an element a reader can go and look at.
+ *
+ * The grounding read comes first for the same reason it runs first: its
+ * citations are the ones that carry more than an id, and the cap must not spend
+ * itself on bare ids before reaching them.
  */
-export function collectCitations(
-  results: readonly KipResult[],
-  seed: readonly MemoryCitation[] = [],
+export function citationsFrom(
+  grounding: KipResult | undefined,
+  planned: readonly KipResult[] = [],
 ): MemoryCitation[] {
   const citations = new Map<string, MemoryCitation>()
-  for (const citation of seed) citations.set(citation.entity, citation)
-  for (const result of results) {
-    visit(result.result, citations)
+  for (const citation of citationsFromLookup(grounding?.result)) {
+    citations.set(citation.entity, citation)
   }
+  for (const result of planned) visit(result.result, citations)
   return [...citations.values()].slice(0, MAX_CITATIONS)
 }
 

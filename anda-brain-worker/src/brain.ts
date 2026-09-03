@@ -1,10 +1,7 @@
 import {
   KipDatabase,
   tryParseElementId,
-  type JsonMap,
   type KipResult,
-  type ReadOptions,
-  type RequestContext,
   type SchemaPackage,
 } from '@ldclabs/kip-do'
 import {
@@ -15,7 +12,7 @@ import {
   type KipExecution,
   type KipOperation,
 } from './kip.js'
-import * as settle from './settle.js'
+import { assess, settle } from './settle.js'
 import type {
   BrainStats,
   DeclaredVocabulary,
@@ -67,59 +64,66 @@ export class AndaBrain extends KipDatabase<Env> {
   /**
    * Every argument is forwarded. All of them, every time.
    *
-   * This override exists to call `ensureInitialized` and for nothing else, and
-   * an override written for one reason drops the parameters it did not think
-   * about — silently, because the base class simply sees `undefined`. Both of
-   * the ones this signature was missing are the kind that fail quietly:
+   * These two overrides exist to call `ensureInitialized` and for nothing else,
+   * and an override written for one reason drops the parameters it did not
+   * think about — silently, because the base class simply sees `undefined` and
+   * TypeScript accepts a narrower override. Each of the ones this signature has
+   * had to grow fails quietly on its own terms:
    *
    * - `ingest` is where the observation's real bytes are (§71.1), so losing it
    *   turns `:msg1` into an unbound parameter, and the model is told its
    *   command is malformed for a facility the runtime failed to deliver;
    * - `idempotencyKey` is §26's "a timeout is not an abort" — drop it and a
    *   resend of a lost write is a second write instead of the first one's
-   *   receipt.
+   *   receipt;
+   * - `execution` defaulted would run a batch the caller asked to stop at the
+   *   first failure as `independent`, committing writes it asked to have
+   *   skipped, while the answer still said `sequence` because the envelope
+   *   reports what was requested;
+   * - `readonly` is the engine's own mutation refusal, which arrived after
+   *   these overrides were written and which a hand-listed signature therefore
+   *   dropped without a word.
    *
-   * `executeKipBatch` below is the same rule for the same reason, and the
-   * batch's own footgun is `execution`: defaulting it would run a batch the
-   * caller asked to stop at the first failure as `independent`, committing
-   * writes it asked to have skipped, while the answer still said `sequence`
-   * because the envelope reports what was requested.
+   * So the arguments are forwarded as a tuple rather than named. Restating the
+   * base signature is what keeps going stale; this cannot, because there is
+   * nothing here to restate.
    */
   override executeKip(
-    command: string,
-    params: JsonMap = {},
-    context?: RequestContext,
-    read?: ReadOptions,
-    ingest?: IngestContext,
-    idempotencyKey?: string,
+    ...args: Parameters<KipDatabase<Env>['executeKip']>
   ): KipResult {
     this.ensureInitialized()
-    return super.executeKip(command, params, context, read, ingest, idempotencyKey)
+    return super.executeKip(...args)
   }
 
   override executeKipBatch(
-    operations: readonly KipOperation[],
-    context?: RequestContext,
-    read?: ReadOptions,
-    execution?: KipExecution,
-    ingest?: IngestContext,
+    ...args: Parameters<KipDatabase<Env>['executeKipBatch']>
   ): KipResult[] {
     this.ensureInitialized()
-    return execution === undefined
-      ? super.executeKipBatch(operations, context, read, undefined, ingest)
-      : super.executeKipBatch(operations, context, read, execution, ingest)
+    return super.executeKipBatch(...args)
   }
 
-  /** KQL and META only, decided by what each command parses to. */
+  /**
+   * KQL and META only, decided by what each command parses to — twice.
+   *
+   * {@link assertReadonlyOperations} is the gate that answers: it refuses the
+   * whole batch before anything runs, naming the offending command, which is
+   * the error a caller can act on. The engine's own `readonly` flag is the
+   * floor underneath it, and it earns its place by being independent — it is
+   * checked inside the statement path, against `parseKip`'s own verdict, after
+   * every envelope field has been read. So a hole in the gate above costs one
+   * failed operation rather than a committed mutation.
+   *
+   * Both decide on parsed semantics, never on a label the caller attached. A
+   * request that calls itself a query and carries a mutation is refused by the
+   * gate, and would be refused by the engine if it were not.
+   */
   executeKipReadonlyBatch(
     operations: readonly KipOperation[],
     execution?: KipExecution,
   ): KipResult[] {
     assertReadonlyOperations(operations)
     this.ensureInitialized()
-    return execution === undefined
-      ? super.executeKipBatch(operations)
-      : super.executeKipBatch(operations, undefined, undefined, execution)
+    return super.executeKipBatch(operations, undefined, undefined, execution, undefined, true)
   }
 
   /**
@@ -154,161 +158,36 @@ export class AndaBrain extends KipDatabase<Env> {
   /**
    * The deterministic settlement, run before every maintenance cycle.
    *
-   * Everything here is arithmetic the host can do without a model, and the
+   * Everything it does is arithmetic the host can do without a model, and the
    * reason it did not exist before is worth naming: the maintenance model gets
    * one completion and emits KML, so a pass needing a read before a write
    * looked impossible. It was only impossible for the model — this object holds
-   * the nexus, and reads it directly.
-   *
-   * Synchronous throughout, like everything else under it, and never allowed to
-   * fail the cycle: a settlement that could not sweep is a degraded cycle, not
-   * a failed one, and each pass reports its own error so "nothing was due" and
-   * "the pass never ran" stay distinguishable.
+   * the nexus, and {@link run} hands the settlement the one capability it
+   * cannot supply itself.
    */
   settleMemory(nowMs: number): SettlementReport {
     this.ensureInitialized()
-    const now = new Date(nowMs).toISOString()
-    const report = settle.emptySettlement(now)
-    report.decayed = this.metabolize(now, new Date(settle.decayHorizon(nowMs)).toISOString())
-    report.watches = this.fireDueWatches(now)
-    report.skills = this.settleSkillLifecycle(now)
-    return report
+    return settle((operation) => this.run(operation), nowMs)
   }
 
-  /**
-   * Disuse metabolism: `MnemonicState.memory_strength`, never confidence.
-   *
-   * The `last_metabolized_at` filter is both the weekly rate limit and the
-   * intra-sweep cursor, so a Space with nothing due costs one query that
-   * matches no rows.
-   */
-  private metabolize(now: string, metabolizedBefore: string): number {
-    const operation = settle.decayCommand(now, metabolizedBefore)
-    const result = super.executeKip(operation.command, operation.parameters)
-    if (result.status === 'failed') return 0
-    const outcome = result.extensions?.['kip-do/outcome']
-    return (outcome?.changes ?? []).filter((change) => change.op === 'update').length
-  }
-
-  /** Fires the silence Watches whose deadline has passed. */
-  private fireDueWatches(now: string): SettlementReport['watches'] {
-    const report = settle.emptyWatchSettlement()
-    const scan = settle.dueSilenceWatchesCommand(now)
-    const found = super.executeKip(scan.command, scan.parameters)
-    if (found.status === 'failed') {
-      report.error = found.error?.message ?? 'watch scan failed'
-      return report
-    }
-    for (const due of settle.dueWatches(found.result)) {
-      const fire = settle.fireWatchCommand(due, now)
-      const written = super.executeKip(fire.command, fire.parameters)
-      if (written.status === 'failed') report.conflicted += 1
-      else report.fired += 1
-    }
-    return report
-  }
-
-  /**
-   * Runs the deterministic Skill lifecycle rule over graded outcomes.
-   *
-   * Profile §14 rule 1: promotion and demotion are executed by deterministic
-   * code reading graded Outcome Evidence — "the Brain proposes, compiles, and
-   * narrates; it never promotes."
-   */
-  private settleSkillLifecycle(now: string): SettlementReport['skills'] {
-    const report = settle.emptySkillSettlement()
-    const scan = settle.skillsCommand()
-    const found = super.executeKip(scan.command, scan.parameters)
-    if (found.status === 'failed') {
-      report.error = found.error?.message ?? 'skill scan failed'
-      return report
-    }
-    for (const skill of settle.skillRows(found.result)) {
-      // One read per Skill: the window is per-Skill and per-cursor, and a
-      // Skill never graded starts from a different coordinate than one that has.
-      const outcomes = settle.outcomesCommand(skill.id, skill.task_family, skill.cursor)
-      const graded = super.executeKip(outcomes.command, outcomes.parameters)
-      if (graded.status === 'failed') continue
-      const window = settle.tally(graded.result)
-      // Nothing attributed to this Skill since the last verdict: nothing to
-      // judge, and no reason to price the family aggregate below.
-      if (window.graded === 0) continue
-
-      // The baseline a trial is measured against: the whole family up to the
-      // end of this window, from which `decide` subtracts what was linked to
-      // this Skill (Profile §6.5).
-      const baseline = settle.familyTallyCommand(skill.task_family, window.cursor)
-      const counted = super.executeKip(baseline.command, baseline.parameters)
-      if (counted.status === 'failed') continue
-      const family = settle.familyTally(counted.result)
-
-      const verdict = settle.decide(skill, window, family)
-      // No new graded outcome: an idle stream writes nothing.
-      if (verdict === undefined) continue
-
-      const write = settle.verdictCommand(skill, verdict, window, now)
-      const written = super.executeKip(write.command, write.parameters)
-      if (written.status === 'failed') {
-        // The cursor did not advance, so the next pass re-reads the same
-        // outcomes and reaches the same verdict.
-        report.conflicted += 1
-        continue
-      }
-      report.graded += 1
-      if (verdict.transition !== undefined) report.transitions += 1
-    }
-    return report
-  }
-
-  /**
-   * What the settlement measured, as the maintenance prompt receives it.
-   *
-   * The model cannot go and fetch any of this — it gets one completion — so a
-   * signal absent here is a duty it will not perform. That is why the armed
-   * set, the fired queue and `space_seq` are read for it rather than left to
-   * a §6 assessment it has no way to run.
-   */
+  /** What the settlement measured, as the maintenance prompt receives it. */
   maintenanceAssessment(): MaintenanceAssessment {
     this.ensureInitialized()
-    const watches = (status: string) => {
-      const operation = settle.watchesCommand(status)
-      const result = super.executeKip(operation.command, operation.parameters)
-      return result.status === 'failed' ? [] : settle.readWatches(result.result)
-    }
-    return {
-      space_seq: this.nexus.store.currentSeq(this.nexus.space),
-      armed_watches: watches('armed'),
-      fired_watches: watches('fired'),
-      predicates: this.predicateCensus(),
-    }
+    return assess(
+      (operation) => this.run(operation),
+      this.nexus.store.currentSeq(this.nexus.space),
+    )
   }
 
   /**
-   * Per-predicate link counts — the vocabulary sprawl indicator.
+   * The settlement's port: one command in, one result out.
    *
-   * A count that failed is omitted rather than reported as zero: naming the
-   * busiest predicate as unused would point the merge guidance at exactly the
-   * wrong target.
+   * `super`, not `this`: the guard has already run by the time a settlement
+   * starts, and re-entering the override would cost a storage read per command
+   * for a check that cannot fail twice.
    */
-  private predicateCensus(): Record<string, number> {
-    const census: Record<string, number> = {}
-    const listed = super.executeKip('LIST PREDICATES LIMIT 100')
-    if (listed.status === 'failed' || !Array.isArray(listed.result)) return census
-    for (const entry of listed.result) {
-      // A `LIST` row, the same one both engines answer with:
-      // `{ref, local_name, package_ref, status}`. `local_name` is what a
-      // command may write, which is what the census counts by.
-      if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue
-      const name = (entry as { local_name?: unknown }).local_name
-      if (typeof name !== 'string' || name === '') continue
-      const operation = settle.predicateCensusCommand(name)
-      const counted = super.executeKip(operation.command, operation.parameters)
-      if (counted.status === 'failed') continue
-      const rows = counted.result
-      const count = Array.isArray(rows) ? rows[0] : undefined
-      if (typeof count === 'number') census[name] = count
-    }
-    return census
+  private run(operation: KipOperation): KipResult {
+    return super.executeKip(operation.command, operation.parameters)
   }
 
   /**
@@ -330,26 +209,13 @@ export class AndaBrain extends KipDatabase<Env> {
     const before = vocabulary.revision
     const rejected = vocabulary.extend(types, predicates)
     if (vocabulary.revision !== before) vocabulary.activate(this.nexus)
-    return {
-      package_ref: vocabulary.packageRef(),
-      // Sorted, because a caller diffing two of these should see what changed
-      // rather than what arrived first.
-      types: [...vocabulary.types].sort(),
-      predicates: [...vocabulary.predicates].sort(),
-      rejected,
-    }
+    return vocabulary.declared(rejected)
   }
 
   /** What this Space can already say, without publishing anything. */
   vocabulary(): DeclaredVocabulary {
     this.ensureInitialized()
-    const vocabulary = MemoryVocabulary.load(this.nexus)
-    return {
-      package_ref: vocabulary.packageRef(),
-      types: [...vocabulary.types].sort(),
-      predicates: [...vocabulary.predicates].sort(),
-      rejected: [],
-    }
+    return MemoryVocabulary.load(this.nexus).declared()
   }
 
   stats(): BrainStats {

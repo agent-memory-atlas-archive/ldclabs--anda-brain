@@ -1,10 +1,12 @@
-import {
-  assertReadonlyOperations,
-  citationsFromLookup,
-  conceptLookupCommand,
-} from './kip.js'
+import { assertReadonlyOperations } from './kip.js'
 import { AndaBrain } from './brain.js'
-import { formMemory, maintainMemory, OperationError, recallMemory } from './operations.js'
+import {
+  formMemory,
+  maintainMemory,
+  OperationError,
+  probeMemory,
+  recallMemory,
+} from './operations.js'
 import type { BrainRpc, Env } from './types.js'
 import {
   parseFormationInput,
@@ -97,18 +99,8 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
         return ok(await recallMemory(env, brain, parseRecallInput(body)))
       case 'maintenance':
         return ok(await maintainMemory(env, brain, parseMaintenanceInput(body)))
-      case 'probe': {
-        const input = parseRecallInput(body)
-        const results = await brain.executeKipReadonlyBatch([
-          conceptLookupCommand(input.query, 8),
-        ])
-        const probe = results[0]
-        if (probe === undefined || probe.status === 'failed') {
-          throw new OperationError('probe KIP failed', 422, probe?.error)
-        }
-        const memories = citationsFromLookup(probe.result)
-        return ok({ found: memories.length > 0, memories })
-      }
+      case 'probe':
+        return ok(await probeMemory(brain, parseRecallInput(body)))
       case 'execute_kip_readonly': {
         const batch = parseKipInput(body)
         // Gated here as well as inside the object: a 400 that names the offence

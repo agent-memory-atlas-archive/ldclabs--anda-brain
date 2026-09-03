@@ -32,7 +32,64 @@
 
 import type { JsonMap, KipResult } from '@ldclabs/kip-do'
 import type { KipOperation } from './kip.js'
-import type { ArmedWatch, SettlementReport, SkillSettlement, WatchSettlement } from './types.js'
+import type {
+  ArmedWatch,
+  MaintenanceAssessment,
+  SettlementReport,
+  SkillSettlement,
+  WatchSettlement,
+} from './types.js'
+
+/**
+ * The one thing settlement needs from its host: run a command, get a result.
+ *
+ * Everything below is arithmetic over what the graph already holds, so the only
+ * capability it cannot supply itself is execution. Taking it as a port rather
+ * than reaching for a Durable Object is what lets the whole settlement — the
+ * verdict rule most of all — be exercised without one.
+ *
+ * Synchronous, because the 2.0 engine is: a Durable Object runs a command
+ * against its own SQLite without awaiting, and a promise here would buy a
+ * suspension point in the middle of a sweep that reads its own writes.
+ */
+export type RunKip = (operation: KipOperation) => KipResult
+
+/**
+ * The deterministic settlement, run before every maintenance cycle.
+ *
+ * Never throws and never fails the cycle: a settlement that could not sweep is
+ * a degraded cycle, not a failed one, and each pass reports its own error so
+ * "nothing was due" and "the pass never ran" stay distinguishable.
+ */
+export function settle(run: RunKip, nowMs: number): SettlementReport {
+  const now = new Date(nowMs).toISOString()
+  return {
+    settled_at: now,
+    decayed: metabolize(run, now, new Date(nowMs - DECAY_MIN_INTERVAL_MS).toISOString()),
+    watches: fireDueWatches(run, now),
+    skills: settleSkillLifecycle(run, now),
+  }
+}
+
+/**
+ * What the settlement measured, as the maintenance prompt receives it.
+ *
+ * The model cannot go and fetch any of this — it gets one completion — so a
+ * signal absent here is a duty it will not perform. That is why the armed set,
+ * the fired queue and `space_seq` are read for it rather than left to a §6
+ * assessment it has no way to run.
+ *
+ * `spaceSeq` is a parameter rather than a read: it is the store's own
+ * coordinate, not something any command answers.
+ */
+export function assess(run: RunKip, spaceSeq: number): MaintenanceAssessment {
+  return {
+    space_seq: spaceSeq,
+    armed_watches: watchesInStatus(run, 'armed'),
+    fired_watches: watchesInStatus(run, 'fired'),
+    predicates: predicateCensus(run),
+  }
+}
 
 // --- rule constants, mirrored from anda_brain -------------------------------
 
@@ -90,13 +147,35 @@ const CURSOR_ATTR = 'verdict_cursor'
 // --- watch expiry -----------------------------------------------------------
 
 /**
+ * Fires the silence Watches whose deadline has passed.
+ *
+ * One scan, then one guarded write per due Watch. A write refused by
+ * `EXPECT VERSION` is counted as a conflict and left armed rather than retried:
+ * something else moved that Watch between the scan and the write, and the next
+ * sweep re-reads it.
+ */
+function fireDueWatches(run: RunKip, now: string): WatchSettlement {
+  const report: WatchSettlement = { fired: 0, conflicted: 0 }
+  const found = run(dueSilenceWatchesCommand(now))
+  if (found.status === 'failed') {
+    report.error = found.error?.message ?? 'watch scan failed'
+    return report
+  }
+  for (const due of dueWatches(found.result)) {
+    if (run(fireWatchCommand(due, now)).status === 'failed') report.conflicted += 1
+    else report.fired += 1
+  }
+  return report
+}
+
+/**
  * The silence Watches whose deadline has passed.
  *
  * A `delta` Watch is the model's to evaluate: its condition is prose the
  * Profile deliberately fixes no language for. A `silence` Watch at its
  * deadline is arithmetic — one still `armed` is one no evaluation has fired.
  */
-export function dueSilenceWatchesCommand(now: string): KipOperation {
+function dueSilenceWatchesCommand(now: string): KipOperation {
   return {
     command:
       'FIND(?w.id, ?w.name, ?w.attributes, ?w._system.plane_versions.attributes) WHERE { ' +
@@ -111,7 +190,7 @@ export function dueSilenceWatchesCommand(now: string): KipOperation {
 }
 
 /** One due Watch, with what the guarded update needs. */
-export interface DueWatch {
+interface DueWatch {
   id: string
   version: number
   watch: ArmedWatch
@@ -123,7 +202,7 @@ export interface DueWatch {
  * A row missing its id or version is skipped rather than fired: firing without
  * the version would overwrite a concurrent edit instead of yielding to it.
  */
-export function dueWatches(result: unknown): DueWatch[] {
+function dueWatches(result: unknown): DueWatch[] {
   if (!Array.isArray(result)) return []
   const due: DueWatch[] = []
   for (const row of result) {
@@ -174,7 +253,7 @@ function readWatch(id: string, name: unknown, attributes: unknown): ArmedWatch {
  * (§35.1) so a `MnemonicState` sweep over the same Concept cannot hold a Watch
  * armed past its deadline for a reason having nothing to do with the Watch.
  */
-export function fireWatchCommand(watch: DueWatch, now: string): KipOperation {
+function fireWatchCommand(watch: DueWatch, now: string): KipOperation {
   return {
     command: `MUTATE {
   UPDATE :watch
@@ -198,11 +277,58 @@ export function fireWatchCommand(watch: DueWatch, now: string): KipOperation {
 
 // --- skill lifecycle --------------------------------------------------------
 
-export type SkillStatus = 'proposed' | 'trialed' | 'adopted' | 'revoked'
+/**
+ * Runs the deterministic Skill lifecycle rule over graded outcomes.
+ *
+ * Profile §14 rule 1: promotion and demotion are executed by deterministic code
+ * reading graded Outcome Evidence — "the Brain proposes, compiles, and
+ * narrates; it never promotes."
+ *
+ * One read per Skill, because the window is per-Skill and per-cursor: a Skill
+ * never graded starts from a different coordinate than one that has.
+ */
+function settleSkillLifecycle(run: RunKip, now: string): SkillSettlement {
+  const report: SkillSettlement = { graded: 0, transitions: 0, conflicted: 0 }
+  const found = run(skillsCommand())
+  if (found.status === 'failed') {
+    report.error = found.error?.message ?? 'skill scan failed'
+    return report
+  }
+  for (const skill of skillRows(found.result)) {
+    const graded = run(outcomesCommand(skill.id, skill.task_family, skill.cursor))
+    if (graded.status === 'failed') continue
+    const window = tally(graded.result)
+    // Nothing attributed to this Skill since the last verdict: nothing to
+    // judge, and no reason to price the family aggregate below.
+    if (window.graded === 0) continue
+
+    // The baseline a trial is measured against: the whole family up to the end
+    // of this window, from which `decide` subtracts what was linked to this
+    // Skill (Profile §6.5).
+    const counted = run(familyTallyCommand(skill.task_family, window.cursor))
+    if (counted.status === 'failed') continue
+
+    const verdict = decide(skill, window, familyTally(counted.result))
+    // An idle stream writes nothing: no verdict, no cursor move, no Activity.
+    if (verdict === undefined) continue
+
+    if (run(verdictCommand(skill, verdict, window, now)).status === 'failed') {
+      // The cursor did not advance, so the next pass re-reads the same outcomes
+      // and reaches the same verdict.
+      report.conflicted += 1
+      continue
+    }
+    report.graded += 1
+    if (verdict.transition !== undefined) report.transitions += 1
+  }
+  return report
+}
+
+type SkillStatus = 'proposed' | 'trialed' | 'adopted' | 'revoked'
 
 const SKILL_STATUSES: readonly SkillStatus[] = ['proposed', 'trialed', 'adopted', 'revoked']
 
-export interface SkillRow {
+interface SkillRow {
   id: string
   name: string
   version: number
@@ -225,7 +351,7 @@ export interface SkillRow {
  * was only ever a rounded number cannot be recomputed, and rule 2 asks for the
  * comparison to be recoverable rather than merely rememberable.
  */
-export interface TrialBasis {
+interface TrialBasis {
   /** The `space_seq` the trial opened at. */
   basis_seq: number
   /** The family's outcomes up to `basis_seq` that were *not* linked here. */
@@ -244,7 +370,7 @@ export interface TrialBasis {
  * is the first to be tried in has no "how things were going", and reading that
  * as 0.0 would let any success at all clear the bar.
  */
-export function baselineRate(trial: TrialBasis): number | undefined {
+function baselineRate(trial: TrialBasis): number | undefined {
   return successRate(trial.baseline_success, trial.baseline_failure)
 }
 
@@ -256,18 +382,18 @@ export function baselineRate(trial: TrialBasis): number | undefined {
  * read, and a truncated baseline would quietly become a comparison against the
  * most recent few runs.
  */
-export interface FamilyTally {
+interface FamilyTally {
   success: number
   failure: number
   graded: number
 }
 
-export function emptyFamilyTally(): FamilyTally {
+function emptyFamilyTally(): FamilyTally {
   return { success: 0, failure: 0, graded: 0 }
 }
 
 /** A tally over one window of Outcome Evidence. */
-export interface Tally {
+interface Tally {
   success: number
   failure: number
   /** Everything the instruments graded. `unknown` is not a grade. */
@@ -278,7 +404,7 @@ export interface Tally {
   evidence: string[]
 }
 
-export function emptyTally(): Tally {
+function emptyTally(): Tally {
   return { success: 0, failure: 0, graded: 0, severeFailure: false, cursor: 0, evidence: [] }
 }
 
@@ -291,7 +417,7 @@ function successRate(success: number, failure: number): number | undefined {
   return decided > 0 ? success / decided : undefined
 }
 
-export interface Verdict {
+interface Verdict {
   /** `undefined` when the Skill stays where it is and only its tallies move. */
   transition: SkillStatus | undefined
   rationale: string
@@ -309,7 +435,7 @@ export interface Verdict {
  * baseline when a trial opens: the baseline is the family minus this Skill's
  * own linked outcomes (§6.5).
  */
-export function decide(
+function decide(
   skill: SkillRow,
   window: Tally,
   family: FamilyTally,
@@ -413,7 +539,7 @@ export function decide(
 }
 
 /** The Skills this Space holds, with the state the rule needs. */
-export function skillsCommand(): KipOperation {
+function skillsCommand(): KipOperation {
   // Each facet is projected by name, not as the whole `facets` object: a
   // projected `?s.facets` comes back keyed by full schema ref, and a reader
   // looking up the local name would silently find nothing and grade every
@@ -433,7 +559,7 @@ export function skillsCommand(): KipOperation {
  * consolidation to attach one, so one that arrived anyway names no stream that
  * could grade it, and judging it on no evidence is what the lifecycle forbids.
  */
-export function skillRows(result: unknown): SkillRow[] {
+function skillRows(result: unknown): SkillRow[] {
   if (!Array.isArray(result)) return []
   const rows: SkillRow[] = []
   for (const row of result) {
@@ -505,7 +631,7 @@ function readTrialState(facet: unknown): TrialBasis | undefined {
  * The cursor is a Space sequence coordinate: without it a replayed pass would
  * count the same run twice and promote on arithmetic rather than evidence.
  */
-export function outcomesCommand(
+function outcomesCommand(
   skill: string,
   taskFamily: string,
   after: number,
@@ -534,7 +660,7 @@ export function outcomesCommand(
  * linked outcomes too; the caller subtracts this Skill's own, which is cheaper
  * and more exact than asking the engine for a negation.
  */
-export function familyTallyCommand(taskFamily: string, upto: number): KipOperation {
+function familyTallyCommand(taskFamily: string, upto: number): KipOperation {
   return {
     command:
       'FIND(?e.facets["OutcomeRecord"].outcome_status, COUNT(?e)) WHERE { ' +
@@ -553,7 +679,7 @@ export function familyTallyCommand(taskFamily: string, upto: number): KipOperati
  * tally applies, because a baseline graded on a different vocabulary than the
  * treatment set is not a comparison.
  */
-export function familyTally(result: unknown): FamilyTally {
+function familyTally(result: unknown): FamilyTally {
   const family = emptyFamilyTally()
   if (!Array.isArray(result)) return family
   for (const row of result) {
@@ -588,7 +714,7 @@ export function familyTally(result: unknown): FamilyTally {
  * penalizing the procedure. A deploy that never started is not evidence the
  * recipe is wrong.
  */
-export function tally(result: unknown): Tally {
+function tally(result: unknown): Tally {
   const graded = emptyTally()
   if (!Array.isArray(result)) return graded
   for (const row of result) {
@@ -641,7 +767,7 @@ export function tally(result: unknown): Tally {
  * `SkillUtility` facet; splitting them is what stops a tally from reading as a
  * forecast.
  */
-export function verdictCommand(
+function verdictCommand(
   skill: SkillRow,
   verdict: Verdict,
   window: Tally,
@@ -735,6 +861,21 @@ export function verdictCommand(
 // --- mnemonic metabolism ----------------------------------------------------
 
 /**
+ * Disuse metabolism: `MnemonicState.memory_strength`, never confidence.
+ *
+ * The `last_metabolized_at` filter is both the weekly rate limit and the
+ * intra-sweep cursor, so a Space with nothing due costs one query that matches
+ * no rows. A failed sweep decays nothing and says so by reporting zero — the
+ * cycle still runs.
+ */
+function metabolize(run: RunKip, now: string, metabolizedBefore: string): number {
+  const result = run(decayCommand(now, metabolizedBefore))
+  if (result.status === 'failed') return 0
+  const changes = result.extensions?.['kip-do/outcome']?.changes ?? []
+  return changes.filter((change) => change.op === 'update').length
+}
+
+/**
  * One disuse-metabolism batch.
  *
  * Decays `MnemonicState.memory_strength` — accessibility — and never Assertion
@@ -747,7 +888,7 @@ export function verdictCommand(
  * anybody made. The `last_metabolized_at` filter is both the weekly rate limit
  * and the intra-sweep cursor — rows stamped by this pass stop matching.
  */
-export function decayCommand(now: string, metabolizedBefore: string): KipOperation {
+function decayCommand(now: string, metabolizedBefore: string): KipOperation {
   return {
     command: `UPDATE ?c
 SET FACET "MnemonicState" {
@@ -771,14 +912,46 @@ LIMIT :limit`,
   }
 }
 
-export function decayHorizon(nowMs: number): number {
-  return nowMs - DECAY_MIN_INTERVAL_MS
-}
-
 // --- assessment reads -------------------------------------------------------
 
-/** The Watches this Space holds in one status. */
-export function watchesCommand(status: string): KipOperation {
+/**
+ * The Watches this Space holds in one status.
+ *
+ * A failed read answers an empty set: the assessment is a signal block, and one
+ * signal it could not gather must not take the cycle down with it.
+ */
+function watchesInStatus(run: RunKip, status: string): ArmedWatch[] {
+  const result = run(watchesCommand(status))
+  return result.status === 'failed' ? [] : dueWatches(result.result).map((due) => due.watch)
+}
+
+/**
+ * Per-predicate link counts — the vocabulary sprawl indicator.
+ *
+ * A count that failed is omitted rather than reported as zero: naming the
+ * busiest predicate as unused would point the merge guidance at exactly the
+ * wrong target.
+ */
+function predicateCensus(run: RunKip): Record<string, number> {
+  const census: Record<string, number> = {}
+  const listed = run({ command: 'LIST PREDICATES LIMIT 100' })
+  if (listed.status === 'failed' || !Array.isArray(listed.result)) return census
+  for (const entry of listed.result) {
+    // A `LIST` row, the same one both engines answer with:
+    // `{ref, local_name, package_ref, status}`. `local_name` is what a command
+    // may write, which is what the census counts by.
+    if (!isObject(entry)) continue
+    const name = entry.local_name
+    if (typeof name !== 'string' || name === '') continue
+    const counted = run(predicateCensusCommand(name))
+    if (counted.status === 'failed') continue
+    const count = Array.isArray(counted.result) ? counted.result[0] : undefined
+    if (typeof count === 'number') census[name] = count
+  }
+  return census
+}
+
+function watchesCommand(status: string): KipOperation {
   return {
     command:
       'FIND(?w.id, ?w.name, ?w.attributes, ?w._system.plane_versions.attributes) WHERE { ' +
@@ -789,12 +962,8 @@ export function watchesCommand(status: string): KipOperation {
   }
 }
 
-export function readWatches(result: unknown): ArmedWatch[] {
-  return dueWatches(result).map((due) => due.watch)
-}
-
 /** How many links each registered predicate carries — the sprawl indicator. */
-export function predicateCensusCommand(predicate: string): KipOperation {
+function predicateCensusCommand(predicate: string): KipOperation {
   return {
     command: 'FIND(COUNT(?link)) WHERE { ?link (?s, :predicate, ?o) }',
     parameters: { predicate },
@@ -805,27 +974,4 @@ export function predicateCensusCommand(predicate: string): KipOperation {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-/** Whether a write failed because the element moved under the sweep. */
-export function isVersionConflict(result: KipResult): boolean {
-  const code = result.error?.code ?? ''
-  return code.includes('Version') || code.includes('Precondition')
-}
-
-export function emptyWatchSettlement(): WatchSettlement {
-  return { fired: 0, conflicted: 0 }
-}
-
-export function emptySkillSettlement(): SkillSettlement {
-  return { graded: 0, transitions: 0, conflicted: 0 }
-}
-
-export function emptySettlement(settledAt: string): SettlementReport {
-  return {
-    settled_at: settledAt,
-    decayed: 0,
-    watches: emptyWatchSettlement(),
-    skills: emptySkillSettlement(),
-  }
 }
