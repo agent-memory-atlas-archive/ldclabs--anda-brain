@@ -153,6 +153,7 @@ impl MemoryVocabulary {
 
     /// Whether the Space can already resolve every one of these symbols,
     /// whoever declares them.
+    #[cfg_attr(not(feature = "wiki"), allow(dead_code))]
     pub fn covers<'a>(
         &self,
         types: impl IntoIterator<Item = &'a str>,

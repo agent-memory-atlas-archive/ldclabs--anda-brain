@@ -122,6 +122,7 @@ pub fn changed(response: &Response, op: &str) -> u64 {
 /// counting the op would let a sweep report the wrong work. §36.1 puts the
 /// move in `state.from` / `state.to`, and this reads the half that says what
 /// the element became.
+#[cfg_attr(not(feature = "wiki"), allow(dead_code))]
 pub fn transitioned(response: &Response, to: &str) -> u64 {
     count_changes(response, |change| {
         change.get("op").and_then(Json::as_str) == Some("lifecycle")

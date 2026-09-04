@@ -175,6 +175,50 @@ of the Rust one:
 - No data migration: `kip-do` never reached production, so no Durable Object
   holds 1.x data and the Worker starts clean.
 
+### Changed — re-synced to KIP 2.0 `22b72b5` (`anda-db` `f425fb3`…`ae321de`)
+
+Upstream made what an engine may leave out a capability rather than a profile,
+and both engines closed four gaps a line-by-line review found neither
+declaring. Nothing this service relied on moved, so the sync itself is a
+re-vendored syntax card and a regenerated prompt bundle; the rest of this entry
+is what the two deployments now answer.
+
+- **Nine profiles; the rest are capabilities (§89, §67.4).** `KIP-Capsule`,
+  `KIP-Historical`, `KIP-High-Assurance` and `KIP-1-Migration` are gone as
+  profiles; `capsule_export` / `capsule_import`, `historical_reads`,
+  `signed_receipts` / `capsule_signatures` and `kip1_migration` say the same
+  thing per engine. The 1.x auto-upgrade this service runs on first open is the
+  reference engine's `kip1_migration: true`; the Worker answers `false` and has
+  nothing to migrate.
+- **`atomic` is the `atomic_batch` capability (§75.3), and both engines answer
+  `false`.** A request asking for it is refused with `UnsupportedCapability`
+  rather than run as a sequence that looks like one: `anda_kip::execute_request`
+  already declined to fake it, and the Worker refuses it at validation. One
+  `MUTATE` block is the transaction — which both Formation contracts asked for
+  and now say outright, because the syntax card's envelope example still spells
+  `"mode": "atomic"` and a model copying it was paying a refused round trip.
+- **`VERIFY` takes `CAPSULE`, `SCHEMA PACKAGE` or `RECEIPT` (§69.1).** `BLOB`
+  and `CHECKPOINT` left the grammar; the Worker's vendored `KIPSyntax.md`
+  follows (`scripts/sync-kip-assets.mjs`, then `codegen:prompts`).
+  `VERIFY RECEIPT` and `VERIFY SCHEMA PACKAGE` now run on both engines; they
+  are reads, so `execute_kip_readonly` admits them without a change.
+- **What both engines now do underneath, with nothing to change here:** an
+  idempotency key is journalled under the Principal that used it (§34.2) —
+  every agent in this service runs as one Principal, so no key changes hands; a
+  page cursor continues only the traversal that issued it (§44.8) — the
+  settlement pages by `space_seq` watermark, never by cursor; a `critical`
+  request extension fails the request — neither deployment sends one;
+  quarantine holds only an active element; a `SEARCH` hit carries a `snippet`
+  beside `element`, which the recall trace reader already skips by shape.
+- **`anda_kip` narrowed its public surface (277 → 217 items).** This crate used
+  none of the removed items and `cargo check` is clean. The two helpers only the
+  `wiki` feature calls (`kip::transitioned`, `Vocabulary::covers`) are marked as
+  such instead of warning in a default build.
+- **The Cognitive Memory Profile is resealed** under JCS number formatting
+  (`sha256:7f32a27a…`). Both engines ship the new digest and a Space activates
+  the Profile by reference, so no stored Space changes.
+
+
 ### Changed — re-synced to KIP 2.0 `793af73` (`anda-db` `d092cae`…`bb27dc0`)
 
 Upstream collapsed six lifecycle statements into one, gave the Change Envelope

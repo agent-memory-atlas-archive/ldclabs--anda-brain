@@ -770,6 +770,13 @@ Concepts, the Assertions and the Activity commit together or not at all. A
 half-written formation leaves claims whose Evidence never landed, which reads
 exactly like a claim nobody supported.
 
+The `MUTATE` block is the transaction. `execution.mode: "atomic"` — the
+syntax card's envelope example still spells it — is the `atomic_batch`
+capability (§75.3), which this engine answers `false`, so a request asking for
+it is refused with `UnsupportedCapability` rather than run as a sequence that
+looks like one. Send one `MUTATE`, or a `sequence` whose operations can each
+stand alone.
+
 Set `MnemonicState` on Concepts you create. Three members, three different
 questions, none of them confidence:
 

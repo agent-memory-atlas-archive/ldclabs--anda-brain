@@ -51,7 +51,7 @@ cd ../../anda-db/ts/kip-do && pnpm install && pnpm run build
 | 派生闭包（`LIST DEPENDENTS`） | 保留，`DEPTH` 上限 8；但 maintenance 一次只出 KML，走不了这条读 |
 | 保留期（`SET RETENTION`） | 引擎已实现，maintenance 可以写；但没有到期清扫，Rust 服务两样都有 |
 | 载荷清除（`PURGE PAYLOAD`） | 引擎已实现；maintenance 计划里和 `PURGE` 一样被拒 |
-| 原子批（`execution.mode: "atomic"`） | 引擎未实现，请求会被拒绝而不是伪装成功 |
+| 原子批（`execution.mode: "atomic"`） | 引擎未实现（`atomic_batch` 能力为 false），请求按 §75.3 被拒绝而不是降级成 sequence |
 
 ## 确定性 settlement
 
