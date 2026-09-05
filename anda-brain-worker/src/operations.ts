@@ -306,6 +306,11 @@ export async function maintainMemory(
 
   const results = operations.length ? await brain.executeMaintenancePlan(operations) : []
   throwOnKipError(results, 'maintenance KIP failed')
+  // The cycle read the Change Stream through the coordinate it was handed
+  // (`assessment.space_seq`): that is where the next cycle starts, and what a
+  // prose silence Watch's deadline is measured against (§5.11). Only a
+  // completed cycle counts — one that failed above may have read nothing.
+  await brain.recordConsumedSeq(assessment.space_seq)
 
   return {
     content: plan.value.summary || 'No maintenance changes were needed.',

@@ -34,7 +34,10 @@ import type { JsonMap, KipResult } from '@ldclabs/kip-do'
 import type { KipOperation } from './kip.js'
 import type {
   ArmedWatch,
+  CorrectionScan,
+  Dependent,
   MaintenanceAssessment,
+  RevisedRoot,
   SettlementReport,
   SkillSettlement,
   WatchSettlement,
@@ -61,14 +64,21 @@ export type RunKip = (operation: KipOperation) => KipResult
  * a degraded cycle, not a failed one, and each pass reports its own error so
  * "nothing was due" and "the pass never ran" stay distinguishable.
  */
-export function settle(run: RunKip, nowMs: number): SettlementReport {
+export function settle(run: RunKip, nowMs: number, position: SettlePosition = {}): SettlementReport {
   const now = new Date(nowMs).toISOString()
   return {
     settled_at: now,
     decayed: metabolize(run, now, new Date(nowMs - DECAY_MIN_INTERVAL_MS).toISOString()),
-    watches: fireDueWatches(run, now),
+    watches: sweepWatches(run, now, position),
     skills: settleSkillLifecycle(run, now),
+    corrections: scanCorrections(run, position.correctionCursor ?? 0),
   }
+}
+
+/** Where the settlement reads from: the host's coordinates, which no command answers. */
+export interface SettlePosition extends StreamPosition {
+  /** The coordinate the last correction scan read past. */
+  correctionCursor?: number
 }
 
 /**
@@ -80,14 +90,22 @@ export function settle(run: RunKip, nowMs: number): SettlementReport {
  * assessment it has no way to run.
  *
  * `spaceSeq` is a parameter rather than a read: it is the store's own
- * coordinate, not something any command answers.
+ * coordinate, not something any command answers. So are `consumedSeq` — the
+ * host's record of what the last cycle read — and `revisedRoots`, which the
+ * settlement just found.
  */
-export function assess(run: RunKip, spaceSeq: number): MaintenanceAssessment {
+export function assess(
+  run: RunKip,
+  spaceSeq: number,
+  extras: { consumedSeq?: number; revisedRoots?: RevisedRoot[] } = {},
+): MaintenanceAssessment {
   return {
     space_seq: spaceSeq,
+    ...(extras.consumedSeq === undefined ? {} : { consumed_seq: extras.consumedSeq }),
     armed_watches: watchesInStatus(run, 'armed'),
     fired_watches: watchesInStatus(run, 'fired'),
     predicates: predicateCensus(run),
+    revised_roots: extras.revisedRoots ?? [],
   }
 }
 
@@ -144,78 +162,333 @@ const DECAY_BATCH_LIMIT = 200
  */
 const CURSOR_ATTR = 'verdict_cursor'
 
-// --- watch expiry -----------------------------------------------------------
+// --- watch evaluation --------------------------------------------------------
+
+/** How many Change Envelopes one stream page carries. */
+const CHANGES_PAGE_LIMIT = 200
 
 /**
- * Fires the silence Watches whose deadline has passed.
- *
- * One scan, then one guarded write per due Watch. A write refused by
- * `EXPECT VERSION` is counted as a conflict and left armed rather than retried:
- * something else moved that Watch between the scan and the write, and the next
- * sweep re-reads it.
+ * How many pages one sweep reads before it stops and records where it got
+ * to. A Space that moved further than this between two cycles is evaluated
+ * across several sweeps rather than in one unbounded read.
  */
-function fireDueWatches(run: RunKip, now: string): WatchSettlement {
-  const report: WatchSettlement = { fired: 0, conflicted: 0 }
-  const found = run(dueSilenceWatchesCommand(now))
-  if (found.status === 'failed') {
-    report.error = found.error?.message ?? 'watch scan failed'
+const CHANGES_MAX_PAGES = 5
+
+/** The columns every Watch scan projects, in the order the readers use them. */
+const WATCH_COLUMNS = '?w.id, ?w.name, ?w.attributes, ?w._system.plane_versions.attributes'
+
+/** Where the sweep reads the stream from and what the Brain has consumed. */
+export interface StreamPosition {
+  /** The Space's head; absent when the store could not answer. */
+  headSeq?: number
+  /** The coordinate the last completed cycle read the stream through. */
+  consumedSeq?: number
+}
+
+/**
+ * Evaluates the armed Watches (Profile §5.11).
+ *
+ * Two halves, and the split is what this function is:
+ *
+ * - A **structured** condition — `element`, `slot` or `type`, narrowed by
+ *   `ops` and `touched` — is the runtime's to read. The sweep reads the
+ *   Change Stream from where each Watch was last evaluated through the head
+ *   and matches the entries: a delta Watch fires on the first match, a silence
+ *   Watch whose awaited change arrived stands down, and a silence Watch past
+ *   its deadline with nothing matched fires — silence concluded over a stream
+ *   consumed through the head, which is what §5.11 means by it.
+ * - A **prose** condition is the Brain's. The runtime cannot say whether "no
+ *   reply from the vendor" was answered, so a prose silence Watch past its
+ *   deadline fires only once the Brain has consumed the stream through the
+ *   head at which the sweep first saw the deadline passed: the clock alone
+ *   proves nothing, because a matching change committed before the deadline
+ *   may still be waiting for the model whose job it is to read it.
+ *
+ * One scan, then one guarded write per Watch. A write refused by
+ * `EXPECT VERSION` is counted as a conflict and left where it was rather than
+ * retried: something else moved that Watch between the scan and the write, and
+ * the next sweep re-reads it.
+ */
+function sweepWatches(run: RunKip, now: string, stream: StreamPosition): WatchSettlement {
+  const report: WatchSettlement = { fired: 0, conflicted: 0, disarmed: 0, deferred: 0 }
+  const evaluated = new Set<string>()
+
+  // The armed set, evaluated wherever the condition is the runtime's to read.
+  // Read whole rather than filtered in KQL: whether a condition is structured
+  // is a question about its shape, which is this side's to ask.
+  const armed = run(watchesCommand('armed'))
+  if (armed.status === 'failed') {
+    report.error = armed.error?.message ?? 'watch scan failed'
     return report
   }
-  for (const due of dueWatches(found.result)) {
-    if (run(fireWatchCommand(due, now)).status === 'failed') report.conflicted += 1
-    else report.fired += 1
+  const structured: [WatchRow, ChangeFilter][] = []
+  for (const row of readWatchRows(armed.result)) {
+    const filter = changeFilter(row.condition)
+    if (filter !== null) structured.push([row, filter])
+  }
+  if (structured.length > 0) {
+    if (stream.headSeq === undefined) {
+      console.warn('the Space head is unknown; structured Watches are not evaluated this cycle')
+    } else {
+      const error = evaluateStructured(
+        run,
+        now,
+        { headSeq: stream.headSeq, consumedSeq: stream.consumedSeq },
+        structured,
+        evaluated,
+        report,
+      )
+      if (error !== null) {
+        report.error = error
+        return report
+      }
+    }
+  }
+
+  // The silence Watches past their deadline that evaluation did not settle:
+  // prose conditions, whose consumption is the Brain's. A structured Watch
+  // lands here only when the head was unknown, and is then held to the same
+  // guard.
+  const due = run(dueSilenceWatchesCommand(now))
+  if (due.status === 'failed') {
+    report.error = due.error?.message ?? 'watch scan failed'
+    return report
+  }
+  for (const row of readWatchRows(due.result)) {
+    if (evaluated.has(row.id)) continue
+    let command: KipOperation
+    if (row.dueSeenSeq !== undefined) {
+      // The Brain has read the stream past the head at which this deadline
+      // was first seen passed: silence is a fact now. Until then, held.
+      if (stream.consumedSeq === undefined || stream.consumedSeq < row.dueSeenSeq) {
+        report.deferred += 1
+        continue
+      }
+      command = fireWatchCommand(row, now, { kind: 'silence' }, stream.consumedSeq)
+    } else if (stream.headSeq !== undefined) {
+      // First sight of the passed deadline: record the head, so the
+      // consumption the next cycle reaches can be measured against it.
+      command = stampCommand(row, 'due_seen_seq', stream.headSeq)
+    } else {
+      report.deferred += 1
+      continue
+    }
+    const firing = row.dueSeenSeq !== undefined
+    if (run(command).status === 'failed') report.conflicted += 1
+    else if (firing) report.fired += 1
+    else report.deferred += 1
   }
   return report
 }
 
+/** What one Watch write meant, for the report. */
+type Outcome = 'fired' | 'disarmed' | 'deferred' | 'evaluated'
+
 /**
- * The silence Watches whose deadline has passed.
+ * Evaluates the structured Watches against the Change Stream from the oldest
+ * coordinate any of them needs, through the head.
  *
- * A `delta` Watch is the model's to evaluate: its condition is prose the
- * Profile deliberately fixes no language for. A `silence` Watch at its
- * deadline is arithmetic — one still `armed` is one no evaluation has fired.
+ * One stream read serves every Watch, and each is matched only past its own
+ * start, so a Watch armed yesterday is not fired by a change committed last
+ * week. The start is `evaluated_seq` where a sweep has stamped one; otherwise
+ * it is the Watch's arming, found in the stream itself as the last entry that
+ * created it or touched its attributes. A Watch is armed by the maintenance
+ * model, after the cycle's `space_seq` — so a Watch not yet stamped was armed
+ * past `consumedSeq`, which is where the stream is read from for it, and where
+ * it starts when its arming is not in the window after all. Not the Watch's
+ * own `_system.space_seq`: the metabolism sweep writes a Facet on every
+ * Concept, Watches included, and that coordinate would follow the sweep to
+ * the head and step over the very changes the Watch was armed for.
+ *
+ * The ids evaluated are collected so the due sweep does not settle them a
+ * second time on a version this pass already moved.
  */
-function dueSilenceWatchesCommand(now: string): KipOperation {
-  return {
-    command:
-      'FIND(?w.id, ?w.name, ?w.attributes, ?w._system.plane_versions.attributes) WHERE { ' +
-      '?w CONCEPT {type: "Watch"} ' +
-      'FILTER(?w.attributes.status == "armed") ' +
-      'FILTER(?w.attributes.watch_class == "silence") ' +
-      'FILTER(IS_NOT_NULL(?w.attributes.due_at)) ' +
-      'FILTER(?w.attributes.due_at <= :now) ' +
-      `} ORDER BY ?w.attributes.due_at LIMIT ${WATCH_SWEEP_LIMIT}`,
-    parameters: { now },
+function evaluateStructured(
+  run: RunKip,
+  now: string,
+  stream: StreamPosition & { headSeq: number },
+  watches: readonly [WatchRow, ChangeFilter][],
+  evaluated: Set<string>,
+  report: WatchSettlement,
+): string | null {
+  const head = stream.headSeq
+  const tentative = stream.consumedSeq ?? 0
+  const from = Math.min(head, ...watches.map(([row]) => row.evaluatedSeq ?? tentative))
+  const read = readChanges(run, from, head)
+  if ('error' in read) return read.error
+  const { envelopes, consumedTo } = read
+
+  // The slots the filters name, resolved once: an Assertion entry carries only
+  // `refs.proposition`, so matching it against a slot needs the Propositions
+  // of that slot.
+  const slots: SlotIndex = new Map()
+  for (const [, filter] of watches) {
+    if (filter.slot === undefined) continue
+    const key = slotKey(filter.slot)
+    if (slots.has(key)) continue
+    const found = run(slotCommand(filter.slot.subject, filter.slot.predicate))
+    if (found.status === 'failed') return found.error?.message ?? 'slot lookup failed'
+    const propositions = new Set<string>()
+    if (Array.isArray(found.result)) {
+      for (const row of found.result) {
+        const id = elementId(row)
+        if (id !== undefined) propositions.add(id)
+      }
+    }
+    slots.set(key, propositions)
   }
+
+  for (const [row, filter] of watches) {
+    evaluated.add(row.id)
+    const start = row.evaluatedSeq ?? armedAt(envelopes, row.id) ?? tentative
+    const through = Math.max(consumedTo, start)
+    const dueSilence = isSilence(row) && isDue(row, now)
+    const matched = firstMatch(filter, start, envelopes, slots)
+    let command: KipOperation
+    let outcome: Outcome
+    if (matched !== undefined && isSilence(row)) {
+      command = disarmMatchedCommand(row, now, matched)
+      outcome = 'disarmed'
+    } else if (matched !== undefined) {
+      command = fireWatchCommand(row, now, { kind: 'delta', seq: matched })
+      outcome = 'fired'
+    } else if (dueSilence && through >= head) {
+      // Nothing matched, and the stream is consumed through the head: for a
+      // due silence Watch that is silence, as §5.11 means it.
+      command = fireWatchCommand(row, now, { kind: 'silence' }, through)
+      outcome = 'fired'
+    } else if (through <= start) {
+      // Nothing new to read; nothing to record.
+      if (dueSilence) report.deferred += 1
+      continue
+    } else {
+      command = stampCommand(row, 'evaluated_seq', through)
+      outcome = dueSilence ? 'deferred' : 'evaluated'
+    }
+    if (run(command).status === 'failed') {
+      report.conflicted += 1
+    } else if (outcome === 'fired') {
+      report.fired += 1
+    } else if (outcome === 'disarmed') {
+      report.disarmed += 1
+    } else if (outcome === 'deferred') {
+      report.deferred += 1
+    }
+  }
+  return null
 }
 
-/** One due Watch, with what the guarded update needs. */
-interface DueWatch {
+/**
+ * Reads the Change Stream after `from`, page by page, within the sweep's
+ * budget.
+ *
+ * Answers the envelopes and the coordinate they are complete through: the head
+ * when the stream was read to its end, or the last coordinate read when the
+ * budget ran out first — which the caller records, so the next sweep continues
+ * from there instead of concluding silence over changes it never saw.
+ */
+function readChanges(
+  run: RunKip,
+  from: number,
+  head: number,
+): { envelopes: unknown[]; consumedTo: number } | { error: string } {
+  let after = from
+  const envelopes: unknown[] = []
+  for (let page = 0; page < CHANGES_MAX_PAGES; page += 1) {
+    const result = run(changesCommand(after))
+    if (result.status === 'failed') {
+      return { error: result.error?.message ?? 'change stream read failed' }
+    }
+    const rows = Array.isArray(result.result) ? result.result : []
+    let last: number | undefined
+    for (const envelope of rows) {
+      const seq = isObject(envelope) ? envelope.space_seq : undefined
+      if (typeof seq === 'number' && (last === undefined || seq > last)) last = seq
+    }
+    envelopes.push(...rows)
+    if (last === undefined) return { envelopes, consumedTo: Math.max(after, head) }
+    if (rows.length < CHANGES_PAGE_LIMIT) return { envelopes, consumedTo: Math.max(last, head) }
+    after = last
+  }
+  return { envelopes, consumedTo: after }
+}
+
+/** One Watch, as the scan returns it. */
+interface WatchRow {
   id: string
+  /** The attributes-plane version the guarded writes expect. */
   version: number
+  /** The condition as written — structured or prose. */
+  condition: unknown
+  /** Through which coordinate the runtime has evaluated this Watch. */
+  evaluatedSeq?: number
+  /**
+   * The head at which a sweep first saw a prose silence Watch's deadline
+   * passed; the guard the Brain's consumption has to reach.
+   */
+  dueSeenSeq?: number
+  /** The Watch as the maintenance prompt receives it. */
   watch: ArmedWatch
 }
 
+function isSilence(row: WatchRow): boolean {
+  return row.watch.watch_class === 'silence'
+}
+
+/** Whether the deadline has passed, as the scan compares it. */
+function isDue(row: WatchRow, now: string): boolean {
+  return row.watch.due_at !== '' && row.watch.due_at <= now
+}
+
 /**
- * Reads the scan rows.
- *
- * A row missing its id or version is skipped rather than fired: firing without
- * the version would overwrite a concurrent edit instead of yielding to it.
+ * The coordinate at which the stream last shows the Watch being armed: the
+ * entry that created it, or the last one that touched its attributes — which
+ * is what a model's `status: "armed"` does and a Facet sweep does not.
  */
-function dueWatches(result: unknown): DueWatch[] {
+function armedAt(envelopes: readonly unknown[], id: string): number | undefined {
+  let armed: number | undefined
+  for (const envelope of envelopes) {
+    if (!isObject(envelope) || typeof envelope.space_seq !== 'number') continue
+    const changes = Array.isArray(envelope.changes) ? envelope.changes : []
+    const arming = changes.some((entry) => {
+      if (!isObject(entry) || entry.id !== id) return false
+      if (entry.op === 'create') return true
+      const touched = Array.isArray(entry.touched) ? entry.touched : []
+      return touched.some((path) => typeof path === 'string' && path.startsWith('attributes'))
+    })
+    if (arming && (armed === undefined || envelope.space_seq > armed)) armed = envelope.space_seq
+  }
+  return armed
+}
+
+/**
+ * Reads scan rows into Watches.
+ *
+ * A row missing its id or version is skipped rather than acted on: every write
+ * here is guarded, and writing without the version would overwrite a
+ * concurrent edit instead of yielding to it.
+ */
+function readWatchRows(result: unknown): WatchRow[] {
   if (!Array.isArray(result)) return []
-  const due: DueWatch[] = []
+  const rows: WatchRow[] = []
   for (const row of result) {
     if (!Array.isArray(row)) continue
     const [id, name, attributes, version] = row
     if (typeof id !== 'string' || typeof version !== 'number') continue
-    due.push({
+    const seqAttribute = (key: string): number | undefined => {
+      const value = isObject(attributes) ? attributes[key] : undefined
+      return typeof value === 'number' ? value : undefined
+    }
+    rows.push({
       id,
       version,
+      condition: isObject(attributes) ? attributes.condition : undefined,
+      evaluatedSeq: seqAttribute('evaluated_seq'),
+      dueSeenSeq: seqAttribute('due_seen_seq'),
       watch: readWatch(id, name, attributes),
     })
   }
-  return due
+  return rows
 }
 
 function readWatch(id: string, name: unknown, attributes: unknown): ArmedWatch {
@@ -240,24 +513,205 @@ function readWatch(id: string, name: unknown, attributes: unknown): ArmedWatch {
 }
 
 /**
- * Fires one silence Watch: the transition and its provenance, atomically.
+ * A structured condition this runtime can evaluate (Profile §5.11).
+ *
+ * `element`, `slot` and `type` select what is watched — at least one, and
+ * every one present has to hold; `ops` and `touched` narrow which entries
+ * count, and an empty list means any.
+ */
+interface ChangeFilter {
+  element?: string
+  slot?: { subject: string; predicate: string }
+  type?: string
+  ops: string[]
+  touched: string[]
+}
+
+/**
+ * The runtime-evaluable reading of a condition, or `null` when it is the
+ * Brain's.
+ *
+ * `null` for prose, for a structured form with no selector (a Watch that
+ * carries only `text` is Brain-evaluated by definition), and for any member
+ * this runtime cannot read the way §5.11 means it. Refusing the last case is
+ * the point: a selector half-understood is a Watch that fires on the wrong
+ * change or never, and either is worse than leaving it to the model.
+ */
+export function changeFilter(condition: unknown): ChangeFilter | null {
+  if (!isObject(condition)) return null
+  const filter: ChangeFilter = { ops: [], touched: [] }
+  const strings = (value: unknown): string[] | null =>
+    Array.isArray(value) && value.every((item) => typeof item === 'string') ? value : null
+  for (const [name, value] of Object.entries(condition)) {
+    switch (name) {
+      case 'element':
+        if (typeof value !== 'string') return null
+        filter.element = value
+        break
+      case 'type':
+        if (typeof value !== 'string') return null
+        filter.type = value
+        break
+      case 'slot': {
+        if (!isObject(value)) return null
+        const { subject, predicate } = value
+        if (typeof subject !== 'string' || typeof predicate !== 'string') return null
+        filter.slot = { subject, predicate }
+        break
+      }
+      case 'ops': {
+        const ops = strings(value)
+        if (ops === null) return null
+        filter.ops = ops
+        break
+      }
+      case 'touched': {
+        const touched = strings(value)
+        if (touched === null) return null
+        filter.touched = touched
+        break
+      }
+      case 'text':
+        // The fallback the Brain interprets when the structured members
+        // cannot express the condition; ignored beside a selector.
+        break
+      default:
+        return null
+    }
+  }
+  if (filter.element === undefined && filter.slot === undefined && filter.type === undefined) {
+    return null
+  }
+  return filter
+}
+
+/** The Propositions each watched slot names, resolved before matching. */
+type SlotIndex = Map<string, Set<string>>
+
+function slotKey(slot: { subject: string; predicate: string }): string {
+  return `${slot.subject} ${slot.predicate}`
+}
+
+/**
+ * Reads the Propositions of one slot, so an Assertion entry — which carries
+ * only `refs.proposition` — can be matched against `slot`.
+ */
+function slotCommand(subject: string, predicate: string): KipOperation {
+  return {
+    command: 'FIND(?p.id) WHERE { ?p (:subject, :predicate, ?o) } LIMIT 100',
+    parameters: { subject: { id: subject }, predicate },
+  }
+}
+
+/** Whether one Change Envelope entry (§36.1) is what the filter watches. */
+export function entryMatches(filter: ChangeFilter, entry: unknown, slots: SlotIndex): boolean {
+  if (!isObject(entry)) return false
+  const text = (name: string): string | undefined =>
+    typeof entry[name] === 'string' ? (entry[name] as string) : undefined
+  if (filter.element !== undefined && text('id') !== filter.element) return false
+  if (filter.type !== undefined) {
+    // Only a Concept entry carries `schema_ref`; the type of anything else is
+    // not what a `type` selector watches.
+    const schemaRef = text('schema_ref')
+    if (schemaRef === undefined || localName(schemaRef) !== filter.type) return false
+  }
+  if (filter.slot !== undefined) {
+    const refs = isObject(entry.refs) ? entry.refs : {}
+    const reference = (name: string): string | undefined =>
+      typeof refs[name] === 'string' ? (refs[name] as string) : undefined
+    let inSlot = false
+    if (text('kind') === 'proposition') {
+      const predicate = reference('predicate_ref')
+      inSlot =
+        reference('subject') === filter.slot.subject &&
+        predicate !== undefined &&
+        localName(predicate) === filter.slot.predicate
+    } else if (text('kind') === 'assertion') {
+      const proposition = reference('proposition')
+      inSlot =
+        proposition !== undefined &&
+        (slots.get(slotKey(filter.slot))?.has(proposition) ?? false)
+    }
+    if (!inSlot) return false
+  }
+  if (filter.ops.length > 0) {
+    const op = text('op')
+    if (op === undefined || !filter.ops.includes(op)) return false
+  }
+  if (filter.touched.length > 0) {
+    const touched = Array.isArray(entry.touched) ? entry.touched : []
+    if (!filter.touched.some((path) => touched.includes(path))) return false
+  }
+  return true
+}
+
+/** One page of the Change Stream. */
+function changesCommand(after: number): KipOperation {
+  return {
+    command: `CHANGES AFTER SEQ :after LIMIT ${CHANGES_PAGE_LIMIT}`,
+    parameters: { after },
+  }
+}
+
+/** The first coordinate in `envelopes` after `from` whose entries the filter matches. */
+function firstMatch(
+  filter: ChangeFilter,
+  from: number,
+  envelopes: readonly unknown[],
+  slots: SlotIndex,
+): number | undefined {
+  for (const envelope of envelopes) {
+    if (!isObject(envelope)) continue
+    const seq = envelope.space_seq
+    if (typeof seq !== 'number' || seq <= from) continue
+    const changes = Array.isArray(envelope.changes) ? envelope.changes : []
+    if (changes.some((entry) => entryMatches(filter, entry, slots))) return seq
+  }
+  return undefined
+}
+
+/** Why a Watch fires. */
+type Fire = { kind: 'silence' } | { kind: 'delta'; seq: number }
+
+/**
+ * Fires one Watch: the transition and its provenance, atomically.
  *
  * No SleepTask, no `action_gate`, no outward act — the same three omissions the
- * Rust sweep makes, for the same reasons. The runtime knows the date passed; it
- * does not know what that means, and recording `defer` on the model's behalf
- * would be fabricating a decision nobody made. **A fired Watch grants nothing.**
+ * Rust sweep makes, for the same reasons. The runtime knows the date passed or
+ * the change landed; it does not know what that means, and recording `defer`
+ * on the model's behalf would be fabricating a decision nobody made. **A fired
+ * Watch grants nothing.**
  *
  * `CLIENT KEY` makes the firing idempotent under concurrent evaluators (§5.11):
- * two sweeps that saw the same passed deadline resolve to one `watch_fire`
- * rather than writing two for one silence. The guard names the attributes plane
- * (§35.1) so a `MnemonicState` sweep over the same Concept cannot hold a Watch
- * armed past its deadline for a reason having nothing to do with the Watch.
+ * the key names the deadline or the matched coordinate, so two sweeps that saw
+ * the same event resolve to one `watch_fire` rather than writing two for it.
+ * The guard names the attributes plane (§35.1) so a `MnemonicState` sweep over
+ * the same Concept cannot hold a Watch armed past its deadline for a reason
+ * having nothing to do with the Watch.
  */
-function fireWatchCommand(watch: DueWatch, now: string): KipOperation {
+function fireWatchCommand(
+  watch: WatchRow,
+  now: string,
+  fire: Fire,
+  evaluatedSeq?: number,
+): KipOperation {
+  const parameters: JsonMap = { watch: watch.id, version: watch.version, now }
+  const members = ['status: "fired"', 'fired_at: :now']
+  if (fire.kind === 'silence') {
+    parameters.fire_key = `watch_fire:${watch.id}:silence:${watch.watch.due_at}`
+  } else {
+    parameters.fire_key = `watch_fire:${watch.id}:delta:${fire.seq}`
+    parameters.matched_seq = fire.seq
+    members.push('matched_seq: :matched_seq')
+  }
+  if (evaluatedSeq !== undefined) {
+    parameters.evaluated_seq = evaluatedSeq
+    members.push('evaluated_seq: :evaluated_seq')
+  }
   return {
     command: `MUTATE {
   UPDATE :watch
-    SET ATTRIBUTES { status: "fired", fired_at: :now }
+    SET ATTRIBUTES { ${members.join(', ')} }
     EXPECT VERSION :version OF ATTRIBUTES
 
   CREATE ACTIVITY ?fire {
@@ -266,13 +720,213 @@ function fireWatchCommand(watch: DueWatch, now: string): KipOperation {
     SET STRUCTURAL { ("inputs", :watch) }
   }
 }`,
-    parameters: {
-      watch: watch.id,
-      version: watch.version,
-      now,
-      fire_key: `watch_fire:${watch.id}:silence:${watch.watch.due_at}`,
-    },
+    parameters,
   }
+}
+
+/**
+ * Disarms a silence Watch whose awaited change arrived before its deadline.
+ *
+ * Not a fire: the Watch was waiting for *silence*, and the change is the
+ * opposite of what it was armed for. The coordinate the change committed at is
+ * kept on the Watch, so the reader who wonders why a silence Watch stood down
+ * finds the transaction that answered it.
+ */
+function disarmMatchedCommand(watch: WatchRow, now: string, matchedSeq: number): KipOperation {
+  return {
+    command: `MUTATE {
+  UPDATE :watch
+    SET ATTRIBUTES { status: "disarmed", disarmed_at: :now, matched_seq: :matched_seq, evaluated_seq: :matched_seq }
+    EXPECT VERSION :version OF ATTRIBUTES
+}`,
+    parameters: { watch: watch.id, version: watch.version, now, matched_seq: matchedSeq },
+  }
+}
+
+/**
+ * Records a coordinate on a Watch: `evaluated_seq` (the runtime read the
+ * stream through here) or `due_seen_seq` (the head at which a sweep first saw
+ * the deadline passed). The name is fixed by the caller, never by data.
+ */
+function stampCommand(
+  watch: WatchRow,
+  attribute: 'evaluated_seq' | 'due_seen_seq',
+  seq: number,
+): KipOperation {
+  return {
+    command: `MUTATE {
+  UPDATE :watch
+    SET ATTRIBUTES { ${attribute}: :seq }
+    EXPECT VERSION :version OF ATTRIBUTES
+}`,
+    parameters: { watch: watch.id, version: watch.version, seq },
+  }
+}
+
+/** Reads the Watches in one status, oldest deadline first. */
+function watchesCommand(status: string): KipOperation {
+  return {
+    command:
+      `FIND(${WATCH_COLUMNS}) WHERE { ` +
+      '?w CONCEPT {type: "Watch"} ' +
+      'FILTER(?w.attributes.status == :status) ' +
+      `} ORDER BY ?w.attributes.due_at LIMIT ${WATCH_SWEEP_LIMIT}`,
+    parameters: { status },
+  }
+}
+
+/**
+ * The silence Watches whose deadline has passed.
+ *
+ * `due_at` is compared as a string because graph timestamps are RFC3339 and
+ * lexicographically ordered. A Watch with no `due_at` never matches, which is
+ * correct: a silence Watch without a deadline has declared no moment at which
+ * silence becomes meaningful.
+ */
+function dueSilenceWatchesCommand(now: string): KipOperation {
+  return {
+    command:
+      `FIND(${WATCH_COLUMNS}) WHERE { ` +
+      '?w CONCEPT {type: "Watch"} ' +
+      'FILTER(?w.attributes.status == "armed") ' +
+      'FILTER(?w.attributes.watch_class == "silence") ' +
+      'FILTER(IS_NOT_NULL(?w.attributes.due_at)) ' +
+      'FILTER(?w.attributes.due_at <= :now) ' +
+      `} ORDER BY ?w.attributes.due_at LIMIT ${WATCH_SWEEP_LIMIT}`,
+    parameters: { now },
+  }
+}
+
+/** The local name of a symbol reference, or the name itself when bare. */
+function localName(symbol: string): string {
+  const slash = symbol.lastIndexOf('/')
+  return slash === -1 ? symbol : symbol.slice(slash + 1)
+}
+
+/** An element id, whether the row spelled it bare or as a reference. */
+function elementId(value: unknown): string | undefined {
+  if (typeof value === 'string') return value
+  if (isObject(value) && typeof value.id === 'string') return value.id
+  return undefined
+}
+
+// --- correction discovery ---------------------------------------------------
+
+/** How many superseded Assertions one scan reads. */
+const CORRECTION_SCAN_LIMIT = 20
+
+/** How far a derivation walk follows Activity lineage from a revised root. */
+const DEPENDENTS_DEPTH = 2
+
+/** How many dependents one walk lists. */
+const DEPENDENTS_LIMIT = 20
+
+/**
+ * Correction discovery: the Assertions an actor has revised since `after`,
+ * each with what `LIST DEPENDENTS` reaches from it (§57.5, §63.5).
+ *
+ * An Assertion is immutable, so the cursor is the Space sequence coordinate:
+ * processed revisions fall behind it, and a backlog larger than one page
+ * drains across cycles. A full page never steps over its last coordinate —
+ * one transaction may have superseded more claims than the page holds — so
+ * the cursor stops just before it, unless the whole page shares that
+ * coordinate, in which case the remainder is lost and said so.
+ *
+ * Reachability is topology, not judgment: a listed dependent is a candidate
+ * for `DerivationState {status: "stale"}`, not already stale. The cycle decides.
+ */
+function scanCorrections(run: RunKip, after: number): CorrectionScan {
+  const scan: CorrectionScan = { revised_roots: [], cursor: after }
+  const found = run(supersededCommand(after))
+  if (found.status === 'failed') {
+    scan.error = found.error?.message ?? 'correction scan failed'
+    return scan
+  }
+  const rows = Array.isArray(found.result) ? found.result : []
+  const roots: RevisedRoot[] = []
+  for (const row of rows) {
+    if (!Array.isArray(row)) continue
+    const [id, seq, actor, proposition, supersededBy] = row
+    if (typeof id !== 'string' || typeof seq !== 'number') continue
+    const actorId = elementId(actor)
+    const propositionId = elementId(proposition)
+    roots.push({
+      assertion: id,
+      space_seq: seq,
+      ...(actorId === undefined ? {} : { actor: actorId }),
+      ...(propositionId === undefined ? {} : { proposition: propositionId }),
+      superseded_by: Array.isArray(supersededBy)
+        ? supersededBy.map(elementId).filter((v): v is string => v !== undefined)
+        : [],
+      dependents: [],
+      truncated: false,
+    })
+  }
+  const seqs = roots.map((root) => root.space_seq)
+  if (seqs.length > 0) {
+    const max = Math.max(...seqs)
+    const min = Math.min(...seqs)
+    if (rows.length < CORRECTION_SCAN_LIMIT) {
+      scan.cursor = max
+    } else if (min < max) {
+      scan.cursor = max - 1
+    } else {
+      console.error(
+        `one transaction superseded more Assertions than a settlement page holds (${CORRECTION_SCAN_LIMIT}); the remainder at ${max} will not be recorded`,
+      )
+      scan.cursor = max
+    }
+  }
+  for (const root of roots) {
+    if (root.space_seq > scan.cursor) continue
+    const walked = run(dependentsCommand(root.assertion))
+    if (walked.status === 'failed') {
+      root.truncated = true
+    } else {
+      root.dependents = readDependents(walked.result)
+      root.truncated =
+        walked.next_cursor !== undefined ||
+        (walked.warnings ?? []).some((warning) => isObject(warning) && warning.code === 'truncated')
+    }
+    scan.revised_roots.push(root)
+  }
+  return scan
+}
+
+function supersededCommand(after: number): KipOperation {
+  return {
+    command:
+      'FIND(?a.id, ?a._system.space_seq, ?a.asserted_by, ?a.proposition, ?a.lifecycle.superseded_by) WHERE { ' +
+      '?a ASSERTION {} ' +
+      'FILTER(?a.lifecycle.status == "superseded") ' +
+      'FILTER(?a._system.space_seq > :after) ' +
+      `} ORDER BY ?a._system.space_seq LIMIT ${CORRECTION_SCAN_LIMIT}`,
+    parameters: { after },
+  }
+}
+
+function dependentsCommand(root: string): KipOperation {
+  return {
+    command: `LIST DEPENDENTS :root DEPTH ${DEPENDENTS_DEPTH} LIMIT ${DEPENDENTS_LIMIT}`,
+    parameters: { root },
+  }
+}
+
+/** The rows of a `LIST DEPENDENTS` answer — `{id, kind, distance, via}`. */
+function readDependents(result: unknown): Dependent[] {
+  if (!Array.isArray(result)) return []
+  const dependents: Dependent[] = []
+  for (const row of result) {
+    if (!isObject(row) || typeof row.id !== 'string') continue
+    const via = isObject(row.via) && typeof row.via.activity === 'string' ? row.via.activity : undefined
+    dependents.push({
+      id: row.id,
+      kind: typeof row.kind === 'string' ? row.kind : '',
+      distance: typeof row.distance === 'number' ? row.distance : 1,
+      ...(via === undefined ? {} : { via }),
+    })
+  }
+  return dependents
 }
 
 // --- skill lifecycle --------------------------------------------------------
@@ -922,7 +1576,7 @@ LIMIT :limit`,
  */
 function watchesInStatus(run: RunKip, status: string): ArmedWatch[] {
   const result = run(watchesCommand(status))
-  return result.status === 'failed' ? [] : dueWatches(result.result).map((due) => due.watch)
+  return result.status === 'failed' ? [] : readWatchRows(result.result).map((row) => row.watch)
 }
 
 /**
@@ -949,17 +1603,6 @@ function predicateCensus(run: RunKip): Record<string, number> {
     if (typeof count === 'number') census[name] = count
   }
   return census
-}
-
-function watchesCommand(status: string): KipOperation {
-  return {
-    command:
-      'FIND(?w.id, ?w.name, ?w.attributes, ?w._system.plane_versions.attributes) WHERE { ' +
-      '?w CONCEPT {type: "Watch"} ' +
-      'FILTER(?w.attributes.status == :status) ' +
-      `} ORDER BY ?w.attributes.due_at LIMIT ${WATCH_SWEEP_LIMIT}`,
-    parameters: { status },
-  }
 }
 
 /** How many links each registered predicate carries — the sprawl indicator. */

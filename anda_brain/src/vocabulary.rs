@@ -36,6 +36,7 @@ use std::{
 };
 
 use crate::kip;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The package id the brain publishes its own vocabulary under.
 ///
@@ -460,6 +461,9 @@ pub struct DeclareSymbolsTool {
     /// vocabulary, add their own symbol, and publish — the second overwriting
     /// the first's, which is how a declared symbol quietly stops existing.
     lock: Arc<tokio::sync::Mutex<()>>,
+    /// Bumped on every publish, so a reader caching the Space's primer knows
+    /// its copy no longer lists everything the Space can say.
+    generation: Arc<AtomicU64>,
 }
 
 impl DeclareSymbolsTool {
@@ -471,7 +475,15 @@ impl DeclareSymbolsTool {
         Self {
             memory,
             lock: Arc::new(tokio::sync::Mutex::new(())),
+            generation: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Shares the schema generation counter with the readers that cache the
+    /// primer (`RecallAgent::with_schema_generation`).
+    pub fn with_schema_generation(mut self, generation: Arc<AtomicU64>) -> Self {
+        self.generation = generation;
+        self
     }
 
     /// Publishes the symbols and returns the names it refused.
@@ -489,6 +501,7 @@ impl DeclareSymbolsTool {
         );
         if vocabulary.revision != before {
             vocabulary.activate(nexus.as_ref()).await?;
+            self.generation.fetch_add(1, Ordering::AcqRel);
         }
         Ok((
             json!({

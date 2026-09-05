@@ -670,13 +670,29 @@ must not redo its work by hand:
   deciding what should carry an expiry at all, and writing that with
   `SET RETENTION`. The sweep is what makes that write mean something rather
   than being recorded and never honoured.
-- **Silence Watch expiry.** Every armed `silence` Watch whose `due_at` had
-  passed is already `fired`, with its `watch_fire` Activity. A deadline
-  arriving is arithmetic and does not wait for a model to be scheduled and
-  notice. What is *not* done is the decision: firing produced attention and
-  nothing else, and `assessment.fired_watches` is the queue waiting for your
-  action gate. `delta` Watches are untouched — matching a condition written in
-  prose is interpretation, and that is yours.
+- **Watch evaluation, the structured half (§5.11).** Every armed Watch whose
+  `condition` is a structured filter — `element`, `slot` or `type`, narrowed
+  by `ops` and `touched` — has already been evaluated against the Change
+  Stream: a `delta` Watch whose change committed is `fired` with its
+  `watch_fire` Activity and the coordinate in `matched_seq`; a `silence` Watch
+  whose awaited change arrived is `disarmed` rather than fired; a `silence`
+  Watch past its `due_at` with nothing matched is `fired`, silence having been
+  concluded over a stream read through the head. What is *not* done is the
+  decision: firing produced attention and nothing else, and
+  `assessment.fired_watches` is the queue waiting for your action gate.
+
+  A Watch whose `condition` is prose is yours (A.2). One thing the runtime
+  still does for it: a prose `silence` Watch past its deadline is fired only
+  once *you* have consumed the Change Stream through the head at which the
+  sweep first saw the deadline passed — the clock alone proves nothing, and a
+  cycle that completes is what consumes the stream (`assessment.consumed_seq`).
+  So a prose deadline fires on the cycle after the one that read past it, and
+  never before.
+- **Correction discovery, with dependents.** Assertions an actor superseded
+  since the last cycle are in `assessment.revised_roots`, each with what
+  `LIST DEPENDENTS` reached from it. The runtime walked the lineage so §16
+  and §22 have a list rather than a guess; it flagged nothing, because
+  reachability is topology and staleness is judgment.
 - **Skill lifecycle verdicts.** Every `proposed → trialed → adopted → revoked`
   transition due on the linked Outcome Evidence has already run, as
   deterministic code, recorded as a `lifecycle_verdict` Activity with its rule
@@ -727,6 +743,20 @@ WorkingState, derivation review, retention decisions and the SleepTask queue.
     "predicates": {"prefers": 41, "works_on": 3, "works_at": 2},
     "source_reliability": {"C-7": {"corrections": 4, "last_corrected_at": 1756512000000}},
     "space_seq": 4213,
+    "consumed_seq": 4100,
+    "revised_roots": [
+      {
+        "assertion": "A-310",
+        "proposition": "P-77",
+        "actor": "C-7",
+        "superseded_by": ["A-412"],
+        "space_seq": 4190,
+        "dependents": [
+          {"id": "C-140", "kind": "concept", "distance": 1, "via": "ACT-58"}
+        ],
+        "truncated": false
+      }
+    ],
     "armed_watches": [
       {
         "id": "C-88",
@@ -758,16 +788,28 @@ they mean one thing is a question the Propositions answer, not the counts.
 `assessment.armed_watches` is what this Space is waiting on and
 `assessment.space_seq` is where its history stands, because §10, §17 and §18
 need both and neither is something you can work out from a snapshot.
+`assessment.consumed_seq` is where the last completed cycle read the stream
+through — where this one's `CHANGES AFTER SEQ` starts — and is absent until a
+cycle has completed.
 
-- **Watch evaluation (§10, §17), the delta half.** The runtime already fired
-  every `silence` Watch whose `due_at` had passed — a deadline arriving is
-  arithmetic, and A.1 covers it. What is yours is `delta`: read
-  `CHANGES AFTER SEQ` from the basis the last `WorkingState` declared, or from
-  `space_seq` when there is none, and compare the committed changes against
-  each armed Watch's `condition`. Deciding whether a change matches "the vendor
-  replied about the renewal" is interpretation, which is why it is not
-  arithmetic and not the runtime's. Fire atomically: the `watch_fire` Activity
-  and the transition to `fired`, in one `MUTATE`.
+- **Watch evaluation (§10, §17), the prose half.** The runtime already
+  evaluated every Watch whose `condition` is a structured filter, and A.1
+  covers it. What is yours is prose: read `CHANGES AFTER SEQ` from
+  `assessment.consumed_seq`, or from `space_seq` when there is none, and
+  compare the committed changes against each armed Watch whose `condition` is
+  a sentence. Deciding whether a change matches "the vendor replied about the
+  renewal" is interpretation, which is why it is not arithmetic and not the
+  runtime's. Fire atomically: the `watch_fire` Activity and the transition to
+  `fired`, in one `MUTATE`. When you arm a Watch yourself, prefer the
+  structured form where it can say what you mean — a Watch the runtime can
+  evaluate fires the moment its change commits, not on the next cycle you
+  happen to read it.
+- **Derivation review (§16, §22), from `assessment.revised_roots`.** Each
+  entry is a claim an actor revised, with the Assertions that superseded it
+  and the artifacts `LIST DEPENDENTS` reached from it. Read each dependent
+  against the revision and mark what no longer holds
+  `DerivationState {status: "stale"}` — or leave it, when the revision does
+  not touch what was derived. A `truncated` walk is one to continue by hand.
 - **The action gate (§17), for every fired Watch.** `assessment.fired_watches`
   is the queue — Watches the runtime or you have fired and nobody has decided
   about yet. Record the decision as an `action_gate` Activity with outcome

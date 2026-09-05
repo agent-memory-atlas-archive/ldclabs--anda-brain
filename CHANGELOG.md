@@ -175,6 +175,52 @@ of the Rust one:
 - No data migration: `kip-do` never reached production, so no Durable Object
   holds 1.x data and the Worker starts clean.
 
+### Added — the runtime evaluates Watches, and silence waits for the stream (Profile §5.11)
+
+The reference README's Maintenance duties had two halves this service left to
+the model without giving it what the halves need. Both deployments now do the
+arithmetic in the deterministic settlement and hand the cycle the rest.
+
+- **Structured Watch conditions are the runtime's.** A `condition` written as
+  the Profile's baseline filter — `element`, `slot` or `type`, narrowed by
+  `ops` and `touched` — is evaluated against `CHANGES AFTER SEQ`, from where
+  each Watch was last evaluated (`evaluated_seq`, or its arming as the stream
+  shows it) through the head, in pages of 200 and at most five per sweep. A
+  `delta` Watch fires on the first matching change (`matched_seq`); a
+  `silence` Watch whose awaited change arrived is `disarmed` rather than fired;
+  a `silence` Watch past its deadline with nothing matched fires. A `slot`
+  selector is resolved to the slot's Propositions first, because an Assertion
+  entry carries only `refs.proposition`. A condition with a member this
+  runtime cannot read is left whole to the model rather than half-evaluated.
+- **A prose silence Watch no longer fires on the clock.** §5.11 requires the
+  evaluator to have consumed the Change Stream through the coordinate current
+  at `due_at` before it may conclude silence. The sweep now records the head
+  at which it first saw the deadline passed (`due_seen_seq`) and fires only
+  once a completed maintenance cycle has consumed the stream past it — the
+  `assessment.space_seq` that cycle was handed, recorded as
+  `delta_consumed_seq` when the cycle completes and handed to the next one as
+  `assessment.consumed_seq`. The settlement report says how many were held
+  (`deferred`) and how many stood down (`disarmed`).
+- **Revised roots come with their dependents.** Correction discovery used to
+  feed only the `source_reliability` tally; the cycle was told to walk
+  `LIST DEPENDENTS` after a revision without being told what was revised.
+  Each newly superseded Assertion now reaches the cycle as
+  `assessment.revised_roots` — the Proposition, the actor, what superseded it,
+  and what `LIST DEPENDENTS :root DEPTH 2 LIMIT 20` reached, with `truncated`
+  set when the walk was cut short. Nothing is flagged: reachability is
+  topology, staleness is the cycle's judgment. The Worker, which had no
+  correction discovery, gains the same scan with its cursor in the Durable
+  Object's own storage.
+- **Recall's cached primer is invalidated by a vocabulary publish.** The five-
+  minute TTL meant that after Formation declared `works_on`, Recall could read
+  a primer that did not list it. `declare_memory_symbols` and the wiki digest
+  now bump a schema generation the cache keys on, so the next recall refetches.
+- Both mode contracts (`BrainMaintenance.md` §A) say what the runtime did and
+  what is now the model's: the prose half of Watch evaluation, read from
+  `consumed_seq`, and the derivation review over `revised_roots`. The one
+  `FIND` shape for Watch rows serves the sweep and the assessment on both
+  engines, where the Rust side used to read them twice.
+
 ### Changed — re-synced to KIP 2.0 `22b72b5` (`anda-db` `f425fb3`…`ae321de`)
 
 Upstream made what an engine may leave out a capability rather than a profile,

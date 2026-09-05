@@ -48,7 +48,7 @@ cd ../../anda-db/ts/kip-do && pnpm install && pnpm run build
 | 自动周期维护 | 未实现；由调用方或 Cron Trigger 调用 maintenance |
 | 确定性 settlement（代谢 / Watch 到期 / Skill 判决） | 保留，见下节 |
 | 全文检索（`SEARCH`） | 保留，keyword 模式，见「检索」一节 |
-| 派生闭包（`LIST DEPENDENTS`） | 保留，`DEPTH` 上限 8；但 maintenance 一次只出 KML，走不了这条读 |
+| 派生闭包（`LIST DEPENDENTS`） | 保留，`DEPTH` 上限 8；runtime 在 settlement 里替模型走：每条新 superseded 的 Assertion 带着它的 dependents 进 `assessment.revised_roots` |
 | 保留期（`SET RETENTION`） | 引擎已实现，maintenance 可以写；但没有到期清扫，Rust 服务两样都有 |
 | 载荷清除（`PURGE PAYLOAD`） | 引擎已实现；maintenance 计划里和 `PURGE` 一样被拒 |
 | 原子批（`execution.mode: "atomic"`） | 引擎未实现（`atomic_batch` 能力为 false），请求按 §75.3 被拒绝而不是降级成 sequence |
@@ -66,11 +66,21 @@ cd ../../anda-db/ts/kip-do && pnpm install && pnpm run build
 - **记忆代谢**：按 `MnemonicState.memory_strength × 0.95` 衰减，下限 0.3，周期一周
   （靠 `last_metabolized_at` 过滤器自己节流）。从不碰 Assertion 的 confidence。
   没有任何东西**抬高** memory_strength——读取不强化它读到的东西。
-- **silence Watch 到期**：`due_at` 过了且仍 `armed` 的，原子地转 `fired` + 写
-  `watch_fire` Activity，`EXPECT VERSION` 守卫。**不建 SleepTask、不写
-  `action_gate`、不做任何对外动作**——日子到了是算术，那意味着什么不是。决定留给
-  下一轮的 `assessment.fired_watches` 队列。`delta` Watch 仍归模型：匹配一句散文写
-  的 condition 是解释。
+- **Watch 求值（Profile §5.11）**：`condition` 是结构化过滤器（`element` / `slot` /
+  `type`，可用 `ops` / `touched` 收窄）的 Watch 由 runtime 对 Change Stream 求值：
+  `delta` 命中即 `fired`（`matched_seq` 记下命中的事务）；`silence` 等的变更来了就
+  `disarmed` 而不是 fired；`silence` 过期且无命中才 `fired`——沉默是在读完到 head 的
+  流上得出的结论，不是看表得出的。每个 Watch 的 `evaluated_seq` 记着读到哪，下次从
+  那里接着读。散文 condition 归模型：它从 `assessment.consumed_seq` 起读
+  `CHANGES AFTER SEQ` 自己匹配；而散文 `silence` 过期后 runtime 只在**某个完成的
+  cycle 已经消费到首次发现过期时的 head** 之后才 fire（`due_seen_seq` 守卫），所以
+  散文 deadline 在读过它的那一轮的**下一轮**才响，绝不提前。fire 原子地转状态 + 写
+  `watch_fire` Activity，`EXPECT VERSION ... OF ATTRIBUTES` 守卫。**不建 SleepTask、
+  不写 `action_gate`、不做任何对外动作**——决定留给下一轮的
+  `assessment.fired_watches` 队列。
+- **更正发现**：新 superseded 的 Assertion（游标存在 DO 的 KV 里）逐条走
+  `LIST DEPENDENTS`，结果进 `assessment.revised_roots`。只列可达性，不标 stale：
+  哪些派生物不再成立是模型的判断。
 - **Skill 生命周期判决**：`proposed → trialed → adopted → revoked` 只按 Outcome
   Evidence 的确定性规则走。Profile §14 规则 1 点名了执行者——**「the Brain
   proposes, compiles, and narrates; it never promotes」**——所以它在代码里。
@@ -86,8 +96,11 @@ cd ../../anda-db/ts/kip-do && pnpm install && pnpm run build
   规则常量与 `anda_brain/src/settlement/skill.rs` 逐一对齐，`VERDICT_RULE` 两边**必须相同**：
   一个 Skill 在 Rust 侧被采纳、在 Worker 侧被撤销，会让这个规则标识变成谎话。
 
-模型拿到的 `assessment` 块（`space_seq`、armed / fired Watch 集合、每谓词链接数）
-也是 runtime 读好的：它只有一次 completion，**输入里没有的信号就是它不会履行的职责**。
+模型拿到的 `assessment` 块（`space_seq`、`consumed_seq`、armed / fired Watch 集合、
+每谓词链接数、`revised_roots`）也是 runtime 读好的：它只有一次 completion，**输入里
+没有的信号就是它不会履行的职责**。cycle 成功结束后 runtime 把它拿到的 `space_seq`
+记为 `consumed_seq`：既是下一轮 `CHANGES AFTER SEQ` 的起点，也是散文 silence Watch
+的放行线。
 
 ## 词汇表：新类型和新谓词
 

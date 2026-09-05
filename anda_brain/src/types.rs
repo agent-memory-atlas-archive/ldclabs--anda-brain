@@ -671,6 +671,70 @@ pub struct MaintenanceAssessment {
     /// records an `action_gate` outcome and disarms it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fired_watches: Vec<ArmedWatch>,
+
+    /// The coordinate the last completed maintenance cycle read the Change
+    /// Stream through — where this cycle's `CHANGES AFTER SEQ` starts.
+    ///
+    /// Recorded by the runtime when a cycle completes, from the `space_seq`
+    /// that cycle was handed. It is also what a prose silence Watch waits on
+    /// (Profile §5.11): the sweep fires one only once this record has reached
+    /// the head at which it first saw the deadline passed. Absent until a
+    /// cycle has completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumed_seq: Option<u64>,
+
+    /// Assertions an actor superseded since the last cycle, each with the
+    /// cognition derived from it — the derivation review's input (§57.5).
+    ///
+    /// The runtime walks `LIST DEPENDENTS` so the cycle does not have to
+    /// guess which artifacts a revised root fed. Reachability is topology,
+    /// not judgment: a listed dependent is a candidate for `DerivationState
+    /// {status: "stale"}`, not already stale.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revised_roots: Vec<RevisedRoot>,
+}
+
+/// One Assertion an actor superseded, with what was derived from it.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+pub struct RevisedRoot {
+    /// The superseded Assertion.
+    pub assertion: String,
+
+    /// The Proposition it took a stance on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposition: Option<String>,
+
+    /// The actor whose claim was revised.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+
+    /// The Assertions that superseded it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub superseded_by: Vec<String>,
+
+    /// The coordinate the supersession committed at.
+    pub space_seq: u64,
+
+    /// What `LIST DEPENDENTS` reached from the Assertion, nearest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependents: Vec<Dependent>,
+
+    /// Set when the list is known to be incomplete: the traversal was cut by
+    /// an element this Principal may not discover (§63.5), the page was
+    /// full, or the read failed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+/// One element reached by a derivation walk (§63.5).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+pub struct Dependent {
+    pub id: String,
+    pub kind: String,
+    pub distance: u64,
+    /// The Activity through which it was reached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
 }
 
 /// One armed Watch, as the Maintenance prompt receives it.
@@ -1166,6 +1230,19 @@ pub struct WatchSettlement {
     /// They stay `armed` and the next sweep sees them again.
     pub conflicted: u64,
 
+    /// Silence Watches whose awaited change arrived before their deadline —
+    /// evaluated by the runtime against the Change Stream and stood down,
+    /// because the silence they were armed for can no longer happen.
+    #[serde(default)]
+    pub disarmed: u64,
+
+    /// Silence Watches past their deadline that were held rather than fired:
+    /// the Change Stream had not yet been consumed through the coordinate
+    /// current at the deadline (Profile §5.11), so "nothing matched" was not
+    /// yet a fact. They fire once it has.
+    #[serde(default)]
+    pub deferred: u64,
+
     /// Set when the scan itself failed: no Watch was evaluated this cycle, and
     /// reporting zero fired would read as "nothing was due".
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1212,6 +1289,11 @@ pub struct SourceReliability {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct MemorySettlementReport {
     pub settled_at: u64,
+
+    /// The revisions this settlement discovered, with their dependents; the
+    /// assessment hands them to the cycle as `revised_roots`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revised_roots: Vec<RevisedRoot>,
 
     /// Concepts whose `MnemonicState.memory_strength` the bulk pass decayed.
     /// Zero is the ordinary answer: the sweep only touches Concepts last

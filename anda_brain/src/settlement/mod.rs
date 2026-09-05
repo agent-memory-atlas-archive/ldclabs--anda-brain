@@ -38,7 +38,7 @@ use std::future::Future;
 
 use crate::{
     kip,
-    types::{MemoryPolicy, SkillSettlement, WatchSettlement},
+    types::{ArmedWatch, Dependent, MemoryPolicy, RevisedRoot, SkillSettlement, WatchSettlement},
 };
 
 /// Per-command row limit for bulk settlement passes.
@@ -174,6 +174,10 @@ pub(crate) struct SupersededRow {
     /// actor is the reliability signal — this is not a statement about the
     /// caller's authority.
     pub actor: Option<String>,
+    /// The Proposition the claim took a stance on.
+    pub proposition: Option<String>,
+    /// The Assertions that superseded it.
+    pub superseded_by: Vec<String>,
 }
 
 /// One page of correction discovery: what was superseded, and how far the
@@ -216,7 +220,7 @@ pub(crate) async fn scan_corrections(port: &impl RunKip, after: u64) -> Correcti
 
     let request = kip::request_with(
         format!(
-            "FIND(?a.id, ?a._system.space_seq, ?a.asserted_by) WHERE {{\n  ?a ASSERTION {{}}\n  FILTER(?a.lifecycle.status == \"superseded\")\n  FILTER(?a._system.space_seq > :after)\n}}\nORDER BY ?a._system.space_seq\nLIMIT {SETTLEMENT_BATCH_LIMIT}"
+            "FIND(?a.id, ?a._system.space_seq, ?a.asserted_by, ?a.proposition, ?a.lifecycle.superseded_by) WHERE {{\n  ?a ASSERTION {{}}\n  FILTER(?a.lifecycle.status == \"superseded\")\n  FILTER(?a._system.space_seq > :after)\n}}\nORDER BY ?a._system.space_seq\nLIMIT {SETTLEMENT_BATCH_LIMIT}"
         ),
         kip::param("after", after),
     );
@@ -260,55 +264,408 @@ pub(crate) async fn scan_corrections(port: &impl RunKip, after: u64) -> Correcti
     scan
 }
 
-/// Fires the silence Watches whose deadline has passed.
+/// Evaluates the armed Watches and fires the silence Watches whose deadline
+/// has passed.
 ///
-/// See [`watch`] for why this half is the runtime's and the delta half is the
-/// model's. Errors are reported rather than propagated: a cycle that could not
-/// sweep is degraded, not failed.
-pub(crate) async fn sweep_watches(port: &impl RunKip, now_ms: u64) -> WatchSettlement {
+/// See [`watch`] for what the runtime evaluates and what it only guards.
+/// `head_seq` is the Space's coordinate as the sweep began — what a
+/// structured Watch is evaluated through — and `consumed_seq` is where the
+/// last completed maintenance cycle read the stream through, which is what a
+/// prose silence Watch waits on (§5.11). Errors are reported rather than
+/// propagated: a cycle that could not sweep is degraded, not failed.
+pub(crate) async fn sweep_watches(
+    port: &impl RunKip,
+    now_ms: u64,
+    head_seq: Option<u64>,
+    consumed_seq: Option<u64>,
+) -> WatchSettlement {
     let now = kip::timestamp(now_ms);
     let mut report = WatchSettlement::default();
+    let mut evaluated: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
-    let response = match read(port, watch::due_silence_watches_request(&now)).await {
-        Ok(response) => response,
+    // The armed set, evaluated wherever the condition is the runtime's to
+    // read. Read whole rather than filtered in KQL: whether a condition is
+    // structured is a question about its shape, which is this side's to ask.
+    let armed = match read(port, watch::watches_request("armed")).await {
+        Ok(response) => kip::ok_result(&response)
+            .map(watch::read_watch_rows)
+            .unwrap_or_default(),
         Err(error) => {
             report.error = Some(error);
             return report;
         }
     };
-    let Some(result) = kip::ok_result(&response) else {
-        return report;
-    };
+    let structured: Vec<(watch::WatchRow, watch::ChangeFilter)> = armed
+        .into_iter()
+        .filter_map(|row| {
+            let filter = watch::change_filter(&row.condition)?;
+            Some((row, filter))
+        })
+        .collect();
+    if !structured.is_empty() {
+        match head_seq {
+            Some(head) => {
+                if let Err(error) = evaluate_structured(
+                    port,
+                    &now,
+                    head,
+                    consumed_seq,
+                    &structured,
+                    &mut evaluated,
+                    &mut report,
+                )
+                .await
+                {
+                    report.error = Some(error);
+                    return report;
+                }
+            }
+            None => log::warn!(
+                target: "brain",
+                space_id = port.space_id();
+                "the Space's head is unknown; structured Watches are not evaluated this cycle"
+            ),
+        }
+    }
 
-    for due in watch::due_watches(result) {
-        let response = match port
-            .run_kip(watch::fire_watch_request(&due, &now), false)
-            .await
-        {
-            Ok(response) => response,
-            Err(err) => {
-                report.error = Some(err.to_string());
-                return report;
+    // The silence Watches past their deadline that evaluation did not settle:
+    // prose conditions, whose consumption is the Brain's. A structured Watch
+    // lands here only when the head was unknown, and is then held to the
+    // same guard.
+    let due = match read(port, watch::due_silence_watches_request(&now)).await {
+        Ok(response) => kip::ok_result(&response)
+            .map(watch::read_watch_rows)
+            .unwrap_or_default(),
+        Err(error) => {
+            report.error = Some(error);
+            return report;
+        }
+    };
+    for row in due {
+        if evaluated.contains(&row.id) {
+            continue;
+        }
+        let request = match (row.due_seen_seq, consumed_seq, head_seq) {
+            // The Brain has read the stream past the head at which this
+            // deadline was first seen passed: silence is a fact now.
+            (Some(seen), Some(consumed), _) if consumed >= seen => {
+                watch::fire_watch_request(&row, &now, watch::Fire::Silence, Some(consumed))
+            }
+            (Some(_), _, _) => {
+                report.deferred += 1;
+                continue;
+            }
+            // First sight of the passed deadline: record the head, so the
+            // consumption the next cycle reaches can be measured against it.
+            (None, _, Some(head)) => watch::stamp_request(&row, "due_seen_seq", head),
+            (None, _, None) => {
+                report.deferred += 1;
+                continue;
             }
         };
-        if kip::succeeded(&response) {
-            report.fired += 1;
-        } else if watch::is_version_conflict(&response) {
-            // The maintenance model moved this Watch between the scan and
-            // the write. It stays armed; the next sweep re-reads it.
-            report.conflicted += 1;
-        } else {
-            log::warn!(
-                target: "brain",
-                space_id = port.space_id(),
-                watch = due.id;
-                "firing a due silence Watch failed: {}",
-                kip::error_message(&response)
-            );
-            report.conflicted += 1;
+        let firing = row.due_seen_seq.is_some();
+        match write(port, request, &row.id, "settling a due silence Watch").await {
+            Ok(true) if firing => report.fired += 1,
+            Ok(true) => report.deferred += 1,
+            Ok(false) => report.conflicted += 1,
+            Err(error) => {
+                report.error = Some(error);
+                return report;
+            }
         }
     }
     report
+}
+
+/// Evaluates the structured Watches against the Change Stream from the
+/// oldest coordinate any of them needs, through `head`.
+///
+/// One stream read serves every Watch, and each is matched only past its own
+/// start, so a Watch armed yesterday is not fired by a change committed last
+/// week. The start is `evaluated_seq` where a sweep has stamped one; otherwise
+/// it is the Watch's arming, found in the stream itself ([`watch::armed_at`]).
+/// A Watch is armed by the maintenance model, after the cycle's `space_seq` —
+/// so a Watch not yet stamped was armed past `consumed_seq`, which is where
+/// the stream is read from for it, and where it starts when its arming is not
+/// in the window after all (a Watch armed before this sweep existed).
+///
+/// The ids evaluated are collected so the due sweep does not settle them a
+/// second time on a version this pass already moved.
+async fn evaluate_structured(
+    port: &impl RunKip,
+    now: &str,
+    head: u64,
+    consumed_seq: Option<u64>,
+    watches: &[(watch::WatchRow, watch::ChangeFilter)],
+    evaluated: &mut std::collections::BTreeSet<String>,
+    report: &mut WatchSettlement,
+) -> Result<(), String> {
+    let tentative = consumed_seq.unwrap_or(0);
+    let from = watches
+        .iter()
+        .map(|(row, _)| row.evaluated_seq.unwrap_or(tentative))
+        .min()
+        .unwrap_or(head);
+    let (envelopes, consumed_to) = read_changes(port, from, head).await?;
+
+    // The slots the filters name, resolved once: an Assertion entry carries
+    // only `refs.proposition`, so matching it against a slot needs the
+    // Propositions of that slot.
+    let mut slots = watch::SlotIndex::new();
+    for (_, filter) in watches {
+        if let Some(slot) = &filter.slot
+            && !slots.contains_key(slot)
+        {
+            let response = read(port, watch::slot_request(&slot.0, &slot.1)).await?;
+            let propositions = kip::ok_result(&response)
+                .and_then(Json::as_array)
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(|row| match row {
+                            Json::String(id) => Some(id.clone()),
+                            Json::Object(map) => map.get("id").and_then(Json::as_str).map(str::to_string),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            slots.insert(slot.clone(), propositions);
+        }
+    }
+
+    for (row, filter) in watches {
+        evaluated.insert(row.id.clone());
+        let start = row
+            .evaluated_seq
+            .or_else(|| watch::armed_at(&envelopes, &row.id))
+            .unwrap_or(tentative);
+        let through = consumed_to.max(start);
+        let due_silence = row.is_silence() && row.is_due(now);
+        let (request, outcome) = match watch::first_match(filter, start, &envelopes, &slots) {
+            Some(seq) if row.is_silence() => (
+                watch::disarm_matched_request(row, now, seq),
+                Outcome::Disarmed,
+            ),
+            Some(seq) => (
+                watch::fire_watch_request(row, now, watch::Fire::Delta(seq), None),
+                Outcome::Fired,
+            ),
+            // Nothing matched, and the stream is consumed through the head:
+            // for a due silence Watch that is silence, as §5.11 means it.
+            None if due_silence && through >= head => (
+                watch::fire_watch_request(row, now, watch::Fire::Silence, Some(through)),
+                Outcome::Fired,
+            ),
+            // Nothing new to read; nothing to record.
+            None if through <= start => {
+                if due_silence {
+                    report.deferred += 1;
+                }
+                continue;
+            }
+            None => (
+                watch::stamp_request(row, "evaluated_seq", through),
+                if due_silence {
+                    Outcome::Deferred
+                } else {
+                    Outcome::Evaluated
+                },
+            ),
+        };
+        match write(port, request, &row.id, "evaluating a structured Watch").await {
+            Ok(true) => match outcome {
+                Outcome::Fired => report.fired += 1,
+                Outcome::Disarmed => report.disarmed += 1,
+                Outcome::Deferred => report.deferred += 1,
+                Outcome::Evaluated => {}
+            },
+            Ok(false) => report.conflicted += 1,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+/// What one Watch write meant, for the report.
+enum Outcome {
+    Fired,
+    Disarmed,
+    Deferred,
+    Evaluated,
+}
+
+/// Reads the Change Stream after `from`, page by page, within the sweep's
+/// budget.
+///
+/// Answers the envelopes and the coordinate they are complete through: the
+/// head when the stream was read to its end, or the last coordinate read when
+/// the budget ran out first — which the caller records, so the next sweep
+/// continues from there instead of concluding silence over changes it never
+/// saw.
+async fn read_changes(port: &impl RunKip, from: u64, head: u64) -> Result<(Vec<Json>, u64), String> {
+    let mut after = from;
+    let mut envelopes: Vec<Json> = Vec::new();
+    for _ in 0..watch::CHANGES_MAX_PAGES {
+        let response = read(port, watch::changes_request(after)).await?;
+        let page = kip::ok_result(&response)
+            .and_then(Json::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let full = page.len() >= watch::CHANGES_PAGE_LIMIT;
+        let last = page
+            .iter()
+            .filter_map(|envelope| envelope.get("space_seq").and_then(Json::as_u64))
+            .max();
+        envelopes.extend(page);
+        match last {
+            Some(seq) if full => after = seq,
+            Some(seq) => return Ok((envelopes, seq.max(head))),
+            None => return Ok((envelopes, after.max(head))),
+        }
+    }
+    Ok((envelopes, after))
+}
+
+/// One guarded settlement write.
+///
+/// `Ok(true)` committed; `Ok(false)` was refused — a version conflict is the
+/// ordinary outcome of racing the maintenance model, anything else is logged —
+/// and the element stays where it was for the next sweep. `Err` is the
+/// transport failing, which ends the pass.
+async fn write(
+    port: &impl RunKip,
+    request: Request,
+    watch_id: &str,
+    what: &str,
+) -> Result<bool, String> {
+    let response = port
+        .run_kip(request, false)
+        .await
+        .map_err(|err| err.to_string())?;
+    if kip::succeeded(&response) {
+        return Ok(true);
+    }
+    if !watch::is_version_conflict(&response) {
+        log::warn!(
+            target: "brain",
+            space_id = port.space_id(),
+            watch = watch_id;
+            "{what} failed: {}",
+            kip::error_message(&response)
+        );
+    }
+    Ok(false)
+}
+
+/// The Watches in one status, as the maintenance prompt receives them.
+///
+/// Best-effort: an error here costs the cycle one input, not the cycle. A
+/// Space that has never declared a Watch resolves the type fine (the Profile
+/// declares it), so a failure is a real one and is logged as such.
+pub(crate) async fn watches_in_status(port: &impl RunKip, status: &str) -> Vec<ArmedWatch> {
+    match read(port, watch::watches_request(status)).await {
+        Ok(response) => kip::ok_result(&response)
+            .map(watch::read_watch_rows)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|row| row.watch)
+            .collect(),
+        Err(error) => {
+            log::warn!(
+                target: "brain",
+                space_id = port.space_id(),
+                status;
+                "reading Watches for the maintenance assessment failed: {error}"
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// How many revised roots one cycle walks.
+pub(crate) const REVISED_ROOTS_LIMIT: usize = 20;
+
+/// How far a derivation walk follows Activity lineage from a revised root.
+pub(crate) const DEPENDENTS_DEPTH: u64 = 2;
+
+/// How many dependents one walk lists.
+pub(crate) const DEPENDENTS_LIMIT: usize = 20;
+
+/// The cognition derived from each newly superseded Assertion.
+///
+/// Spec §57.5 asks a Brain to review the dependents of a revised root, and
+/// §63.5 makes them discoverable in one read — so the runtime reads them and
+/// hands the cycle a list, where before it handed a count. Reachability is
+/// topology, not judgment: nothing here is flagged stale; the cycle decides.
+pub(crate) async fn revised_roots(port: &impl RunKip, rows: &[SupersededRow]) -> Vec<RevisedRoot> {
+    let mut roots = Vec::with_capacity(rows.len().min(REVISED_ROOTS_LIMIT));
+    for row in rows.iter().take(REVISED_ROOTS_LIMIT) {
+        let request = kip::request_with(
+            format!("LIST DEPENDENTS :root DEPTH {DEPENDENTS_DEPTH} LIMIT {DEPENDENTS_LIMIT}"),
+            kip::param("root", row.assertion.as_str()),
+        );
+        let (dependents, truncated) = match read(port, request).await {
+            Ok(response) => (dependents_of(&response), dependents_truncated(&response)),
+            Err(error) => {
+                log::warn!(
+                    target: "brain",
+                    space_id = port.space_id(),
+                    assertion = row.assertion;
+                    "walking the dependents of a revised root failed: {error}"
+                );
+                (Vec::new(), true)
+            }
+        };
+        roots.push(RevisedRoot {
+            assertion: row.assertion.clone(),
+            proposition: row.proposition.clone(),
+            actor: row.actor.clone(),
+            superseded_by: row.superseded_by.clone(),
+            space_seq: row.space_seq,
+            dependents,
+            truncated,
+        });
+    }
+    roots
+}
+
+/// The rows of a `LIST DEPENDENTS` answer — `{id, kind, distance, via}`.
+fn dependents_of(response: &Response) -> Vec<Dependent> {
+    kip::ok_result(response)
+        .and_then(Json::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    Some(Dependent {
+                        id: row.get("id")?.as_str()?.to_string(),
+                        kind: row
+                            .get("kind")
+                            .and_then(Json::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        distance: row.get("distance").and_then(Json::as_u64).unwrap_or(1),
+                        via: row
+                            .get("via")
+                            .and_then(|via| via.get("activity"))
+                            .and_then(Json::as_str)
+                            .map(str::to_string),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether the walk said it was cut short: the §63.5 `truncated` caveat, or
+/// a full page.
+fn dependents_truncated(response: &Response) -> bool {
+    let Some(result) = response.results.first() else {
+        return false;
+    };
+    result.next_cursor.is_some()
+        || result.warnings.iter().any(|warning| {
+            matches!(warning, anda_kip::Warning::Coded { code, .. } if code == "truncated")
+        })
 }
 
 /// Runs the deterministic Skill lifecycle rule over graded outcomes.
@@ -519,7 +876,8 @@ fn correction_watermark(seqs: &[u64], page_full: bool, after: u64) -> Correction
 }
 
 /// Reads the rows of the correction-discovery scan —
-/// `FIND(?a.id, ?a._system.space_seq, ?a.asserted_by)`.
+/// `FIND(?a.id, ?a._system.space_seq, ?a.asserted_by, ?a.proposition,
+/// ?a.lifecycle.superseded_by)`.
 fn superseded_rows(result: &Json) -> Vec<SupersededRow> {
     let element_id = |value: &Json| -> Option<String> {
         match value {
@@ -539,6 +897,12 @@ fn superseded_rows(result: &Json) -> Vec<SupersededRow> {
                         assertion: id.to_string(),
                         space_seq: columns.get(1).and_then(Json::as_u64)?,
                         actor: columns.get(2).and_then(element_id),
+                        proposition: columns.get(3).and_then(element_id),
+                        superseded_by: columns
+                            .get(4)
+                            .and_then(Json::as_array)
+                            .map(|ids| ids.iter().filter_map(element_id).collect())
+                            .unwrap_or_default(),
                     })
                 })
                 .collect()
@@ -755,46 +1119,273 @@ mod tests {
         let result: Vec<_> = rows
             .iter()
             .enumerate()
-            .map(|(n, (seq, actor))| json!([format!("A-{n}"), seq, actor]))
+            .map(|(n, (seq, actor))| json!([format!("A-{n}"), seq, actor, "P-1", ["A-99"]]))
             .collect();
         FakeKip::new([("superseded", vec![Response::ok(json!(result))])])
     }
 
+    /// A Watch row as the scan projects it: `(id, name, attributes, version,
+    /// space_seq)`.
+    fn watch_row(id: &str, attributes: Json, _armed_seq: u64) -> Json {
+        json!([id, "the vendor never replied", attributes, 1])
+    }
+
+    /// The armed scan and the due-silence scan, told apart by the filter each
+    /// one carries.
+    const ARMED_SCAN: &str = "status == :status";
+    const DUE_SCAN: &str = r#"watch_class == "silence""#;
+
+    #[tokio::test]
+    async fn a_prose_silence_watch_waits_for_the_brain_to_consume_its_deadline() {
+        let prose = |seen: Option<u64>| {
+            let mut attributes = json!({
+                "watch_class": "silence",
+                "condition": "no reply from the vendor",
+                "due_at": "2026-01-01T00:00:00Z"
+            });
+            if let Some(seen) = seen {
+                attributes["due_seen_seq"] = json!(seen);
+            }
+            watch_row("W-1", attributes, 3)
+        };
+
+        // First sight of the passed deadline: the head is recorded on the
+        // Watch and nothing fires — the clock alone proves nothing (§5.11).
+        let port = FakeKip::new([(DUE_SCAN, vec![Response::ok(json!([prose(None)]))])]);
+        let report = sweep_watches(&port, 1_000, Some(9), Some(20)).await;
+        assert_eq!((report.fired, report.deferred), (0, 1), "{report:?}");
+        let wrote = port.wrote();
+        assert_eq!(wrote.len(), 1);
+        assert!(wrote[0].contains("due_seen_seq: :seq"), "{}", wrote[0]);
+        assert!(!wrote[0].contains("watch_fire"));
+
+        // Seen at 9, and the Brain has read through 8: still not silence.
+        let port = FakeKip::new([(DUE_SCAN, vec![Response::ok(json!([prose(Some(9))]))])]);
+        let report = sweep_watches(&port, 1_000, Some(12), Some(8)).await;
+        assert_eq!((report.fired, report.deferred), (0, 1), "{report:?}");
+        assert!(port.wrote().is_empty());
+
+        // The Brain's consumption reached the coordinate: silence is a fact.
+        let port = FakeKip::new([
+            (DUE_SCAN, vec![Response::ok(json!([prose(Some(9))]))]),
+            ("watch_fire", vec![changed("lifecycle", 1)]),
+        ]);
+        let report = sweep_watches(&port, 1_000, Some(12), Some(9)).await;
+        assert_eq!((report.fired, report.deferred), (1, 0), "{report:?}");
+        let wrote = port.wrote();
+        assert_eq!(wrote.len(), 1);
+        assert!(wrote[0].contains("watch_fire"), "{}", wrote[0]);
+    }
+
     #[tokio::test]
     async fn a_due_watch_is_fired_once_and_a_conflicted_one_stays_armed() {
-        let armed = |id: &str| {
-            json!([
+        let due = |id: &str| {
+            watch_row(
                 id,
-                "the vendor never replied",
-                {"watch_class": "silence", "due_at": "2026-01-01T00:00:00Z"},
-                1
-            ])
+                json!({
+                    "watch_class": "silence",
+                    "condition": "no reply",
+                    "due_at": "2026-01-01T00:00:00Z",
+                    "due_seen_seq": 5
+                }),
+                2,
+            )
         };
         let port = FakeKip::new([
-            (
-                "watch_class",
-                vec![Response::ok(json!([armed("W-1"), armed("W-2")]))],
-            ),
+            (DUE_SCAN, vec![Response::ok(json!([due("W-1"), due("W-2")]))]),
             ("watch_fire", vec![changed("lifecycle", 1), conflicted()]),
         ]);
-        let report = sweep_watches(&port, 1_000).await;
+        let report = sweep_watches(&port, 1_000, Some(9), Some(5)).await;
 
         assert_eq!(report.fired, 1);
         // A Watch the maintenance model moved between scan and write stays
         // armed rather than being reported as fired.
         assert_eq!(report.conflicted, 1);
         assert!(report.error.is_none());
-        // One scan, then one write per due Watch — never a write per page.
+        // Two scans, then one write per due Watch — never a write per page.
         assert_eq!(port.wrote().len(), 2);
     }
 
     #[tokio::test]
     async fn a_watch_scan_that_fails_writes_nothing() {
         let port = FakeKip::new([("Watch", vec![failed("engine busy")])]);
-        let report = sweep_watches(&port, 1_000).await;
+        let report = sweep_watches(&port, 1_000, Some(9), Some(9)).await;
 
         assert_eq!(report.fired, 0);
         assert!(report.error.unwrap().contains("engine busy"));
+        assert!(port.wrote().is_empty());
+    }
+
+    /// One Change Envelope holding one entry.
+    fn envelope(seq: u64, entry: Json) -> Json {
+        json!({"space_seq": seq, "changes": [entry]})
+    }
+
+    #[tokio::test]
+    async fn a_structured_delta_watch_fires_on_the_change_it_watches() {
+        let armed = watch_row(
+            "W-1",
+            json!({
+                "watch_class": "delta",
+                "condition": {"element": "C-42", "ops": ["update"]},
+                "due_at": ""
+            }),
+            10,
+        );
+        let port = FakeKip::new([
+            (ARMED_SCAN, vec![Response::ok(json!([armed]))]),
+            (
+                "CHANGES AFTER SEQ",
+                vec![Response::ok(json!([
+                    // Committed before the Watch was armed: not its change.
+                    envelope(9, json!({"op": "update", "kind": "concept", "id": "C-42"})),
+                    // The arming itself, which is where evaluation starts.
+                    envelope(10, json!({"op": "create", "kind": "concept", "id": "W-1"})),
+                    envelope(11, json!({"op": "create", "kind": "concept", "id": "C-42"})),
+                    envelope(12, json!({"op": "update", "kind": "concept", "id": "C-42"})),
+                ]))],
+            ),
+            ("watch_fire", vec![changed("lifecycle", 1)]),
+        ]);
+        let report = sweep_watches(&port, 1_000, Some(12), None).await;
+
+        assert_eq!(report.fired, 1, "{report:?}");
+        let seen = port.seen();
+        // The stream is read, and the Watch is matched only past its arming.
+        assert!(seen.iter().any(|(command, _)| command.contains("CHANGES AFTER SEQ")));
+        let wrote = port.wrote();
+        assert_eq!(wrote.len(), 1);
+        assert!(wrote[0].contains("watch_fire"), "{}", wrote[0]);
+        assert!(wrote[0].contains("matched_seq: :matched_seq"), "{}", wrote[0]);
+    }
+
+    #[tokio::test]
+    async fn a_structured_silence_watch_stands_down_on_a_match_and_fires_on_none() {
+        let silence = |from: u64| {
+            watch_row(
+                "W-2",
+                json!({
+                    "watch_class": "silence",
+                    "condition": {"slot": {"subject": "C-1", "predicate": "replied_about"}},
+                    "due_at": "2026-01-01T00:00:00Z"
+                }),
+                from,
+            )
+        };
+        // The awaited reply arrived: the Watch stands down without firing.
+        let port = FakeKip::new([
+            (ARMED_SCAN, vec![Response::ok(json!([silence(10)]))]),
+            (DUE_SCAN, vec![Response::ok(json!([silence(10)]))]),
+            ("?p (:subject", vec![Response::ok(json!(["P-11"]))]),
+            (
+                "CHANGES AFTER SEQ",
+                vec![Response::ok(json!([envelope(
+                    11,
+                    json!({"op": "create", "kind": "assertion", "id": "A-3", "refs": {"proposition": "P-11"}})
+                )]))],
+            ),
+            ("disarmed", vec![changed("update", 1)]),
+        ]);
+        let report = sweep_watches(&port, 1_000, Some(12), None).await;
+        assert_eq!((report.fired, report.disarmed), (0, 1), "{report:?}");
+        let wrote = port.wrote();
+        // One write: the due scan does not settle a Watch evaluation moved.
+        assert_eq!(wrote.len(), 1, "{wrote:?}");
+        assert!(wrote[0].contains(r#"status: "disarmed""#), "{}", wrote[0]);
+
+        // Nothing matched through the head: silence, concluded over a
+        // consumed stream, fires in the same sweep.
+        let port = FakeKip::new([
+            (ARMED_SCAN, vec![Response::ok(json!([silence(10)]))]),
+            (DUE_SCAN, vec![Response::ok(json!([silence(10)]))]),
+            ("CHANGES AFTER SEQ", vec![Response::ok(json!([]))]),
+            ("watch_fire", vec![changed("lifecycle", 1)]),
+        ]);
+        // Past the deadline: the sweep decides `is_due` itself, on the clock
+        // it is handed, and a Watch due in 2026 is not due in 1970.
+        let report = sweep_watches(&port, 1_790_000_000_000, Some(12), None).await;
+        assert_eq!((report.fired, report.deferred), (1, 0), "{report:?}");
+        let wrote = port.wrote();
+        assert_eq!(wrote.len(), 1, "{wrote:?}");
+        assert!(wrote[0].contains("evaluated_seq: :evaluated_seq"), "{}", wrote[0]);
+    }
+
+    #[tokio::test]
+    async fn a_structured_watch_with_nothing_new_records_where_it_read_to() {
+        let armed = watch_row(
+            "W-3",
+            json!({"watch_class": "delta", "condition": {"type": "Commitment"}}),
+            10,
+        );
+        // A full page, then the budget: the Watch is stamped with what was
+        // read, not with the head it never reached.
+        let full_page: Vec<Json> = (11..=(10 + watch::CHANGES_PAGE_LIMIT as u64))
+            .map(|seq| envelope(seq, json!({"op": "update", "kind": "assertion", "id": "A-1"})))
+            .collect();
+        let port = FakeKip::new([
+            (ARMED_SCAN, vec![Response::ok(json!([armed]))]),
+            (
+                "CHANGES AFTER SEQ",
+                std::iter::repeat_n(Response::ok(json!(full_page)), watch::CHANGES_MAX_PAGES)
+                    .collect(),
+            ),
+        ]);
+        let report = sweep_watches(&port, 1_000, Some(5_000), None).await;
+        assert_eq!(report.fired, 0, "{report:?}");
+        let wrote = port.wrote();
+        assert_eq!(wrote.len(), 1, "{wrote:?}");
+        assert!(wrote[0].contains("evaluated_seq: :seq"), "{}", wrote[0]);
+        assert_eq!(
+            port.seen()
+                .iter()
+                .filter(|(command, _)| command.contains("CHANGES AFTER SEQ"))
+                .count(),
+            watch::CHANGES_MAX_PAGES
+        );
+    }
+
+    #[tokio::test]
+    async fn revised_roots_carry_what_each_superseded_claim_fed() {
+        let rows = vec![
+            SupersededRow {
+                assertion: "A-3".into(),
+                space_seq: 40,
+                actor: Some("C-7".into()),
+                proposition: Some("P-11".into()),
+                superseded_by: vec!["A-9".into()],
+            },
+            SupersededRow {
+                assertion: "A-4".into(),
+                space_seq: 41,
+                actor: None,
+                proposition: None,
+                superseded_by: vec![],
+            },
+        ];
+        let port = FakeKip::new([(
+            "LIST DEPENDENTS",
+            vec![
+                Response::ok(json!([
+                    {"id": "C-30", "kind": "concept", "distance": 1, "via": {"activity": "ACT-5"}},
+                    {"id": "C-31", "kind": "concept", "distance": 2, "via": {"activity": "ACT-6"}}
+                ])),
+                failed("engine busy"),
+            ],
+        )]);
+        let roots = revised_roots(&port, &rows).await;
+
+        assert_eq!(roots.len(), 2);
+        assert_eq!(roots[0].assertion, "A-3");
+        assert_eq!(roots[0].superseded_by, vec!["A-9".to_string()]);
+        assert_eq!(roots[0].dependents.len(), 2);
+        assert_eq!(roots[0].dependents[0].id, "C-30");
+        assert_eq!(roots[0].dependents[0].via.as_deref(), Some("ACT-5"));
+        assert!(!roots[0].truncated);
+        // A walk that failed says the list is not to be trusted, rather than
+        // reporting a root with no derivations.
+        assert!(roots[1].dependents.is_empty());
+        assert!(roots[1].truncated);
+        // Reads only: a derivation walk changes nothing.
         assert!(port.wrote().is_empty());
     }
 

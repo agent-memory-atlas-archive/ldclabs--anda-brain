@@ -107,9 +107,9 @@ Consolidates, prunes, and optimizes the knowledge graph during scheduled or on-d
 3. **Semantic consolidation** — Compress clusters of Events, Experiences and Evidence into derived Assertions, keeping Activity lineage back to the sources. A summary is not a new epistemic root.
 4. **Procedural consolidation** — Compare successful against failed Experiences and compile a `proposed` Skill with the `task_family` that can grade it. A pattern no outcome stream could prove wrong is an Insight, not a Skill.
 5. **Identity review** — Review `same_as` suspicions, then `MERGE CONCEPT`, which is non-destructive: the source survives as merged historical identity.
-6. **Contradiction and derivation review** — Different actors' disagreement coexists; only an actor's own revision supersedes. After a revision, walk `LIST DEPENDENTS` and flag derived artifacts `stale` for review.
+6. **Contradiction and derivation review** — Different actors' disagreement coexists; only an actor's own revision supersedes. After a revision, the settlement walks `LIST DEPENDENTS` and hands the agent each revised root with its dependents (`assessment.revised_roots`); the agent flags what no longer holds `stale`.
 7. **Mnemonic metabolism** — run by the runtime settlement before the cycle, not by the agent: `MnemonicState.memory_strength * decay_factor` on Concepts due for it. Never `confidence`; a fact nobody has asked about lately is no less credible. `salience` and `utility` stay with the agent — the sweep cannot make a per-memory judgement.
-8. **Commitments, Watches and the action gate** — Review what is owed and what is being waited for. The runtime has already fired the `silence` Watches whose deadline passed; the agent evaluates `delta` Watches against `CHANGES AFTER SEQ` and records what it decided about each fired one as an `action_gate` outcome (`act` / `ask` / `defer` / `silence`). See "Waiting is active" below.
+8. **Commitments, Watches and the action gate** — Review what is owed and what is being waited for. The runtime has already evaluated every Watch whose condition is a structured filter against the change stream (Profile §5.11); the agent evaluates prose conditions against `CHANGES AFTER SEQ` from `assessment.consumed_seq` and records what it decided about each fired one as an `action_gate` outcome (`act` / `ask` / `defer` / `silence`). See "Waiting is active" below.
 9. **SelfModel and WorkingState refresh** — Consolidate identity from evidence rather than from the latest conversation, and rebuild the digest the next waking session resumes from, stamped with the `basis_seq` it was built at.
 10. **Retention review** — Decide what should carry an expiry and write it with `SET RETENTION`; the full settlement's sweep is what makes that write mean something. See "Retention expiry" below.
 
@@ -168,16 +168,32 @@ observed, not rewarded — which is also the difference between a memory system
 and a popularity contest. The `recall_reinforcement` policy knob is retained
 for stored-policy compatibility and does nothing.
 
-**Waiting is active:** every settlement fires the `silence` Watches whose
-`due_at` has passed — the transition to `fired` and its `watch_fire` Activity,
-atomically and guarded by `EXPECT VERSION`. A deadline arriving is arithmetic,
-and arithmetic should not wait for a model to be scheduled, have context budget
-and notice. Firing produces attention and nothing else: no SleepTask, no
-outward act, and no `action_gate` outcome, because `act` / `ask` / `defer` /
-`silence` are all judgements about what the deadline *means*. Those wait in
-`assessment.fired_watches` for the maintenance cycle. `delta` Watches stay with
-the model: matching a condition written in prose is interpretation, not
-arithmetic.
+**Waiting is active:** every settlement evaluates the armed Watches whose
+`condition` is a structured filter — `element`, `slot` or `type`, narrowed by
+`ops` and `touched` (Profile §5.11) — against the Change Stream, from where
+each was last evaluated through the head. A `delta` Watch fires on the first
+change that matches, with the coordinate in `matched_seq`; a `silence` Watch
+whose awaited change arrived stands down as `disarmed`, because the silence it
+was armed for can no longer happen; a `silence` Watch past its `due_at` with
+nothing matched fires — silence concluded over a consumed stream, which is
+what §5.11 requires, not a clock reading. Each fire is the transition and its
+`watch_fire` Activity, atomically and guarded by `EXPECT VERSION`.
+
+A Watch whose `condition` is prose stays with the model: matching "the vendor
+replied about the renewal" is interpretation, not arithmetic. The runtime keeps
+one promise for it all the same — a prose `silence` Watch past its deadline
+fires only once a completed maintenance cycle has consumed the stream through
+the head at which the sweep first saw the deadline passed (`due_seen_seq` on
+the Watch, `delta_consumed_seq` in the Space). The clock alone proves nothing:
+a matching change committed before the deadline may still be waiting for the
+model whose job it is to read it, and firing on the clock first is the false
+alarm §5.11 names. So a prose deadline fires on the cycle after the one that
+read past it, and never before.
+
+Firing produces attention and nothing else: no SleepTask, no outward act, and
+no `action_gate` outcome, because `act` / `ask` / `defer` / `silence` are all
+judgements about what the deadline *means*. Those wait in
+`assessment.fired_watches` for the maintenance cycle.
 
 **The Skill lifecycle is code, not a prompt.** `proposed → trialed → adopted →
 revoked` moves only by deterministic verdict over Outcome Evidence — Profile

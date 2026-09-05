@@ -706,6 +706,10 @@ pub struct Space {
     /// Serializes memory-metabolism settlements (plan M2); the settlement
     /// itself is idempotent, the lock just avoids wasted duplicate passes.
     settlement_lock: tokio::sync::Mutex<()>,
+    /// Bumped whenever this Space's vocabulary package is published — by the
+    /// `declare_memory_symbols` tool or the wiki digest — so Recall's cached
+    /// primer is refetched on the next read rather than at the end of its TTL.
+    schema_generation: Arc<std::sync::atomic::AtomicU64>,
     /// At most one dream self-test (plan M7) runs at a time; overlapping
     /// kicks are skipped, not queued.
     self_test_lock: tokio::sync::Mutex<()>,
@@ -1399,8 +1403,13 @@ impl Space {
                 .get_extension_as("source_reliability")
                 .unwrap_or_default(),
             space_seq: self.current_space_seq().await,
-            armed_watches: self.watches_with_status("armed").await,
-            fired_watches: self.watches_with_status("fired").await,
+            armed_watches: settlement::watches_in_status(self, "armed").await,
+            fired_watches: settlement::watches_in_status(self, "fired").await,
+            consumed_seq: self.db.get_extension_as(DELTA_CONSUMED_SEQ_KEY),
+            revised_roots: self
+                .memory_settlement()
+                .map(|report| report.revised_roots)
+                .unwrap_or_default(),
         }
     }
 
@@ -1424,81 +1433,6 @@ impl Space {
                 None
             }
         }
-    }
-
-    /// The Watches this Space holds in one status.
-    ///
-    /// Two readings feed the cycle. `armed` is what the Brain is still waiting
-    /// for, which §10 and §17 ask it to evaluate — a model that has to go
-    /// looking for the set first will often not look. `fired` is the action
-    /// gate's queue: the runtime fires a silence Watch when its deadline
-    /// passes, and the decision about what that means waits here.
-    ///
-    /// Neither list is a licence. A Watch fires into attention and never into
-    /// an action.
-    ///
-    /// Bounded and best-effort. A Space with more Watches than one page has a
-    /// backlog the cycle should work through over several runs, and an error
-    /// here degrades the assessment rather than failing the cycle.
-    async fn watches_with_status(&self, status: &str) -> Vec<crate::types::ArmedWatch> {
-        const WATCH_LIMIT: usize = 20;
-
-        let response = self
-            .execute_kip_readonly(kip::request_with(
-                format!(
-                    r#"FIND(?w.id, ?w.name, ?w.attributes)
-WHERE {{
-  ?w CONCEPT {{type: "Watch"}}
-  FILTER(?w.attributes.status == :status)
-}}
-ORDER BY ?w.attributes.due_at
-LIMIT {WATCH_LIMIT}"#
-                ),
-                kip::param("status", status),
-            ))
-            .await;
-        let Ok(response) = response else {
-            return Vec::new();
-        };
-        if !kip::succeeded(&response) {
-            // A Space that has never declared a Watch resolves the type fine
-            // (the Profile declares it), so a failure here is a real one —
-            // but it costs the cycle one input, not the cycle.
-            log::warn!(
-                target: "brain",
-                space_id = self.id,
-                status;
-                "reading Watches for the maintenance assessment failed: {}",
-                kip::error_message(&response)
-            );
-            return Vec::new();
-        }
-        let Some(rows) = kip::ok_result(&response).and_then(serde_json::Value::as_array) else {
-            return Vec::new();
-        };
-        rows.iter()
-            .filter_map(|row| {
-                let columns = row.as_array()?;
-                let attribute = |name: &str| {
-                    columns
-                        .get(2)
-                        .and_then(|attributes| attributes.get(name))
-                        .map(crate::types::attribute_text)
-                        .unwrap_or_default()
-                };
-                Some(crate::types::ArmedWatch {
-                    id: columns
-                        .first()
-                        .and_then(serde_json::Value::as_str)?
-                        .to_string(),
-                    name: element_label(columns.get(1)?),
-                    watch_class: attribute("watch_class"),
-                    condition: attribute("condition"),
-                    summary: attribute("summary"),
-                    due_at: attribute("due_at"),
-                })
-            })
-            .collect()
     }
 
     /// Bumps the incrementally-updated observability counters (plan M12).
@@ -1783,6 +1717,9 @@ LIMIT {WATCH_LIMIT}"#
         let after: u64 = self.db.get_extension_as("correction_cursor").unwrap_or(0);
         let corrections = settlement::scan_corrections(self, after).await;
         report.correction_scan_error = corrections.error;
+        // The derivation review's input (§57.5): what each revised root fed,
+        // walked here so the cycle is handed a list rather than a guess.
+        report.revised_roots = settlement::revised_roots(self, &corrections.rows).await;
         for row in corrections.rows {
             if !self
                 .ledger
@@ -1812,7 +1749,11 @@ LIMIT {WATCH_LIMIT}"#
         // expensive the cycle it landed in was, and a silence Watch that
         // waited for a `full` cycle would be a promise the Brain kept only
         // when it was already busy.
-        report.watches = settlement::sweep_watches(self, now_ms).await;
+        // The head is what a structured Watch is evaluated through; the
+        // consumption record is what a prose silence Watch waits on (§5.11).
+        let head_seq = self.current_space_seq().await;
+        let consumed_seq: Option<u64> = self.db.get_extension_as(DELTA_CONSUMED_SEQ_KEY);
+        report.watches = settlement::sweep_watches(self, now_ms, head_seq, consumed_seq).await;
         if let Some(error) = &report.watches.error {
             log::error!(
                 target: "brain",
@@ -2658,6 +2599,10 @@ LIMIT {window}"#
             // at open would leave the primer contradicting the prompts for the
             // whole run that created it.
             designate_self_concept(self.memory.nexus().as_ref()).await;
+            // The digest may have grown the vocabulary package on its way
+            // through; Recall's cached primer is stale from here.
+            self.schema_generation
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         }
         Ok(rt)
     }
@@ -2998,7 +2943,9 @@ LIMIT {window}"#
         let note_tool = NoteTool::new();
         // Formation and Maintenance may grow this Space's vocabulary; Recall
         // may not, and gets the tool nowhere.
-        let declare_tool = crate::vocabulary::DeclareSymbolsTool::new(memory.clone());
+        let schema_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let declare_tool = crate::vocabulary::DeclareSymbolsTool::new(memory.clone())
+            .with_schema_generation(schema_generation.clone());
 
         let hooks = Arc::new(Hooks::new(db.clone()));
         let formation = Arc::new(FormationAgent::new(
@@ -3017,7 +2964,8 @@ LIMIT {window}"#
                 let db = db.clone();
                 Arc::new(move || memory_policy_of(&db))
             },
-        ));
+        )
+        .with_schema_generation(schema_generation.clone()));
         let maintenance = Arc::new(MaintenanceAgent::new(
             memory.clone(),
             maintenance_store,
@@ -3084,6 +3032,7 @@ LIMIT {window}"#
             ledger,
             miss_cache,
             settlement_lock: tokio::sync::Mutex::new(()),
+            schema_generation,
             self_test_lock: tokio::sync::Mutex::new(()),
             shadow_lock: tokio::sync::Mutex::new(()),
             token_lock: tokio::sync::Mutex::new(()),
@@ -3274,6 +3223,19 @@ impl BrainHook for Hooks {
                         usage.accumulate(&conversation.usage);
                         Some(usage)
                     });
+                // The cycle read the Change Stream through the coordinate it
+                // was handed (`assessment.space_seq`, BrainMaintenance.md
+                // §A.2): that is where the next cycle starts, and what a prose
+                // silence Watch's deadline is measured against (§5.11). Only a
+                // completed cycle counts — a failed one may have read nothing.
+                if conversation.status == ConversationStatus::Completed
+                    && let Some(seq) = consumed_seq_of(conversation)
+                {
+                    let _ = self.db.set_extension_from_with(
+                        DELTA_CONSUMED_SEQ_KEY.to_string(),
+                        |recorded: Option<u64>| Some(recorded.unwrap_or(0).max(seq)),
+                    );
+                }
                 // Dream self-test (plan M7): after the sleep cycle ends, probe
                 // whether recent memories are actually findable; failures
                 // become review SleepTasks for the next cycle.
@@ -3548,6 +3510,26 @@ impl Space {
 /// Timeout for one settlement-built write KIP command.
 const SETTLEMENT_KIP_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Space extension: the coordinate the last completed maintenance cycle read
+/// the Change Stream through (`assessment.space_seq` of that cycle).
+///
+/// Two readers. The next cycle starts its `CHANGES AFTER SEQ` here, and the
+/// Watch sweep fires a prose silence Watch only once this has reached the head
+/// at which it first saw the deadline passed (Profile §5.11).
+const DELTA_CONSUMED_SEQ_KEY: &str = "delta_consumed_seq";
+
+/// The coordinate a completed maintenance cycle consumed the stream through:
+/// the `assessment.space_seq` in the input it was run on.
+///
+/// Read back off the conversation rather than threaded through the agent,
+/// because the conversation is the durable record of what the cycle was
+/// handed — a value carried beside it could disagree with it.
+fn consumed_seq_of(conversation: &Conversation) -> Option<u64> {
+    let first: Message = serde_json::from_value(conversation.messages.first()?.clone()).ok()?;
+    let input: MaintenanceInput = serde_json::from_str(&first.text()?).ok()?;
+    input.assessment?.space_seq
+}
+
 /// How long a Space may go without a maintenance cycle before the background
 /// pass runs one on the clock.
 ///
@@ -3685,6 +3667,7 @@ fn element_field(value: &serde_json::Value, field: &str) -> String {
         .unwrap_or_default()
         .to_string()
 }
+
 
 /// How a Proposition endpoint reads in a prompt: a Concept's name, or the
 /// literal itself when the endpoint is one.
@@ -5334,11 +5317,76 @@ WHERE { ?s CONCEPT {type: "Skill", key: "redeploy"} } LIMIT 1"#,
         assert_eq!(graded_evidence.len(), 10);
     }
 
-    /// A deadline passing is arithmetic, and until this sweep existed nothing
-    /// in the system did that arithmetic: a Commitment whose trigger was a
-    /// silence Watch waited forever. The delta half stays with the model,
-    /// whose job it is to decide whether a change matched a condition written
-    /// in prose.
+    /// The status of one Watch, by key.
+    async fn watch_status(space: &Space, key: &str) -> String {
+        watch_attribute(space, key, "status").await
+    }
+
+    /// One attribute of one Watch, as text.
+    async fn watch_attribute(space: &Space, key: &str, attribute: &str) -> String {
+        let response = space
+            .execute_kip_readonly(kip::request_with(
+                format!(
+                    r#"FIND(?w.attributes.{attribute}) WHERE {{ ?w CONCEPT {{type: "Watch", key: :key}} }} LIMIT 1"#
+                ),
+                kip::param("key", key),
+            ))
+            .await
+            .unwrap();
+        kip::ok_result(&response)
+            .and_then(serde_json::Value::as_array)
+            .and_then(|rows| rows.first())
+            .map(crate::types::attribute_text)
+            .unwrap_or_default()
+    }
+
+    /// Arms one Watch.
+    async fn arm_watch(space: &Space, key: &str, class: &str, condition: serde_json::Value, due: &str) {
+        seed_kip(
+            space,
+            kip::request_with(
+                r#"MUTATE {
+  UPSERT CONCEPT ?w {
+    MATCH { type: "Watch", key: :key }
+    SET FIELDS { name: :key }
+    SET ATTRIBUTES {
+      watch_class: :class,
+      summary: "escalate if nothing lands",
+      condition: :condition,
+      status: "armed",
+      due_at: :due
+    }
+  }
+}"#,
+                serde_json::Map::from_iter([
+                    ("key".to_string(), serde_json::Value::from(key)),
+                    ("class".to_string(), serde_json::Value::from(class)),
+                    ("condition".to_string(), condition),
+                    ("due".to_string(), serde_json::Value::from(due)),
+                ]),
+            ),
+        )
+        .await;
+    }
+
+    /// The `activity_class` of every Activity in the Space.
+    async fn activity_classes(space: &Space) -> Vec<String> {
+        let activities = space
+            .execute_kip_readonly(kip::request(
+                r#"FIND(?a.activity_class) WHERE { ?a ACTIVITY {} } LIMIT 20"#,
+            ))
+            .await
+            .unwrap();
+        serde_json::from_value(kip::ok_result(&activities).cloned().unwrap_or_default())
+            .unwrap_or_default()
+    }
+
+    /// A prose silence Watch fires on its deadline only once the Brain has
+    /// consumed the Change Stream through the head at which the sweep first
+    /// saw the deadline passed (Profile §5.11). The clock alone proves
+    /// nothing: a matching change committed before the deadline may still be
+    /// waiting for the model whose job it is to decide whether a change
+    /// matched a condition written in prose.
     #[tokio::test]
     async fn a_silence_watch_fires_when_its_deadline_passes() {
         let app = test_app_state("watch_expiry");
@@ -5346,60 +5394,44 @@ WHERE { ?s CONCEPT {type: "Skill", key: "redeploy"} } LIMIT 1"#,
         let now_ms = unix_ms();
         let past = kip::timestamp(now_ms.saturating_sub(86_400_000));
         let future = kip::timestamp(now_ms.saturating_add(86_400_000));
+        let prose = serde_json::Value::from("no reply from the vendor");
 
-        for (key, class, due) in [
-            ("overdue", "silence", past.as_str()),
-            ("not_yet", "silence", future.as_str()),
-            // A delta Watch has no deadline semantics at all: it waits for a
-            // matching change, and only the model can say what matches.
-            ("delta", "delta", past.as_str()),
-        ] {
-            seed_kip(
-                &space,
-                kip::request_with(
-                    r#"MUTATE {
-  UPSERT CONCEPT ?w {
-    MATCH { type: "Watch", key: :key }
-    SET FIELDS { name: :key }
-    SET ATTRIBUTES {
-      watch_class: :class,
-      summary: "escalate if nothing lands",
-      condition: "no reply from the vendor",
-      status: "armed",
-      due_at: :due
-    }
-  }
-}"#,
-                    serde_json::Map::from_iter([
-                        ("key".to_string(), serde_json::Value::from(key)),
-                        ("class".to_string(), serde_json::Value::from(class)),
-                        ("due".to_string(), serde_json::Value::from(due)),
-                    ]),
-                ),
-            )
-            .await;
-        }
+        arm_watch(&space, "overdue", "silence", prose.clone(), &past).await;
+        arm_watch(&space, "not_yet", "silence", prose.clone(), &future).await;
+        // A delta Watch has no deadline semantics at all: it waits for a
+        // matching change, and in prose only the model can say what matches.
+        arm_watch(&space, "delta", "delta", prose, &past).await;
 
-        let report = settlement::sweep_watches(space.as_ref(), now_ms).await;
+        // First sight of the passed deadline: the head is recorded on the
+        // Watch and nothing fires.
+        let head = space.current_space_seq().await;
+        assert!(head.is_some());
+        let report = settlement::sweep_watches(space.as_ref(), now_ms, head, None).await;
         assert_eq!(report.error, None, "{report:?}");
-        assert_eq!(report.fired, 1, "{report:?}");
+        assert_eq!((report.fired, report.deferred), (0, 1), "{report:?}");
+        assert_eq!(watch_status(&space, "overdue").await, "armed");
+        let seen: u64 = watch_attribute(&space, "overdue", "due_seen_seq")
+            .await
+            .parse()
+            .unwrap();
+        assert_eq!(Some(seen), head);
 
-        async fn watch_status(space: &Space, key: &str) -> String {
-            let response = space
-                .execute_kip_readonly(kip::request_with(
-                    r#"FIND(?w.attributes.status) WHERE { ?w CONCEPT {type: "Watch", key: :key} } LIMIT 1"#,
-                    kip::param("key", key),
-                ))
-                .await
-                .unwrap();
-            serde_json::from_value::<Vec<String>>(
-                kip::ok_result(&response).cloned().unwrap_or_default(),
-            )
-            .unwrap_or_default()
-            .into_iter()
-            .next()
-            .unwrap_or_default()
-        }
+        // The Brain has read the stream only up to before that head: held.
+        let report = settlement::sweep_watches(
+            space.as_ref(),
+            now_ms,
+            space.current_space_seq().await,
+            Some(seen - 1),
+        )
+        .await;
+        assert_eq!((report.fired, report.deferred), (0, 1), "{report:?}");
+        assert_eq!(watch_status(&space, "overdue").await, "armed");
+
+        // Consumed through it: silence is a fact, and the Watch fires.
+        let consumed = space.current_space_seq().await;
+        let report = settlement::sweep_watches(space.as_ref(), now_ms, consumed, consumed).await;
+        assert_eq!(report.error, None, "{report:?}");
+        assert_eq!((report.fired, report.deferred), (1, 0), "{report:?}");
         assert_eq!(watch_status(&space, "overdue").await, "fired");
         assert_eq!(watch_status(&space, "not_yet").await, "armed");
         assert_eq!(watch_status(&space, "delta").await, "armed");
@@ -5407,21 +5439,16 @@ WHERE { ?s CONCEPT {type: "Skill", key: "redeploy"} } LIMIT 1"#,
         // Firing wrote its own provenance, and nothing else. An `action_gate`
         // here would be the runtime inventing a decision — act, ask, defer and
         // silence are all judgements about what the deadline means.
-        let activities = space
-            .execute_kip_readonly(kip::request(
-                r#"FIND(?a.activity_class) WHERE { ?a ACTIVITY {} } LIMIT 20"#,
-            ))
-            .await
-            .unwrap();
-        let classes: Vec<String> =
-            serde_json::from_value(kip::ok_result(&activities).cloned().unwrap_or_default())
-                .unwrap_or_default();
-        assert_eq!(classes, vec!["watch_fire".to_string()], "{classes:?}");
+        assert_eq!(
+            activity_classes(&space).await,
+            vec!["watch_fire".to_string()]
+        );
 
         // Idempotent: the fired Watch is no longer armed, so a second sweep
         // finds nothing and cannot fire it twice.
-        let again = settlement::sweep_watches(space.as_ref(), now_ms).await;
-        assert_eq!(again.fired, 0, "{again:?}");
+        let consumed = space.current_space_seq().await;
+        let again = settlement::sweep_watches(space.as_ref(), now_ms, consumed, consumed).await;
+        assert_eq!((again.fired, again.deferred), (0, 0), "{again:?}");
 
         // The decision is still outstanding, and the next cycle is handed the
         // queue. Firing produced attention; what it means is the action gate's,
@@ -5439,6 +5466,107 @@ WHERE { ?s CONCEPT {type: "Skill", key: "redeploy"} } LIMIT 1"#,
             .map(|watch| watch.name.as_str())
             .collect();
         assert_eq!(armed.len(), 2, "{armed:?}");
+    }
+
+    /// A structured condition is the runtime's to evaluate (Profile §5.11):
+    /// the sweep reads the Change Stream from where each Watch was last
+    /// evaluated and matches the entries, so a delta Watch fires on the
+    /// change it watches, a silence Watch whose change arrived stands down,
+    /// and a silence Watch past its deadline with nothing matched fires in
+    /// the same sweep — silence concluded over a consumed stream.
+    #[tokio::test]
+    async fn a_structured_watch_is_evaluated_against_the_change_stream() {
+        let app = test_app_state("watch_structured");
+        let space = create_loaded_space(&app, "watch_structured").await;
+        let now_ms = unix_ms();
+        let past = kip::timestamp(now_ms.saturating_sub(86_400_000));
+
+        seed_kip(
+            &space,
+            kip::request(
+                r#"MUTATE { UPSERT CONCEPT ?p { MATCH { type: "Person", key: "vendor" } SET FIELDS { name: "Vendor" } } }"#,
+            ),
+        )
+        .await;
+        let vendor = {
+            let response = space
+                .execute_kip_readonly(kip::request(
+                    r#"FIND(?c.id) WHERE { ?c CONCEPT {type: "Person", key: "vendor"} } LIMIT 1"#,
+                ))
+                .await
+                .unwrap();
+            serde_json::from_value::<Vec<String>>(kip::ok_result(&response).cloned().unwrap())
+                .unwrap()
+                .remove(0)
+        };
+
+        // Armed now, so only changes committed after arming count.
+        arm_watch(&space, "profile", "delta", serde_json::json!({"element": vendor}), "").await;
+        arm_watch(
+            &space,
+            "reply",
+            "silence",
+            serde_json::json!({"slot": {"subject": vendor, "predicate": "prefers"}}),
+            &past,
+        )
+        .await;
+        arm_watch(
+            &space,
+            "quiet",
+            "silence",
+            serde_json::json!({"element": vendor, "ops": ["lifecycle"]}),
+            &past,
+        )
+        .await;
+
+        // The vendor's profile changes, and a claim lands in the watched slot.
+        seed_kip(
+            &space,
+            kip::request_with(
+                r#"MUTATE {
+  UPDATE :vendor_id SET FIELDS { name: "Vendor Inc" }
+  UPSERT CONCEPT ?channel { MATCH { type: "Preference", key: "email" } SET FIELDS { name: "email" } }
+  ASSERT (:vendor, "prefers", ?channel) { by: :vendor, mode: "stated" }
+}"#,
+                serde_json::Map::from_iter([
+                    ("vendor_id".to_string(), serde_json::Value::from(vendor.as_str())),
+                    ("vendor".to_string(), serde_json::json!({"id": vendor})),
+                ]),
+            ),
+        )
+        .await;
+
+        let head = space.current_space_seq().await;
+        let report = settlement::sweep_watches(space.as_ref(), now_ms, head, None).await;
+        assert_eq!(report.error, None, "{report:?}");
+        assert_eq!(
+            (report.fired, report.disarmed, report.deferred, report.conflicted),
+            (2, 1, 0, 0),
+            "{report:?}"
+        );
+        assert_eq!(watch_status(&space, "profile").await, "fired");
+        assert_eq!(watch_status(&space, "reply").await, "disarmed");
+        assert_eq!(watch_status(&space, "quiet").await, "fired");
+        // A delta fire names the change it fired on; a stand-down names the
+        // change that answered the silence.
+        assert!(!watch_attribute(&space, "profile", "matched_seq").await.is_empty());
+        assert!(!watch_attribute(&space, "reply", "matched_seq").await.is_empty());
+        // Silence was concluded over a stream consumed through the head.
+        assert_eq!(
+            watch_attribute(&space, "quiet", "evaluated_seq").await.parse::<u64>().ok(),
+            head
+        );
+
+        // Two fires, two `watch_fire` Activities; standing down is not a fire.
+        assert_eq!(
+            activity_classes(&space).await,
+            vec!["watch_fire".to_string(), "watch_fire".to_string()]
+        );
+
+        // Nothing armed is left, so the next sweep has nothing to evaluate.
+        let head = space.current_space_seq().await;
+        let again = settlement::sweep_watches(space.as_ref(), now_ms, head, None).await;
+        assert_eq!((again.fired, again.disarmed, again.deferred), (0, 0, 0), "{again:?}");
     }
 
     /// Maintenance was reachable only by counting formation conversations, so

@@ -18,11 +18,18 @@ import type {
   DeclaredVocabulary,
   Env,
   MaintenanceAssessment,
+  RevisedRoot,
   SettlementReport,
 } from './types.js'
 import { MemoryVocabulary, activeSet, activeVocabulary } from './vocabulary.js'
 
 const APP_BOOTSTRAP_KEY = '__anda_brain_worker_bootstrap_version'
+/** The coordinate the last completed maintenance cycle read the stream through. */
+const CONSUMED_SEQ_KEY = 'anda-brain:delta_consumed_seq'
+/** Where the next correction scan reads after. */
+const CORRECTION_CURSOR_KEY = 'anda-brain:correction_cursor'
+/** What the last settlement's correction scan found, for the next assessment. */
+const REVISED_ROOTS_KEY = 'anda-brain:revised_roots'
 const APP_BOOTSTRAP_VERSION = '3'
 
 /** The key of the Person this brain speaks as when it asserts something. */
@@ -167,16 +174,49 @@ export class AndaBrain extends KipDatabase<Env> {
    */
   settleMemory(nowMs: number): SettlementReport {
     this.ensureInitialized()
-    return settle((operation) => this.run(operation), nowMs)
+    const kv = this.ctx.storage.kv
+    const report = settle((operation) => this.run(operation), nowMs, {
+      headSeq: this.nexus.store.currentSeq(this.nexus.space),
+      consumedSeq: kv.get<number>(CONSUMED_SEQ_KEY),
+      correctionCursor: kv.get<number>(CORRECTION_CURSOR_KEY),
+    })
+    // A scan that failed leaves the cursor where it was, so nothing it did
+    // not read falls behind the watermark.
+    if (report.corrections.error === undefined) {
+      kv.put(CORRECTION_CURSOR_KEY, report.corrections.cursor)
+    }
+    kv.put(REVISED_ROOTS_KEY, report.corrections.revised_roots)
+    return report
   }
 
   /** What the settlement measured, as the maintenance prompt receives it. */
   maintenanceAssessment(): MaintenanceAssessment {
     this.ensureInitialized()
+    const kv = this.ctx.storage.kv
     return assess(
       (operation) => this.run(operation),
       this.nexus.store.currentSeq(this.nexus.space),
+      {
+        consumedSeq: kv.get<number>(CONSUMED_SEQ_KEY),
+        revisedRoots: kv.get<RevisedRoot[]>(REVISED_ROOTS_KEY) ?? [],
+      },
     )
+  }
+
+  /**
+   * Records that a completed maintenance cycle read the Change Stream through
+   * `seq` — the `assessment.space_seq` it was handed.
+   *
+   * Two readers. The next cycle starts its `CHANGES AFTER SEQ` here, and the
+   * Watch sweep fires a prose silence Watch only once this has reached the
+   * head at which it first saw the deadline passed (Profile §5.11). It never
+   * moves backwards: a cycle handed an older coordinate than one already
+   * recorded has consumed nothing new.
+   */
+  recordConsumedSeq(seq: number): void {
+    this.ensureInitialized()
+    const kv = this.ctx.storage.kv
+    kv.put(CONSUMED_SEQ_KEY, Math.max(kv.get<number>(CONSUMED_SEQ_KEY) ?? 0, seq))
   }
 
   /**

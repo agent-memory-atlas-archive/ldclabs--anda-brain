@@ -708,9 +708,13 @@ describe('Anda Brain Worker', () => {
   it('fires a silence Watch whose deadline passed, and only that one', async () => {
     // The half of Watch evaluation that is arithmetic. Until the runtime did
     // it, a Commitment whose trigger was a silence Watch waited forever,
-    // because nothing in the system noticed a date passing.
-    // The settlement runs before the completion, so the cycle still needs one.
-    const runtime = testEnv(new FakeAi([{ types: [], predicates: [], commands: [], summary: 'Nothing to do.' }]))
+    // because nothing in the system noticed a date passing. A prose condition
+    // fires on the second cycle, not the first: §5.11 lets silence be
+    // concluded only once the Brain has consumed the stream through the head
+    // at which the deadline was first seen passed, and the first cycle is
+    // what consumes it.
+    // The settlement runs before the completion, so each cycle still needs one.
+    const runtime = testEnv(new FakeAi(Array.from({ length: 2 }, () => ({ types: [], predicates: [], commands: [], summary: 'Nothing to do.' }))))
     const space = uniqueSpace('watch-expiry')
     const past = new Date(Date.now() - 86_400_000).toISOString()
     const future = new Date(Date.now() + 86_400_000).toISOString()
@@ -738,10 +742,18 @@ describe('Anda Brain Worker', () => {
       expect(created.status, await text(created)).toBe(200)
     }
 
+    // First sight: held, with the head recorded on the Watch.
+    const first = await post(runtime, space, 'maintenance', { scope: 'full' })
+    expect(first.status, await text(first)).toBe(200)
+    const held = (await first.json()) as { result: { settlement: any } }
+    expect(held.result.settlement.watches).toEqual({ fired: 0, conflicted: 0, disarmed: 0, deferred: 1 })
+
+    // The completed cycle consumed the stream through its `space_seq`, which
+    // is past that head: silence is a fact, and the second sweep fires it.
     const settled = await post(runtime, space, 'maintenance', { scope: 'full' })
     expect(settled.status, await text(settled)).toBe(200)
     const body = (await settled.json()) as { result: { settlement: any } }
-    expect(body.result.settlement.watches).toMatchObject({ fired: 1, conflicted: 0 })
+    expect(body.result.settlement.watches).toEqual({ fired: 1, conflicted: 0, disarmed: 0, deferred: 0 })
 
     const statuses = await post(runtime, space, 'execute_kip_readonly', {
       command:
@@ -761,6 +773,59 @@ describe('Anda Brain Worker', () => {
       command: 'FIND(?a.activity_class) WHERE { ?a ACTIVITY {} } LIMIT 10',
     })
     expect(((await activities.json()) as any).result[0].result).toEqual(['watch_fire'])
+  })
+
+  it('evaluates a structured Watch against the change stream itself', async () => {
+    // A condition with a selector the runtime can read (§5.11) is the
+    // runtime's to evaluate: no model is asked whether the vendor's profile
+    // changed, and the fire names the transaction that answered it.
+    const runtime = testEnv(new FakeAi([{ types: [], predicates: [], commands: [], summary: 'Nothing to do.' }]))
+    const space = uniqueSpace('watch-structured')
+    const created = await post(runtime, space, 'execute_kip', {
+      command: 'MUTATE { UPSERT CONCEPT ?p { MATCH { type: "Person", key: "vendor" } SET FIELDS { name: "Vendor" } } }',
+    })
+    expect(created.status, await text(created)).toBe(200)
+    const found = await post(runtime, space, 'execute_kip_readonly', {
+      command: 'FIND(?c.id) WHERE { ?c CONCEPT {type: "Person", key: "vendor"} } LIMIT 1',
+    })
+    const vendor = ((await found.json()) as any).result[0].result[0] as string
+
+    const armed = await post(runtime, space, 'execute_kip', {
+      command: `MUTATE {
+  UPSERT CONCEPT ?w {
+    MATCH { type: "Watch", key: "profile" }
+    SET FIELDS { name: "profile" }
+    SET ATTRIBUTES { watch_class: "delta", summary: "vendor profile", condition: :condition, status: "armed" }
+  }
+}`,
+      parameters: { condition: { element: vendor } },
+    })
+    const armedBody = (await armed.json()) as any
+    expect(armed.status, JSON.stringify(armedBody)).toBe(200)
+    expect(armedBody.result[0].status, JSON.stringify(armedBody)).toBe('succeeded')
+    const changed = await post(runtime, space, 'execute_kip', {
+      command: 'UPDATE :vendor SET FIELDS { name: "Vendor Inc" }',
+      parameters: { vendor },
+    })
+    const changedBody = (await changed.json()) as any
+    expect(changed.status, JSON.stringify(changedBody)).toBe(200)
+    expect(changedBody.result[0].status, JSON.stringify(changedBody)).toBe('succeeded')
+
+    // The settlement's own metabolism sweep writes a Facet on every Concept,
+    // the Watch included, before the Watch sweep runs; evaluation still starts
+    // at the arming, not at that write, or the change above would be skipped.
+    const settled = await post(runtime, space, 'maintenance', { scope: 'full' })
+    expect(settled.status, await text(settled)).toBe(200)
+    const body = (await settled.json()) as { result: { settlement: any } }
+    expect(body.result.settlement.watches).toEqual({ fired: 1, conflicted: 0, disarmed: 0, deferred: 0 })
+
+    const after = await post(runtime, space, 'execute_kip_readonly', {
+      command:
+        'FIND(?w.attributes.status, ?w.attributes.matched_seq) WHERE { ?w CONCEPT {type: "Watch", key: "profile"} } LIMIT 1',
+    })
+    const [status, matched] = ((await after.json()) as any).result[0].result[0] as [string, number]
+    expect(status).toBe('fired')
+    expect(matched).toBeGreaterThan(0)
   })
 
   it('moves a Skill on its outcome stream alone, never on assertion', async () => {
@@ -927,7 +992,7 @@ describe('Anda Brain Worker', () => {
     // The model gets one completion, so a signal absent from its input is a
     // duty it will not perform. This is why the runtime reads them for it.
     const runtime = testEnv(
-      new FakeAi([{ types: [], predicates: [], commands: [], summary: 'Nothing to do.' }]),
+      new FakeAi(Array.from({ length: 2 }, () => ({ types: [], predicates: [], commands: [], summary: 'Nothing to do.' }))),
     )
     const space = uniqueSpace('assessment')
     await post(runtime, space, 'execute_kip', { command: FORMATION_PLAN })
@@ -950,13 +1015,25 @@ describe('Anda Brain Worker', () => {
     expect(response.status, await text(response)).toBe(200)
 
     // The prompt the model actually saw.
-    const prompt = JSON.parse(lastUserPayload(runtime))
+    let prompt = JSON.parse(lastUserPayload(runtime))
     expect(prompt.snapshot.assessment.space_seq).toBeGreaterThan(0)
-    // Fired by the settlement in this same cycle, and now waiting for the
-    // action gate — which is cognition, not arithmetic.
+    // No cycle has completed yet, so nothing has been consumed, and the prose
+    // silence Watch is held rather than fired (§5.11): still armed.
+    expect(prompt.snapshot.assessment.consumed_seq).toBeUndefined()
+    expect(prompt.snapshot.assessment.fired_watches).toHaveLength(0)
+    expect(prompt.snapshot.assessment.armed_watches).toHaveLength(1)
+    expect(prompt.snapshot.assessment.revised_roots).toEqual([])
+    expect(prompt.snapshot.assessment.predicates.prefers).toBe(1)
+
+    // The completed cycle recorded what it consumed; the next one is handed
+    // it, and the Watch it let through fires into the action gate's queue —
+    // which is cognition, not arithmetic.
+    const again = await post(runtime, space, 'maintenance', { scope: 'full' })
+    expect(again.status, await text(again)).toBe(200)
+    prompt = JSON.parse(lastUserPayload(runtime))
+    expect(prompt.snapshot.assessment.consumed_seq).toBeGreaterThan(0)
     expect(prompt.snapshot.assessment.fired_watches).toHaveLength(1)
     expect(prompt.snapshot.assessment.armed_watches).toHaveLength(0)
-    expect(prompt.snapshot.assessment.predicates.prefers).toBe(1)
   })
 
   it('lets maintenance set retention, which is what §20 review is for', async () => {

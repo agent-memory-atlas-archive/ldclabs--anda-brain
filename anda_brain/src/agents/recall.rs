@@ -21,6 +21,7 @@ use std::{
     sync::{Arc, LazyLock},
     time::Duration,
 };
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::time::timeout;
 
 use anda_kip::{KipError, KipErrorCode, Response};
@@ -49,6 +50,12 @@ pub const READONLY_KIP_TIMEOUT: Duration = Duration::from_secs(15);
 struct CachedPrimer {
     value: Json,
     fetched_at: u64,
+    /// The schema generation the primer was read under. A publish since —
+    /// `declare_memory_symbols`, or a wiki digest growing the vocabulary —
+    /// makes it stale before its TTL does: the primer is how Recall learns
+    /// what this Space can say, and a symbol it does not list is one the
+    /// model grounds by guessing.
+    generation: u64,
 }
 
 pub static FUNCTION_DEFINITION: LazyLock<FunctionDefinition> = LazyLock::new(|| {
@@ -213,6 +220,9 @@ pub struct RecallAgent {
     hook: Arc<dyn BrainHook>,
     history: Arc<RwLock<VecDeque<Document>>>,
     primer_cache: Arc<RwLock<Option<CachedPrimer>>>,
+    /// Bumped by whoever publishes into this Space's vocabulary package; see
+    /// [`Self::with_schema_generation`].
+    schema_generation: Arc<AtomicU64>,
     max_input_tokens: usize,
     policy: MemoryPolicyReader,
 }
@@ -234,9 +244,21 @@ impl RecallAgent {
             hook,
             history: Arc::new(RwLock::new(VecDeque::new())),
             primer_cache: Arc::new(RwLock::new(None)),
+            schema_generation: Arc::new(AtomicU64::new(0)),
             max_input_tokens,
             policy,
         }
+    }
+
+    /// Shares the counter a vocabulary publish bumps, so the cached primer is
+    /// refetched on the next recall instead of at the end of its TTL.
+    ///
+    /// Without it the cache is time-based only, and for up to five minutes
+    /// after Formation declared `works_on` Recall would be reading a primer
+    /// that does not list it.
+    pub fn with_schema_generation(mut self, generation: Arc<AtomicU64>) -> Self {
+        self.schema_generation = generation;
+        self
     }
 
     /// The model-turn cap for one recall run.
@@ -320,7 +342,9 @@ impl RecallAgent {
 
     async fn describe_primer_cached(&self) -> Json {
         let now = unix_ms();
+        let generation = self.schema_generation.load(Ordering::Acquire);
         if let Some(cached) = self.primer_cache.read().as_ref()
+            && cached.generation == generation
             && now.saturating_sub(cached.fetched_at) <= RECALL_PRIMER_CACHE_TTL_MS
         {
             return cached.value.clone();
@@ -341,6 +365,7 @@ impl RecallAgent {
         *self.primer_cache.write() = Some(CachedPrimer {
             value: primer.clone(),
             fetched_at: unix_ms(),
+            generation,
         });
         primer
     }

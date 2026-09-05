@@ -45,6 +45,7 @@ export interface BrainRpc {
   executeMaintenancePlan(operations: readonly KipOperation[]): Promise<KipResult[]>
   maintenanceAssessment(): Promise<MaintenanceAssessment>
   settleMemory(nowMs: number): Promise<SettlementReport>
+  recordConsumedSeq(seq: number): Promise<void>
   stats(): Promise<BrainStats>
   vocabulary(): Promise<DeclaredVocabulary>
 }
@@ -136,7 +137,60 @@ export interface WatchSettlement {
    * `EXPECT VERSION` refuses rather than clobbers. They stay armed.
    */
   conflicted: number
+  /**
+   * Silence Watches whose awaited change arrived before their deadline —
+   * evaluated by the runtime against the Change Stream and stood down,
+   * because the silence they were armed for can no longer happen.
+   */
+  disarmed: number
+  /**
+   * Silence Watches past their deadline that were held rather than fired: the
+   * Change Stream had not yet been consumed through the coordinate current at
+   * the deadline (Profile §5.11), so "nothing matched" was not yet a fact.
+   * They fire once it has.
+   */
+  deferred: number
   error?: string
+}
+
+/** What correction discovery found, and where the next scan starts. */
+export interface CorrectionScan {
+  /** The revisions found, each with the cognition derived from it. */
+  revised_roots: RevisedRoot[]
+  /** The coordinate the next scan reads after. */
+  cursor: number
+  error?: string
+}
+
+/** One Assertion an actor superseded, with what was derived from it. */
+export interface RevisedRoot {
+  /** The superseded Assertion. */
+  assertion: string
+  /** The Proposition it took a stance on. */
+  proposition?: string
+  /** The actor whose claim was revised. */
+  actor?: string
+  /** The Assertions that superseded it. */
+  superseded_by: string[]
+  /** The coordinate the supersession committed at. */
+  space_seq: number
+  /** What `LIST DEPENDENTS` reached from the Assertion, nearest first. */
+  dependents: Dependent[]
+  /**
+   * Set when the list is known to be incomplete: the traversal was cut by an
+   * element this Principal may not discover (§63.5), the page was full, or
+   * the read failed.
+   */
+  truncated: boolean
+}
+
+/** One element reached by a derivation walk (§63.5). */
+export interface Dependent {
+  id: string
+  kind: string
+  distance: number
+  /** The Activity through which it was reached. */
+  via?: string
 }
 
 export interface SkillSettlement {
@@ -156,6 +210,7 @@ export interface SettlementReport {
   decayed: number
   watches: WatchSettlement
   skills: SkillSettlement
+  corrections: CorrectionScan
   error?: string
 }
 
@@ -173,12 +228,27 @@ export interface MaintenanceAssessment {
    * reads from.
    */
   space_seq: number
+  /**
+   * The coordinate the last completed maintenance cycle read the Change
+   * Stream through — where this cycle's `CHANGES AFTER SEQ` starts. Recorded
+   * by the runtime when a cycle completes, from the `space_seq` that cycle
+   * was handed; absent until one has.
+   */
+  consumed_seq?: number
   /** What the Brain is still waiting for — the delta evaluation's input. */
   armed_watches: ArmedWatch[]
   /** Fired and undecided — the action gate's queue. */
   fired_watches: ArmedWatch[]
   /** Registered predicate to link count; vocabulary sprawl is visible here. */
   predicates: Record<string, number>
+  /**
+   * Assertions an actor superseded since the last cycle, each with the
+   * cognition derived from it — the derivation review's input (§57.5). The
+   * runtime walks `LIST DEPENDENTS` so the cycle does not have to guess which
+   * artifacts a revised root fed; a listed dependent is a candidate for
+   * `DerivationState {status: "stale"}`, not already stale.
+   */
+  revised_roots: RevisedRoot[]
 }
 
 export interface Usage {

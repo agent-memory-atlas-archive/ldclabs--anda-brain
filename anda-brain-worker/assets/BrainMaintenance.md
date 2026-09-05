@@ -649,12 +649,28 @@ not redo its work by hand:
   must not reinforce what it read (§32). What is yours is the judgement the
   sweep cannot make: `salience` on what deserves protection from forgetting
   (§14), and `utility` calibrated on outcomes (§13).
-- **Silence Watch expiry.** Every armed `silence` Watch whose `due_at` had
-  passed is already `fired`, with its `watch_fire` Activity. A deadline
-  arriving is arithmetic and does not wait for a model to be scheduled and
-  notice. What is *not* done is the decision: firing produced attention and
-  nothing else, and `assessment.fired_watches` is the queue waiting for your
-  action gate.
+- **Watch evaluation, the structured half (§5.11).** Every armed Watch whose
+  `condition` is a structured filter — `element`, `slot` or `type`, narrowed
+  by `ops` and `touched` — has already been evaluated against the Change
+  Stream: a `delta` Watch whose change committed is `fired` with its
+  `watch_fire` Activity and the coordinate in `matched_seq`; a `silence` Watch
+  whose awaited change arrived is `disarmed` rather than fired; a `silence`
+  Watch past its `due_at` with nothing matched is `fired`. What is *not* done
+  is the decision: firing produced attention and nothing else, and
+  `assessment.fired_watches` is the queue waiting for your action gate.
+
+  A Watch whose `condition` is prose is yours: read `CHANGES AFTER SEQ` from
+  `assessment.consumed_seq` — where the last completed cycle read through —
+  and fire what matched, atomically. A prose `silence` Watch past its deadline
+  is fired by the runtime only once a completed cycle has consumed the stream
+  through the head at which the deadline was first seen passed: the clock
+  alone proves nothing (§5.11), so it fires on the cycle after the one that
+  read past it. Prefer the structured form when you arm a Watch yourself.
+- **Correction discovery, with dependents.** Assertions an actor superseded
+  since the last cycle are in `assessment.revised_roots`, each with what
+  `LIST DEPENDENTS` reached from it. Nothing is flagged: reachability is
+  topology, staleness is your judgment — mark what no longer holds
+  `DerivationState {status: "stale"}`.
 - **Skill lifecycle verdicts.** Every `proposed → trialed → adopted → revoked`
   transition due on the *linked* Outcome Evidence has already run, as
   deterministic code, recorded as a `lifecycle_verdict` Activity with its rule
@@ -700,9 +716,15 @@ evidence:
 ```json
 {
   "space_seq": 4213,
+  "consumed_seq": 4100,
   "armed_watches": [{"id": "C-88", "watch_class": "delta", "condition": "any message from :vendor"}],
   "fired_watches": [{"id": "C-91", "watch_class": "silence", "due_at": "2026-08-30T00:00:00Z"}],
-  "predicates": {"prefers": 41, "works_on": 3, "works_at": 2}
+  "predicates": {"prefers": 41, "works_on": 3, "works_at": 2},
+  "revised_roots": [
+    {"assertion": "A-310", "proposition": "P-77", "actor": "C-7", "superseded_by": ["A-412"],
+     "space_seq": 4190, "dependents": [{"id": "C-140", "kind": "concept", "distance": 1, "via": "ACT-58"}],
+     "truncated": false}
+  ]
 }
 ```
 
