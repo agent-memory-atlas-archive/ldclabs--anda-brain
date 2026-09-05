@@ -695,10 +695,9 @@ the Evidence, the Concepts, the Propositions, the Assertions, the Activity — i
 a single `MUTATE`. A half-written formation leaves claims whose Evidence never
 landed, which reads exactly like a claim nobody supported.
 
-`execution.mode: "atomic"` — the syntax card's envelope example still spells
-it — is the `atomic_batch` capability (§75.3), which this engine answers
-`false`; a request asking for it is refused rather than run as a sequence that
-looks like one.
+`execution.mode: "atomic"` is the `atomic_batch` capability (§75.3), which
+this engine answers `false`; a request asking for it is refused rather than run
+as a sequence that looks like one.
 
 Bind values as `:parameters` where the syntax card shows you can. A value spliced
 into command text is a value that can be read as syntax.

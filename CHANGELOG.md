@@ -258,8 +258,10 @@ is what the two deployments now answer.
   rather than run as a sequence that looks like one: `anda_kip::execute_request`
   already declined to fake it, and the Worker refuses it at validation. One
   `MUTATE` block is the transaction — which both Formation contracts asked for
-  and now say outright, because the syntax card's envelope example still spells
-  `"mode": "atomic"` and a model copying it was paying a refused round trip.
+  and now say outright. The syntax card's envelope example used to spell
+  `"mode": "atomic"` — a model copying it paid a refused round trip on every
+  formation — and now asks for a `sequence` and says what `atomic` needs
+  (`KIPSyntax.md` §5, fixed upstream and vendored through `anda_kip`).
 - **`VERIFY` takes `CAPSULE`, `SCHEMA PACKAGE` or `RECEIPT` (§69.1).** `BLOB`
   and `CHECKPOINT` left the grammar; the Worker's vendored `KIPSyntax.md`
   follows (`scripts/sync-kip-assets.mjs`, then `codegen:prompts`).
