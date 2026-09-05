@@ -4,7 +4,6 @@ use anda_core::{
 };
 use anda_db::{
     collection::Collection,
-    query::Fv,
     schema::{DocumentId, Json, Map},
 };
 use anda_engine::{
@@ -348,41 +347,25 @@ impl FormationAgent {
     }
 
     async fn mark_conversation_failed(&self, conversation: &mut Conversation, reason: String) {
-        log::error!(target: "brain", "Conversation {} failed: {}", conversation._id, reason);
-        conversation.failed_reason = Some(reason);
-        conversation.status = ConversationStatus::Failed;
-        conversation.updated_at = unix_ms();
-
-        if let Ok(changes) = conversation.to_changes() {
-            let _ = self
-                .memory
-                .update_conversation(conversation._id, changes)
-                .await;
-        }
+        super::mark_conversation_failed(
+            |id, changes| self.memory.update_conversation(id, changes),
+            "formation",
+            conversation,
+            reason,
+        )
+        .await;
     }
 
-    /// Persists the current full conversation snapshot; `to_changes` failures
-    /// are logged and must not interrupt the processing loop.
+    /// Persists the current full conversation snapshot. A formation is
+    /// retried, so a stale `failed_reason` is cleared on the way through.
     async fn persist_conversation_snapshot(&self, conversation: &Conversation) {
-        match conversation.to_changes() {
-            Ok(mut changes) => {
-                if conversation.failed_reason.is_none() {
-                    changes.insert("failed_reason".to_string(), Fv::Null);
-                }
-                let _ = self
-                    .memory
-                    .update_conversation(conversation._id, changes)
-                    .await;
-            }
-            Err(err) => {
-                log::error!(
-                    target: "brain",
-                    "Failed to serialize formation conversation {} changes: {:?}",
-                    conversation._id,
-                    err
-                );
-            }
-        }
+        super::persist_conversation_snapshot(
+            |id, changes| self.memory.update_conversation(id, changes),
+            "formation",
+            conversation,
+            true,
+        )
+        .await;
     }
 
     async fn process_one(&self, ctx: &AgentCtx, conversation: &mut Conversation) {

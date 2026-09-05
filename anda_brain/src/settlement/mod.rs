@@ -423,7 +423,9 @@ async fn evaluate_structured(
                     rows.iter()
                         .filter_map(|row| match row {
                             Json::String(id) => Some(id.clone()),
-                            Json::Object(map) => map.get("id").and_then(Json::as_str).map(str::to_string),
+                            Json::Object(map) => {
+                                map.get("id").and_then(Json::as_str).map(str::to_string)
+                            }
                             _ => None,
                         })
                         .collect()
@@ -502,7 +504,11 @@ enum Outcome {
 /// the budget ran out first — which the caller records, so the next sweep
 /// continues from there instead of concluding silence over changes it never
 /// saw.
-async fn read_changes(port: &impl RunKip, from: u64, head: u64) -> Result<(Vec<Json>, u64), String> {
+async fn read_changes(
+    port: &impl RunKip,
+    from: u64,
+    head: u64,
+) -> Result<(Vec<Json>, u64), String> {
     let mut after = from;
     let mut envelopes: Vec<Json> = Vec::new();
     for _ in 0..watch::CHANGES_MAX_PAGES {
@@ -1192,7 +1198,10 @@ mod tests {
             )
         };
         let port = FakeKip::new([
-            (DUE_SCAN, vec![Response::ok(json!([due("W-1"), due("W-2")]))]),
+            (
+                DUE_SCAN,
+                vec![Response::ok(json!([due("W-1"), due("W-2")]))],
+            ),
             ("watch_fire", vec![changed("lifecycle", 1), conflicted()]),
         ]);
         let report = sweep_watches(&port, 1_000, Some(9), Some(5)).await;
@@ -1252,11 +1261,18 @@ mod tests {
         assert_eq!(report.fired, 1, "{report:?}");
         let seen = port.seen();
         // The stream is read, and the Watch is matched only past its arming.
-        assert!(seen.iter().any(|(command, _)| command.contains("CHANGES AFTER SEQ")));
+        assert!(
+            seen.iter()
+                .any(|(command, _)| command.contains("CHANGES AFTER SEQ"))
+        );
         let wrote = port.wrote();
         assert_eq!(wrote.len(), 1);
         assert!(wrote[0].contains("watch_fire"), "{}", wrote[0]);
-        assert!(wrote[0].contains("matched_seq: :matched_seq"), "{}", wrote[0]);
+        assert!(
+            wrote[0].contains("matched_seq: :matched_seq"),
+            "{}",
+            wrote[0]
+        );
     }
 
     #[tokio::test]
@@ -1307,7 +1323,11 @@ mod tests {
         assert_eq!((report.fired, report.deferred), (1, 0), "{report:?}");
         let wrote = port.wrote();
         assert_eq!(wrote.len(), 1, "{wrote:?}");
-        assert!(wrote[0].contains("evaluated_seq: :evaluated_seq"), "{}", wrote[0]);
+        assert!(
+            wrote[0].contains("evaluated_seq: :evaluated_seq"),
+            "{}",
+            wrote[0]
+        );
     }
 
     #[tokio::test]
@@ -1320,7 +1340,12 @@ mod tests {
         // A full page, then the budget: the Watch is stamped with what was
         // read, not with the head it never reached.
         let full_page: Vec<Json> = (11..=(10 + watch::CHANGES_PAGE_LIMIT as u64))
-            .map(|seq| envelope(seq, json!({"op": "update", "kind": "assertion", "id": "A-1"})))
+            .map(|seq| {
+                envelope(
+                    seq,
+                    json!({"op": "update", "kind": "assertion", "id": "A-1"}),
+                )
+            })
             .collect();
         let port = FakeKip::new([
             (ARMED_SCAN, vec![Response::ok(json!([armed]))]),

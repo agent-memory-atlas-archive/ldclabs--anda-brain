@@ -301,42 +301,25 @@ use super::RUNNER_MAX_MODEL_TURNS as MAINTENANCE_MAX_MODEL_TURNS;
 
 impl MaintenanceAgent {
     async fn mark_conversation_failed(&self, conversation: &mut Conversation, reason: String) {
-        log::error!(
-            target: "brain",
-            "Maintenance conversation {} failed: {}",
-            conversation._id,
-            reason
-        );
-        conversation.failed_reason = Some(reason);
-        conversation.status = ConversationStatus::Failed;
-        conversation.updated_at = unix_ms();
-        if let Ok(changes) = conversation.to_changes() {
-            let _ = self
-                .conversations
-                .update_conversation(conversation._id, changes)
-                .await;
-        }
+        super::mark_conversation_failed(
+            |id, changes| self.conversations.update_conversation(id, changes),
+            "maintenance",
+            conversation,
+            reason,
+        )
+        .await;
     }
 
-    /// Persists the current full conversation snapshot; `to_changes` failures
-    /// are logged and must not interrupt the processing loop.
+    /// Persists the current full conversation snapshot. A maintenance cycle
+    /// is not retried, so its `failed_reason` is left as it was written.
     async fn persist_conversation_snapshot(&self, conversation: &Conversation) {
-        match conversation.to_changes() {
-            Ok(changes) => {
-                let _ = self
-                    .conversations
-                    .update_conversation(conversation._id, changes)
-                    .await;
-            }
-            Err(err) => {
-                log::error!(
-                    target: "brain",
-                    "Failed to serialize maintenance conversation {} changes: {:?}",
-                    conversation._id,
-                    err
-                );
-            }
-        }
+        super::persist_conversation_snapshot(
+            |id, changes| self.conversations.update_conversation(id, changes),
+            "maintenance",
+            conversation,
+            false,
+        )
+        .await;
     }
 
     async fn process_one(&self, ctx: &AgentCtx, conversation: &mut Conversation) {

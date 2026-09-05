@@ -7,7 +7,7 @@ use anda_core::{
     BoxError, ContentPart, Document, FunctionDefinition, Json, Message, Principal, Resource, Tool,
     ToolGroupInfo, ToolOutput, Usage,
 };
-use anda_db::schema::DocumentId;
+use anda_db::{query::Fv, schema::DocumentId};
 use anda_engine::{
     context::{BaseCtx, CompletionRunner},
     memory::{Conversation, ConversationStatus, KipArgs, MemoryManagement},
@@ -15,7 +15,10 @@ use anda_engine::{
 };
 use anda_kip::Response;
 use parking_lot::RwLock;
-use std::{collections::VecDeque, sync::Arc};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::Arc,
+};
 
 use crate::kip;
 
@@ -378,6 +381,70 @@ pub(super) async fn drive_runner_loop<H: RunnerHost>(
     // hold turns skipped by the throttle.
     if unpersisted_turns > 0 && conversation.status == ConversationStatus::Working {
         host.persist_snapshot(conversation).await;
+    }
+}
+
+/// Marks a conversation failed and persists the verdict.
+///
+/// A persistence failure is logged, never propagated: the processing loop has
+/// already decided the conversation is over, and a store that would not take
+/// the verdict must not turn one failure into two. `update` is the store's
+/// own `update_conversation`, passed in because the two agents keep their
+/// conversations in different stores with the same method on each.
+pub(super) async fn mark_conversation_failed<F, Fut, E>(
+    update: F,
+    label: &str,
+    conversation: &mut Conversation,
+    reason: String,
+) where
+    F: FnOnce(u64, BTreeMap<String, Fv>) -> Fut,
+    Fut: Future<Output = Result<(), E>>,
+{
+    log::error!(
+        target: "brain",
+        "{label} conversation {} failed: {}",
+        conversation._id,
+        reason
+    );
+    conversation.failed_reason = Some(reason);
+    conversation.status = ConversationStatus::Failed;
+    conversation.updated_at = unix_ms();
+    if let Ok(changes) = conversation.to_changes() {
+        let _ = update(conversation._id, changes).await;
+    }
+}
+
+/// Persists the current full conversation snapshot; `to_changes` failures
+/// are logged and must not interrupt the processing loop.
+///
+/// `clear_failed_reason` writes an explicit null when the conversation has
+/// no failure, so a reason persisted by an earlier failed attempt does not
+/// survive the retry that succeeded. Formation retries; maintenance does
+/// not, and leaves the field alone.
+pub(super) async fn persist_conversation_snapshot<F, Fut, E>(
+    update: F,
+    label: &str,
+    conversation: &Conversation,
+    clear_failed_reason: bool,
+) where
+    F: FnOnce(u64, BTreeMap<String, Fv>) -> Fut,
+    Fut: Future<Output = Result<(), E>>,
+{
+    match conversation.to_changes() {
+        Ok(mut changes) => {
+            if clear_failed_reason && conversation.failed_reason.is_none() {
+                changes.insert("failed_reason".to_string(), Fv::Null);
+            }
+            let _ = update(conversation._id, changes).await;
+        }
+        Err(err) => {
+            log::error!(
+                target: "brain",
+                "Failed to serialize {label} conversation {} changes: {:?}",
+                conversation._id,
+                err
+            );
+        }
     }
 }
 

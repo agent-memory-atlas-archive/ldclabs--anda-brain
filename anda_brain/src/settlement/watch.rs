@@ -162,9 +162,10 @@ pub(crate) fn armed_at(envelopes: &[Json], id: &str) -> Option<u64> {
                                 .get("touched")
                                 .and_then(Json::as_array)
                                 .is_some_and(|paths| {
-                                    paths.iter().filter_map(Json::as_str).any(|path| {
-                                        path.starts_with("attributes")
-                                    })
+                                    paths
+                                        .iter()
+                                        .filter_map(Json::as_str)
+                                        .any(|path| path.starts_with("attributes"))
                                 }))
                 });
             arming.then_some(seq)
@@ -348,7 +349,11 @@ pub(crate) fn entry_matches(filter: &ChangeFilter, entry: &Json, slots: &SlotInd
             .and_then(Json::as_array)
             .map(|paths| paths.iter().filter_map(Json::as_str).collect::<Vec<_>>())
             .unwrap_or_default();
-        if !filter.touched.iter().any(|path| touched.contains(&path.as_str())) {
+        if !filter
+            .touched
+            .iter()
+            .any(|path| touched.contains(&path.as_str()))
+        {
             return false;
         }
     }
@@ -648,7 +653,10 @@ mod tests {
         ]]);
         let read = read_watch_rows(&rows);
         assert_eq!(read.len(), 1);
-        assert!(read[0].watch.condition.contains("replied_about"), "{read:?}");
+        assert!(
+            read[0].watch.condition.contains("replied_about"),
+            "{read:?}"
+        );
         assert_eq!(
             change_filter(&read[0].condition),
             Some(ChangeFilter {
@@ -787,7 +795,10 @@ mod tests {
         );
         // What the sweep read through travels with the fire, so the record
         // says silence was concluded over a consumed stream, not a clock.
-        assert!(command.contains("evaluated_seq: :evaluated_seq"), "{command}");
+        assert!(
+            command.contains("evaluated_seq: :evaluated_seq"),
+            "{command}"
+        );
         assert_eq!(parameters["evaluated_seq"], Json::from(44));
 
         // The transition and its provenance commit together: a Watch marked
@@ -804,11 +815,25 @@ mod tests {
         assert!(!command.contains("SleepTask"), "{command}");
 
         // A delta fire is keyed by the change it fired on.
-        let delta = fire_watch_request(&row("C-8", "delta"), "2026-08-31T00:00:00Z", Fire::Delta(52), None);
+        let delta = fire_watch_request(
+            &row("C-8", "delta"),
+            "2026-08-31T00:00:00Z",
+            Fire::Delta(52),
+            None,
+        );
         let parameters = delta.parameters.as_ref().unwrap();
-        assert_eq!(parameters["fire_key"], Json::from("watch_fire:C-8:delta:52"));
+        assert_eq!(
+            parameters["fire_key"],
+            Json::from("watch_fire:C-8:delta:52")
+        );
         assert_eq!(parameters["matched_seq"], Json::from(52));
-        assert!(!delta.operations[0].command.as_deref().unwrap().contains("evaluated_seq"));
+        assert!(
+            !delta.operations[0]
+                .command
+                .as_deref()
+                .unwrap()
+                .contains("evaluated_seq")
+        );
     }
 
     #[test]
@@ -818,7 +843,10 @@ mod tests {
         assert!(command.contains(r#"status: "disarmed""#));
         assert!(!command.contains("watch_fire"), "{command}");
         assert!(command.contains("EXPECT VERSION :version OF ATTRIBUTES"));
-        assert_eq!(request.parameters.as_ref().unwrap()["matched_seq"], Json::from(52));
+        assert_eq!(
+            request.parameters.as_ref().unwrap()["matched_seq"],
+            Json::from(52)
+        );
 
         let stamp = stamp_request(&row("C-9", "silence"), "due_seen_seq", 61);
         let command = stamp.operations[0].command.as_deref().unwrap();

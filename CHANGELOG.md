@@ -175,6 +175,23 @@ of the Rust one:
 - No data migration: `kip-do` never reached production, so no Durable Object
   holds 1.x data and the Worker starts clean.
 
+### Changed — `space.rs` is three files shorter, and the agents share their persistence
+
+No behaviour changes.
+
+- **`space.rs` keeps the Space; its side quests moved out.** The shadow
+  evaluation (`run_shadow_eval`, the fork primitive) is `space/shadow.rs`, the
+  dream self-test is `space/self_test.rs`, and the 3,700 lines of tests are
+  `space/tests.rs`. `space.rs` goes from 7,500 lines to 3,150, and a reader
+  looking for how a Space is opened, settled or forgotten no longer scrolls
+  past the self-test's prompt to find it.
+- **One `mark_conversation_failed`, one `persist_conversation_snapshot`.**
+  Formation and Maintenance each carried a copy over their own conversation
+  store; the copies are two functions in `agents.rs` that take the store's
+  `update_conversation`, with the one real difference — Formation clears a
+  stale `failed_reason` because it retries, Maintenance does not — as a
+  parameter rather than as a divergence to rediscover.
+
 ### Added — the runtime evaluates Watches, and silence waits for the stream (Profile §5.11)
 
 The reference README's Maintenance duties had two halves this service left to
