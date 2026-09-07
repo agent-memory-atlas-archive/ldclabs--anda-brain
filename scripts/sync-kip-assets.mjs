@@ -4,12 +4,12 @@
  *
  * Two kinds of file, and the difference is why this script exists.
  *
- * **Verbatim.** `KIPSyntax.md` and `CognitiveMemoryProfile-2.0.md` are the
- * protocol's, not ours. The Rust service reads them straight out of the crate
- * at completion time (`agents::prompts::language_reference()`), so it keeps no
- * copy. `@ldclabs/kip-do` ships neither, so the Worker keeps copies — and a
- * copy nobody can refresh is how a model ends up writing against a syntax that
- * moved.
+ * **Verbatim.** The role cards, `KIPSyntax.md` and
+ * `CognitiveMemoryProfile-2.0.md` are the protocol's, not ours. The Rust service
+ * reads them straight out of the crate (`agents::prompts::mode_reference()` and
+ * `memory_runtime`), so it keeps no copy. `@ldclabs/kip-do` ships none of them,
+ * so the Worker keeps copies — and a copy nobody can refresh is how a model
+ * ends up writing against a contract that moved.
  *
  * **Half ours.** Each `Brain*.md` is the KIP 2.0 reference policy for one mode
  * plus a section A describing *this* deployment. The reference half is

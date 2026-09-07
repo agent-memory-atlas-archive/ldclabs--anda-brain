@@ -415,23 +415,19 @@ impl FormationAgent {
         // and before the completion, so every `execute_kip` the model makes
         // inherits it.
         //
-        // `context.source` is the caller's own thread identity and is the
-        // better `client_key` origin when it is there. The conversation row is
-        // the fallback rather than a digest of the envelope, because this
-        // deployment retries the same durable conversation: the id is the
-        // logical identity a retry actually shares.
+        // A thread/channel is provenance, not the identity of an observation.
+        // Each durable conversation has its own key, stable across retries,
+        // so a later submission from the same source cannot cite old bytes.
         ctx.base.set_state(super::Observation(
             input
                 .as_ref()
                 .and_then(|input| {
-                    let origin = match input.context.as_ref().and_then(|c| c.source.as_deref()) {
-                        Some(source) => format!("formation:{source}"),
-                        None => format!("formation:conversation:{}", conversation._id),
-                    };
+                    let origin = format!("formation:conversation:{}", conversation._id);
                     crate::kip::observation_ingest(
                         &input.messages,
                         &input.timestamp.clone().unwrap_or_else(|| {
-                            rfc3339_datetime(now_ms).unwrap_or_else(rfc3339_datetime_now)
+                            rfc3339_datetime(conversation.created_at)
+                                .unwrap_or_else(rfc3339_datetime_now)
                         }),
                         &origin,
                         counterparty_info

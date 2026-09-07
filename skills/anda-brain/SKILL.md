@@ -43,11 +43,15 @@ retained independent trial/evaluation evidence; self-reported success is not a g
 Text Watches require a configured semantic evaluator and remain deferred otherwise.
 A local purge acknowledgement is not a verified complete semantic ErasurePlan across
 all descendants, replays, backups and external exports.
+Operational Watch/SleepTask records written with an exact CognitiveMemory 2.0
+schema_ref require a verified 2.1 replacement; they cannot be upgraded in place.
 
 本适配器保留现有 API，未声明支持五意图 Memory Interface 或能力包；对话编号不是
 处理回执。涉及刚提交的更正时先确认 Formation 完成，再召回；未完成处理须明确说明。
 程序候选未经过独立试验/评估时保持未验证，自述成功不能作为等级。文本 Watch 无语义
 求值器时保持等待；单个对象的清除结果不能被扩展成整个语义依赖闭包已清除。
+使用 CognitiveMemory 2.0 精确 schema_ref 的 Watch/SleepTask 必须创建并核验 2.1
+替代记录，不能原地升级。
 
 
 Persistent long-term memory service for LLM agents, powered by a Knowledge Graph (Cognitive Nexus) and KIP (Knowledge Interaction Protocol). Anda Brain is [open-source software](https://github.com/ldclabs/anda-brain) designed to be **self-hosted** — deploy your own instance with the [Quick Start guide](https://github.com/ldclabs/anda-brain/blob/main/deploy/quick_start.md).
@@ -307,6 +311,11 @@ Content-Type: application/json
 | `context.source` | `string` | No | Identifier of the source of the current interaction content |
 | `context.topic` | `string` | No | Conversation topic |
 | `timestamp` | `string` | No (recommended) | ISO 8601 timestamp of the conversation |
+
+`context.source` identifies a thread/channel for provenance. Reusing it for later
+messages is supported; it is not an idempotency key. Rust retries of a persisted
+formation keep that conversation's Evidence identity. A new submission is a new
+conversation; use the stored conversation/restart path when retrying existing work.
 
 **Tips for best results:**
 
@@ -695,3 +704,15 @@ The service is configured via CLI arguments and environment variables:
 | AWS S3 | `cargo run -p anda_brain --features mcp,wiki -- aws` | `AWS_BUCKET`, `AWS_REGION` |
 | MCP HTTP | `cargo run -p anda_brain --features mcp,wiki -- local` then connect `/mcp/{space_id}` | `MCP_HTTP_ALLOWED_HOSTS`, bearer token |
 | MCP stdio | `cargo run -p anda_brain --features mcp,wiki -- mcp --space-id my_space_001 local` | `MCP_AUTH_TOKEN`, `LOCAL_DB_PATH` |
+
+Maintenance parameters override the space policy for that run, including the
+actual deterministic decay. Inspect `GET /v1/{space_id}/memory_status`:
+`last_settlement.correction_scan_incomplete` means the bounded discovery scan
+will continue, and `correction_scan_through_seq` identifies fully read progress.
+A completed discovery page does not prove model processing or Watch coverage.
+
+For KIP v1 upgrades, stop the old writer, back up and test a copy before cutover.
+Migration is per-space and one-way. It preserves source records, conservatively
+maps native fields/lifecycle/time, and leaves unsupported learning/runtime state
+as Legacy records. Old-id usage and derived caches reset once; conversations,
+policies, tokens and wiki records remain.

@@ -89,6 +89,7 @@ export async function formMemory(
   input: FormationInput,
 ): Promise<unknown> {
   const timestamp = input.timestamp ?? new Date().toISOString()
+  const counterparty = await counterpartyElement(brain, input.context?.counterparty)
   const primer = resultOrThrow(await brain.describePrimer(), 'formation primer failed')
   const model = env.AI_MODEL || DEFAULT_AI_MODEL
   const plan = await createMutationPlan(
@@ -111,16 +112,18 @@ export async function formMemory(
   const ingest = observationIngest(operations, input.messages, {
     at: timestamp,
     origin: await conversationOrigin(input, timestamp),
-    sourceActor: await counterpartyElement(brain, input.context?.counterparty),
+    sourceActor: counterparty.id,
   })
   const results = operations.length
     ? await brain.executeFormationPlan(operations, ingest)
     : []
   throwOnKipError(results, 'formation KIP failed')
+  const stored = countWrites(results)
+  stored.concepts += counterparty.created
 
   return {
     content: plan.value.summary || 'No durable memory was extracted.',
-    stored: countWrites(results),
+    stored,
     commands: operations.length,
     ...(vocabulary ? { vocabulary } : {}),
     usage: plan.usage,
@@ -130,67 +133,60 @@ export async function formMemory(
 /**
  * The stable name this conversation's minted Evidence is keyed under.
  *
- * `context.source` is the caller's own thread identity and is what a
- * `client_key` wants: resending the same thread resolves to the Evidence the
- * first attempt minted rather than duplicating it (§52.1).
- *
- * Without one, the digest of the envelope stands in. It is honest about what it
- * can promise — a byte-identical resend dedupes, and anything else is a
- * different observation — and it still does the job that matters within a
- * single pass, where four commands citing `:msg1` must reach one record. The
- * timestamp is in the digest deliberately: the same sentence said twice on
- * different days is two observations, not one.
+ * The digest covers the complete input, including source and counterparty.
+ * A source names a thread/channel, not an individual observation. Reusing a
+ * thread must never replace a new message's Evidence with that thread's first
+ * message. Callers retrying an observation keep its explicit timestamp; without
+ * one, each request receives a new observation time.
  */
 async function conversationOrigin(
   input: FormationInput,
   timestamp: string,
 ): Promise<string> {
-  const source = input.context?.source
-  if (source) return `formation:${source}`
   const bytes = new TextEncoder().encode(
-    JSON.stringify({ messages: input.messages, timestamp }),
+    JSON.stringify({ messages: input.messages, context: input.context ?? {}, timestamp }),
   )
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))
-  const hex = Array.from(digest.slice(0, 16), (byte) =>
+  const hex = Array.from(digest, (byte) =>
     byte.toString(16).padStart(2, '0'),
   ).join('')
   return `formation:sha256:${hex}`
 }
 
 /**
- * The counterparty's element id, when this Space already holds one.
- *
- * An ingested Evidence source must resolve to something a reader can follow, so
- * it is an id or a canonical identity — never the `context.counterparty`
- * handle, which is a Concept *key*. A first conversation with someone therefore
- * has no source to name, and the Evidence is minted without one rather than
- * with a source that resolves to nothing.
- *
- * Failure is not raised: an ingest block is an improvement on the model
- * retyping the payload, and losing the whole formation because a lookup
- * stumbled would be a worse trade than losing the source link.
+ * Resolve/create the semantic counterparty before planning. First ingestion
+ * and a retry must name the same Evidence source, even when the first model
+ * plan would otherwise be responsible for creating the Person.
  */
 async function counterpartyElement(
   brain: BrainRpc,
   counterparty: string | undefined,
-): Promise<string | undefined> {
-  if (!counterparty) return undefined
-  try {
-    const [found] = await brain.executeKipReadonlyBatch([
-      {
-        command:
-          'FIND(?person.id) WHERE { ?person CONCEPT {type: "Person", key: :key} } LIMIT 1',
-        parameters: { key: counterparty },
-      },
-    ])
-    if (found?.status !== 'succeeded') return undefined
-    const row = Array.isArray(found.result) ? found.result[0] : undefined
-    if (typeof row === 'string') return row
-    const id = (row as { id?: unknown } | undefined)?.id
-    return typeof id === 'string' ? id : undefined
-  } catch {
-    return undefined
+): Promise<{ id?: string; created: number }> {
+  if (!counterparty) return { created: 0 }
+  const lookup = {
+    command: 'FIND(?person.id) WHERE { ?person CONCEPT {type: "Person", key: :key} } LIMIT 1',
+    parameters: { key: counterparty },
   }
+  const [known] = await brain.executeKipReadonlyBatch([lookup])
+  if (known?.status === 'failed') throw new OperationError('counterparty lookup failed', 422, known.error)
+  const knownId = Array.isArray(known?.result) ? known.result[0] : undefined
+  if (typeof knownId === 'string') return { id: knownId, created: 0 }
+  const created = await brain.executeKipBatch([{
+    command: 'CREATE CONCEPT ?person { TYPE "Person" NAME :key CLIENT KEY :creation_key SET FIELDS {key: :key} }',
+    parameters: { key: counterparty, creation_key: `anda-brain:counterparty:${counterparty}` },
+  }])
+  // A concurrent creation may win the key. Reading the winner preserves its
+  // display name; an UPSERT here could overwrite a rename made meanwhile.
+  const collision = created.some((result) => result.error?.code === 'IdentityConflict')
+  if (!collision) throwOnKipError(created, 'counterparty initialization failed')
+  const [found] = await brain.executeKipReadonlyBatch([lookup])
+  if (found?.status !== 'succeeded') throw new OperationError('counterparty lookup failed', 422, found?.error)
+  const row = Array.isArray(found.result) ? found.result[0] : undefined
+  const count = countWrites(created).concepts
+  if (typeof row === 'string') return { id: row, created: count }
+  const id = (row as { id?: unknown } | undefined)?.id
+  if (typeof id === 'string') return { id, created: count }
+  throw new OperationError('counterparty lookup returned no element', 422)
 }
 
 export async function recallMemory(
@@ -289,7 +285,7 @@ export async function maintainMemory(
   // Disuse metabolism, silence-Watch expiry and the Skill lifecycle are
   // arithmetic; doing them before the completion means the cycle assesses an
   // already-settled graph rather than one it would have had to settle by hand.
-  const settlement = await brain.settleMemory(Date.parse(timestamp) || Date.now())
+  const settlement = await brain.settleMemory(Date.parse(timestamp), input.parameters?.memory_strength_decay_factor)
   const [snapshot, assessment] = await Promise.all([
     brain.executeKipReadonlyBatch(MAINTENANCE_SNAPSHOT),
     brain.maintenanceAssessment(),

@@ -12,43 +12,47 @@ being true*. Existing 1.x memory is migrated by the Cognitive Nexus on first
 open; see the KIP migration guide for what that can and cannot preserve.
 
 `anda_kip`, `anda_cognitive_nexus` and `anda_engine` are consumed from local
-path patches (`[patch.crates-io]`) until 0.13 / 0.15.1 are published.
+path patches (`[patch.crates-io]`) until the matching KIP 2.0 runtimes are published.
+
+### Fixed — release migration and memory correctness
+
+- The v1 upgrade reads the published `a` / `m` property layout, normalizes
+  standard Brain types, preserves source records in `LegacyRecord`, and maps
+  valid time, retention, pinning and mnemonic values without decaying belief.
+  Retractions and reconstructible same-actor/same-Proposition supersession stay
+  excluded; ambiguous or cross-Proposition old corrections are archived with
+  their annotations. Unsupported learning/runtime types retain Legacy identities.
+- Extraction and vocabulary checkpoints survive either collection deletion and
+  partial loading; the generated legacy package is fixed for each migration.
+  Old-id usage, derived metrics and misses reset once while conversations,
+  policies, tokens, wiki data and existing v2 usage remain.
+- Captured Evidence uses submission/message identity rather than a shared
+  source thread. Both engines reject conflicting ingest-key reuse and dedupe
+  identical entries in one transaction. Worker counterparty resolution precedes
+  planning and preserves existing names.
+- Wiki withdrawal checks document ownership in the host and transitions exact
+  Assertion ids under CAS. Restored facts get a new assertion generation,
+  including restoration of the same document version; actual retries remain
+  idempotent. Failed reads/retractions do not advance the digest ledger.
+- Request-level decay overrides reach deterministic settlement and the model.
+  Correction discovery uses a durable transaction/id cursor and reports
+  incomplete pages instead of discarding the rest of a large transaction.
+- Both upstream engines reuse a Proposition already staged by another
+  ENSURE/ASSERT in the same transaction.
 
 ### Upgrading a KIP 1.x space
 
-**Install, restart, and the space keeps working.** The Cognitive Nexus migrates
-a 1.x layout on first open: the 1.x rows are staged verbatim, the colliding
-collection names are cleared, and every row becomes a 2.0 element. It is
-resumable — a crash mid-migration continues on the next start — and the original
-rows are kept in `kip_legacy_v1` afterwards, so the source is still inspectable.
+Stop the old writer, take a consistent backup and rehearse on a copy first.
+Migration happens on each space's first access and replaces the v1 graph
+collections in place. It is one-way: rollback requires the original backup.
+The source remains inspectable in `kip_legacy_v1`; malformed identifiers or
+unresolvable graph references still require operator repair. The generated
+compatibility package is `kip://legacy/nexus@1.1.0`.
 
-What the migration will not do is invent what 1.x never recorded. Every migrated
-claim carries `mode: "imported"`: a database row is not an observation. A 1.x
-`author` becomes the speaker only when it names exactly one migrated Concept;
-otherwise it stays an attribute. Legacy `confidence` is carried onto the
-Assertion *and* kept verbatim under `attributes.legacy`, because 1.x deployments
-used that field for several different things and only the operator knows which.
-`access_level` is preserved as a legacy attribute and does **not** become a
-classification.
-
-Two details decide whether a migrated space is usable, and both are now
-right (`anda_cognitive_nexus`):
-
-- **Migrated elements land on the vocabulary this service activates.** A 1.x
-  Brain used `Person`, `Event`, `SleepTask`, `Insight`, `Commitment` and
-  `Preference`, and the Cognitive Memory Profile declares all six. The migration
-  used to mint its own copies beside them, which made every command naming a
-  bare local type fail with `SchemaSymbolAmbiguous` on a space whose data had
-  migrated perfectly. The legacy load now runs after the host activates its
-  packages and adopts the host's symbol wherever the name matches; only a name
-  nothing else declares (say `Topic`) keeps a generated legacy symbol.
-- **1.x `(type, name)` identity becomes a 2.0 `key`,** so `get_or_init_user` and
-  every counterparty lookup resolve the migrated `Person` instead of minting a
-  second one beside it.
-
-What still does not carry over: the usage ledger is keyed by element id, and
-2.0 re-mints those, so recall-usage counters, correction history and self-test
-coverage all restart from empty. The memories themselves are unaffected.
+Regression coverage includes real object-store bytes generated with the
+published Nexus/KIP 0.11.0 and AndaDB 0.11.1 packages from Brain v0.11.0's
+lockfile. The migration does not fabricate Evidence, verified identity, trust,
+learning standing or leases. See the [upgrade guide](anda_brain/README.md#upgrading-a-space-written-by-a-kip-1x-build).
 
 ### Changed — memory model
 

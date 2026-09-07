@@ -18,6 +18,23 @@ LeaseState or WatchState. Nexus computes dependency validity; a stored review ne
 Text Watch evaluation is unavailable, including a text member mixed with selectors. \
 Read constraints, task scope, uncertainty and invalid dependencies must remain visible.";
 
+const LEGACY_PROFILE: &str = "kip://profiles/cognitive-memory@2.0.0/";
+
+fn legacy_runtime_replacement(operation: &str, schema_ref: &str) -> Option<String> {
+    let kind = match operation {
+        "arm_watch" => "Watch",
+        "lease_task" => "SleepTask",
+        _ => return None,
+    };
+    (schema_ref == format!("{LEGACY_PROFILE}{kind}")).then(|| {
+        format!(
+            "CognitiveMemory 2.0 {kind} cannot be upgraded in place because schema_ref is \
+             immutable; create a 2.1 replacement, reconnect its structural references, and \
+             archive the legacy record only after the replacement is ready"
+        )
+    })
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RuntimeArgs {
@@ -61,6 +78,12 @@ impl MemoryRuntimeTool {
         let nexus = self.memory.nexus();
         let session = nexus.system_session();
         let operation = async {
+            let id: anda_cognitive_nexus::ElementId = target.parse()?;
+            let element = nexus.store.get_element(id).await?;
+            if let Some(message) = legacy_runtime_replacement(&args.operation, element.schema_ref())
+            {
+                return Err(anda_kip::KipError::unsupported_capability(message));
+            }
             match args.operation.as_str() {
                 "arm_watch" => session.arm_watch(DEFAULT_SPACE, &target, expected).await,
                 "lease_task" => {
@@ -128,5 +151,29 @@ impl Tool<BaseCtx> for MemoryRuntimeTool {
             .execute(args, ctx.agent == crate::agents::MaintenanceAgent::NAME)
             .await?;
         Ok(ToolOutput::new(result))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_operational_records_require_an_explicit_replacement() {
+        let watch =
+            legacy_runtime_replacement("arm_watch", "kip://profiles/cognitive-memory@2.0.0/Watch")
+                .unwrap();
+        assert!(watch.contains("create a 2.1 replacement"));
+        assert!(
+            legacy_runtime_replacement("arm_watch", "kip://profiles/cognitive-memory@2.1.0/Watch")
+                .is_none()
+        );
+        assert!(
+            legacy_runtime_replacement(
+                "lease_task",
+                "kip://profiles/cognitive-memory@2.0.0/SleepTask"
+            )
+            .is_some()
+        );
     }
 }

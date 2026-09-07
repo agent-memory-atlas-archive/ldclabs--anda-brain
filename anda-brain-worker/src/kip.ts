@@ -87,19 +87,18 @@ export type { IngestContext }
  * `source_actor` has to name something a reader can follow — an element
  * reference, `{id}` or `{type, key}` — and `context.counterparty` is a Concept
  * *key* without its type, so it is
- * the caller's job to resolve one and `undefined` is an ordinary answer. This
- * deployment leaves creating the counterparty's Person to the model's own plan,
- * so a first conversation with someone mints Evidence without a source; the
- * Rust service upserts it before the pass and always has one. Attribution does
- * not depend on it either way: who said the thing is `asserted_by` on the
- * Assertion.
+ * the caller's job to resolve one. Formation ensures the counterparty before
+ * planning, so its first ingestion and its retries use the same source. A
+ * source remains semantic provenance; attribution still lives in `asserted_by`
+ * on the Assertion.
  */
 export function observationIngest(
   operations: readonly KipOperation[],
   messages: readonly Message[],
   observed: { at: string; origin: string; sourceActor?: string },
 ): IngestContext | undefined {
-  const recent = messages.slice(-MAX_INGESTED_MESSAGES)
+  const start = Math.max(0, messages.length - MAX_INGESTED_MESSAGES)
+  const recent = messages.slice(start)
   // A pass that stored nothing has nothing to mint Evidence for, and an
   // Evidence record for a claim nobody made is indistinguishable later from an
   // observation somebody chose not to act on.
@@ -112,7 +111,7 @@ export function observationIngest(
     evidence_class: EVIDENCE_CLASS[message.role] ?? 'message',
     payload: message as unknown as Json,
     observed_at: observed.at,
-    client_key: `${observed.origin}:${index + 1}`,
+    client_key: `${observed.origin}:${start + index + 1}`,
     ...(observed.sourceActor === undefined || message.role !== 'user'
       ? {}
       : { source_actor: { id: observed.sourceActor } }),
@@ -434,7 +433,14 @@ export function countChanges(results: readonly KipResult[]): {
   let retired = 0
   let merged = 0
   for (const result of results) {
-    for (const change of outcomeOf(result)?.changes ?? []) {
+    const changes = outcomeOf(result)?.changes
+    // Brain runtime operations are protected Session calls rather than KML,
+    // so their transaction outcome is nested under `result` instead of the
+    // kip-do extension. Each committed arm/lease changes exactly one Concept.
+    if (changes === undefined && result.op_id?.startsWith('runtime_') && result.status === 'succeeded') {
+      updated += 1
+    }
+    for (const change of changes ?? []) {
       switch (change.op) {
         case 'create':
           created += 1

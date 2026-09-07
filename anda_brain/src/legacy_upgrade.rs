@@ -227,7 +227,7 @@ async fn a_kip_1x_space_migrates_onto_the_vocabulary_this_service_activates() {
     )
     .await
     .unwrap();
-    assert_eq!(topic.to_string(), r#"["kip://legacy/nexus@1.0.0/Topic"]"#);
+    assert_eq!(topic.to_string(), r#"["kip://legacy/nexus@1.1.0/Topic"]"#);
 
     // Every migrated claim is `imported`, attributed to the migration actor:
     // 1.x recorded a row, not a speaker, and the migration does not promote one

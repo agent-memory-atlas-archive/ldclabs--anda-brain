@@ -12,8 +12,7 @@ Rust 与 Worker 已对齐 KIP `d6e3a45`、AndaDB `bcd01d4`。Skill 行为保存�
 `SkillRevision`；Watch 进度和任务租约通过 Nexus 的受保护接口维护。旧的 family
 成功率晋升规则已移除；未配置独立观察者、冻结试验和可重放评估时，程序候选保持未验证，
 `skills.unsupported_reason` 明确报告该边界。现有 Brain API 保持可用；这两个适配器
-**未声明支持**可选的五意图 Memory Interface 或 `memory_*` 能力包。详见
-[同步说明](docs/kip-v2-cognitive-sync.md)。
+**未声明支持**可选的五意图 Memory Interface 或 `memory_*` 能力包。
 
 ## 不会睡觉的记忆，终将被自己淹没
 
@@ -228,7 +227,7 @@ KIP 2.0 把 1.x 混在一张图里的东西拆开了：语义、信念、证据�
 
 #### 从运行中的 KIP 1.x 部署升级
 
-装新版重启即可：每个空间在**第一次被访问时**自行迁移，可断点续跑。开始前请先备份对象存储——1.x 的集合会被就地删除，迁移是**单向的**，旧版本之后无法再打开这个存储。1.x 原始行会原样保留在 `kip_legacy_v1` 里；使用账本不会保留（2.0 会重新分配元素 id），记忆本身不受影响。迁移会保留什么、拒绝虚构什么，见 [从 KIP 1.x 构建写入的空间升级](./anda_brain/README.md#upgrading-a-space-written-by-a-kip-1x-build)。
+先停止旧写入进程、备份对象存储，并在副本上演练。每个空间首次访问时自动迁移，通过持久化的提取和词汇映射检查点恢复中断。迁移是单向的，回滚需要升级前备份。原始行保留在 `kip_legacy_v1`；旧字段、有效期、生命周期、记忆强度和保留策略按确定的规则映射，无法证明学习或运行状态的记录保留为独立 Legacy 类型。旧 id 使用账本及派生缓存只重置一次；会话、策略、令牌和 Wiki 数据保留。映射与验收步骤见[升级指南](./anda_brain/README.md#upgrading-a-space-written-by-a-kip-1x-build)。
 
 ### Anda DB
 

@@ -1,4 +1,4 @@
-import { BRAIN_CAPABILITIES, runtimeOperations, type RuntimeOperation } from './cognitive.js'
+import { BRAIN_CAPABILITIES, legacyRuntimeReplacement, runtimeOperations, type RuntimeOperation } from './cognitive.js'
 import {
   KipDatabase,
   KipError,
@@ -18,6 +18,7 @@ import {
 import { assess, settle } from './settle.js'
 import type {
   BrainStats,
+  CorrectionCursor,
   DeclaredVocabulary,
   Env,
   MaintenanceAssessment,
@@ -160,6 +161,11 @@ export class AndaBrain extends KipDatabase<Env> {
     const results: KipResult[] = []
     for (const [index, request] of work.entries()) {
       try {
+        const id = tryParseElementId(request.target_ref)!
+        const target = this.nexus.store.load(id)
+        const schemaRef = target?.kind === 'Concept' ? target.row.schema_ref : ''
+        const legacy = legacyRuntimeReplacement(request.operation, schemaRef)
+        if (legacy) throw new KipError('UnsupportedCapability', legacy)
         const result = request.operation === 'arm_watch'
           ? session.armWatch(request.target_ref, request.expected_version)
           : session.leaseTask(request.target_ref, request.expected_version, new Date(Date.now() + 300_000).toISOString())
@@ -204,18 +210,22 @@ export class AndaBrain extends KipDatabase<Env> {
    * the nexus, and {@link run} hands the settlement the one capability it
    * cannot supply itself.
    */
-  settleMemory(nowMs: number): SettlementReport {
+  settleMemory(nowMs: number, decayFactor?: number): SettlementReport {
     this.ensureInitialized()
     const kv = this.ctx.storage.kv
     const report = settle((operation) => this.run(operation), nowMs, {
+      decayFactor,
       advanceWatch: (id, version, generation) =>
         this.nexus.session(this.authenticate(undefined)).advanceWatch(id, version, generation, 200),
-      correctionCursor: kv.get<number>(CORRECTION_CURSOR_KEY),
+      correctionCursor: kv.get<number | CorrectionCursor>(CORRECTION_CURSOR_KEY),
     })
     // A scan that failed leaves the cursor where it was, so nothing it did
     // not read falls behind the watermark.
     if (report.corrections.error === undefined) {
-      kv.put(CORRECTION_CURSOR_KEY, report.corrections.cursor)
+      kv.put(CORRECTION_CURSOR_KEY, {
+        seq: report.corrections.cursor,
+        after_id: report.corrections.cursor_after_id ?? '',
+      })
     }
     kv.put(REVISED_ROOTS_KEY, report.corrections.revised_roots)
     return report

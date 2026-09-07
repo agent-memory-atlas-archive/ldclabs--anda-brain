@@ -21,11 +21,18 @@ import {
   KIP_FORMATION_CARD,
   KIP_RECALL_CARD,
   KIP_MAINTENANCE_CARD,
+  KIP_SYNTAX,
 } from './assets.generated.js'
 import type { FormationInput, MaintenanceInput, RecallInput } from './types.js'
 
-/** Load the role-specific card with the ontology and actual adapter limits. */
-const reference = (card: string): string => `${card}\n\n${COGNITIVE_MEMORY_PROFILE}\n\nBrain adapter capabilities (distinct from engine Schema): ${JSON.stringify(BRAIN_CAPABILITIES)}`
+/**
+ * Load the role-specific card with the ontology and actual adapter limits.
+ * Planning stages also need the full language card: unlike the Rust agents,
+ * this one-completion Worker has no tool round in which to request it later.
+ */
+const reference = (card: string, syntax = false): string =>
+  `${card}\n\n${syntax ? `${KIP_SYNTAX}\n\n` : ''}${COGNITIVE_MEMORY_PROFILE}\n\n` +
+  `Brain adapter capabilities (distinct from engine Schema): ${JSON.stringify(BRAIN_CAPABILITIES)}`
 
 export function formationMessages(
   primer: unknown,
@@ -33,7 +40,7 @@ export function formationMessages(
   timestamp: string,
 ): AiMessage[] {
   return [
-    { role: 'system', content: `${BRAIN_FORMATION}\n\n---\n\n${reference(KIP_FORMATION_CARD)}` },
+    { role: 'system', content: `${BRAIN_FORMATION}\n\n---\n\n${reference(KIP_FORMATION_CARD, true)}` },
     {
       role: 'user',
       content: boundedJson({
@@ -49,7 +56,7 @@ export function formationMessages(
 
 export function recallPlanMessages(primer: unknown, input: RecallInput): AiMessage[] {
   return [
-    { role: 'system', content: `${BRAIN_RECALL}\n\n---\n\n${reference(KIP_RECALL_CARD)}` },
+    { role: 'system', content: `${BRAIN_RECALL}\n\n---\n\n${reference(KIP_RECALL_CARD, true)}` },
     {
       role: 'user',
       content: boundedJson({
@@ -90,7 +97,7 @@ export function maintenanceMessages(
   timestamp: string,
 ): AiMessage[] {
   return [
-    { role: 'system', content: `${BRAIN_MAINTENANCE}\n\n---\n\n${reference(`${KIP_RECALL_CARD}\n${KIP_FORMATION_CARD}\n${KIP_MAINTENANCE_CARD}`)}` },
+    { role: 'system', content: `${BRAIN_MAINTENANCE}\n\n---\n\n${reference(`${KIP_RECALL_CARD}\n${KIP_FORMATION_CARD}\n${KIP_MAINTENANCE_CARD}`, true)}` },
     {
       role: 'user',
       content: boundedJson({ stage: 'maintenance', timestamp, request: input, snapshot }),

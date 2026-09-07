@@ -735,6 +735,15 @@ pub struct Dependent {
 pub struct ArmedWatch {
     pub id: String,
 
+    /// Exact persisted type. A 2.0 Watch must be replaced rather than being
+    /// presented as eligible for the 2.1 protected runtime.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub schema_ref: String,
+
+    /// Whole-element version used by the protected arm/advance operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u64>,
+
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
 
@@ -1308,6 +1317,12 @@ pub struct MemorySettlementReport {
     /// not recorded this cycle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correction_scan_error: Option<String>,
+    /// The bounded discovery page did not prove the backlog exhausted.
+    #[serde(default)]
+    pub correction_scan_incomplete: bool,
+    /// Largest transaction coordinate completely read by correction discovery.
+    #[serde(default)]
+    pub correction_scan_through_seq: u64,
 
     /// What the retention pass acted on, and what it left alone.
     #[serde(default)]

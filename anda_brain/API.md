@@ -23,6 +23,8 @@ legacy counters stay zero. Watch `disarmed` also counts Nexus expiry, while text
 conditions remain deferred. Model-generated Formation requests cannot replace captured
 ingest/msgN bindings; learning/runtime Facet writes fail UnsupportedCapability.
 Authorized raw administrative KIP remains subject to the engine's full contracts.
+Legacy `@2.0.0/Watch` and `@2.0.0/SleepTask` records require explicit 2.1
+replacement because their exact `schema_ref` cannot be changed in place.
 
 ---
 
@@ -45,7 +47,7 @@ export interface RpcResponse<T> {
 export interface InputContext {
   counterparty?: string;
   agent?: string;
-  source?: string;
+  source?: string; // provenance thread/channel; not a submission/message deduplication key
   topic?: string;
 }
 
@@ -70,7 +72,7 @@ export interface Message {
 export interface FormationInput {
   messages: Message[]; // must contain at least one non-empty message (400)
   context?: InputContext;
-  timestamp: string; // ISO 8601
+  timestamp?: string; // ISO 8601; recommended
 }
 
 export interface RecallInput {
@@ -616,6 +618,18 @@ When `ED25519_PUBKEYS` is set, configure the remote MCP client with an `Authoriz
 - Auth: SpaceToken/CWT `write`
 - Request body: `MaintenanceInput`
 - Response: `RpcResponse<AgentOutput>`
+
+Explicit `parameters` override the space policy; omitted members use policy defaults. The same effective parameters reach deterministic settlement and the model, without changing the persisted space policy.
+
+### GET `/v1/{space_id}/memory_status`
+
+- Purpose: Read memory statistics and the latest maintenance report.
+- Auth: SpaceToken/CWT `read`; public spaces permit anonymous reads.
+- Response: `RpcResponse<MemoryStatus>`, with existing JSON/CBOR/Markdown negotiation.
+- `result.last_settlement.correction_scan_incomplete`: the bounded scan has not proved the backlog exhausted; later maintenance resumes within the transaction.
+- `result.last_settlement.correction_scan_through_seq`: largest transaction sequence completely read.
+- `result.last_settlement.correction_scan_error`: discovery failure; failed scans retain their cursor.
+- These fields describe correction discovery, not completed model review or authorized Watch coverage.
 
 ### POST `/v1/{space_id}/execute_kip_readonly`
 

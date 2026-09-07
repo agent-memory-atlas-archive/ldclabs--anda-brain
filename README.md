@@ -14,8 +14,7 @@ operations. The former family-rate Skill promotion rule has been removed. Withou
 configured independent observers, frozen trials and replayable evaluations,
 procedures remain unproven and `skills.unsupported_reason` reports the limitation.
 Existing Brain endpoints remain available. The optional five-intent Memory Interface
-and its `memory_*` bundles are **not advertised** by these adapters. See the
-[sync notes](docs/kip-v2-cognitive-sync.md) for implemented behavior and remaining boundaries.
+and its `memory_*` bundles are **not advertised** by these adapters.
 
 ## Memories That Never Sleep Will Eventually Drown Themselves
 
@@ -232,7 +231,7 @@ KIP 2.0 separates what 1.x kept in one graph — meaning, belief, evidence, prov
 
 #### Upgrading a running KIP 1.x deployment
 
-Install the new build and restart: each space migrates itself the first time it is accessed, and the migration is resumable. Back up the object store first — the 1.x collections are dropped in place and the migration is one-way, so an older build cannot reopen the store afterwards. The 1.x rows are kept verbatim in `kip_legacy_v1`, and the usage ledger does not survive because 2.0 re-mints element ids; the memories themselves do. See [Upgrading a space written by a KIP 1.x build](./anda_brain/README.md#upgrading-a-space-written-by-a-kip-1x-build) for what the migration will and will not invent.
+Stop the old writer, back up the object store, and rehearse the upgrade on a copy. Each space migrates on its first access, using durable extraction and vocabulary checkpoints. Migration is one-way: rollback needs the original backup. Source rows remain in `kip_legacy_v1`; native fields, valid time, lifecycle and mnemonic/retention state are mapped conservatively. Unproven legacy learning/runtime records remain distinct Legacy types. Old-id usage and derived caches reset once; conversations, policies, tokens and wiki records remain. See [the upgrade guide](./anda_brain/README.md#upgrading-a-space-written-by-a-kip-1x-build) for the mapping and verification steps.
 
 ### Anda DB
 

@@ -520,6 +520,32 @@ impl AppState {
     }
 }
 
+/// Errors from the settlement attempt that immediately precedes a maintenance
+/// cycle. A top-level failure wins over the stored report because that report
+/// belongs to an older attempt and must not describe the current cycle.
+fn settlement_error_messages(
+    stored: Option<&MemorySettlementReport>,
+    current_error: Option<&str>,
+) -> Vec<String> {
+    if let Some(error) = current_error {
+        return vec![format!("settlement: {error}")];
+    }
+    stored
+        .map(|report| {
+            [
+                ("decay", &report.decay_error),
+                ("corrections", &report.correction_scan_error),
+                ("watches", &report.watches.error),
+                ("skills", &report.skills.error),
+                ("retention", &report.retention.error),
+            ]
+            .into_iter()
+            .filter_map(|(pass, error)| error.as_ref().map(|error| format!("{pass}: {error}")))
+            .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub struct Space {
     id: String,
     engine: Engine,
@@ -1155,13 +1181,34 @@ impl Space {
         // under the space's memory policy. Default policy values equal the
         // defaults documented in BrainMaintenance.md, so an unset policy is
         // not a behavior change (plan module M-P).
-        if input.parameters.is_none() {
-            input.parameters = Some(self.memory_policy().maintenance_parameters());
+        let mut effective_policy = self.memory_policy();
+        if let Some(parameters) = &input.parameters {
+            if let Some(value) = parameters.memory_strength_decay_factor {
+                effective_policy.memory_strength_decay_factor = value;
+            }
+            if let Some(value) = parameters.stale_event_threshold_days {
+                effective_policy.stale_event_threshold_days = value;
+            }
+            if let Some(value) = parameters.unconsolidated_max_backlog {
+                effective_policy.unconsolidated_max_backlog = value;
+            }
+            if let Some(value) = parameters.orphan_max_count {
+                effective_policy.orphan_max_count = value;
+            }
         }
+        input.parameters = Some(effective_policy.maintenance_parameters());
         // Deterministic metabolism settles before the LLM cycle starts, so
         // the agent assesses an already-settled graph. Settlement failures
         // degrade the cycle, never abort it.
-        match self.settle_memory_metabolism(input.scope, unix_ms()).await {
+        let settlement_error = match self
+            .settle_memory_metabolism_using(
+                input.scope,
+                unix_ms(),
+                DECAY_MIN_INTERVAL_MS,
+                effective_policy,
+            )
+            .await
+        {
             Ok(report) => {
                 log::info!(
                     target: "brain",
@@ -1169,6 +1216,7 @@ impl Space {
                     report:serde = report;
                     "memory metabolism settled"
                 );
+                None
             }
             Err(err) => {
                 log::warn!(
@@ -1176,13 +1224,17 @@ impl Space {
                     space_id = self.id;
                     "memory metabolism settlement failed: {err:?}"
                 );
+                Some(err.to_string())
             }
-        }
+        };
         // What the settlement just measured, handed to the cycle's assessment
         // phase. Overwritten rather than merged: like `formation_id`, this is
         // the runtime's account of its own graph, and a request body must not
         // be able to tell the Brain what its vocabulary looks like.
-        input.assessment = Some(self.maintenance_assessment().await);
+        input.assessment = Some(
+            self.maintenance_assessment(settlement_error.as_deref())
+                .await,
+        );
         let rt = self
             .engine
             .agent_run(
@@ -1218,24 +1270,14 @@ impl Space {
     ///
     /// A `quick` or `daydream` cycle takes no census of its own, so it reads
     /// the last full cycle's — which is why `audited_at` travels with it.
-    async fn maintenance_assessment(&self) -> crate::types::MaintenanceAssessment {
+    async fn maintenance_assessment(
+        &self,
+        current_settlement_error: Option<&str>,
+    ) -> crate::types::MaintenanceAssessment {
         let audit: Option<SchemaAudit> = self.db.get_extension_as("schema_audit");
         let settlement = self.memory_settlement();
-        let settlement_errors = settlement
-            .as_ref()
-            .map(|report| {
-                [
-                    ("decay", &report.decay_error),
-                    ("corrections", &report.correction_scan_error),
-                    ("watches", &report.watches.error),
-                    ("skills", &report.skills.error),
-                    ("retention", &report.retention.error),
-                ]
-                .into_iter()
-                .filter_map(|(pass, error)| error.as_ref().map(|error| format!("{pass}: {error}")))
-                .collect()
-            })
-            .unwrap_or_default();
+        let settlement_errors =
+            settlement_error_messages(settlement.as_ref(), current_settlement_error);
         crate::types::MaintenanceAssessment {
             settlement_errors,
             audited_at: audit.as_ref().map(|audit| audit.audited_at),
@@ -1504,6 +1546,7 @@ impl Space {
     ///
     /// Nothing here reads the usage ledger back into the graph: see the body
     /// for why recall no longer reinforces what it touched.
+    #[cfg(test)]
     async fn settle_memory_metabolism(
         &self,
         scope: MaintenanceScope,
@@ -1524,8 +1567,23 @@ impl Space {
         now_ms: u64,
         decay_min_interval_ms: u64,
     ) -> Result<MemorySettlementReport, BoxError> {
+        self.settle_memory_metabolism_using(
+            scope,
+            now_ms,
+            decay_min_interval_ms,
+            self.memory_policy(),
+        )
+        .await
+    }
+
+    async fn settle_memory_metabolism_using(
+        &self,
+        scope: MaintenanceScope,
+        now_ms: u64,
+        decay_min_interval_ms: u64,
+        policy: MemoryPolicy,
+    ) -> Result<MemorySettlementReport, BoxError> {
         let _guard = self.settlement_lock.lock().await;
-        let policy = self.memory_policy();
         let mut report = MemorySettlementReport {
             settled_at: now_ms,
             ..Default::default()
@@ -1555,9 +1613,19 @@ impl Space {
         report.decayed = decay.decayed;
         report.decay_error = decay.error;
 
-        let after: u64 = self.db.get_extension_as("correction_cursor").unwrap_or(0);
-        let corrections = settlement::scan_corrections(self, after).await;
+        let after = self
+            .db
+            .get_extension_as::<settlement::CorrectionCursor>("correction_cursor")
+            .unwrap_or_else(|| {
+                self.db
+                    .get_extension_as::<u64>("correction_cursor")
+                    .unwrap_or(0)
+                    .into()
+            });
+        let corrections = settlement::scan_corrections(self, after.clone()).await;
         report.correction_scan_error = corrections.error;
+        report.correction_scan_incomplete = corrections.incomplete;
+        report.correction_scan_through_seq = corrections.watermark;
         // The derivation review's input (§57.5): what each revised root fed,
         // walked here so the cycle is handed a list rather than a guess.
         report.revised_roots = settlement::revised_roots(self, &corrections.rows).await;
@@ -1581,9 +1649,9 @@ impl Space {
                     Some(map)
                 });
         }
-        if corrections.watermark > after {
+        if corrections.cursor != after {
             self.db
-                .set_extension_from("correction_cursor".to_string(), corrections.watermark);
+                .set_extension_from("correction_cursor".to_string(), &corrections.cursor);
         }
 
         // Nexus checks generation, element CAS and complete authorized coverage.
@@ -2398,6 +2466,7 @@ impl Space {
         let db = Arc::new(AndaDB::open(object_store.clone(), db_config).await?);
         let nexus = CognitiveNexus::connect(db.clone()).await?;
         init_nexus_kip(&nexus).await?;
+        reset_v1_bookkeeping(&db).await?;
         let mut schema = Conversation::schema()?;
         schema.with_version(4);
 
@@ -2952,6 +3021,60 @@ async fn init_nexus_kip(nexus: &CognitiveNexus) -> Result<(), BoxError> {
     let vocabulary = crate::vocabulary::MemoryVocabulary::load(nexus).await?;
     vocabulary.activate(nexus).await?;
     designate_self_concept(nexus).await;
+    Ok(())
+}
+
+/// Graph ids and projection semantics changed during the v1 import. Retire
+/// only old-id usage rows, reset derived metrics/misses once, and preserve
+/// conversations, tokens, policies and any already-recorded v2 usage.
+pub(crate) async fn reset_v1_bookkeeping(db: &Arc<AndaDB>) -> Result<(), BoxError> {
+    const MARKER: &str = "brain_kip2_bookkeeping_reset";
+    if !db
+        .metadata()
+        .collections
+        .contains(anda_cognitive_nexus::migrate::LEGACY_STAGING)
+        || db.get_extension(MARKER).is_some()
+    {
+        return Ok(());
+    }
+    let mut removed = 0;
+    if db.metadata().collections.contains("memory_usage") {
+        let usage = db
+            .open_collection("memory_usage".into(), async |_| Ok(()))
+            .await?;
+        for id in usage.ids() {
+            let row: serde_json::Value = usage.get_as(id).await?;
+            if row["entity"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("C:") || id.starts_with("P:"))
+            {
+                usage.remove(id).await?;
+                removed += 1;
+            }
+        }
+        usage.flush(unix_ms()).await?;
+    }
+    if db.metadata().collections.contains("recall_misses") {
+        db.delete_collection("recall_misses").await?;
+    }
+    for key in [
+        "memory_metrics",
+        "source_reliability",
+        "memory_graph_counters",
+        "memory_settlement",
+        "memory_self_test",
+        "memory_self_test_cursor",
+        "shadow_report",
+        "schema_audit",
+        "correction_cursor",
+    ] {
+        db.remove_extension(key).await?;
+    }
+    db.save_extension_from(
+        MARKER.into(),
+        &serde_json::json!({"version":1,"removed_usage_rows":removed,"at":unix_ms()}),
+    )
+    .await?;
     Ok(())
 }
 

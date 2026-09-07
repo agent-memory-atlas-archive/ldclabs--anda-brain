@@ -11,7 +11,7 @@ fix:
 	@cargo clippy --fix --workspace --tests
 
 test:
-	@cargo test --workspace --all-features -- --nocapture
+	@RUST_MIN_STACK=16777216 cargo test --workspace --all-features -- --nocapture
 
 # Every fixture in evals/ is picked up automatically: *_profile.json files
 # are profiles, everything else is a scenario. Adding a fixture needs no

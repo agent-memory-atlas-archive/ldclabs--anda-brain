@@ -18,8 +18,7 @@ operations. The former family-rate Skill promotion rule has been removed. Withou
 configured independent observers, frozen trials and replayable evaluations,
 procedures remain unproven and `skills.unsupported_reason` reports the limitation.
 Existing Brain endpoints remain available. The optional five-intent Memory Interface
-and its `memory_*` bundles are **not advertised** by these adapters. See the
-[sync notes](../docs/kip-v2-cognitive-sync.md) for implemented behavior and remaining boundaries.
+and its `memory_*` bundles are **not advertised** by these adapters.
 
 ## Architecture
 
@@ -214,6 +213,12 @@ WatchState and LeaseState cannot be written by model KML. There is no external
 dispatch adapter. Runtime authentication, tool capabilities and evaluator code never
 come from model-generated content.
 
+Operational records written against CognitiveMemory 2.0 cannot be armed or leased
+in place: their exact `schema_ref` is immutable. Maintenance must create a 2.1
+replacement, reconnect and verify its structural references, and only then archive
+the legacy Watch or SleepTask. The runtime returns this migration instruction before
+calling the protected operation.
+
 **Current basis matters.** Recall loads a fresh Primer because policy, trust and
 identity can change independently of vocabulary. A stored WorkingState/DerivationState
 or bare `basis_seq` cannot override computed dependency validity. Derived refreshes
@@ -238,7 +243,7 @@ managed to archive.
 
 > **Known scale ceiling:** the bulk decay, correction discovery, and
 > self-test sampling passes use unconstrained full-scan KQL, and the engine
-> caps full-scan solutions at 65,536 (`KIP_4002`) regardless of `LIMIT`.
+> caps full-scan solutions at 65,536 regardless of `LIMIT`.
 > On graphs past ~65k propositions these passes stop working; the failure
 > is loud (`log::error` + `decay_error`/`correction_scan_error` in the
 > settlement report and `memory_status`), but the fix — predicate-sharded
@@ -811,38 +816,41 @@ Business agents can register the Recall endpoint as an LLM tool/function call. S
 
 ### Upgrading a space written by a KIP 1.x build
 
-Automatic on first open, and resumable. The 1.x rows are staged verbatim into
-`kip_legacy_v1`, the colliding collection names are cleared, and each row becomes
-a 2.0 element: a Concept stays a Concept, and a fact-like Proposition becomes a
-truth-neutral Proposition plus a positive Assertion — without one, nothing would
-be believed after the migration, because silence in 2.0 means *insufficient*
-rather than assent.
+Migration runs when a space is first opened, after the Brain activates its
+Schema. Stop the old writer, take a consistent backup, and rehearse against a
+copy before changing production. The two old graph collections are replaced in
+place; rollback requires the pre-upgrade backup, not an older binary pointed at
+the migrated store. Upgrade one space at a time and check its results before
+opening the next.
 
-Three things to know before you start it:
+The migration persists extraction and vocabulary checkpoints before switching
+collections. It can resume between either collection deletion and between
+loading records and committing the completion marker. Original rows remain in
+`kip_legacy_v1`. `LegacyRecord` Facets preserve source data for audit, including
+the published v1 `a` / `m` attribute and metadata fields.
 
-- **Back up the object store first.** The staging is copy-then-drop, so nothing
-  is read into memory and destroyed — but the migration does drop the 1.x
-  `concepts` and `propositions` collections in place, and it is **one-way**: a
-  KIP 1.x build reopening the same store afterwards will not find its
-  collections. The original rows survive in `kip_legacy_v1` and stay
-  inspectable, which is not the same as being able to roll back.
-- **It runs per space, on first access — not at startup.** Spaces are
-  lazy-loaded, so the service comes up before anything has migrated, and the
-  first request that touches a space is what pays for it and where a failure
-  surfaces. A large space makes that one request slow; a crash mid-way resumes
-  on the next attempt rather than starting over.
-- **Migrate one space at a time if you can.** Nothing serialises them, and each
-  is independent, so a problem found on a small space is a problem you have not
-  yet had on the rest.
+| v1 data | v2 representation |
+| --- | --- |
+| `(type, name)` identity | Immutable Concept `key`; standard Person / Event / Preference / Insight / Commitment / SleepTask fields are normalized |
+| Insight `description`; SleepTask `reason` / `requested_action` | Native summary / task class; interrupted tasks become blocked without a fabricated lease |
+| A recorded claim | Proposition + `mode: "imported"` Assertion; recorded confidence and resolvable author are preserved |
+| Retracted or superseded claim | Native lifecycle where the same-actor, same-Proposition revision is reconstructible; otherwise archived with its original annotations, never revived as current belief |
+| `valid_from` / `valid_until`; `expires_at` | Assertion valid time; record retention, respectively |
+| `pinned`; mnemonic values | Pinned retention class; `MnemonicState`, never copied from Assertion confidence |
+| Unsupported old learning/runtime artifacts | Distinct `Legacy*` types under `kip://legacy/nexus@1.1.0`; they acquire neither learning standing nor operational leases |
+| Legacy relation with incompatible native endpoints | A distinct legacy predicate for that tuple; compatible tuples keep the native predicate |
 
-Migrated claims carry `mode: "imported"`, and 1.x `(type, name)` identity becomes
-a 2.0 `key`, so counterparty lookups keep resolving. Types the Cognitive Memory
-Profile also declares are adopted onto it; a type only this deployment used keeps
-a generated `kip://legacy/nexus@1.0.0` symbol.
+Unresolvable attribution and privacy annotations remain source data, not
+verified identity, trust or Governance permission. Invalid optional native
+values remain available in `LegacyRecord`. Malformed identifiers or dangling
+references can still stop migration; inspect the reported source row and retry
+on the backup copy rather than treating an unopened space as empty memory.
 
-The usage ledger does not survive: it is keyed by element id and 2.0 re-mints
-those, so recall counters, correction history and self-test coverage restart
-empty. The memories themselves are unaffected.
+The service removes old-id usage rows and resets miss caches, derived metrics
+and scan cursors once. It preserves conversations, tokens, policies, wiki
+records and any already-recorded v2 usage. The migration is tested against a
+complete object-store snapshot produced by the published v0.11 runtime packages;
+see [the fixture generator](../scripts/fixtures/v0_11/README.md).
 
 ### Runtime
 - Spaces are **lazy-loaded** on first access via `OnceCell`.

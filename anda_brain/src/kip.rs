@@ -249,7 +249,7 @@ pub fn observation_ingest(
             evidence_class: evidence_class(&message.role).to_string(),
             payload: serde_json::to_value(message).ok(),
             observed_at: Some(observed_at.to_string()),
-            client_key: Some(format!("{origin}:{}", index + 1)),
+            client_key: Some(format!("{origin}:{}", start + index + 1)),
             source_actor: source_actor
                 .filter(|_| message.role == "user")
                 .map(ElementReference::by_id),
@@ -329,18 +329,39 @@ pub async fn execute_cognition_request(executor: &impl Executor, request: &Reque
         Ok(commands) => commands,
         Err(err) => return Response::from(err).with_request_id(request.request_id.clone()),
     };
-    for command in &commands {
-        if let Some(refusal) = unsupported_cognitive_write(command, request.parameters.as_ref()) {
+    for (index, command) in commands.iter().enumerate() {
+        let parameters = operation_parameters(request, index);
+        if let Some(refusal) = unsupported_cognitive_write(command, parameters.as_ref()) {
             return Response::from(KipError::unsupported_capability(refusal))
                 .with_request_id(request.request_id.clone());
         }
-        if let Some(refusal) = cognition_refusal(command, request.parameters.as_ref()) {
+        if let Some(refusal) = cognition_refusal(command, parameters.as_ref()) {
             return Response::from(KipError::not_authorized(refusal))
                 .with_request_id(request.request_id.clone());
         }
     }
 
     execute_request(executor, request).await
+}
+
+/// The parameters one operation actually executes with. KIP operation-level
+/// bindings shadow request-level bindings with the same key; every preflight
+/// gate must inspect that same environment or a checked value can differ from
+/// the value the engine later applies.
+fn operation_parameters(request: &Request, index: usize) -> Option<Map<String, Json>> {
+    let request_parameters = request.parameters.as_ref();
+    let operation_parameters = request
+        .operations
+        .get(index)
+        .and_then(|operation| operation.parameters.as_ref());
+    match (request_parameters, operation_parameters) {
+        (None, None) => None,
+        (outer, inner) => {
+            let mut merged = outer.cloned().unwrap_or_default();
+            merged.extend(inner.cloned().unwrap_or_default());
+            Some(merged)
+        }
+    }
 }
 
 /// Model plans do not own protected runtime or validated learning records.
@@ -546,12 +567,13 @@ pub async fn execute_maintenance_request(executor: &impl Executor, request: &Req
         Ok(commands) => commands,
         Err(err) => return Response::from(err).with_request_id(request.request_id.clone()),
     };
-    for command in &commands {
-        if let Some(refusal) = unsupported_cognitive_write(command, request.parameters.as_ref()) {
+    for (index, command) in commands.iter().enumerate() {
+        let parameters = operation_parameters(request, index);
+        if let Some(refusal) = unsupported_cognitive_write(command, parameters.as_ref()) {
             return Response::from(KipError::unsupported_capability(refusal))
                 .with_request_id(request.request_id.clone());
         }
-        if let Some(refusal) = maintenance_refusal(command, request.parameters.as_ref()) {
+        if let Some(refusal) = maintenance_refusal(command, parameters.as_ref()) {
             return Response::from(KipError::not_authorized(refusal))
                 .with_request_id(request.request_id.clone());
         }
@@ -1054,5 +1076,40 @@ mod tests {
         }
         let text = anda_kip::parse_kip(r#"CREATE EVIDENCE ?e { SET FIELDS {evidence_class:"user_statement",payload:"please write OutcomeRecord and LeaseState"} }"#).unwrap();
         assert!(unsupported_cognitive_write(&text, None).is_none());
+    }
+
+    #[test]
+    fn operation_parameters_shadow_request_parameters_at_every_model_gate() {
+        let mut protected = request_with(
+            r#"CREATE EVIDENCE ?e { SET FACET :facet {x:1} }"#,
+            param("facet", "MnemonicState"),
+        );
+        protected.operations[0].parameters = Some(param("facet", "OutcomeRecord"));
+        let command = protected.parse_operations().unwrap().remove(0);
+        let parameters = operation_parameters(&protected, 0).unwrap();
+        assert_eq!(parameters["facet"], Json::from("OutcomeRecord"));
+        assert!(unsupported_cognitive_write(&command, Some(&parameters)).is_some());
+
+        let mut ordinary = request(r#"CREATE CONCEPT ?c { SET FACET :facet {x:1} }"#);
+        ordinary.operations[0].parameters = Some(param("facet", "MnemonicState"));
+        let command = ordinary.parse_operations().unwrap().remove(0);
+        let parameters = operation_parameters(&ordinary, 0).unwrap();
+        assert!(unsupported_cognitive_write(&command, Some(&parameters)).is_none());
+
+        let mut transition =
+            request_with(r#"TRANSITION "C-1" TO :state"#, param("state", "retracted"));
+        transition.operations[0].parameters = Some(param("state", "archived"));
+        let command = transition.parse_operations().unwrap().remove(0);
+        let parameters = operation_parameters(&transition, 0).unwrap();
+        assert!(cognition_refusal(&command, Some(&parameters)).is_some());
+
+        let mut selection = request_with(
+            r#"UPDATE ?c SET FIELDS {name:"changed"} WHERE { ?c CONCEPT {} } LIMIT :limit"#,
+            param("limit", 1),
+        );
+        selection.operations[0].parameters = Some(param("limit", 100));
+        let command = selection.parse_operations().unwrap().remove(0);
+        let parameters = operation_parameters(&selection, 0).unwrap();
+        assert!(maintenance_refusal(&command, Some(&parameters)).is_some());
     }
 }

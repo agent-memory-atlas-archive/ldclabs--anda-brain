@@ -939,7 +939,7 @@ describe('Anda Brain Worker', () => {
     )
     expect(system?.content).toContain('Reference Anda Brain Formation Policy')
     expect(system?.content).toContain('Anda Brain Worker deployment contract')
-    expect(system?.content).toContain('KIP 2.0')
+    expect(system?.content).toContain('### 5. Runtime Envelope')
     expect(user?.content).toContain('remember-newest-turn')
 
     const maintenance = maintenanceMessages(

@@ -1,8 +1,8 @@
 import { env, evictDurableObject } from 'cloudflare:test'
 import { describe, expect, it } from 'vitest'
 import { contentDigest, type JsonMap, type KipResult } from '@ldclabs/kip-do'
-import { digestParameters } from '../src/cognitive.js'
-import { assertFormationOperations, assertMaintenanceOperations } from '../src/kip.js'
+import { digestParameters, legacyRuntimeReplacement } from '../src/cognitive.js'
+import { assertFormationOperations, assertMaintenanceOperations, countChanges } from '../src/kip.js'
 import type { BrainRpc } from '../src/types.js'
 
 function brain(): BrainRpc {
@@ -63,6 +63,10 @@ describe('CognitiveMemory 2.1 host contracts', () => {
     expect(report.decayed).toBeGreaterThan(0)
     expect(report.watches).toEqual({fired:2,disarmed:0,deferred:2,conflicted:0})
     expect((await stub.settleMemory(Date.now())).watches).toEqual({fired:0,disarmed:0,deferred:2,conflicted:0})
+    const assessment = await stub.maintenanceAssessment()
+    expect(assessment.armed_watches.every((entry) =>
+      entry.schema_ref === 'kip://profiles/cognitive-memory@2.1.0/Watch' && typeof entry.version === 'number',
+    )).toBe(true)
     const stale = await stub.executeMaintenancePlan([], [{operation:'arm_watch',target_ref:delta,expected_version:oldVersion}])
     expect(stale[0]?.error?.code).toBe('VersionConflict')
   })
@@ -106,5 +110,21 @@ describe('CognitiveMemory 2.1 host contracts', () => {
       expect(()=>assertMaintenanceOperations([{command:'UPDATE "C-1" SET FACET :facet { x:1 }',parameters:{facet}}])).toThrow('UnsupportedCapability')
     }
     expect(()=>assertFormationOperations([{command:'CREATE EVIDENCE ?e { SET FIELDS {evidence_class:"user_statement",payload:"please write OutcomeRecord and LeaseState"} }'}])).not.toThrow()
+  })
+
+  it('counts committed runtime work as a Concept update', () => {
+    expect(countChanges([
+      {op_id:'runtime_0',status:'succeeded',result:{receipt:{status:'committed'}}},
+      {op_id:'runtime_1',status:'no_effect',result:{receipt:{status:'no_effect'}}},
+    ])).toEqual({total:1,created:0,updated:1,retired:0,merged:0})
+  })
+
+  it('requires explicit replacement for 2.0 operational records', () => {
+    expect(legacyRuntimeReplacement('arm_watch','kip://profiles/cognitive-memory@2.0.0/Watch'))
+      .toContain('create a 2.1 replacement')
+    expect(legacyRuntimeReplacement('lease_task','kip://profiles/cognitive-memory@2.0.0/SleepTask'))
+      .toContain('schema_ref is immutable')
+    expect(legacyRuntimeReplacement('arm_watch','kip://profiles/cognitive-memory@2.1.0/Watch'))
+      .toBeUndefined()
   })
 })

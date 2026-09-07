@@ -715,6 +715,10 @@ call re-read _system.version. Commit terminal state and outputs in one MUTATE wi
 that version guard, retaining LeaseState. A stale/expired lease cannot complete.
 Create Watch as disarmed without WatchState, then explicitly arm it using the host
 facility. Review observation gaps before re-arming; it starts a new generation.
+An existing `@2.0.0/Watch` or `@2.0.0/SleepTask` cannot gain 2.1 runtime state in
+place because its exact schema_ref is immutable. Create a 2.1 replacement, copy
+the required semantic attributes and structural references, verify those links,
+then archive the legacy record. Do not reuse its lineage-scoped key.
 Do not hand-write WatchState, LeaseState, matched, consumed_seq or Watch status.
 Fired Watches are attention, never permission. Read existing decision records before
 recording another; there is no automatic acknowledgement/disarm or external action.

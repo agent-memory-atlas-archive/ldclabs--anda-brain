@@ -731,8 +731,8 @@ first command runs, from the bytes it received. They are bound on every
 `execute_kip` call you make in this pass:
 
 ```text
-:msg1   the first message in `messages`
-:msg2   the second
+:msg1   the oldest message in the captured final-16-message window
+:msg2   the next message in that same window
 …       up to :msg16, the newest sixteen when there are more
 ```
 
@@ -750,10 +750,12 @@ ASSERT (?alice, "prefers", ?dark_mode) {
 }
 ```
 
-Each record already carries its `evidence_class` (from the speaker's role), its
-`observed_at`, and — when this Space already holds the counterparty — its
-`source`. A first conversation with someone has no source to name yet; that is
-not a gap for you to fill, because who said the thing is `by:` on the Assertion.
+Each record already carries its `evidence_class` (from the speaker's role) and
+`observed_at`. User-message Evidence also carries the counterparty's semantic
+`source` when the host resolved it before planning. A missing source is not
+permission to invent one; `by:` on the Assertion still records who made the claim.
+A source thread/channel is provenance, not a unique message identity. The host
+owns the captured Evidence keys; do not replace them with `context.source`.
 
 Write `CREATE EVIDENCE` yourself only for an observation that is **not** one of
 these messages — something quoted inside a message, a measurement, an attached

@@ -168,87 +168,118 @@ pub(crate) struct SupersededRow {
     pub superseded_by: Vec<String>,
 }
 
-/// One page of correction discovery: what was superseded, and how far the
-/// cursor may advance for having read it.
+/// Durable position inside a transaction coordinate. An empty id means the
+/// entire coordinate was read; a nonempty id resumes within that coordinate.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CorrectionCursor {
+    pub seq: u64,
+    #[serde(default)]
+    pub after_id: String,
+}
+
+impl From<u64> for CorrectionCursor {
+    fn from(seq: u64) -> Self {
+        Self {
+            seq,
+            after_id: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct CorrectionScan {
     pub rows: Vec<SupersededRow>,
-    /// The cursor this page earned — never past a coordinate it only half
-    /// read. Equal to the caller's `after` when nothing was consumed.
+    pub cursor: CorrectionCursor,
+    /// Largest transaction coordinate proved completely read.
     pub watermark: u64,
-    /// Set when one transaction superseded more Assertions than a page holds,
-    /// so the remainder at that coordinate is lost.
-    ///
-    /// The operator signal is the error log the scan writes; this field is
-    /// how a test asserts the truncation arm fired without reading logs. The
-    /// settlement report has no field for it, and adding one would change a
-    /// persisted shape to carry something only a test reads.
-    pub truncated_at: Option<u64>,
-    /// Set when the scan failed — new corrections were not recorded this
-    /// cycle.
+    /// A bounded page did not prove the backlog exhausted. No rows are lost.
+    pub incomplete: bool,
     pub error: Option<String>,
 }
 
-/// Correction discovery: the Assertions an actor has revised since `after`.
-///
-/// In KIP 1.x this was a `metadata.superseded` flag the settlement could clear
-/// with a second write; an Assertion is immutable, so the cursor is the Space
-/// sequence coordinate instead — processed revisions fall behind the
-/// watermark, and a backlog larger than one batch drains across cycles rather
-/// than starving new corrections behind the first LIMIT-full.
-///
-/// Recording what comes back is the caller's: the usage ledger dedupes
-/// corrections and the `source_reliability` aggregate is Space extension
-/// state, neither of which the graph owns.
-pub(crate) async fn scan_corrections(port: &impl RunKip, after: u64) -> CorrectionScan {
+pub(crate) async fn scan_corrections(
+    port: &impl RunKip,
+    after: CorrectionCursor,
+) -> CorrectionScan {
+    let through = if after.after_id.is_empty() {
+        after.seq
+    } else {
+        after.seq.saturating_sub(1)
+    };
     let mut scan = CorrectionScan {
-        watermark: after,
+        cursor: after.clone(),
+        watermark: through,
         ..Default::default()
     };
-
+    let boundary = if after.after_id.is_empty() {
+        "FILTER(?a._system.space_seq > :after)"
+    } else {
+        "FILTER(?a._system.space_seq > :after || (?a._system.space_seq == :after && ?a.id > :after_id))"
+    };
     let request = kip::request_with(
         format!(
-            "FIND(?a.id, ?a._system.space_seq, ?a.asserted_by, ?a.proposition, ?a.lifecycle.superseded_by) WHERE {{\n  ?a ASSERTION {{}}\n  FILTER(?a.lifecycle.status == \"superseded\")\n  FILTER(?a._system.space_seq > :after)\n}}\nORDER BY ?a._system.space_seq\nLIMIT {SETTLEMENT_BATCH_LIMIT}"
+            "FIND(?a.id, ?a._system.space_seq, ?a.asserted_by, ?a.proposition, ?a.lifecycle.superseded_by) WHERE {{ ?a ASSERTION {{}} FILTER(?a.lifecycle.status == \"superseded\") {boundary} }} ORDER BY ?a._system.space_seq, ?a.id LIMIT {SETTLEMENT_BATCH_LIMIT}"
         ),
-        kip::param("after", after),
+        serde_json::Map::from_iter([
+            ("after".into(), Json::from(after.seq)),
+            ("after_id".into(), Json::from(after.after_id.clone())),
+        ]),
     );
     let response = match read(port, request).await {
         Ok(response) => response,
         Err(error) => {
-            log::error!(
-                target: "brain",
-                space_id = port.space_id();
-                "correction discovery scan failed — new corrections are NOT being \
-                 recorded (graph past the full-scan engine cap?): {error}"
-            );
+            scan.incomplete = true;
             scan.error = Some(error);
             return scan;
         }
     };
-
-    let Some(rows) = kip::ok_result(&response) else {
+    let Some(rows) = kip::ok_result(&response).and_then(Json::as_array) else {
+        scan.incomplete = true;
+        scan.error = Some("correction scan returned no row array".into());
         return scan;
     };
-    let page_full = rows
-        .as_array()
-        .is_some_and(|rows| rows.len() >= SETTLEMENT_BATCH_LIMIT);
-    scan.rows = superseded_rows(rows);
-    let seqs: Vec<u64> = scan.rows.iter().map(|row| row.space_seq).collect();
-    scan.watermark = match correction_watermark(&seqs, page_full, after) {
-        CorrectionWatermark::Consumed(seq) => seq,
-        CorrectionWatermark::Truncated(seq) => {
-            log::error!(
-                target: "brain",
-                space_id = port.space_id(),
-                space_seq = seq;
-                "one transaction superseded more Assertions than a settlement page \
-                 holds ({SETTLEMENT_BATCH_LIMIT}); the remainder at this coordinate \
-                 will not be recorded as corrections"
-            );
-            scan.truncated_at = Some(seq);
-            seq
-        }
-    };
+    scan.incomplete = rows.len() >= SETTLEMENT_BATCH_LIMIT
+        || response
+            .results
+            .first()
+            .is_some_and(|r| r.next_cursor.is_some());
+    let mut parsed = superseded_rows(&Json::Array(rows.clone()));
+    if parsed.len() != rows.len() {
+        scan.incomplete = true;
+        scan.error = Some("correction scan returned an unreadable row; cursor retained".into());
+        return scan;
+    }
+    parsed.retain(|row| {
+        row.space_seq > after.seq
+            || row.space_seq == after.seq
+                && !after.after_id.is_empty()
+                && row.assertion > after.after_id
+    });
+    parsed.sort_by(|a, b| {
+        a.space_seq
+            .cmp(&b.space_seq)
+            .then(a.assertion.cmp(&b.assertion))
+    });
+    if let Some(last) = parsed.last() {
+        scan.cursor = CorrectionCursor {
+            seq: last.space_seq,
+            after_id: if scan.incomplete {
+                last.assertion.clone()
+            } else {
+                String::new()
+            },
+        };
+        scan.watermark = if scan.incomplete {
+            last.space_seq.saturating_sub(1)
+        } else {
+            last.space_seq
+        };
+    } else if !scan.incomplete {
+        scan.cursor = after.seq.into();
+        scan.watermark = after.seq;
+    }
+    scan.watermark = scan.watermark.max(through);
+    scan.rows = parsed;
     scan
 }
 
@@ -272,7 +303,7 @@ pub(crate) async fn sweep_watches(port: &impl RunKip) -> WatchSettlement {
     for row in rows {
         let Some(_) = row.generation else {
             report.deferred += 1;
-            report.error = Some("legacy Watch has no WatchState; explicitly re-arm after reviewing its observation gap".into());
+            report.error = Some("legacy Watch has no WatchState and cannot be re-armed in place; after reviewing its observation gap, create a CognitiveMemory 2.1 replacement, reconnect structural references, then archive the legacy record".into());
             continue;
         };
         // Text (including a text member combined with structured selectors)
@@ -479,43 +510,6 @@ LIMIT :limit"#,
     )
 }
 
-/// How far a correction page may advance the cursor, and whether anything was
-/// lost getting there.
-enum CorrectionWatermark {
-    /// Every coordinate up to this one was read whole.
-    Consumed(u64),
-    /// One coordinate held more rows than a page, so advancing past it drops
-    /// the remainder. Reported so an operator hears about it.
-    Truncated(u64),
-}
-
-/// Chooses the cursor a correction page has actually earned.
-///
-/// `_system.space_seq` is the *transaction* coordinate, so one commit stamps
-/// every Assertion it revised with the same number, and the scan's `>` filter
-/// cannot page inside one coordinate. A full page therefore hands its trailing
-/// coordinate back and stops one short of it — re-reading costs nothing,
-/// because `record_correction` dedupes, while advancing past a half-read
-/// coordinate drops the rest of it for good.
-///
-/// The one case with no good answer is a full page that is *entirely* one
-/// coordinate: standing still re-reads it forever and never reaches the
-/// corrections behind it, so the cursor advances and says so.
-fn correction_watermark(seqs: &[u64], page_full: bool, after: u64) -> CorrectionWatermark {
-    let Some(last) = seqs.last().copied() else {
-        return CorrectionWatermark::Consumed(after);
-    };
-    if !page_full {
-        // A short page means the scan reached the end of the backlog, so every
-        // coordinate in it was read whole.
-        return CorrectionWatermark::Consumed(last.max(after));
-    }
-    match seqs.iter().copied().filter(|seq| *seq < last).max() {
-        Some(seq) => CorrectionWatermark::Consumed(seq.max(after)),
-        None => CorrectionWatermark::Truncated(last),
-    }
-}
-
 /// Reads the rows of the correction-discovery scan —
 /// `FIND(?a.id, ?a._system.space_seq, ?a.asserted_by, ?a.proposition,
 /// ?a.lifecycle.superseded_by)`.
@@ -697,50 +691,89 @@ mod tests {
     async fn the_correction_cursor_never_steps_over_a_half_read_coordinate() {
         // A short page reached the end of the backlog: every coordinate in it
         // was read whole, so the cursor takes the last one.
-        let scan = scan_corrections(&superseded(&[(7, "actor_a"), (9, "actor_b")]), 3).await;
+        let scan =
+            scan_corrections(&superseded(&[(7, "actor_a"), (9, "actor_b")]), 3u64.into()).await;
         assert_eq!(scan.watermark, 9);
         assert_eq!(scan.rows.len(), 2);
         assert_eq!(scan.rows[0].actor.as_deref(), Some("actor_a"));
-        assert!(scan.truncated_at.is_none());
+        assert!(!scan.incomplete);
 
         // Nothing to read leaves the cursor alone.
-        assert_eq!(scan_corrections(&superseded(&[]), 3).await.watermark, 3);
+        assert_eq!(
+            scan_corrections(&superseded(&[]), 3u64.into())
+                .await
+                .watermark,
+            3
+        );
 
         // A full page stops one coordinate short: `space_seq` is the
         // transaction coordinate, so the trailing 9s may have more behind them
         // and the next scan has to see them again.
         let mut page: Vec<(u64, &str)> = vec![(7, "a"), (8, "a")];
         page.extend((0..SETTLEMENT_BATCH_LIMIT - 2).map(|_| (9u64, "a")));
-        let full = scan_corrections(&superseded(&page), 3).await;
+        let full = scan_corrections(&superseded(&page), 3u64.into()).await;
         assert_eq!(full.watermark, 8);
-        assert!(full.truncated_at.is_none());
+        assert!(full.incomplete);
+        assert!(!full.cursor.after_id.is_empty());
 
         // Never backwards, whatever the page held: a cursor already past the
         // coordinate this page earned stays where it is, so corrections
         // already recorded are not scanned again forever.
-        let ahead = scan_corrections(&superseded(&page), 8).await;
+        let ahead = scan_corrections(&superseded(&page), 8u64.into()).await;
         assert_eq!(ahead.watermark, 8);
-        let further = scan_corrections(&superseded(&page), 42).await;
+        let further = scan_corrections(&superseded(&page), 42u64.into()).await;
         assert_eq!(further.watermark, 42);
 
-        // A full page that is entirely one coordinate has no good answer:
-        // standing still would re-read it forever, so it advances and says so.
+        // A full page within one coordinate resumes after its last id;
+        // it never declares the unread tail consumed.
         let one: Vec<(u64, &str)> = (0..SETTLEMENT_BATCH_LIMIT).map(|_| (9u64, "a")).collect();
-        let stuck = scan_corrections(&superseded(&one), 3).await;
-        assert_eq!(stuck.watermark, 9);
-        assert_eq!(stuck.truncated_at, Some(9));
+        let stuck = scan_corrections(&superseded(&one), 3u64.into()).await;
+        assert_eq!(stuck.watermark, 8);
+        assert_eq!(stuck.cursor.seq, 9);
+        assert!(!stuck.cursor.after_id.is_empty());
+        assert!(stuck.incomplete);
     }
 
     #[tokio::test]
     async fn a_failed_correction_scan_leaves_the_cursor_where_it_was() {
         let port = FakeKip::new([("superseded", vec![failed("full-scan cap")])]);
-        let scan = scan_corrections(&port, 42).await;
+        let scan = scan_corrections(&port, 42u64.into()).await;
 
         assert_eq!(scan.watermark, 42);
         assert!(scan.rows.is_empty());
         assert!(scan.error.unwrap().contains("full-scan cap"));
         // Reading corrections never writes.
         assert!(port.wrote().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_transaction_larger_than_one_page_is_fully_discovered() {
+        let rows: Vec<Json> = (0..SETTLEMENT_BATCH_LIMIT)
+            .map(|i| {
+                serde_json::json!([
+                    format!("A-{}", 1000+i), 9, {"id":"C-1"}, {"id":"P-1"}, [{"id":"A-9999"}]
+                ])
+            })
+            .collect();
+        let port = FakeKip::new([(
+            "superseded",
+            vec![
+                Response::ok(Json::Array(rows)),
+                Response::ok(
+                    serde_json::json!([["A-2000",9,{"id":"C-1"},{"id":"P-1"},[{"id":"A-9999"}]]]),
+                ),
+            ],
+        )]);
+        let first = scan_corrections(&port, 0u64.into()).await;
+        assert_eq!(first.rows.len(), SETTLEMENT_BATCH_LIMIT);
+        assert!(first.incomplete);
+        assert_eq!(first.watermark, 8);
+        let second = scan_corrections(&port, first.cursor).await;
+        assert_eq!(second.rows.len(), 1);
+        assert_eq!(second.rows[0].assertion, "A-2000");
+        assert!(!second.incomplete);
+        assert_eq!(second.watermark, 9);
+        assert!(second.cursor.after_id.is_empty());
     }
 
     /// Builds a port whose correction scan answers with these

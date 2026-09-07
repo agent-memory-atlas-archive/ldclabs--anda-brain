@@ -71,9 +71,11 @@ Run these from the repository root:
 ```bash
 cargo fmt --check
 cargo clippy -p anda_brain --all-targets --all-features -- -D warnings
-cargo test -p anda_brain --all-features
+RUST_MIN_STACK=16777216 cargo test -p anda_brain --all-features
 ```
 
+The CognitiveMemory 2.1 schema paths can exceed Rust's 2 MiB test-thread stack
+in debug builds, so keep `RUST_MIN_STACK=16777216` on Rust test commands.
 `cargo test -p anda_brain --all-features` includes a bin test that binds an
 ephemeral localhost port. In restricted sandboxes it may fail with
 `PermissionDenied`; rerun it with the required permission rather than treating
@@ -84,9 +86,9 @@ the lean build still compiles when you touch `space.rs`, `handler.rs`,
 `authz.rs`, or `types.rs`:
 
 ```bash
-cargo test -p anda_brain --lib
-cargo test -p anda_brain --lib --features wiki
-cargo test -p anda_brain --lib --features mcp
+RUST_MIN_STACK=16777216 cargo test -p anda_brain --lib
+RUST_MIN_STACK=16777216 cargo test -p anda_brain --lib --features wiki
+RUST_MIN_STACK=16777216 cargo test -p anda_brain --lib --features mcp
 ```
 
 For local manual testing:

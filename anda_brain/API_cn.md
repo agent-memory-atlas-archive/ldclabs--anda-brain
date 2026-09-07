@@ -21,6 +21,8 @@ CognitiveMemory 2.1 对齐说明：现有 JSON/CBOR/Markdown 请求和鉴权保�
 保持零。Watch 的 `disarmed` 兼容字段也统计 Nexus 的 expired；文本 Watch 保持 deferred。
 模型生成的 Formation 请求不得覆盖宿主捕获的 ingest 或 msgN 绑定；学习/runtime Facet
 写入返回 UnsupportedCapability。原始管理 KIP 仍接受符合 Nexus 契约的受权写入。
+使用精确 `@2.0.0` schema_ref 的旧 Watch/SleepTask 不能原地改成 2.1，需要显式创建、
+重连并核验替代记录后再归档旧记录。
 
 ---
 
@@ -43,7 +45,7 @@ export interface RpcResponse<T> {
 export interface InputContext {
   counterparty?: string;
   agent?: string;
-  source?: string;
+  source?: string; // 来源线程/渠道；不是提交或消息的去重键
   topic?: string;
 }
 
@@ -68,7 +70,7 @@ export interface Message {
 export interface FormationInput {
   messages: Message[]; // 至少包含一条非空消息（否则 400）
   context?: InputContext;
-  timestamp: string; // ISO 8601
+  timestamp?: string; // ISO 8601；建议提供
 }
 
 export interface RecallInput {
@@ -608,6 +610,18 @@ MCP_AUTH_TOKEN="$SPACE_TOKEN" \
 - 鉴权：SpaceToken/CWT `write`
 - 请求体：`MaintenanceInput`
 - 响应：`RpcResponse<AgentOutput>`
+
+`parameters` 中明确提供的值覆盖空间策略；省略项使用空间策略的默认值。同一份有效参数同时用于确定性 settlement 和维护模型，不修改持久化的空间策略。
+
+### GET `/v1/{space_id}/memory_status`
+
+- 用途：读取记忆统计和最近一次维护报告。
+- 鉴权：SpaceToken/CWT `read`；公开空间允许匿名读取。
+- 响应：`RpcResponse<MemoryStatus>`，保持 JSON/CBOR/Markdown 协商。
+- `result.last_settlement.correction_scan_incomplete`：本次有界扫描尚未证明 backlog 已耗尽，后续维护会从事务内部继续。
+- `result.last_settlement.correction_scan_through_seq`：已完整读取的最大事务序号。
+- `result.last_settlement.correction_scan_error`：扫描失败原因；失败不会推进游标。
+- 这些字段表示更正发现进度，不表示模型完成审查或 Watch 获得完整授权覆盖。
 
 ### POST `/v1/{space_id}/execute_kip_readonly`
 

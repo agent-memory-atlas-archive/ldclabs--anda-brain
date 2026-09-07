@@ -45,7 +45,7 @@ export interface BrainRpc {
   ): Promise<KipResult[]>
   executeMaintenancePlan(operations: readonly KipOperation[], runtime?: readonly RuntimeOperation[]): Promise<KipResult[]>
   maintenanceAssessment(): Promise<MaintenanceAssessment>
-  settleMemory(nowMs: number): Promise<SettlementReport>
+  settleMemory(nowMs: number, decayFactor?: number): Promise<SettlementReport>
   stats(): Promise<BrainStats>
   vocabulary(): Promise<DeclaredVocabulary>
 }
@@ -119,6 +119,10 @@ export interface MaintenanceInput {
 /** One armed or fired Watch, as the maintenance cycle receives it. */
 export interface ArmedWatch {
   id: string
+  /** Exact persisted type; 2.0 records require explicit replacement. */
+  schema_ref?: string
+  /** Whole-element version used by protected runtime operations. */
+  version?: number
   name: string
   /** `delta` (fire on a matching change) or `silence` (fire when `due_at` passes). */
   watch_class: string
@@ -159,7 +163,16 @@ export interface CorrectionScan {
   revised_roots: RevisedRoot[]
   /** The coordinate the next scan reads after. */
   cursor: number
+  /** Resume within cursor's transaction; absent when it was completely read. */
+  cursor_after_id?: string
+  /** The bounded scan did not prove the backlog exhausted. */
+  incomplete: boolean
   error?: string
+}
+
+export interface CorrectionCursor {
+  seq: number
+  after_id: string
 }
 
 /** One Assertion an actor superseded, with what was derived from it. */

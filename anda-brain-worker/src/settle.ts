@@ -5,6 +5,7 @@ import type { KipOperation } from './kip.js'
 import type {
   ArmedWatch,
   CorrectionScan,
+  CorrectionCursor,
   Dependent,
   MaintenanceAssessment,
   RevisedRoot,
@@ -17,13 +18,16 @@ export type RunKip = (operation: KipOperation) => KipResult
 export type AdvanceWatch = (id: string, version: number, generation: number) => JsonMap
 
 export interface SettlePosition {
-  correctionCursor?: number
+  correctionCursor?: number | CorrectionCursor
   advanceWatch?: AdvanceWatch
+  decayFactor?: number
 }
 
 export function settle(run: RunKip, nowMs: number, position: SettlePosition = {}): SettlementReport {
   const now = new Date(nowMs).toISOString()
-  const decay = metabolize(run, now, new Date(nowMs - DECAY_MIN_INTERVAL_MS).toISOString())
+  const factor = position.decayFactor ?? DECAY_FACTOR
+  if (!Number.isFinite(factor) || factor <= 0 || factor > 1) throw new Error('decayFactor must be in (0, 1]')
+  const decay = metabolize(run, now, new Date(nowMs - DECAY_MIN_INTERVAL_MS).toISOString(), factor)
   return {
     settled_at: now,
     decayed: decay.decayed,
@@ -71,7 +75,7 @@ function sweepWatches(run: RunKip, advance?: AdvanceWatch): WatchSettlement {
   for (const row of rows) {
     if (row.generation === undefined) {
       report.deferred += 1
-      report.error = 'legacy Watch has no WatchState; explicitly re-arm after reviewing its observation gap'
+      report.error = 'legacy Watch has no WatchState and cannot be re-armed in place; after reviewing its observation gap, create a CognitiveMemory 2.1 replacement, reconnect structural references, then archive the legacy record'
       continue
     }
     // An arbitrary text member must never be ignored by a structured matcher.
@@ -126,7 +130,7 @@ function watchesCommand(status: string, runnable = false): KipOperation {
       'FILTER(IS_NOT_NULL(?w.attributes.condition.element) || IS_NOT_NULL(?w.attributes.condition.slot) || IS_NOT_NULL(?w.attributes.condition.type))'
     : ''
   return {
-    command: 'FIND(?w.id, ?w.name, ?w.attributes, ?w._system.version, ?w.facets["WatchState"]) ' +
+    command: 'FIND(?w.id, ?w.name, ?w.attributes, ?w._system.version, ?w.facets["WatchState"], ?w.schema_ref) ' +
       `WHERE { ?w CONCEPT {type: "Watch"} FILTER(?w.attributes.status == :status) ${filter} } ORDER BY ?w.updated_at LIMIT ${WATCH_SWEEP_LIMIT}`,
     parameters: { status },
   }
@@ -136,13 +140,14 @@ function readWatchRows(result: unknown): WatchRow[] {
   if (!Array.isArray(result)) return []
   return result.flatMap((row): WatchRow[] => {
     if (!Array.isArray(row)) return []
-    const [id, name, attributes, version, state] = row
+    const [id, name, attributes, version, state, schemaRef] = row
     if (typeof id !== 'string' || typeof version !== 'number' || !isObject(attributes)) return []
     const text = (key: string): string => typeof attributes[key] === 'string'
       ? attributes[key] : attributes[key] === undefined ? '' : JSON.stringify(attributes[key])
     return [{ id, version, condition: attributes.condition,
       generation: isObject(state) && typeof state.arm_generation === 'number' ? state.arm_generation : undefined,
-      watch: { id, name: typeof name === 'string' ? name : '', watch_class: text('watch_class'),
+      watch: { id, ...(typeof schemaRef === 'string' ? {schema_ref:schemaRef} : {}), version,
+        name: typeof name === 'string' ? name : '', watch_class: text('watch_class'),
         condition: text('condition'), summary: text('summary'), due_at: text('due_at') },
     }]
   })
@@ -170,24 +175,30 @@ const DEPENDENTS_LIMIT = 20
  * Correction discovery: the Assertions an actor has revised since `after`,
  * each with what `LIST DEPENDENTS` reaches from it (§57.5, §63.5).
  *
- * An Assertion is immutable, so the cursor is the Space sequence coordinate:
- * processed revisions fall behind it, and a backlog larger than one page
- * drains across cycles. A full page never steps over its last coordinate —
- * one transaction may have superseded more claims than the page holds — so
- * the cursor stops just before it, unless the whole page shares that
- * coordinate, in which case the remainder is lost and said so.
+ * A durable (space_seq, assertion_id) cursor resumes within a transaction.
+ * Each cycle reads a bounded page; a full page reports incomplete coverage,
+ * never skips its unread tail. Old scalar checkpoints remain readable.
  *
  * Reachability is topology, not judgment: a listed dependent is a candidate
  * for `DerivationState {status: "stale"}`, not already stale. The cycle decides.
  */
-function scanCorrections(run: RunKip, after: number): CorrectionScan {
-  const scan: CorrectionScan = { revised_roots: [], cursor: after }
+function scanCorrections(run: RunKip, position: number | CorrectionCursor): CorrectionScan {
+  const after = typeof position === 'number' ? { seq: position, after_id: '' } : position
+  const scan: CorrectionScan = { revised_roots: [], cursor: after.seq, incomplete: false,
+    ...(after.after_id ? { cursor_after_id: after.after_id } : {}),
+  }
   const found = run(supersededCommand(after))
   if (found.status === 'failed') {
+    scan.incomplete = true
     scan.error = found.error?.message ?? 'correction scan failed'
     return scan
   }
-  const rows = Array.isArray(found.result) ? found.result : []
+  if (!Array.isArray(found.result)) {
+    scan.incomplete = true
+    scan.error = 'correction scan returned no row array'
+    return scan
+  }
+  const rows = found.result
   const roots: RevisedRoot[] = []
   for (const row of rows) {
     if (!Array.isArray(row)) continue
@@ -207,23 +218,22 @@ function scanCorrections(run: RunKip, after: number): CorrectionScan {
       truncated: false,
     })
   }
-  const seqs = roots.map((root) => root.space_seq)
-  if (seqs.length > 0) {
-    const max = Math.max(...seqs)
-    const min = Math.min(...seqs)
-    if (rows.length < CORRECTION_SCAN_LIMIT) {
-      scan.cursor = max
-    } else if (min < max) {
-      scan.cursor = max - 1
-    } else {
-      console.error(
-        `one transaction superseded more Assertions than a settlement page holds (${CORRECTION_SCAN_LIMIT}); the remainder at ${max} will not be recorded`,
-      )
-      scan.cursor = max
-    }
+  if (roots.length !== rows.length) {
+    scan.incomplete = true
+    scan.error = 'correction scan returned an unreadable row; cursor retained'
+    return scan
   }
-  for (const root of roots) {
-    if (root.space_seq > scan.cursor) continue
+  scan.incomplete = rows.length >= CORRECTION_SCAN_LIMIT || found.next_cursor !== undefined
+  const selected = roots.filter((root) => root.space_seq > after.seq ||
+    root.space_seq === after.seq && after.after_id !== '' && root.assertion > after.after_id)
+    .sort((a,b) => a.space_seq - b.space_seq || (a.assertion < b.assertion ? -1 : a.assertion > b.assertion ? 1 : 0))
+  const last = selected.at(-1)
+  if (last) {
+    scan.cursor = last.space_seq
+    if (scan.incomplete) scan.cursor_after_id = last.assertion
+    else delete scan.cursor_after_id
+  } else if (!scan.incomplete) delete scan.cursor_after_id
+  for (const root of selected) {
     const walked = run(dependentsCommand(root.assertion))
     if (walked.status === 'failed') {
       root.truncated = true
@@ -238,15 +248,17 @@ function scanCorrections(run: RunKip, after: number): CorrectionScan {
   return scan
 }
 
-function supersededCommand(after: number): KipOperation {
+function supersededCommand(after: CorrectionCursor): KipOperation {
+  const boundary = after.after_id === '' ? 'FILTER(?a._system.space_seq > :after)' :
+    'FILTER(?a._system.space_seq > :after || (?a._system.space_seq == :after && ?a.id > :after_id))'
   return {
     command:
       'FIND(?a.id, ?a._system.space_seq, ?a.asserted_by, ?a.proposition, ?a.lifecycle.superseded_by) WHERE { ' +
       '?a ASSERTION {} ' +
       'FILTER(?a.lifecycle.status == "superseded") ' +
-      'FILTER(?a._system.space_seq > :after) ' +
-      `} ORDER BY ?a._system.space_seq LIMIT ${CORRECTION_SCAN_LIMIT}`,
-    parameters: { after },
+      boundary +
+      ` } ORDER BY ?a._system.space_seq, ?a.id LIMIT ${CORRECTION_SCAN_LIMIT}`,
+    parameters: { after: after.seq, after_id: after.after_id },
   }
 }
 
@@ -284,8 +296,8 @@ function readDependents(result: unknown): Dependent[] {
  * no rows. A failed sweep decays nothing and says so by reporting zero — the
  * cycle still runs.
  */
-function metabolize(run: RunKip, now: string, metabolizedBefore: string): { decayed: number; error?: string } {
-  const result = run(decayCommand(now, metabolizedBefore))
+function metabolize(run: RunKip, now: string, metabolizedBefore: string, factor: number): { decayed: number; error?: string } {
+  const result = run(decayCommand(now, metabolizedBefore, factor))
   if (result.status === 'failed') return { decayed: 0, error: result.error?.message ?? 'mnemonic metabolism failed' }
   const changes = result.extensions?.['kip-do/outcome']?.changes ?? []
   return { decayed: changes.filter((change) => change.op === 'update').length }
@@ -304,7 +316,7 @@ function metabolize(run: RunKip, now: string, metabolizedBefore: string): { deca
  * anybody made. The `last_metabolized_at` filter is both the weekly rate limit
  * and the intra-sweep cursor — rows stamped by this pass stop matching.
  */
-function decayCommand(now: string, metabolizedBefore: string): KipOperation {
+function decayCommand(now: string, metabolizedBefore: string, factor: number): KipOperation {
   return {
     command: `UPDATE ?c
 SET FACET "MnemonicState" {
@@ -321,7 +333,7 @@ WHERE {
 LIMIT :limit`,
     parameters: {
       baseline: DEFAULT_MEMORY_STRENGTH,
-      factor: DECAY_FACTOR,
+      factor,
       floor: DECAY_FLOOR,
       now,
       before: metabolizedBefore,

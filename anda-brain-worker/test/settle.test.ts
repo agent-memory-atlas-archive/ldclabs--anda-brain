@@ -65,6 +65,7 @@ describe('deterministic settlement', () => {
 
     expect(report.corrections).toEqual({
       cursor: 9,
+      incomplete: false,
       revised_roots: [
         {
           assertion: 'A-1',

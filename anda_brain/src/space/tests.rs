@@ -1,6 +1,6 @@
 use super::{
     AppState, Hooks, MAINTENANCE_MAX_INTERVAL_MS, Space, SpaceEntry, init_conversation_collection,
-    init_resource_collection,
+    init_resource_collection, settlement_error_messages,
 };
 use crate::settlement;
 use crate::{
@@ -918,8 +918,121 @@ async fn maintenance_keeps_explicit_parameters() {
         .unwrap();
     let encoded = serde_json::to_string(&conversation.messages).unwrap();
     assert!(encoded.contains("\\\"stale_event_threshold_days\\\": 3"));
-    // The policy must not overwrite explicit parameters.
-    assert!(!encoded.contains("memory_strength_decay_factor"));
+    // Explicit values win; omitted values use the same effective policy as settlement.
+    assert!(encoded.contains("memory_strength_decay_factor"));
+}
+
+#[tokio::test]
+async fn maintenance_override_controls_the_actual_decay_without_changing_space_policy() {
+    let app = test_app_state_with_final_model("decay_override");
+    let space = create_loaded_space(&app, "decay_override").await;
+    space.memory.execute(r#"CREATE CONCEPT ?c { TYPE "Preference" NAME "keep accessible" SET FACET "MnemonicState" {memory_strength: 0.8} }"#, None).await.unwrap();
+    let previous_policy = space.memory_policy();
+    space
+        .maintenance(
+            SELF_USER_ID,
+            MaintenanceInput {
+                scope: MaintenanceScope::Quick,
+                parameters: Some(MaintenanceParameters {
+                    memory_strength_decay_factor: Some(1.0),
+                    stale_event_threshold_days: None,
+                    unconsolidated_max_backlog: None,
+                    orphan_max_count: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let response = space.execute_kip_readonly(kip::request(r#"FIND(?c.facets["MnemonicState"].memory_strength) WHERE { ?c CONCEPT {type: "Preference"} } LIMIT 10"#)).await.unwrap();
+    assert_eq!(kip::ok_result(&response), Some(&serde_json::json!([0.8])));
+    assert_eq!(space.memory_policy(), previous_policy);
+}
+
+#[tokio::test]
+async fn a_published_v1_space_resets_only_legacy_bookkeeping_once() {
+    use object_store::ObjectStoreExt;
+    #[derive(serde::Deserialize)]
+    struct StoredObject {
+        path: String,
+        bytes: ic_auth_types::ByteBufB64,
+    }
+    let app = test_app_state("published_v011_fixture");
+    let snapshot: Vec<StoredObject> =
+        cbor2::from_reader(include_bytes!("../../tests/fixtures/published_v0_11.cbor").as_slice())
+            .unwrap();
+    for object in snapshot {
+        app.object_store
+            .put(
+                &object_store::path::Path::from(object.path),
+                object.bytes.0.into(),
+            )
+            .await
+            .unwrap();
+    }
+    let db = Arc::new(
+        anda_db::database::AndaDB::open(
+            app.object_store.clone(),
+            crate::testkit::db_config("published_v011_fixture"),
+        )
+        .await
+        .unwrap(),
+    );
+    let ledger = crate::ledger::UsageLedger::connect(&db).await.unwrap();
+    ledger
+        .record_recall(&BTreeSet::from(["C:1".into(), "C-999".into()]), unix_ms())
+        .await
+        .unwrap();
+    let misses = crate::ledger::MissCache::connect(&db).await.unwrap();
+    misses.record_miss("old search", unix_ms()).await.unwrap();
+    db.save_extension_from(
+        "memory_metrics".into(),
+        &crate::types::MemoryMetrics {
+            recalls_completed: 9,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    db.close().await.unwrap();
+    drop(ledger);
+    drop(misses);
+    drop(db);
+    let space = app
+        .load_space_with("published_v011_fixture", false, false)
+        .await
+        .unwrap();
+    assert!(space.ledger.get("C:1").await.unwrap().is_none());
+    assert!(space.ledger.get("C-999").await.unwrap().is_some());
+    assert!(space.db.get_extension("memory_metrics").is_none());
+    assert!(
+        !space
+            .miss_cache
+            .is_fresh_miss("old search", unix_ms())
+            .await
+            .unwrap()
+    );
+    space
+        .db
+        .save_extension_from(
+            "memory_metrics".into(),
+            &crate::types::MemoryMetrics {
+                recalls_completed: 7,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    super::reset_v1_bookkeeping(&space.db).await.unwrap();
+    assert_eq!(
+        space
+            .db
+            .get_extension_as::<crate::types::MemoryMetrics>("memory_metrics")
+            .unwrap()
+            .recalls_completed,
+        7
+    );
+    space.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -1328,6 +1441,10 @@ async fn watches_use_nexus_coverage_and_never_infer_text_consumption() {
     );
     let next = settlement::sweep_watches(space.as_ref()).await;
     assert_eq!((next.fired, next.deferred), (0, 2));
+    let assessment = space.maintenance_assessment(None).await;
+    assert!(assessment.armed_watches.iter().all(|watch| {
+        watch.schema_ref == "kip://profiles/cognitive-memory@2.1.0/Watch" && watch.version.is_some()
+    }));
     let nexus = space.memory.nexus();
     let error = nexus
         .system_session()
@@ -2268,7 +2385,7 @@ SUPERSEDING :old"#,
     // ... and the same census reaches the Maintenance prompt, which its
     // deployment contract (§A.1) has always claimed. Correction discovery
     // recorded one revision above, so the actor tally travels with it.
-    let assessment = space.maintenance_assessment().await;
+    let assessment = space.maintenance_assessment(None).await;
     assert_eq!(assessment.predicates.get("prefers"), Some(&2));
     assert_eq!(assessment.audited_at, Some(audit.audited_at));
     assert_eq!(
@@ -2279,6 +2396,22 @@ SUPERSEDING :old"#,
             .sum::<u64>(),
         1,
         "{assessment:?}"
+    );
+}
+
+#[test]
+fn current_settlement_failure_replaces_a_stale_stored_report() {
+    let stored = crate::types::MemorySettlementReport {
+        decay_error: Some("previous decay failure".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        settlement_error_messages(Some(&stored), Some("usage ledger unavailable")),
+        vec!["settlement: usage ledger unavailable"]
+    );
+    assert_eq!(
+        settlement_error_messages(Some(&stored), None),
+        vec!["decay: previous decay failure"]
     );
 }
 

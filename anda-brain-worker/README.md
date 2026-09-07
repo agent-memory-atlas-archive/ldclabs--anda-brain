@@ -68,8 +68,12 @@ cd ../../anda-db/ts/kip-do && pnpm install && pnpm run build
 ## 确定性 settlement 与受保护操作
 
 每次 maintenance 在模型调用前执行记忆强度代谢、更正发现和结构化 Watch 推进。
-代谢只修改 `MnemonicState.memory_strength`，每周乘以 0.95、下限 0.3，绝不衰减
+代谢只修改 `MnemonicState.memory_strength`，默认每周乘以 0.95、下限 0.3，绝不衰减
 Assertion confidence。读取不强化记忆。
+本次 `parameters.memory_strength_decay_factor` 会覆盖默认因子，并实际作用于确定性代谢；例如 `1` 保持强度不变。
+更正扫描通过 `(space_seq, assertion_id)` 继续分页，同一事务超过 20 条也不会丢弃尾部。
+响应中的 `settlement.corrections.incomplete` 表示尚未证明 backlog 已读完；`cursor_after_id`
+在需要从事务内部继续时出现。发现进度不表示模型已处理这些更正。
 
 Watch 先以 `disarmed` 创建，再通过宿主 `armWatch` 领取新 generation 与授权观察依据。
 结算调用 `advanceWatch`，提交整体版本与 generation，让 Nexus 检查完整性水位和权限变化。
@@ -105,6 +109,11 @@ Skill 保持稳定身份，行为放入不可变 SkillRevision，current_revisio
 下一次 snapshot 中读取结果，再把任务终态与输出放进同一个有 CAS 的 MUTATE。
 runtime 结果通过 maintenance 响应的 `runtime` 数组返回；后续失败不会抹掉先前操作的
 receipt，错误数据保留已执行的结果。整个计划不是事务，不要自动重放已成功的前缀。
+
+使用 CognitiveMemory 2.0 精确 `schema_ref` 写入的旧 Watch/SleepTask 不能原地获得
+2.1 的 WatchState/LeaseState。runtime 会在调用受保护操作前返回迁移说明：创建 2.1
+替代记录，复制并核验必要的语义字段和结构引用，再归档旧记录；不要复用按 lineage
+唯一的旧 key。
 
 `assessment.revised_roots` 仍提供有界依赖遍历；缺页或不可访问的闭包显式标记 incomplete。
 Nexus 的虚拟 dependency_validity 决定派生内容能否使用，存储的 review 不能覆盖它。
@@ -207,7 +216,12 @@ curl http://localhost:8787/v1/alice/formation \
   }'
 ```
 
-`context.counterparty` 是 Concept 的 **key**（不可变身份），不是 name（可变标签）。
+`context.counterparty` 是 Concept 的 **key**（不可变身份），不是 name（可变标签）。宿主会在规划前确保该 Person 存在，并保留已有显示名称。
+
+`context.source` 是线程/渠道来源，不是消息去重键。Evidence 身份由完整输入、上下文和时间戳的摘要确定；
+同一 source 的后续消息不会复用旧消息的 Evidence。要重试同一观察，应保持消息、上下文及显式 `timestamp`
+不变；省略 timestamp 时，每个请求获得新的观察时间。此规则只保证 Evidence 的身份，不表示整份模型写入计划
+具备请求级 exactly-once 语义。
 
 Formation 只能写认知：`CREATE CONCEPT`、`UPSERT CONCEPT`、`ENSURE PROPOSITION`、`CREATE EVIDENCE / ASSERTION / ACTIVITY`、`ASSERT`，以及用于更正和自身 Activity 的 `TRANSITION`——状态限于 `retracted` / `superseded` / `corrected` / `running` / `completed` / `failed` / `cancelled`。`TRANSITION ... TO "archived"`、`TO "tombstoned"` 以及 `UPDATE`、`PURGE`、`MERGE CONCEPT` 会在 Durable Object 内被拒绝。状态必须写成字面量：闸门读不到的参数化状态一律拒绝，否则「六条语句合并成一条 `TRANSITION`」就等于给 Formation 开了一条以绑定值 tombstone 的路。
 

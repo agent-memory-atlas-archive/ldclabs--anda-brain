@@ -30,6 +30,7 @@ use anda_engine::{context::AgentCtx, memory::MemoryManagement, model::Models};
 use anda_kip::Request;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha3::{Digest, Sha3_256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
@@ -173,6 +174,10 @@ pub struct DigestedFact {
     pub confidence: f64,
     pub citation: String,
     pub checksum: String,
+    /// Previous digest ledger event. A retraction starts a new assertion
+    /// generation even when restoring the same immutable document version.
+    #[serde(default)]
+    pub assertion_generation: u64,
 }
 
 /// (subject_type, subject_name, predicate, object_type, object_name)
@@ -565,7 +570,16 @@ impl WikiDigest {
         // the same observation, not a second one. `facts` stays the whole
         // current set, because that is what the ledger event means by "what
         // this document says"; only the write is narrowed.
-        let previous = self.previous_digest_facts(doc._id, version._id).await?;
+        let (generation, previous) = self
+            .previous_digest_head(doc._id, version._id.saturating_add(1))
+            .await?;
+        for fact in &mut facts {
+            fact.assertion_generation = previous
+                .iter()
+                .find(|old| old.triple_key() == fact.triple_key())
+                .map(|old| old.assertion_generation)
+                .unwrap_or(generation);
+        }
         let previously_claimed: BTreeSet<TripleKey> =
             previous.iter().map(DigestedFact::triple_key).collect();
         let mut to_assert: Vec<DigestedFact> = facts
@@ -618,7 +632,7 @@ impl WikiDigest {
                 .unwrap_or_default();
         }
 
-        let superseded = self.retract_facts(doc._id, &previous, &alive).await;
+        let superseded = self.retract_facts(doc._id, &previous, &alive).await?;
 
         self.wiki
             .write_event(
@@ -756,7 +770,7 @@ impl WikiDigest {
         }
         let superseded = self
             .retract_facts(doc._id, &previous, &BTreeSet::new())
-            .await;
+            .await?;
         self.wiki
             .write_event(
                 EVENT_DIGEST_EXTRACTED,
@@ -792,35 +806,80 @@ impl WikiDigest {
     /// a no-op, so a Concept maintenance merged or archived in the meantime
     /// costs one harmless statement instead of resurrecting anything.
     ///
-    /// One statement per fact: a missing endpoint must not abort the rest.
+    /// Missing endpoints are harmless; scan/write failures retain the ledger
+    /// head so a retry finishes withdrawing the remaining owned claims.
     async fn retract_facts(
         &self,
         doc_id: u64,
         facts: &[DigestedFact],
         alive: &BTreeSet<TripleKey>,
-    ) -> usize {
+    ) -> Result<usize, BoxError> {
         let mut retracted = 0usize;
         for fact in facts {
             if alive.contains(&fact.triple_key()) {
                 continue;
             }
-            let response =
-                anda_kip::execute_request(self.memory.nexus().as_ref(), &retract_request(fact))
-                    .await;
-            if kip::succeeded(&response) {
-                retracted +=
-                    usize::try_from(kip::transitioned(&response, "retracted")).unwrap_or(0);
-            } else {
-                log::warn!(
-                    target: "brain",
-                    doc_id = doc_id;
-                    "retracting the digest's claim about {:?} failed: {}",
-                    fact.predicate,
-                    kip::error_message(&response)
+            let mut after = String::new();
+            let mut owned = Vec::new();
+            let mut complete = false;
+            // client_key is host bookkeeping, deliberately absent from the
+            // model-facing Core view. Resolve authorized candidates through KQL,
+            // then check their ownership in the host before guarded transitions.
+            for _ in 0..64 {
+                let response = anda_kip::execute_request(
+                    self.memory.nexus().as_ref(),
+                    &claim_candidates_request(fact, &after),
+                )
+                .await;
+                if !kip::succeeded(&response) {
+                    return Err(format!(
+                        "reading document {doc_id} claims failed: {}",
+                        kip::error_message(&response)
+                    )
+                    .into());
+                }
+                let rows: Vec<(String, u64)> = serde_json::from_value(
+                    kip::ok_result(&response)
+                        .cloned()
+                        .ok_or("missing claim candidates")?,
+                )?;
+                for (id, version) in &rows {
+                    let row = self.memory.nexus().store.get_element(id.parse()?).await?;
+                    if let anda_cognitive_nexus::store::Element::Assertion(row) = row
+                        && owns_claim(doc_id, fact, &row)
+                    {
+                        owned.push((id.clone(), *version));
+                    }
+                }
+                if rows.len() < 128 {
+                    complete = true;
+                    break;
+                }
+                after = rows.last().unwrap().0.clone();
+            }
+            if !complete {
+                return Err(
+                    "document claim scan reached its budget; digest ledger retained".into(),
                 );
             }
+            for (id, version) in owned {
+                let response = anda_kip::execute_request(
+                    self.memory.nexus().as_ref(),
+                    &retract_request(&id, version),
+                )
+                .await;
+                if !kip::succeeded(&response) {
+                    return Err(format!(
+                        "retracting document {doc_id} claim {id} failed: {}",
+                        kip::error_message(&response)
+                    )
+                    .into());
+                }
+                retracted +=
+                    usize::try_from(kip::transitioned(&response, "retracted")).unwrap_or(0);
+            }
         }
-        retracted
+        Ok(retracted)
     }
 
     /// Publishes the Schema Package covering these facts' symbols, when the
@@ -865,6 +924,14 @@ impl WikiDigest {
         doc_id: u64,
         before_version: u64,
     ) -> Result<Vec<DigestedFact>, BoxError> {
+        Ok(self.previous_digest_head(doc_id, before_version).await?.1)
+    }
+
+    async fn previous_digest_head(
+        &self,
+        doc_id: u64,
+        before_version: u64,
+    ) -> Result<(u64, Vec<DigestedFact>), BoxError> {
         let events = self
             .wiki
             .list_events(
@@ -880,7 +947,7 @@ impl WikiDigest {
             .filter(|e| e.version_id.is_some_and(|v| v < before_version))
             .max_by_key(|e| e.id);
         let Some(event) = latest else {
-            return Ok(Vec::new());
+            return Ok((0, Vec::new()));
         };
         let facts = match event
             .detail
@@ -890,18 +957,19 @@ impl WikiDigest {
         {
             Some(Ok(facts)) => facts,
             Some(Err(err)) => {
-                // Schema drift would otherwise disable superseding silently.
-                log::warn!(
-                    target: "brain",
-                    doc_id = doc_id,
-                    event_id = event.id;
-                    "digest ledger facts unreadable, superseding skipped for this pass: {err}"
-                );
-                Vec::new()
+                return Err(format!(
+                    "document {doc_id} digest ledger {} is unreadable: {err}",
+                    event.id
+                )
+                .into());
             }
-            None => Vec::new(),
+            None => {
+                return Err(
+                    format!("document {doc_id} digest ledger {} has no facts", event.id).into(),
+                );
+            }
         };
-        Ok(facts)
+        Ok((event.id, facts))
     }
 
     /// Re-verifies every citation recorded by recent digests; `Invalid`
@@ -1267,6 +1335,7 @@ fn normalize_facts(
             confidence: fact.confidence.unwrap_or(0.7).clamp(0.0, 1.0),
             citation,
             checksum,
+            assertion_generation: 0,
         };
         if alive.insert(normalized.triple_key()) && facts.len() < MAX_FACTS_PER_VERSION {
             facts.push(normalized);
@@ -1425,8 +1494,10 @@ fn digest_request(
         parameters.insert(
             format!("fkey{index}"),
             json!(format!(
-                "wiki:{}:{}:{}:{}",
-                doc._id, fact.subject_name, fact.predicate, fact.object_name
+                "{}{}:{}",
+                assertion_key_prefix(doc._id, fact),
+                version._id,
+                fact.assertion_generation
             )),
         );
         lines.push(format!(
@@ -1443,7 +1514,51 @@ fn digest_request(
 /// Scoped to `asserted_by: ?self`: another actor may hold the same belief for
 /// their own reasons, and this document going quiet is no reason to speak for
 /// them. A `WHERE` that matches nothing retracts nothing.
-fn retract_request(fact: &DigestedFact) -> Request {
+fn assertion_key_prefix(doc_id: u64, fact: &DigestedFact) -> String {
+    let tuple = json!([
+        fact.subject_type,
+        fact.subject_name,
+        fact.predicate,
+        fact.object_type,
+        fact.object_name
+    ]);
+    let digest: String = Sha3_256::digest(tuple.to_string().as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("wiki:{doc_id}:claim:{digest}:")
+}
+
+fn owns_claim(
+    doc_id: u64,
+    fact: &DigestedFact,
+    row: &anda_cognitive_nexus::store::rows::AssertionRow,
+) -> bool {
+    if row
+        .client_key
+        .starts_with(&assertion_key_prefix(doc_id, fact))
+        || row.client_key
+            == format!(
+                "wiki:{}:{}:{}:{}",
+                doc_id, fact.subject_name, fact.predicate, fact.object_name
+            )
+    {
+        return true;
+    }
+    // A v1 wiki claim has the migration's key, with the original ownership
+    // annotation preserved verbatim. Do not infer ownership from actor alone.
+    row.mode == "imported"
+        && row.facets.iter().any(|(name, value)| {
+            let properties = &value["record"]["properties"];
+            let metadata = properties.get("m").unwrap_or(&properties["metadata"]);
+            name.starts_with("kip://legacy/nexus@")
+                && name.ends_with("/LegacyRecord")
+                && metadata["source"] == "wiki"
+                && metadata["doc_id"].as_u64() == Some(doc_id)
+        })
+}
+
+fn claim_candidates_request(fact: &DigestedFact, after: &str) -> Request {
     let parameters = serde_json::Map::from_iter([
         ("st".to_string(), json!(fact.subject_type)),
         ("sn".to_string(), json!(fact.subject_name)),
@@ -1451,9 +1566,10 @@ fn retract_request(fact: &DigestedFact) -> Request {
         ("ot".to_string(), json!(fact.object_type)),
         ("on".to_string(), json!(fact.object_name)),
         ("self_key".to_string(), json!(SELF_ACTOR_KEY)),
+        ("after".to_string(), json!(after)),
     ]);
     kip::request_with(
-        r#"TRANSITION ?a TO "retracted"
+        r#"FIND(?a.id, ?a._system.version)
 WHERE {
   ?s CONCEPT {type: :st, key: :sn}
   ?o CONCEPT {type: :ot, key: :on}
@@ -1461,15 +1577,207 @@ WHERE {
   ?self CONCEPT {type: "Person", key: :self_key}
   ?a ASSERTION {proposition: ?p, asserted_by: ?self}
   FILTER(?a.lifecycle.status == "active")
+  FILTER(?a.id > :after)
 }
-LIMIT 8"#,
+ORDER BY ?a.id LIMIT 128"#,
         parameters,
+    )
+}
+
+fn retract_request(id: &str, version: u64) -> Request {
+    kip::request_with(
+        "TRANSITION :id TO \"retracted\" EXPECT VERSION :version",
+        serde_json::Map::from_iter([("id".into(), json!(id)), ("version".into(), json!(version))]),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn review_seed_wiki_fact(
+        wiki: &WikiService,
+        digest: &WikiDigest,
+        title: &str,
+    ) -> (WikiDocRecord, WikiVersionRecord, DigestedFact) {
+        let created = wiki
+            .commit("a".into(), commit_input(title, "A shared fact.\n"), 1000)
+            .await
+            .unwrap();
+        let doc = wiki.doc_record(created.doc.id).await.unwrap();
+        let version = wiki
+            .versions
+            .get_as::<WikiVersionRecord>(created.version.id)
+            .await
+            .unwrap();
+        let mut item = fact(("Person", "alice"), "prefers", ("Preference", "dark_mode"));
+        item.citation = citation_uri("test_space", doc._id, version._id, 0, version.size);
+        digest
+            .ensure_vocabulary(std::slice::from_ref(&item))
+            .await
+            .unwrap();
+        let request = digest_request(
+            &doc,
+            &version,
+            &Extraction::default(),
+            std::slice::from_ref(&item),
+            "review",
+            1500,
+        );
+        let response = anda_kip::execute_request(digest.memory.nexus().as_ref(), &request).await;
+        assert!(
+            kip::succeeded(&response),
+            "seed failed: {}",
+            kip::error_message(&response)
+        );
+        wiki.write_event(
+            EVENT_DIGEST_EXTRACTED,
+            Some(doc._id),
+            Some(version._id),
+            "wiki_digest".into(),
+            BTreeMap::from([("facts".into(), json!([item.clone()]))]),
+            1500,
+        )
+        .await
+        .unwrap();
+        (doc, version, item)
+    }
+
+    #[tokio::test]
+    async fn review_wiki_retry_keeps_idempotency() {
+        let (wiki, digest) = test_digest("review_wiki_retry").await;
+        let (doc, version, item) = review_seed_wiki_fact(&wiki, &digest, "retry doc").await;
+        let request = digest_request(
+            &doc,
+            &version,
+            &Extraction::default(),
+            &[item],
+            "review",
+            2500,
+        );
+        let response = anda_kip::execute_request(digest.memory.nexus().as_ref(), &request).await;
+        assert!(
+            kip::succeeded(&response),
+            "retry failed: {}",
+            kip::error_message(&response)
+        );
+    }
+
+    #[tokio::test]
+    async fn review_wiki_retraction_is_document_scoped() {
+        let (wiki, digest) = test_digest("review_wiki_scope").await;
+        let (first, _, item) = review_seed_wiki_fact(&wiki, &digest, "first doc").await;
+        review_seed_wiki_fact(&wiki, &digest, "second doc").await;
+        assert_eq!(
+            digest_claim_status(&digest, &item).await,
+            ["active", "active"]
+        );
+        let count = digest
+            .retract_facts(first._id, std::slice::from_ref(&item), &BTreeSet::new())
+            .await
+            .unwrap();
+        let statuses = digest_claim_status(&digest, &item).await;
+        println!("one document retracted: count={count}; statuses={statuses:?}");
+        assert_eq!(count, 1);
+        assert_eq!(
+            statuses.iter().filter(|s| s.as_str() == "active").count(),
+            1
+        );
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|s| s.as_str() == "retracted")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn review_wiki_fact_can_return_in_a_later_version() {
+        let (wiki, digest) = test_digest("review_wiki_return").await;
+        let (doc, previous, mut item) = review_seed_wiki_fact(&wiki, &digest, "return doc").await;
+        digest
+            .retract_facts(doc._id, std::slice::from_ref(&item), &BTreeSet::new())
+            .await
+            .unwrap();
+        let mut update = commit_input("return doc", "The shared fact returns.\n");
+        update.doc_id = Some(doc._id);
+        update.parent_version = Some(previous._id);
+        let created = wiki.commit("a".into(), update, 2000).await.unwrap();
+        let version = wiki
+            .versions
+            .get_as::<WikiVersionRecord>(created.version.id)
+            .await
+            .unwrap();
+        item.citation = citation_uri("test_space", doc._id, version._id, 0, version.size);
+        let request = digest_request(
+            &doc,
+            &version,
+            &Extraction::default(),
+            std::slice::from_ref(&item),
+            "review",
+            2500,
+        );
+        let response = anda_kip::execute_request(digest.memory.nexus().as_ref(), &request).await;
+        assert!(
+            kip::succeeded(&response),
+            "returned fact failed: {}",
+            kip::error_message(&response)
+        );
+        assert!(
+            digest_claim_status(&digest, &item)
+                .await
+                .iter()
+                .any(|s| s == "active")
+        );
+    }
+
+    #[tokio::test]
+    async fn restoring_the_same_version_starts_a_new_assertion_generation() {
+        let (wiki, digest) = test_digest("same_version_restore").await;
+        let (doc, version, mut item) = review_seed_wiki_fact(&wiki, &digest, "restored doc").await;
+        assert_eq!(
+            digest.retract_digested(&doc, &version, 2000).await.unwrap(),
+            1
+        );
+        assert_eq!(digest_claim_status(&digest, &item).await, ["retracted"]);
+        let (generation, previous) = digest
+            .previous_digest_head(doc._id, version._id + 1)
+            .await
+            .unwrap();
+        assert!(previous.is_empty());
+        assert!(generation > 0);
+        item.assertion_generation = generation;
+        let request = digest_request(
+            &doc,
+            &version,
+            &Extraction::default(),
+            std::slice::from_ref(&item),
+            "review",
+            2500,
+        );
+        for _ in 0..2 {
+            let response =
+                anda_kip::execute_request(digest.memory.nexus().as_ref(), &request).await;
+            assert!(
+                kip::succeeded(&response),
+                "{}",
+                kip::error_message(&response)
+            );
+        }
+        let statuses = digest_claim_status(&digest, &item).await;
+        assert_eq!(
+            statuses.iter().filter(|s| s.as_str() == "active").count(),
+            1
+        );
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|s| s.as_str() == "retracted")
+                .count(),
+            1
+        );
+    }
 
     fn fact(s: (&str, &str), p: &str, o: (&str, &str)) -> DigestedFact {
         DigestedFact {
@@ -1481,6 +1789,7 @@ mod tests {
             confidence: 0.9,
             citation: "wiki://sp/1@2#0-10".to_string(),
             checksum: "sha3-256:x".to_string(),
+            assertion_generation: 0,
         }
     }
 
@@ -1625,14 +1934,22 @@ mod tests {
         );
 
         // Dropping a fact withdraws this reader's claim, scoped to `$self`.
-        let retract = retract_request(&facts[0]);
+        let retract = retract_request("A-1", 1);
         retract.validate().unwrap();
         let command = retract.operations[0].command.clone().unwrap();
         assert!(
-            command.starts_with(r#"TRANSITION ?a TO "retracted""#),
+            command.starts_with(r#"TRANSITION :id TO "retracted""#),
             "{command}"
         );
-        assert!(command.contains("asserted_by: ?self"), "{command}");
+        assert!(command.contains("EXPECT VERSION :version"), "{command}");
+        let candidates = claim_candidates_request(&facts[0], "");
+        assert!(
+            candidates.operations[0]
+                .command
+                .as_ref()
+                .unwrap()
+                .contains("asserted_by: ?self")
+        );
     }
 
     #[test]
@@ -2055,6 +2372,7 @@ mod tests {
             confidence: 0.9,
             citation: citation_uri("test_space", doc._id, v1_version._id, 0, v1_version.size),
             checksum: "sha3-256:x".to_string(),
+            assertion_generation: 0,
         };
         // The Space must declare the extracted symbols before a write can name
         // one; that is the host's decision in KIP 2.0, not the write's.

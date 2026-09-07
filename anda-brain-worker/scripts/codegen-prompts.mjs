@@ -7,12 +7,12 @@
  * one import that both understand, and it keeps the prompts readable as
  * Markdown in the repository rather than as escaped strings in a source file.
  *
- * The Rust service does not need this: `anda_kip` ships the syntax card and the
- * Cognitive Memory Profile with the protocol, and the runtime reads them at
- * completion time. `@ldclabs/kip-do` ships neither, so this Worker vendors
- * copies — with the cost that copies drift. `pnpm run sync:assets` re-syncs
- * every one of them from `anda_kip`, including the reference half of each
- * `Brain*.md`; run it before this.
+ * The Rust service does not need this: `anda_kip` ships the role and syntax
+ * cards plus the Cognitive Memory Profile, and the runtime reads them directly.
+ * `@ldclabs/kip-do` ships none of those assets, so this Worker vendors copies —
+ * with the cost that copies drift. `pnpm run sync:assets` re-syncs every one of
+ * them from `anda_kip`, including the reference half of each `Brain*.md`; run it
+ * before this.
  */
 import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'

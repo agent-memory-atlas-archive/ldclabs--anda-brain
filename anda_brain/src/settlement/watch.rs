@@ -24,7 +24,7 @@ FILTER(IS_NOT_NULL(?w.attributes.condition.element) || IS_NOT_NULL(?w.attributes
     };
     kip::request_with(
         format!(
-            r#"FIND(?w.id, ?w.name, ?w.attributes, ?w._system.version, ?w.facets["WatchState"])
+            r#"FIND(?w.id, ?w.name, ?w.attributes, ?w._system.version, ?w.facets["WatchState"], ?w.schema_ref)
 WHERE {{ ?w CONCEPT {{type: "Watch"}} FILTER(?w.attributes.status == :status) {filter} }}
 ORDER BY ?w.updated_at LIMIT {WATCH_SWEEP_LIMIT}"#
         ),
@@ -71,6 +71,12 @@ pub(crate) fn read_watch_rows(result: &Json) -> Vec<WatchRow> {
                 condition: attributes.get("condition").cloned().unwrap_or(Json::Null),
                 watch: ArmedWatch {
                     id: id.clone(),
+                    schema_ref: columns
+                        .get(5)
+                        .and_then(Json::as_str)
+                        .unwrap_or_default()
+                        .into(),
+                    version: Some(version),
                     name: columns
                         .get(1)
                         .and_then(Json::as_str)
