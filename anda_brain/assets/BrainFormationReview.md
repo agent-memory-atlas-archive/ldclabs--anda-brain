@@ -22,7 +22,7 @@ Re-read the original input messages and verify all durable knowledge was capture
 
 1. Attribution is right: `by:` names the actor whose stance it is, not the caller and not `$self` for something a user said.
 2. `mode` matches how you came to it — `stated` for what someone said, `observed` for what the trace shows, `inferred` for what you concluded, with the premises cited.
-3. Confidence reflects the strength of that one stance: explicitly stated → 0.85–1.0; implied → 0.7–0.85; inferred → 0.5–0.7. It is not a probability that the world is that way.
+3. Confidence, when supplied, reflects the evidence for that attributed stance. It may be absent; never invent a score from a fixed range merely to fill the field. Salience and utility are optional too.
 4. Naming: UpperCamelCase types, snake_case predicates, and a symbol this Space already declares wherever one fits.
 5. No duplicate Concepts, and no second Assertion by the same actor about a Proposition you already asserted this run.
 

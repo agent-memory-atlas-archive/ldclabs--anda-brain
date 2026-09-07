@@ -11,18 +11,21 @@
  * The payload goes last so head/tail truncation keeps the newest turns.
  */
 
+import { BRAIN_CAPABILITIES } from './cognitive.js'
 import type { AiMessage } from './ai.js'
 import {
   BRAIN_FORMATION,
   BRAIN_MAINTENANCE,
   BRAIN_RECALL,
   COGNITIVE_MEMORY_PROFILE,
-  KIP_SYNTAX,
+  KIP_FORMATION_CARD,
+  KIP_RECALL_CARD,
+  KIP_MAINTENANCE_CARD,
 } from './assets.generated.js'
 import type { FormationInput, MaintenanceInput, RecallInput } from './types.js'
 
-/** The KIP 2.0 syntax card and the memory ontology, in that order. */
-const LANGUAGE_REFERENCE = `${KIP_SYNTAX}\n\n---\n\n${COGNITIVE_MEMORY_PROFILE}`
+/** Load the role-specific card with the ontology and actual adapter limits. */
+const reference = (card: string): string => `${card}\n\n${COGNITIVE_MEMORY_PROFILE}\n\nBrain adapter capabilities (distinct from engine Schema): ${JSON.stringify(BRAIN_CAPABILITIES)}`
 
 export function formationMessages(
   primer: unknown,
@@ -30,7 +33,7 @@ export function formationMessages(
   timestamp: string,
 ): AiMessage[] {
   return [
-    { role: 'system', content: `${BRAIN_FORMATION}\n\n---\n\n${LANGUAGE_REFERENCE}` },
+    { role: 'system', content: `${BRAIN_FORMATION}\n\n---\n\n${reference(KIP_FORMATION_CARD)}` },
     {
       role: 'user',
       content: boundedJson({
@@ -46,7 +49,7 @@ export function formationMessages(
 
 export function recallPlanMessages(primer: unknown, input: RecallInput): AiMessage[] {
   return [
-    { role: 'system', content: `${BRAIN_RECALL}\n\n---\n\n${LANGUAGE_REFERENCE}` },
+    { role: 'system', content: `${BRAIN_RECALL}\n\n---\n\n${reference(KIP_RECALL_CARD)}` },
     {
       role: 'user',
       content: boundedJson({
@@ -68,7 +71,7 @@ export function recallPlanMessages(primer: unknown, input: RecallInput): AiMessa
  */
 export function recallAnswerMessages(input: RecallInput, evidence: unknown): AiMessage[] {
   return [
-    { role: 'system', content: `${BRAIN_RECALL}\n\n---\n\n${COGNITIVE_MEMORY_PROFILE}` },
+    { role: 'system', content: `${BRAIN_RECALL}\n\n---\n\n${reference(KIP_RECALL_CARD)}` },
     {
       role: 'user',
       content: boundedJson({
@@ -87,7 +90,7 @@ export function maintenanceMessages(
   timestamp: string,
 ): AiMessage[] {
   return [
-    { role: 'system', content: `${BRAIN_MAINTENANCE}\n\n---\n\n${LANGUAGE_REFERENCE}` },
+    { role: 'system', content: `${BRAIN_MAINTENANCE}\n\n---\n\n${reference(`${KIP_RECALL_CARD}\n${KIP_FORMATION_CARD}\n${KIP_MAINTENANCE_CARD}`)}` },
     {
       role: 'user',
       content: boundedJson({ stage: 'maintenance', timestamp, request: input, snapshot }),

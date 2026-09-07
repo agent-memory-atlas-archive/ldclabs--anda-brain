@@ -1,5 +1,7 @@
 # KIP 2.0 Brain — Memory Formation
 
+**[English](./BrainFormation.md) | [中文](./BrainFormation_CN.md)**
+
 ## Status
 
 **Reference Anda Brain Formation Policy**
@@ -9,8 +11,8 @@ This document defines one reference memory-formation policy for a KIP 2.0 Brain.
 It assumes:
 
 ```text
-SPECIFICATION.md
-KIPSyntax.md                 (LLM-facing syntax card; load with this prompt)
+KIP-2.0-SPECIFICATION.md
+brain/KIPFormation.md        (role card; full KIPSyntax.md only as needed)
 profiles/CognitiveMemoryProfile-2.0.md
 brain/ExperienceLearningArchitecture.md
 ```
@@ -112,9 +114,11 @@ Outcome Evidence + OutcomeRecord + outcome_observation link (instrumentation inp
 
 The empty write is valid.
 
-When instrumentation reports a consequence — telemetry, a verifier, a test harness, a human reviewer — form Outcome Evidence with its `OutcomeRecord` (`task_family`, `outcome_status`) through the ingestion context's `facets`, keep the payload transport-typed (Spec Invariant 33), and link it to the decision it grades with an `outcome_observation` Activity (inputs: the `action_gate` Activity; outputs: the outcome). An unlinked outcome joins the stream's baseline and grades nothing (Spec §15.7, Profile §8.1); writing either needs `record_outcome`. Never form `outcome` Evidence from the agent's own account of how its action went: that account is `agent_statement`, and summarizing instrument output yields `derived_result`, not `outcome` (Spec §15.7).
+When instrumentation reports a consequence — telemetry, a verifier, a test harness, a human reviewer — form Outcome Evidence with its `OutcomeRecord` (`task_family`, `outcome_status`) through the ingestion context's `facets`, keep the payload transport-typed (Spec Invariant 33), and link it to the decision it grades with an `outcome_observation` Activity (inputs: the `action_gate` Activity; outputs: the outcome). An unlinked outcome stays stream material and grades nothing; a baseline requires an explicit comparable selection (Spec §15.7, Profile §8.1); writing either needs `record_outcome`. Never form `outcome` Evidence from the agent's own account of how its action went: that account is `agent_statement`, and summarizing instrument output yields `derived_result`, not `outcome` (Spec §15.7).
 
-When a structured trace shows the agent deciding — which Skill it applied, which memories the briefing gave it, what the gate said — form the `action_gate` Activity with its `DecisionRecord` and name what was applied in `inputs`. Without that record the consequence channel has nothing to grade.
+Instrumentation attaches attempt_ref, metric/window, terminal flag, observation_key and observer_config_digest. An attempt must have fixed its trial and exact applied revisions before dispatch. Multiple observations of one attempt do not add independent samples.
+
+When a structured trace shows the agent deciding — which Skill it applied, which memories the briefing gave it, what the gate said — form the `action_gate` Activity with its `DecisionRecord` and name what was applied in `inputs`. DecisionRecord distinguishes retrieved_refs, used_refs and applied_revisions and pins its full basis. Without that record and the actual AttemptRecord the consequence channel has no attributable treatment attempt.
 
 # 4. Store Bar
 
@@ -139,6 +143,8 @@ stable self-model signal
 Usually skip acknowledgements, low-value small talk, temporary formatting requests, duplicate retries, process noise, speculative low-value inference, and private chain-of-thought.
 
 Storing is a bet that the element will matter to a future decision. Record the bet: where `MnemonicState` is set at formation, set `utility` too, so Maintenance can later calibrate it against actual use instead of guessing which memories earn their keep.
+
+Keep short-lived source Evidence and durable semantic products under separate explicit budgets. Record admission/defer/rejection and CompressionRecord when loss matters, including extractor/schema versions, preserved fields, omissions and re-encoding eligibility. An unresolved entity/Schema can remain Evidence-only. Digest retention does not recover omitted facts; clear raw bytes only under an explicit retention decision that accounts for pending review/re-encoding.
 
 # 5. Workflow
 
@@ -317,6 +323,7 @@ MUTATE {
       activity_class: "extraction",
       status: "completed"
     }
+    SET FACET "DependencyBasis" {basis_seq: :basis_seq, groups: :dependency_groups, policy_basis: :basis}
     SET STRUCTURAL {
       ("inputs", ?message)
       ("outputs", ?a)
@@ -403,6 +410,7 @@ MUTATE {
   }
   CREATE ACTIVITY ?formation {
     SET FIELDS {activity_class: "extraction", status: "completed"}
+    SET FACET "DependencyBasis" {basis_seq: :basis_seq, groups: :dependency_groups, policy_basis: :basis}
     SET STRUCTURAL {
       ("inputs", :msg)
       ("outputs", ?event)
@@ -525,6 +533,8 @@ client_key                  → durable event-like element identity
 
 Timeout is not abort. Lookup transaction/idempotency outcome before re-forming non-idempotent cognition.
 
+A new behavior creates SkillRevision; it never edits procedure or task_family on an adopted Skill. Selecting a revision atomically resets current standing and trial/grade pointers without altering the old immutable evaluations.
+
 # 27. Transaction Boundaries
 
 Atomic when partial state would mislead:
@@ -572,6 +582,14 @@ On success, return/record Receipt with `tx_id`/`space_seq` and stop. Do not read
 For `outcome_unknown`, lookup by idempotency key/transaction status before retrying. Never infer `timeout → nothing written`.
 
 # 34. Output Contract
+
+When exposed through the optional Memory Interface, use its normative response
+schema and processing receipt. The legacy internal summary below describes a
+formation transaction only: stored does not by itself prove a source is fully
+processed or recallable. Intake must record pending work durably; an after barrier
+waits for the processed disposition and recall availability. Task scope is preserved
+through extraction; scoped Assertions use explicit context_refs because ASSERT
+sugar has no context member. Missing estimates are not guessed to fill fields.
 
 ```json
 {
@@ -630,7 +648,7 @@ No-memory result:
 Everything above is the reference Formation policy. This section is what *this*
 deployment adds or constrains.
 
-The syntax card (`KIPSyntax.md`) and the Cognitive Memory Profile are supplied
+The applicable KIP role card and the Cognitive Memory Profile are supplied
 in your context, along with a live `DESCRIBE PRIMER` for this Space.
 
 ## A.1 Request
@@ -776,28 +794,25 @@ request asking for it is refused with `UnsupportedCapability` rather than run
 as a sequence that looks like one. Send one `MUTATE`, or a `sequence` whose
 operations can each stand alone.
 
-Set `MnemonicState` on Concepts you create. Three members, three different
-questions, none of them confidence:
+Mnemonic estimates are optional. Preserve meaningful supplied confidence,
+salience and utility; leave them absent when no defensible estimate exists.
 
-- `memory_strength` — how available this should be later.
-- `salience` — how noteworthy it is.
-- `utility` — the admission bet. Storing something is a wager that it will
-  change a future decision; `utility` is what you wagered. Set it whenever you
-  set the other two (§4), because Maintenance calibrates it against what
-  actually got used, and it cannot calibrate a bet nobody recorded — it would
-  be left guessing which memories earned their keep.
+## A.9 CognitiveMemory 2.1 boundary
 
-A Concept without the Facet still metabolizes from a default, but you are the
-only one who knows whether this memory mattered.
-
-## A.6 Answer
-
-Return the reference output contract (§34) — `stored` with its product counts
-and receipt, or:
-
-```json
-{"status": "skipped", "reason": "no durable cognitive value"}
-```
-
-The empty write is a real answer. A conversation that taught this Brain nothing
-should cost it nothing.
+The installed Profile is vocabulary, not an advertised Memory Interface or
+learning bundle. Use the existing Formation API. No processing receipt or recall
+after barrier is implied by a conversation id or by committed Evidence alone.
+Preserve source and task context. Topic strings are not authorization or global
+scope. For an exact authorized context use explicit CREATE ASSERTION context_refs;
+ASSERT sugar has no context member. Unresolved scope/actor/meaning stays explicit.
+Feedback is attributed Evidence, not a gradable OutcomeRecord. Model plans cannot
+write learning/runtime record facets (TrialRecord, EvaluationRecord, AttemptRecord,
+OutcomeRecord, TrialState, GradingState, WatchState, LeaseState).
+Create SleepTask as pending and Watch as disarmed; Maintenance handles the host
+lease/arm step. Procedures remain unproven Skill + immutable SkillRevision with
+both structural links in one MUTATE; never invent a behavior digest. Confidence,
+salience and utility are optional; repeated reports are not independent attempts.
+Use memory_runtime content_digest to hash all SkillRevision attributes except
+behavior_digest; operation syntax loads the full language reference. Formation
+cannot call its arm_watch or lease_task operations. The observation bindings and
+ingest block belong to the host; do not override them in an execute_kip request.

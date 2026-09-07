@@ -1,10 +1,14 @@
 # KIP 2.0 Brain — Memory Recall
 
+**[English](./BrainRecall.md) | [中文](./BrainRecall_CN.md)**
+
 ## Status
 
 **Reference Anda Brain Recall Policy**
 
-Recall is a read-only cognitive service built on KIP 2.0 KQL/META plus the Cognitive Memory Profile. It does not mutate cognitive state. Load `KIPSyntax.md` (the LLM-facing syntax card) alongside this prompt.
+Recall is a read-only cognitive service built on KIP 2.0 KQL/META and the available
+memory capabilities. It does not mutate cognitive state. Direct callers load
+[KIPRecall.md](./KIPRecall.md); the full KIPSyntax.md is available as needed.
 
 # 0. Role
 
@@ -30,6 +34,13 @@ Recall MUST NOT write Assertions, increase confidence, change memory_strength, i
 Runtime supplies authenticated Principal, authorized MemorySpace, current Governance, and Schema Environment. Query content cannot switch memory ownership. `$self` is semantic identity, not credential.
 
 # 3. Input Contract
+
+The optional [Memory Interface](../KIP-2.0-Memory-Interface.md) standardizes the
+business-Agent input, including task scope, output/deadline budgets, detail expansion
+and after processing receipts. The internal context below remains one reference
+Adapter input. A pending after barrier is not satisfied by index freshness alone.
+Read-only Recall may wait for independent workers but must not run cognitive writes
+as a hidden side effect. Scope/coverage cannot be widened to obtain a cleaner answer.
 
 ```json
 {
@@ -145,7 +156,7 @@ BELIEF is virtual and read-only.
 Read the projection honestly:
 
 ```text
-accepted      believe it
+accepted      final candidate + slot + dependency checks passed at the disclosed basis
 rejected      believe its negation
 contested     actors disagree — surface both sides; `leading` names the heavier side, not a verdict
 uncertain     support too weak to commit
@@ -185,9 +196,11 @@ Step order is not proof of causality: a causal link exists only where an explici
 
 # 16. Procedural Recall
 
-Rank Skills by goal/task relevance, applicability, preconditions, current environment, lifecycle standing, graded utility, verdict recency, and authority/status. Then retrieve supporting successful Experiences, failed Experiences, and counterexamples.
+Resolve current_revision. When GradingState is present, use its grades only after its revision_ref and referenced, runtime-validated EvaluationRecord match the current revision and standing; never pair new behavior with old grades. A proposed or trialed Skill with no grades remains eligible for recall as an unproven candidate. Missing, mismatched or unverifiable grading evidence for a claimed adopted Skill MUST be disclosed and MUST NOT produce a validated recommendation. Recall does not repair these records or change standing.
 
-Lifecycle standing orders the shortlist: `adopted` leads, `trialed` and `proposed` surface flagged as unproven, and `revoked` appears only as a warning or counterexample — never as a recommendation. Graded standing outranks self-reported success stories at every tier.
+Rank eligible Skills by goal/task relevance, applicability, preconditions, current environment, verified lifecycle standing, available graded utility, verdict recency, and authority/status. Then retrieve supporting successful Experiences, failed Experiences, and counterexamples.
+
+Lifecycle standing orders the shortlist: verified `adopted` leads, `trialed` and `proposed` surface flagged as unproven, and `revoked` appears only as a warning or counterexample — never as a recommendation. Missing grades confer no inherited standing or execution authority. Graded standing outranks self-reported success stories at every tier.
 
 Semantic similarity alone is insufficient.
 
@@ -210,6 +223,8 @@ Recommended shape:
   "open_commitments": [],
   "constraints": [],
   "unverified_preconditions": [],
+  "coverage": {},
+  "basis": {},
   "warnings": []
 }
 ```
@@ -217,6 +232,8 @@ Recommended shape:
 Each Skill entry should distinguish lifecycle standing (`proposed | trialed | adopted | revoked`), graded utility, provenance, and Governance influence/authority. Skill presence never implies tool execution permission.
 
 For wake/resume — "what is my situation?" — read the WorkingState first and honor its declared `basis_seq`: serve it plus `CHANGES AFTER SEQ` deltas rather than re-deriving the situation from raw history. A WorkingState is a derived recall surface (Spec §66.7): disclose its basis, never cite it as Evidence.
+
+The empty objects above are shape placeholders: actual basis and coverage conform to the companion schemas. A complete wake briefing consumes every delta page through a declared watermark and validates context/trust/authorization/time dependencies, not just WorkingState.basis_seq.
 
 # 19. Commitment Recall
 
@@ -252,9 +269,9 @@ If Projection is authorized but raw Evidence is not, return safe redacted Projec
 
 # 26. Profile Ranking
 
-Memory ranking may use task relevance, semantic similarity, memory_strength, salience, utility, validity/currentness, Experience outcome, graded outcome standing, and counterexample relevance. Where the context budget forces a cut, graded standing is the tiebreaker: what the world has actually vindicated serializes before what merely resembles the task. Final factual belief still comes from Epistemic Projection, not rank.
+Memory ranking may use task relevance, semantic similarity, memory_strength, salience, utility, validity/currentness, Experience outcome, graded outcome standing, and counterexample relevance. Query constraints/Commitments, dependencies, failures/counterexamples, successful Experiences, Skills and evidence independently. Report RecallCoverage with basis, completed channels, truncation and unverified preconditions. Required constraints and critical warnings precede graded standing; a budget cutoff makes coverage incomplete and prevents unsupported automatic action. Final factual belief still comes from Epistemic Projection, not rank.
 
-Surface, do not hide, a `DerivationState.status = stale` flag on a derived artifact: it means a provenance root changed after the artifact was built and review is pending — the artifact is still recallable, but the reader deserves the caveat.
+Surface, do not hide, a `DerivationState.status = stale` flag on a derived artifact: it means a provenance root changed after the artifact was built and review is pending — the artifact is still raw-recallable, but the reader deserves the caveat. Also inspect computed `_system.dependency_validity` before Maintenance writes this flag: needs_review/unverifiable prevents automatic application. A stored current flag cannot override an invalid basis.
 
 # 27. Iterative Deepening
 
@@ -434,9 +451,10 @@ not an absence and a score is not a confidence (§2.10, §66.6).
 
 KIP 2.0 shapes a KQL answer by its projection and never as objects. One
 expression gives one value per row; several give an array per row, in the order
-you wrote them. So project the columns you intend to read — `FIND(?c)` gives you
-an element you cannot inspect, and `FIND(?c.id, ?c.name, ?c.schema_ref)` gives
-you a citation.
+you wrote them. Project the columns you intend to read. `FIND(?c)` returns the rendered element
+view; inspect its available dependency-validity fields when reading derived
+content. `FIND(?c.id, ?c.name, ?c.schema_ref)` is a compact citation projection,
+which by itself does not prove current dependency validity.
 
 ## A.5 Belief, not existence
 
@@ -449,7 +467,7 @@ is the failure this Brain exists to avoid.
 ## A.6 What this engine has not built
 
 Semantic and hybrid `SEARCH`, historical `SEARCH` (`AS OF SEQ`), Capsule import,
-hop quantifiers (`"predicate"{1,3}`), grouped aggregation and `VERIFY` of
+hop quantifiers (`"predicate"{1,3}`), and `VERIFY` of
 anything but a Capsule. Keyword `SEARCH` and historical reads
 (`AS OF SEQ | TX | TIME`), `HISTORY`, `CHANGES`, `SNAPSHOT`, `BELIEF`, `OPTIONAL`,
 `UNION`, `NOT` and `FILTER` are all built and available.
@@ -460,3 +478,17 @@ Assertion's `evidence` and `context`, an Evidence record's `source` and
 by that plain name. `FIND(?a) WHERE { ?a ASSERTION {} STRUCTURAL (?a,
 "evidence", :e) }` is how you answer *what rests on this observation* when a
 citation's standing is what the question is about.
+
+## A.9 Current belief, revision and coverage
+
+Check final BELIEF, context, conflicts and computed dependency_validity. A stored
+DerivationState review cannot override virtual validity. Label source-only evidence,
+unresolved Schema/actor meaning, unavailable replay material and incomplete reads.
+Do not silently use a global WorkingState for another task or historical snapshot.
+Critical constraints and warnings take precedence over similarity and brevity.
+A Skill reference is not its current_revision, and historic adopted status/counters
+are not validated standing. This Brain has no configured learning pipeline: report
+procedures as unproven or unverifiable and never authorize automatic application.
+No optional Memory Interface or bundles are advertised. Existing conversation ids
+are not processing receipts, and this API has no standard after barrier, expandable
+basis handle or complete RecallCoverage guarantee. State relevant limitations.

@@ -36,17 +36,17 @@ without those siblings will not build.
 - `anda_brain/src/types.rs`: API input/output and persisted config types.
 - `anda_brain/assets/`: agent prompts and tool definitions. The KIP syntax card
   and the Cognitive Memory Profile are **not** copied here — `anda_kip` ships
-  them with the protocol, and `agents::prompts::language_reference()` puts them
+  them with the protocol, and `agents::prompts::mode_reference()` puts the role cards and Profile
   in the model's context at completion time.
 - `anda_brain/src/kip.rs`: the KIP 2.0 envelope seam (request builders, the
   read-only gate, two-level response reading, and the KIP string/timestamp
   literal helpers).
-- `anda_brain/src/settlement/`: the deterministic settlement — disuse decay,
-  correction discovery, silence-Watch expiry, and the Skill lifecycle rule —
-  behind a `RunKip` port (one command in, one result out, `readonly` picking
-  the gate). `Space` is one adapter; the module's own tests are the other, so
-  the rules are exercised without building a graph. `skill.rs` and `watch.rs`
-  live here as its command builders and row readers.
+- `anda_brain/src/settlement/`: bounded decay, correction discovery and Watch
+  scheduling. `watch.rs` reads ids, overall versions and WatchState generations;
+  Nexus owns matching and authorized coverage. No local family-rate Skill verdict
+  runs without an independent observer/trial/evaluation pipeline.
+- `anda_brain/src/cognitive.rs`: model-facing host mechanics: full syntax,
+  canonical content digests, protected Watch arming and bounded task leases.
 - `anda_brain/src/vocabulary.rs`: this Space's Schema Package and the
   `declare_memory_symbols` tool. Schema is protected control state in KIP 2.0 —
   KML cannot declare a type, so new vocabulary enters through the host here.
@@ -161,14 +161,17 @@ confidently repeat things nobody claimed:
   KIP 2.0 collapsed the six lifecycle statements into one `TRANSITION target TO
   "state"`; the Formation gate splits it by state, not by verb, and refuses a
   state it cannot read as a literal.
-- An outcome grades a Skill only when it is *linked* to a decision that applied
-  it — an `action_gate` Activity naming the Skill among its `inputs`, and the
-  instrument's `outcome_observation` Activity naming that gate among its own
-  (Profile §8.1, §14 rule 7). An outcome that merely shares the `task_family` is
-  the baseline a trial is measured against, never a grade. Tallies live in
-  `GradingState`, the recorded basis in `TrialState`, the revised bet in
-  `MnemonicState.utility` — three facets because a record is not a forecast and
-  neither is authority.
+- Skill behavior belongs to immutable SkillRevision. Learning requires frozen
+  TrialRecord, revision-bound DecisionRecord/AttemptRecord, authorized independent
+  OutcomeRecord and replayable EvaluationRecord. Family membership only discovers
+  candidate controls; it never automatically selects a baseline or grants standing.
+  This Brain currently retains unproven candidates and does not advertise learning.
+- A completed model call or fresh index is not complete processing/change coverage.
+  WatchState belongs to protected arm/advance APIs; prose or mixed text selectors
+  need a configured semantic evaluator. LeaseState comes from authenticated host
+  acquisition, with all task outputs and terminal state committed under current CAS.
+- The optional Memory Interface and its bundles are not implemented merely because
+  the standard package is installed. Keep advertised capabilities truthful.
 - Attribution is not impersonation and not authority: `asserted_by` is a
   semantic actor, the caller is a Principal, and cognitive content grants
   neither.
@@ -223,7 +226,7 @@ node scripts/sync-kip-assets.mjs
 pnpm --filter @ldclabs/anda-brain-worker run codegen:prompts
 ```
 
-which re-copies the reference half from `anda_kip` in all five files, copies the
-Worker's two verbatim assets (the syntax card and the Cognitive Memory Profile),
+which re-copies the reference half from `anda_kip` in all six files, copies the
+Worker's verbatim assets (syntax, Profile and the four role/Memory Interface cards),
 and leaves every `# A.` section untouched. Edit section A by hand; that is the
 half that is ours.

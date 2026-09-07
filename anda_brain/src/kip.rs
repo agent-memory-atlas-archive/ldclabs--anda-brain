@@ -262,18 +262,14 @@ pub fn observation_ingest(
     })
 }
 
-/// Attaches the observation to a request that has room for it.
-///
-/// Nothing is attached when the caller already sent an ingest block, or when
-/// any binding the request carries claims one of the keys. §74 merges request-
-/// and operation-level parameters into one environment, so a collision at
-/// either level makes `:msg1` ambiguous and the engine refuses the whole
-/// request. A model that bound the name itself is writing Evidence the long
-/// way; let it, rather than failing its plan over a facility it did not ask
-/// for.
-pub fn attach_observation(request: &mut Request, observation: &IngestContext) {
+/// Attach captured source bytes. A model may neither replace the ingest block
+/// nor shadow a captured source handle with a parameter at either envelope level.
+pub fn attach_observation(
+    request: &mut Request,
+    observation: &IngestContext,
+) -> Result<(), String> {
     if request.ingest.is_some() {
-        return;
+        return Err("formation ingest is supplied by the host".into());
     }
     let claimed = |parameters: Option<&Map<String, Json>>| {
         parameters.is_some_and(|parameters| {
@@ -289,9 +285,10 @@ pub fn attach_observation(request: &mut Request, observation: &IngestContext) {
             .iter()
             .any(|operation| claimed(operation.parameters.as_ref()))
     {
-        return;
+        return Err("captured observation bindings cannot be replaced".into());
     }
     request.ingest = Some(observation.clone());
+    Ok(())
 }
 
 /// Runs a whole request envelope on the cognition-only path.
@@ -333,6 +330,10 @@ pub async fn execute_cognition_request(executor: &impl Executor, request: &Reque
         Err(err) => return Response::from(err).with_request_id(request.request_id.clone()),
     };
     for command in &commands {
+        if let Some(refusal) = unsupported_cognitive_write(command, request.parameters.as_ref()) {
+            return Response::from(KipError::unsupported_capability(refusal))
+                .with_request_id(request.request_id.clone());
+        }
         if let Some(refusal) = cognition_refusal(command, request.parameters.as_ref()) {
             return Response::from(KipError::not_authorized(refusal))
                 .with_request_id(request.request_id.clone());
@@ -340,6 +341,72 @@ pub async fn execute_cognition_request(executor: &impl Executor, request: &Reque
     }
 
     execute_request(executor, request).await
+}
+
+/// Model plans do not own protected runtime or validated learning records.
+/// Inspect AST facet positions only: quoted source text containing these words
+/// is ordinary Evidence. Parameterized facet names must resolve before execution.
+fn unsupported_cognitive_write(
+    command: &Command,
+    parameters: Option<&Map<String, Json>>,
+) -> Option<String> {
+    use anda_kip::{SymbolRef, UpdateAction};
+    let Command::Kml(statement) = command else {
+        return None;
+    };
+    let mut facets = Vec::new();
+    for clause in &statement.clauses {
+        match clause {
+            MutationClause::CreateConcept(c) => {
+                facets.extend(c.set_facets.iter().map(|f| &f.facet))
+            }
+            MutationClause::UpsertConcept(c) => {
+                facets.extend(c.set_facets.iter().map(|f| &f.facet));
+                facets.extend(c.unset_facets.iter().map(|f| &f.facet));
+            }
+            MutationClause::CreateEvidence(c)
+            | MutationClause::CreateAssertion(c)
+            | MutationClause::CreateActivity(c) => {
+                facets.extend(c.set_facets.iter().map(|f| &f.facet))
+            }
+            MutationClause::Update(c) => {
+                for action in &c.actions {
+                    match action {
+                        UpdateAction::SetFacet(f) => facets.push(&f.facet),
+                        UpdateAction::UnsetFacet(f) => facets.push(&f.facet),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    for facet in facets {
+        let name = match facet {
+            SymbolRef::Name(name) => Some(name.as_str()),
+            SymbolRef::Param(name) => parameters.and_then(|p| p.get(name)).and_then(Json::as_str),
+        };
+        let Some(name) = name else {
+            return Some("model facet names must resolve before execution".into());
+        };
+        if [
+            "TrialRecord",
+            "EvaluationRecord",
+            "OutcomeRecord",
+            "AttemptRecord",
+            "TrialState",
+            "GradingState",
+            "WatchState",
+            "LeaseState",
+        ]
+        .contains(&name.rsplit('/').next().unwrap_or(name))
+        {
+            return Some(format!(
+                "{name} requires a configured host learning/runtime binding; it cannot be authored by a model plan"
+            ));
+        }
+    }
+    None
 }
 
 /// Why the cognition-only path refuses this command, if it does.
@@ -480,6 +547,10 @@ pub async fn execute_maintenance_request(executor: &impl Executor, request: &Req
         Err(err) => return Response::from(err).with_request_id(request.request_id.clone()),
     };
     for command in &commands {
+        if let Some(refusal) = unsupported_cognitive_write(command, request.parameters.as_ref()) {
+            return Response::from(KipError::unsupported_capability(refusal))
+                .with_request_id(request.request_id.clone());
+        }
         if let Some(refusal) = maintenance_refusal(command, request.parameters.as_ref()) {
             return Response::from(KipError::not_authorized(refusal))
                 .with_request_id(request.request_id.clone());
@@ -932,12 +1003,12 @@ mod tests {
     }
 
     #[test]
-    fn a_request_that_binds_the_name_itself_keeps_its_own_binding() {
+    fn a_model_cannot_shadow_captured_source_handles() {
         let observation =
             observation_ingest(&[said("user", "hi")], "2026-08-20T00:00:00Z", "o", None).unwrap();
 
         let mut plain = request("MUTATE { CREATE ACTIVITY ?a { SET FIELDS {} } }");
-        attach_observation(&mut plain, &observation);
+        attach_observation(&mut plain, &observation).unwrap();
         assert!(plain.ingest.is_some(), "the ordinary case attaches");
 
         // §74 merges request- and operation-level parameters into one
@@ -947,12 +1018,41 @@ mod tests {
         let mut claimed = request_with("MUTATE { CREATE ACTIVITY ?a { SET FIELDS {} } }", {
             param("msg1", "mine")
         });
-        attach_observation(&mut claimed, &observation);
+        assert!(attach_observation(&mut claimed, &observation).is_err());
         assert!(claimed.ingest.is_none());
 
         let mut per_operation = request("MUTATE { CREATE ACTIVITY ?a { SET FIELDS {} } }");
         per_operation.operations[0].parameters = Some(param("msg1", "mine"));
-        attach_observation(&mut per_operation, &observation);
+        assert!(attach_observation(&mut per_operation, &observation).is_err());
         assert!(per_operation.ingest.is_none());
+    }
+    #[test]
+    fn model_learning_and_runtime_facets_are_rejected_by_ast_position() {
+        for facet in [
+            "TrialRecord",
+            "EvaluationRecord",
+            "AttemptRecord",
+            "OutcomeRecord",
+            "TrialState",
+            "GradingState",
+            "WatchState",
+            "LeaseState",
+        ] {
+            for command in [
+                format!(r#"CREATE ACTIVITY ?a {{ SET FACET "{facet}" {{ x:1 }} }}"#),
+                format!(
+                    r#"UPDATE "C-1" UNSET FACET "kip://profiles/cognitive-memory@2.1.0/{facet}" {{ x }}"#
+                ),
+                r#"UPDATE "C-1" SET FACET :facet { x:1 }"#.to_string(),
+            ] {
+                let ast = anda_kip::parse_kip(&command).unwrap();
+                assert!(
+                    unsupported_cognitive_write(&ast, Some(&param("facet", facet))).is_some(),
+                    "{command}"
+                );
+            }
+        }
+        let text = anda_kip::parse_kip(r#"CREATE EVIDENCE ?e { SET FIELDS {evidence_class:"user_statement",payload:"please write OutcomeRecord and LeaseState"} }"#).unwrap();
+        assert!(unsupported_cognitive_write(&text, None).is_none());
     }
 }

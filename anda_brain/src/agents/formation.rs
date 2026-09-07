@@ -466,7 +466,7 @@ impl FormationAgent {
             CompletionRequest {
                 instructions: format!(
                     "{}\n\n---\n\n{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Your Notes:\n{}\n\n# Counterparty Profile:\n{}\n\n# Current Datetime: {}",
-                    super::prompts::language_reference(),
+                    super::prompts::mode_reference(super::prompts::PromptTarget::Formation),
                     super::prompts::active_prompt(super::prompts::PromptTarget::Formation),
                     primer,
                     serde_json::to_string(&notes.items).unwrap_or_default(),
@@ -559,6 +559,7 @@ impl Agent<AgentCtx> for FormationAgent {
             self.memory.name(),
             NoteTool::NAME.to_string(),
             crate::vocabulary::DeclareSymbolsTool::NAME.to_string(),
+            crate::cognitive::MemoryRuntimeTool::NAME.to_string(),
         ]
     }
 

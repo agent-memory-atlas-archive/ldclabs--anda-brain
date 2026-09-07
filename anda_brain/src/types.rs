@@ -626,6 +626,11 @@ fn default_trigger() -> String {
 /// Reading them here is what makes that sentence true.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct MaintenanceAssessment {
+    /// Host pass failures. Model completion cannot turn a failed pass into a
+    /// successful no-op or a complete coverage claim.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settlement_errors: Vec<String>,
+
     /// Registered predicate → number of links using it, from the last
     /// full-scope census. Vocabulary sprawl is visible here and nowhere else:
     /// two predicates meaning one thing show up as two thin counts.
@@ -648,10 +653,8 @@ pub struct MaintenanceAssessment {
 
     /// The Space's sequence coordinate as this cycle began.
     ///
-    /// Two uses, both of which need a number the model cannot get from a
-    /// query: it is the `basis_seq` a refreshed `WorkingState` is stamped
-    /// with, and it is the coordinate a later `CHANGES AFTER SEQ` reads from.
-    /// Absent when the engine could not answer.
+    /// Current Space head for orientation. It is not a substitute for the real
+    /// ProjectionBasis and dependency pins of a refreshed WorkingState.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub space_seq: Option<u64>,
 
@@ -663,23 +666,13 @@ pub struct MaintenanceAssessment {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub armed_watches: Vec<ArmedWatch>,
 
-    /// Watches that have fired and that nobody has decided about yet — the
-    /// action gate's queue.
-    ///
-    /// The runtime fires a silence Watch when its deadline passes, which is
-    /// arithmetic; what to do about it is not, and stays here until the cycle
-    /// records an `action_gate` outcome and disarms it.
+    /// Fired attention. A fired Watch grants no external authority and is not
+    /// automatically acknowledged or disarmed by this deployment.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fired_watches: Vec<ArmedWatch>,
 
-    /// The coordinate the last completed maintenance cycle read the Change
-    /// Stream through — where this cycle's `CHANGES AFTER SEQ` starts.
-    ///
-    /// Recorded by the runtime when a cycle completes, from the `space_seq`
-    /// that cycle was handed. It is also what a prose silence Watch waits on
-    /// (Profile §5.11): the sweep fires one only once this record has reached
-    /// the head at which it first saw the deadline passed. Absent until a
-    /// cycle has completed.
+    /// Legacy response field, no longer populated. Per-Watch consumed_seq is
+    /// protected WatchState; model completion never attests stream coverage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consumed_seq: Option<u64>,
 
@@ -1221,41 +1214,32 @@ pub struct RecallOutput {
 /// What one sweep did.
 #[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct WatchSettlement {
-    /// Silence Watches whose `due_at` had passed and that this sweep fired.
+    /// Delta or silence Watches fired by native advancement.
     pub fired: u64,
-
-    /// Watches that were due but whose fire did not commit — almost always
-    /// because the maintenance model changed the same Watch between the scan
-    /// and the write, which `EXPECT VERSION` refuses rather than clobbers.
-    /// They stay `armed` and the next sweep sees them again.
+    /// Refused version, generation or control-basis checks; requires refresh.
     pub conflicted: u64,
-
-    /// Silence Watches whose awaited change arrived before their deadline —
-    /// evaluated by the runtime against the Change Stream and stood down,
-    /// because the silence they were armed for can no longer happen.
+    /// Legacy field also counting matched silence Watches expired by Nexus.
     #[serde(default)]
     pub disarmed: u64,
-
-    /// Silence Watches past their deadline that were held rather than fired:
-    /// the Change Stream had not yet been consumed through the coordinate
-    /// current at the deadline (Profile §5.11), so "nothing matched" was not
-    /// yet a fact. They fire once it has.
+    /// Assessed Watches left armed, including unsupported text conditions and
+    /// incomplete change coverage. Counts cover the bounded scheduling window.
     #[serde(default)]
     pub deferred: u64,
-
-    /// Set when the scan itself failed: no Watch was evaluated this cycle, and
-    /// reporting zero fired would read as "nothing was due".
+    /// Scan/runtime failure or a legacy Watch without an observation basis.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
 /// What one Skill lifecycle pass decided.
 ///
-/// The transitions themselves are deterministic code (see
-/// [`crate::settlement::skill`]);
-/// this is only the count, for the cycle's health report.
+/// Counts remain for compatibility; unsupported_reason distinguishes an
+/// unconfigured learning pipeline from a completed evaluation with no changes.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 pub struct SkillSettlement {
+    /// No evaluation ran when the host has no configured learning pipeline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsupported_reason: Option<String>,
+
     /// Skills whose tallies or standing moved.
     pub graded: u64,
 
@@ -1275,8 +1259,8 @@ pub struct SkillSettlement {
 
 /// Per-source correction statistics (memory evolution plan, module M3),
 /// aggregated at settlement time into the `source_reliability` space
-/// extension. High correction counts mark a source whose facts deserve a
-/// lower initial confidence at encode time.
+/// extension. These are audit statistics, not protected trust weights or an
+/// automatic confidence penalty for subsequent claims.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct SourceReliability {
     pub corrections: u64,

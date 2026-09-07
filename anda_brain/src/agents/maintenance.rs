@@ -195,6 +195,7 @@ impl Agent<AgentCtx> for MaintenanceAgent {
             "execute_kip".to_string(),
             NoteTool::NAME.to_string(),
             crate::vocabulary::DeclareSymbolsTool::NAME.to_string(),
+            crate::cognitive::MemoryRuntimeTool::NAME.to_string(),
         ]
     }
 
@@ -370,7 +371,7 @@ impl MaintenanceAgent {
             CompletionRequest {
                 instructions: format!(
                     "{}\n\n---\n\n{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Your Notes:\n{}\n\n# Current Datetime: {}",
-                    super::prompts::language_reference(),
+                    super::prompts::mode_reference(super::prompts::PromptTarget::Maintenance),
                     super::prompts::active_prompt(super::prompts::PromptTarget::Maintenance),
                     primer,
                     serde_json::to_string(&notes.items).unwrap_or_default(),

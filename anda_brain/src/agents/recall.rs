@@ -16,7 +16,7 @@ use anda_engine::{
 };
 use parking_lot::RwLock;
 use serde_json::json;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::{
     collections::VecDeque,
     sync::{Arc, LazyLock},
@@ -38,25 +38,12 @@ use crate::wiki::{WikiReadTool, WikiSearchTool};
 
 const RECALL_CONTEXT_TIMEOUT: Duration = Duration::from_secs(5);
 const RECALL_TOTAL_TIMEOUT: Duration = Duration::from_secs(180);
-const RECALL_PRIMER_CACHE_TTL_MS: u64 = 300_000;
 /// Fallback model-turn cap, used when the space has no policy of its own.
 /// Equal to `MemoryPolicy::default_recall_max_rounds`, so an unset policy is
 /// not a behavior change.
 const RECALL_MAX_MODEL_TURNS: usize = 7;
 const RECALL_HISTORY_LIMIT: usize = 1;
 pub const READONLY_KIP_TIMEOUT: Duration = Duration::from_secs(15);
-
-#[derive(Clone)]
-struct CachedPrimer {
-    value: Json,
-    fetched_at: u64,
-    /// The schema generation the primer was read under. A publish since —
-    /// `declare_memory_symbols`, or a wiki digest growing the vocabulary —
-    /// makes it stale before its TTL does: the primer is how Recall learns
-    /// what this Space can say, and a symbol it does not list is one the
-    /// model grounds by guessing.
-    generation: u64,
-}
 
 pub static FUNCTION_DEFINITION: LazyLock<FunctionDefinition> = LazyLock::new(|| {
     serde_json::from_value(json!({
@@ -219,10 +206,6 @@ pub struct RecallAgent {
     memory: Arc<MemoryManagement>,
     hook: Arc<dyn BrainHook>,
     history: Arc<RwLock<VecDeque<Document>>>,
-    primer_cache: Arc<RwLock<Option<CachedPrimer>>>,
-    /// Bumped by whoever publishes into this Space's vocabulary package; see
-    /// [`Self::with_schema_generation`].
-    schema_generation: Arc<AtomicU64>,
     max_input_tokens: usize,
     policy: MemoryPolicyReader,
 }
@@ -243,21 +226,14 @@ impl RecallAgent {
             memory,
             hook,
             history: Arc::new(RwLock::new(VecDeque::new())),
-            primer_cache: Arc::new(RwLock::new(None)),
-            schema_generation: Arc::new(AtomicU64::new(0)),
             max_input_tokens,
             policy,
         }
     }
 
-    /// Shares the counter a vocabulary publish bumps, so the cached primer is
-    /// refetched on the next recall instead of at the end of its TTL.
-    ///
-    /// Without it the cache is time-based only, and for up to five minutes
-    /// after Formation declared `works_on` Recall would be reading a primer
-    /// that does not list it.
-    pub fn with_schema_generation(mut self, generation: Arc<AtomicU64>) -> Self {
-        self.schema_generation = generation;
+    /// Retained for caller compatibility. Primers are now read fresh because
+    /// trust, identity and authorization can change without a schema publish.
+    pub fn with_schema_generation(self, _generation: Arc<AtomicU64>) -> Self {
         self
     }
 
@@ -340,34 +316,20 @@ impl RecallAgent {
         }
     }
 
-    async fn describe_primer_cached(&self) -> Json {
-        let now = unix_ms();
-        let generation = self.schema_generation.load(Ordering::Acquire);
-        if let Some(cached) = self.primer_cache.read().as_ref()
-            && cached.generation == generation
-            && now.saturating_sub(cached.fetched_at) <= RECALL_PRIMER_CACHE_TTL_MS
-        {
-            return cached.value.clone();
-        }
-
-        let primer = match timeout(RECALL_CONTEXT_TIMEOUT, self.memory.describe_primer()).await {
+    async fn describe_primer_fresh(&self) -> Json {
+        // Governance, trust and identity can change without a vocabulary publish.
+        // A fresh primer carries the live control basis; a TTL cannot validate it.
+        match timeout(RECALL_CONTEXT_TIMEOUT, self.memory.describe_primer()).await {
             Ok(Ok(primer)) => primer,
             Ok(Err(err)) => {
                 log::warn!(target: "brain", "recall primer not available: {err:?}");
-                return Json::default();
+                Json::default()
             }
             Err(_) => {
                 log::warn!(target: "brain", "recall primer lookup timed out");
-                return Json::default();
+                Json::default()
             }
-        };
-
-        *self.primer_cache.write() = Some(CachedPrimer {
-            value: primer.clone(),
-            fetched_at: unix_ms(),
-            generation,
-        });
-        primer
+        }
     }
 
     async fn load_recall_notes(ctx: &AgentCtx) -> Json {
@@ -509,7 +471,7 @@ impl Agent<AgentCtx> for RecallAgent {
 
         let (counterparty_info, primer, notes) = tokio::join!(
             self.get_counterparty_with_timeout(counterparty),
-            self.describe_primer_cached(),
+            self.describe_primer_fresh(),
             Self::load_recall_notes(&ctx),
         );
 
@@ -537,7 +499,7 @@ impl Agent<AgentCtx> for RecallAgent {
             CompletionRequest {
                 instructions: format!(
                     "{}\n\n---\n\n{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Your Notes:\n{}\n\n# Counterparty profile:\n{}\n\n# Current Datetime: {}",
-                    super::prompts::language_reference(),
+                    super::prompts::mode_reference(super::prompts::PromptTarget::Recall),
                     super::prompts::active_prompt(super::prompts::PromptTarget::Recall),
                     primer,
                     serde_json::to_string(&notes).unwrap_or_default(),

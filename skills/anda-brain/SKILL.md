@@ -33,6 +33,23 @@ metadata:
 
 # 🧠 Anda Brain
 
+This adapter uses KIP 2.0 / CognitiveMemory 2.1. Keep using the documented
+Formation, Recall, Maintenance and forget endpoints. The optional observe/recall/
+revise/feedback/forget Memory Interface and its bundles are not advertised here;
+conversation ids are not processing receipts and cannot be used as `after` barriers.
+When a fresh correction matters, wait for the documented formation completion before
+recall and disclose unresolved processing. Procedure candidates are unproven without
+retained independent trial/evaluation evidence; self-reported success is not a grade.
+Text Watches require a configured semantic evaluator and remain deferred otherwise.
+A local purge acknowledgement is not a verified complete semantic ErasurePlan across
+all descendants, replays, backups and external exports.
+
+本适配器保留现有 API，未声明支持五意图 Memory Interface 或能力包；对话编号不是
+处理回执。涉及刚提交的更正时先确认 Formation 完成，再召回；未完成处理须明确说明。
+程序候选未经过独立试验/评估时保持未验证，自述成功不能作为等级。文本 Watch 无语义
+求值器时保持等待；单个对象的清除结果不能被扩展成整个语义依赖闭包已清除。
+
+
 Persistent long-term memory service for LLM agents, powered by a Knowledge Graph (Cognitive Nexus) and KIP (Knowledge Interaction Protocol). Anda Brain is [open-source software](https://github.com/ldclabs/anda-brain) designed to be **self-hosted** — deploy your own instance with the [Quick Start guide](https://github.com/ldclabs/anda-brain/blob/main/deploy/quick_start.md).
 
 > **Note:** The hosted cloud service (`brain.anda.ai`) and its console (`anda.ai/brain`) have been discontinued. All examples below assume your own deployment.

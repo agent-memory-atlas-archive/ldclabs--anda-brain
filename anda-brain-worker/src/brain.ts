@@ -1,5 +1,8 @@
+import { BRAIN_CAPABILITIES, runtimeOperations, type RuntimeOperation } from './cognitive.js'
 import {
   KipDatabase,
+  KipError,
+  isJsonMap,
   tryParseElementId,
   type KipResult,
   type SchemaPackage,
@@ -24,8 +27,6 @@ import type {
 import { MemoryVocabulary, activeSet, activeVocabulary } from './vocabulary.js'
 
 const APP_BOOTSTRAP_KEY = '__anda_brain_worker_bootstrap_version'
-/** The coordinate the last completed maintenance cycle read the stream through. */
-const CONSUMED_SEQ_KEY = 'anda-brain:delta_consumed_seq'
 /** Where the next correction scan reads after. */
 const CORRECTION_CURSOR_KEY = 'anda-brain:correction_cursor'
 /** What the last settlement's correction scan found, for the next assessment. */
@@ -148,18 +149,49 @@ export class AndaBrain extends KipDatabase<Env> {
   ): KipResult[] {
     assertFormationOperations(operations)
     this.ensureInitialized()
-    return super.executeKipBatch(operations, undefined, undefined, undefined, ingest)
+    return super.executeKipBatch(operations, undefined, undefined, { mode: 'sequence', onError: 'stop' }, ingest)
   }
 
-  executeMaintenancePlan(operations: readonly KipOperation[]): KipResult[] {
-    assertMaintenanceOperations(operations)
+  executeMaintenancePlan(operations: readonly KipOperation[], runtime: readonly RuntimeOperation[] = []): KipResult[] {
+    const work = runtimeOperations(runtime)
+    if (operations.length > 0) assertMaintenanceOperations(operations)
     this.ensureInitialized()
-    return super.executeKipBatch(operations)
+    const session = this.nexus.session(this.authenticate(undefined))
+    const results: KipResult[] = []
+    for (const [index, request] of work.entries()) {
+      try {
+        const result = request.operation === 'arm_watch'
+          ? session.armWatch(request.target_ref, request.expected_version)
+          : session.leaseTask(request.target_ref, request.expected_version, new Date(Date.now() + 300_000).toISOString())
+        results.push({
+          op_id: `runtime_${index}`,
+          status: isJsonMap(result.receipt) && result.receipt.status === 'no_effect' ? 'no_effect' : 'succeeded',
+          result,
+        })
+      } catch (error) {
+        results.push({ op_id: `runtime_${index}`, status: 'failed', error: KipError.from(error).toJSON() })
+        return results
+      }
+    }
+    return [...results, ...super.executeKipBatch(operations, undefined, undefined, { mode: 'sequence', onError: 'stop' })]
   }
 
   describePrimer(): KipResult {
     this.ensureInitialized()
-    return super.executeKip('DESCRIBE PRIMER')
+    const result = super.executeKip('DESCRIBE PRIMER')
+    if (result.result && typeof result.result === 'object' && !Array.isArray(result.result)) {
+      return {
+        ...result,
+        result: {
+          ...result.result,
+          extensions: {
+            ...(isJsonMap(result.result.extensions) ? result.result.extensions : {}),
+            'anda-brain/capabilities': BRAIN_CAPABILITIES,
+          },
+        },
+      }
+    }
+    return result
   }
 
   /**
@@ -176,8 +208,8 @@ export class AndaBrain extends KipDatabase<Env> {
     this.ensureInitialized()
     const kv = this.ctx.storage.kv
     const report = settle((operation) => this.run(operation), nowMs, {
-      headSeq: this.nexus.store.currentSeq(this.nexus.space),
-      consumedSeq: kv.get<number>(CONSUMED_SEQ_KEY),
+      advanceWatch: (id, version, generation) =>
+        this.nexus.session(this.authenticate(undefined)).advanceWatch(id, version, generation, 200),
       correctionCursor: kv.get<number>(CORRECTION_CURSOR_KEY),
     })
     // A scan that failed leaves the cursor where it was, so nothing it did
@@ -197,26 +229,9 @@ export class AndaBrain extends KipDatabase<Env> {
       (operation) => this.run(operation),
       this.nexus.store.currentSeq(this.nexus.space),
       {
-        consumedSeq: kv.get<number>(CONSUMED_SEQ_KEY),
         revisedRoots: kv.get<RevisedRoot[]>(REVISED_ROOTS_KEY) ?? [],
       },
     )
-  }
-
-  /**
-   * Records that a completed maintenance cycle read the Change Stream through
-   * `seq` — the `assessment.space_seq` it was handed.
-   *
-   * Two readers. The next cycle starts its `CHANGES AFTER SEQ` here, and the
-   * Watch sweep fires a prose silence Watch only once this has reached the
-   * head at which it first saw the deadline passed (Profile §5.11). It never
-   * moves backwards: a cycle handed an older coordinate than one already
-   * recorded has consumed nothing new.
-   */
-  recordConsumedSeq(seq: number): void {
-    this.ensureInitialized()
-    const kv = this.ctx.storage.kv
-    kv.put(CONSUMED_SEQ_KEY, Math.max(kv.get<number>(CONSUMED_SEQ_KEY) ?? 0, seq))
   }
 
   /**

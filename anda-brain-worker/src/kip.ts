@@ -253,6 +253,7 @@ export function assertFormationOperations(operations: readonly KipOperation[]): 
       throw new Error('formation accepts only KIP KML commands')
     }
     for (const clause of command.Kml.clauses) {
+      assertCognitiveRecords(clause, operation.parameters)
       const name = clauseName(clause)
       if (!FORMATION_CLAUSES.has(name)) {
         throw new Error(
@@ -306,6 +307,7 @@ export function assertMaintenanceOperations(operations: readonly KipOperation[])
       throw new Error('maintenance plans must contain KML commands')
     }
     for (const clause of command.Kml.clauses) {
+      assertCognitiveRecords(clause, operation.parameters)
       if ('Purge' in clause || 'PurgePayload' in clause) {
         throw new Error('maintenance plans cannot issue KIP PURGE commands')
       }
@@ -715,4 +717,27 @@ function integer(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isInteger(value) && value > 0
     ? value
     : undefined
+}
+
+/** Check facet AST positions, never words inside captured source payloads. */
+function assertCognitiveRecords(clause: MutationClause, parameters?: JsonMap): void {
+  const body = Object.values(clause)[0] as Record<string, unknown>
+  const facets: unknown[] = []
+  for (const key of ['set_facets', 'unset_facets']) {
+    const entries = body[key]
+    if (Array.isArray(entries)) for (const entry of entries) facets.push(entry.facet)
+  }
+  if (Array.isArray(body.actions)) for (const action of body.actions) {
+    if ('SetFacet' in action) facets.push(action.SetFacet.facet)
+    if ('UnsetFacet' in action) facets.push(action.UnsetFacet.facet)
+  }
+  for (const facet of facets) {
+    const symbol = facet as { Name?: string; Param?: string }
+    const name = symbol.Name ?? (symbol.Param ? parameters?.[symbol.Param] : undefined)
+    if (typeof name !== 'string') throw new Error('model facet names must resolve before execution')
+    if (['TrialRecord', 'EvaluationRecord', 'OutcomeRecord', 'AttemptRecord', 'TrialState',
+      'GradingState', 'WatchState', 'LeaseState'].includes(localName(name))) {
+      throw new Error(`UnsupportedCapability: ${name} requires a configured host learning/runtime binding; it cannot be authored by a model plan`)
+    }
+  }
 }

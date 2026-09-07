@@ -138,8 +138,13 @@ impl Tool<BaseCtx> for GuardedMemory {
         // `:msg1` instead of retyping what was said. Attached here rather than
         // where the request is built because this is the only seam that knows
         // both the pass it belongs to and the request it is going on.
-        if formation && let Some(Observation(Some(observation))) = ctx.get_state::<Observation>() {
-            kip::attach_observation(&mut request, &observation);
+        if formation
+            && let Some(Observation(Some(observation))) = ctx.get_state::<Observation>()
+            && let Err(error) = kip::attach_observation(&mut request, &observation)
+        {
+            return Ok(error_output(Response::from(
+                anda_kip::KipError::not_authorized(error),
+            )));
         }
         let nexus = self.memory.nexus();
         let nexus = nexus.as_ref();

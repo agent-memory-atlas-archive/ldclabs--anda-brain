@@ -8,6 +8,18 @@
 
 每个 `space_id` 映射到一个独立的 SQLite Durable Object。KIP 图谱、原子事务和模式包由 `@ldclabs/kip-do` 提供；自然语言规划和答案合成使用 Workers AI。
 
+批量代谢跳过 SleepTask/Watch 运行记录，避免违反其版本守卫而让整批代谢失败。
+失败通过 settlement.decay_error 报告，维护模型会收到实际 settlement。
+
+## KIP 2.0 / CognitiveMemory 2.1 更新
+
+Rust 与 Worker 已对齐 KIP `d6e3a45`、AndaDB `bcd01d4`。Skill 行为保存为不可变的
+`SkillRevision`；Watch 进度和任务租约通过 Nexus 的受保护接口维护。旧的 family
+成功率晋升规则已移除；未配置独立观察者、冻结试验和可重放评估时，程序候选保持未验证，
+`skills.unsupported_reason` 明确报告该边界。现有 Brain API 保持可用；这两个适配器
+**未声明支持**可选的五意图 Memory Interface 或 `memory_*` 能力包。详见
+[同步说明](../docs/kip-v2-cognitive-sync.md)。
+
 ## KIP 2.0 意味着什么
 
 1.x 把含义、信念、证据、来源和模式塞在同一张图里；2.0 把它们分开，而其余区别都来自同一条：**一个 Proposition 存在，不等于它为真**。落到这个 Worker 上：
@@ -46,65 +58,61 @@ cd ../../anda-db/ts/kip-do && pnpm install && pnpm run build
 | 异步 Formation 队列与对话历史 | 未实现 |
 | Wiki、MCP、BYOK、分级令牌 | 未实现 |
 | 自动周期维护 | 未实现；由调用方或 Cron Trigger 调用 maintenance |
-| 确定性 settlement（代谢 / Watch 到期 / Skill 判决） | 保留，见下节 |
+| 确定性 settlement（代谢 / Nexus Watch 推进 / 更正发现） | 保留，见下节 |
 | 全文检索（`SEARCH`） | 保留，keyword 模式，见「检索」一节 |
 | 派生闭包（`LIST DEPENDENTS`） | 保留，`DEPTH` 上限 8；runtime 在 settlement 里替模型走：每条新 superseded 的 Assertion 带着它的 dependents 进 `assessment.revised_roots` |
 | 保留期（`SET RETENTION`） | 引擎已实现，maintenance 可以写；但没有到期清扫，Rust 服务两样都有 |
 | 载荷清除（`PURGE PAYLOAD`） | 引擎已实现；maintenance 计划里和 `PURGE` 一样被拒 |
 | 原子批（`execution.mode: "atomic"`） | 引擎未实现（`atomic_batch` 能力为 false），请求按 §75.3 被拒绝而不是降级成 sequence |
 
-## 确定性 settlement
+## 确定性 settlement 与受保护操作
 
-每次 maintenance 在问模型**之前**先跑一遍确定性结算，与 Rust 服务同形。分工只有一条：
+每次 maintenance 在模型调用前执行记忆强度代谢、更正发现和结构化 Watch 推进。
+代谢只修改 `MnemonicState.memory_strength`，每周乘以 0.95、下限 0.3，绝不衰减
+Assertion confidence。读取不强化记忆。
 
-> **runtime 做算术，模型做解释。**
+Watch 先以 `disarmed` 创建，再通过宿主 `armWatch` 领取新 generation 与授权观察依据。
+结算调用 `advanceWatch`，提交整体版本与 generation，让 Nexus 检查完整性水位和权限变化。
+只有完整授权覆盖越过截止时间，silence Watch 才能触发；等到的变化已经发生时，截止后
+状态为 `expired`，兼容响应字段 `disarmed` 统计该数量。引擎返回状态、coverage、receipt，
+不会凭空生成 `watch_fire` Activity。文本条件和混合 text/selector 条件保持 deferred；
+本适配器没有语义 evaluator。模型完成一轮不再被记录成 `consumed_seq`。旧 Watch 缺少
+WatchState 时，先审查观察缺口，再显式重新 arm。
 
-之前这三件事在 Worker 里都做不了，原因不是引擎缺能力——`kip-do` 读写俱全——而是
-「maintenance 一次 completion 只出 KML」这个约定被误当成了整个部署的限制。它只约束
-**模型**：Durable Object 自己持有 nexus，可以随便读。
+Skill 保持稳定身份，行为放入不可变 SkillRevision，current_revision/revision_of 双向引用
+可在同一 MUTATE 创建。旧的 family 成功率规则已删除：family 仅用于寻找可比较样本，
+不能自动选定基线。未配置独立观察者、冻结 TrialRecord、重放材料和受保护评估策略时，
+程序候选保持未验证，`settlement.skills.unsupported_reason` 说明未运行评估；旧计数
+字段仍为零。模型不能写学习记录、WatchState 或 LeaseState。
 
-- **记忆代谢**：按 `MnemonicState.memory_strength × 0.95` 衰减，下限 0.3，周期一周
-  （靠 `last_metabolized_at` 过滤器自己节流）。从不碰 Assertion 的 confidence。
-  没有任何东西**抬高** memory_strength——读取不强化它读到的东西。
-- **Watch 求值（Profile §5.11）**：`condition` 是结构化过滤器（`element` / `slot` /
-  `type`，可用 `ops` / `touched` 收窄）的 Watch 由 runtime 对 Change Stream 求值：
-  `delta` 命中即 `fired`（`matched_seq` 记下命中的事务）；`silence` 等的变更来了就
-  `disarmed` 而不是 fired；`silence` 过期且无命中才 `fired`——沉默是在读完到 head 的
-  流上得出的结论，不是看表得出的。每个 Watch 的 `evaluated_seq` 记着读到哪，下次从
-  那里接着读。散文 condition 归模型：它从 `assessment.consumed_seq` 起读
-  `CHANGES AFTER SEQ` 自己匹配；而散文 `silence` 过期后 runtime 只在**某个完成的
-  cycle 已经消费到首次发现过期时的 head** 之后才 fire（`due_seen_seq` 守卫），所以
-  散文 deadline 在读过它的那一轮的**下一轮**才响，绝不提前。fire 原子地转状态 + 写
-  `watch_fire` Activity，`EXPECT VERSION ... OF ATTRIBUTES` 守卫。**不建 SleepTask、
-  不写 `action_gate`、不做任何对外动作**——决定留给下一轮的
-  `assessment.fired_watches` 队列。
-- **更正发现**：新 superseded 的 Assertion（游标存在 DO 的 KV 里）逐条走
-  `LIST DEPENDENTS`，结果进 `assessment.revised_roots`。只列可达性，不标 stale：
-  哪些派生物不再成立是模型的判断。
-- **Skill 生命周期判决**：`proposed → trialed → adopted → revoked` 只按 Outcome
-  Evidence 的确定性规则走。Profile §14 规则 1 点名了执行者——**「the Brain
-  proposes, compiles, and narrates; it never promotes」**——所以它在代码里。
+模型计划可选两个宿主字段（普通 HTTP 请求形状不变）：
 
-  哪些 outcome 算数是规则 7（*attribution before counting*）：一条 outcome 只有**挂
-  在应用了这个 Skill 的决定上**才算——`action_gate` Activity 的 `inputs` 里点名这个
-  Skill，仪器写的 `outcome_observation` Activity 的 `inputs` 里点名那个 gate。只是
-  `task_family` 相同的 outcome 属于**基线**，永远不是分数；否则同一个 family 里的两
-  个 Skill 会互相判决对方。基线在开庭时写进 Skill 的 `TrialState`（开庭坐标、这个
-  Skill 之外的 family 计数、判决所需的挂钩 outcome 配额），分数写进 `GradingState`，
-  修正后的准入押注写进 `MnemonicState.utility`——记录不是预测，两者都不是权限。
+```json
+{
+  "types": [], "predicates": [], "commands": [], "summary": "领取维护任务，下一轮处理。",
+  "digests": {"digest_revision": {"task_family":"deploy", "procedure":"verify first"}},
+  "runtime": [{"operation":"lease_task", "target_ref":"C-12", "expected_version":3}]
+}
+```
 
-  规则常量与 `anda_brain/src/settlement/skill.rs` 逐一对齐，`VERDICT_RULE` 两边**必须相同**：
-  一个 Skill 在 Rust 侧被采纳、在 Worker 侧被撤销，会让这个规则标识变成谎话。
+`digests` 至多四项、总量至多 64 KiB，键以 `digest_` 开头；宿主以 kip-jcs-safe-v1
+规范化 JSON 并计算 SHA-256，作为 `:digest_revision` 等参数传给 KML。revision 摘要覆盖
+全部 attributes，排除 behavior_digest。Nexus 会复核摘要与实际行为一致。
 
-模型拿到的 `assessment` 块（`space_seq`、`consumed_seq`、armed / fired Watch 集合、
-每谓词链接数、`revised_roots`）也是 runtime 读好的：它只有一次 completion，**输入里
-没有的信号就是它不会履行的职责**。cycle 成功结束后 runtime 把它拿到的 `space_seq`
-记为 `consumed_seq`：既是下一轮 `CHANGES AFTER SEQ` 的起点，也是散文 silence Watch
-的放行线。
+`runtime` 至多四项，支持 `arm_watch`、`lease_task`，仅 Maintenance 可用。顺序为：
+校验整份计划 → 发布合法词汇 → 执行 runtime → sequence/stop 执行 KML。租期由宿主固定
+为五分钟；身份来自认证 Session。每次操作后需要重新读取整体版本，这个单轮模型应在
+下一次 snapshot 中读取结果，再把任务终态与输出放进同一个有 CAS 的 MUTATE。
+runtime 结果通过 maintenance 响应的 `runtime` 数组返回；后续失败不会抹掉先前操作的
+receipt，错误数据保留已执行的结果。整个计划不是事务，不要自动重放已成功的前缀。
+
+`assessment.revised_roots` 仍提供有界依赖遍历；缺页或不可访问的闭包显式标记 incomplete。
+Nexus 的虚拟 dependency_validity 决定派生内容能否使用，存储的 review 不能覆盖它。
+快照里的 space_seq 也不等于 WorkingState 的真实计算依据；缺少实际版本/basis 时推迟刷新。
 
 ## 词汇表：新类型和新谓词
 
-Cognitive Memory Profile 只自带 10 个类型和 3 个谓词（`prefers`、`caused_by`、`same_as`），够不上「Alice 在 Acme 工作」。KIP 2.0 又禁止 KML 声明类型，所以新词汇必须从宿主进入。
+Cognitive Memory Profile 提供标准记忆类型和谓词，业务领域仍可能需要新符号。KIP 2.0 又禁止 KML 声明类型，所以新词汇必须从宿主进入。
 
 每个 Durable Object 维护一个 `kip://anda-brain/memory` 包，与 Profile 并行激活。模型在计划 JSON 里提出符号，宿主校验、限量、发版：
 
@@ -145,7 +153,7 @@ curl http://localhost:8787/v1/alice/execute_kip_readonly \
 
 ## 提示词
 
-三个模式提示词是 KIP 2.0 参考 Brain 策略（`anda-db/rs/anda_kip/brain/Brain*.md`），各自附一段本部署的契约（`# A. Anda Brain Worker deployment contract`），再拼上语法卡与 Cognitive Memory Profile。它们放在 `assets/`，由脚本内联：
+三个模式提示词是 KIP 2.0 参考 Brain 策略（`anda-db/rs/anda_kip/brain/Brain*.md`），各自附一段本部署的契约（`# A. Anda Brain Worker deployment contract`），再拼上对应角色卡与 Cognitive Memory Profile。它们放在 `assets/`，由脚本内联：
 
 ```bash
 pnpm run sync:assets      # 从 anda_kip 刷新全部 vendor 资产
@@ -156,7 +164,7 @@ pnpm run codegen:prompts  # assets/*.md -> src/assets.generated.ts（需提交�
 
 Rust 服务不需要 codegen：`anda_kip` 随协议发出语法卡和 Profile，运行时直接读。`kip-do` 两者都不发，所以这里保留副本——代价就是副本会漂移，`sync:assets` 是用来对抗这件事的。
 
-一个模式提示词约 20k token，**24k 上下文的模型装不下**。`AI_MODEL` 默认 `@cf/meta/llama-4-scout-17b-16e-instruct`；生产环境可换成上下文更大、同样支持结构化 JSON 输出的模型。
+提示词包含角色策略和完整 ontology；实际 token 成本应按部署模型的 tokenizer 测量。`AI_MODEL` 默认 `@cf/meta/llama-4-scout-17b-16e-instruct`；生产环境可换成上下文更大、同样支持结构化 JSON 输出的模型。
 
 ## 快速开始
 
@@ -226,7 +234,7 @@ curl http://localhost:8787/v1/alice/maintenance \
   -d '{"trigger":"on_demand","scope":"daydream"}'
 ```
 
-Maintenance 可以用 KML 的全部动作，但 **`PURGE` 被拒绝**（不可逆，且模型读自己的快照不是决定「让某物从未存在」的地方；需要时走管理级 `execute_kip`）。**任何带 `WHERE` 选择的子句都必须带 `LIMIT 20` 或更小**——`UPDATE ?e … WHERE {}` 和 `TRANSITION ?e TO "archived" WHERE {}` 是同一个风险换了个动词。`MERGE CONCEPT` 语法上没有 `LIMIT` 位置，所以对它的要求是 `WHERE` 必须精确指出源和目标，一次合并一对。
+Maintenance 可以使用受限的维护 KML，学习和运行时 Facet 由宿主保护； **`PURGE` 和 `PURGE PAYLOAD` 被拒绝**（不可逆，且模型读自己的快照不是决定「让某物从未存在」的地方；需要时走管理级 `execute_kip`）。**任何带 `WHERE` 选择的子句都必须带 `LIMIT 20` 或更小**——`UPDATE ?e … WHERE {}` 和 `TRANSITION ?e TO "archived" WHERE {}` 是同一个风险换了个动词。`MERGE CONCEPT` 语法上没有 `LIMIT` 位置，所以对它的要求是 `WHERE` 必须精确指出源和目标，一次合并一对。
 
 `SET RETENTION` 引擎已实现，maintenance 可以写保留期类别和 `expires_at`；被拒的只有 `legal_hold` 这一个成员，两个方向都拒——法务保留会挡住所有人的擦除，不是模型读一张快照就该做的决定。到期清扫本身 Worker 没有，写下的 `expires_at` 要靠调用方或 Rust 服务去执行。
 

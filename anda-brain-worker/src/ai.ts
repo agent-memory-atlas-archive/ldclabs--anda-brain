@@ -1,3 +1,4 @@
+import { digestParameters, runtimeOperations } from './cognitive.js'
 import type {
   AiBinding,
   JsonObject,
@@ -7,15 +8,7 @@ import type {
   Usage,
 } from './types.js'
 
-/**
- * The fallback when `AI_MODEL` is unset.
- *
- * Long context is not a preference here. A mode prompt is the reference Brain
- * policy plus the KIP syntax card and the Cognitive Memory Profile — about 20k
- * tokens before the conversation is added — so a 24k-context model truncates
- * the policy it was given rather than the payload, and answers from whatever
- * survived.
- */
+/** Default model; context cost includes reference policy, role cards and ontology. */
 export const DEFAULT_AI_MODEL = '@cf/meta/llama-4-scout-17b-16e-instruct'
 
 export interface AiMessage {
@@ -61,6 +54,14 @@ const MUTATION_PLAN_SCHEMA: JsonObject = {
       items: { type: 'string' },
     },
     summary: { type: 'string' },
+    digests: { type: 'object', description: 'Optional digest_ parameter name to canonical JSON content. Host computes SHA-256; use :digest_revision in behavior_digest. Content includes every revision attribute except behavior_digest.' },
+    runtime: { type: 'array', maxItems: 4, items: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        operation: { type: 'string', enum: ['arm_watch', 'lease_task'] },
+        target_ref: { type: 'string' }, expected_version: { type: 'integer', minimum: 1 },
+      }, required: ['operation', 'target_ref', 'expected_version'],
+    } },
   },
   required: ['types', 'predicates', 'commands', 'summary'],
 }
@@ -162,6 +163,8 @@ function validateMutationPlan(value: unknown): MutationPlan {
     types: readSymbols(object.types),
     predicates: readSymbols(object.predicates),
     summary: object.summary.trim(),
+    parameters: digestParameters(object.digests),
+    runtime: runtimeOperations(object.runtime),
   }
 }
 

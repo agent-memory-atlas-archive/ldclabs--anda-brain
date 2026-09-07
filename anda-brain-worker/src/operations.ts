@@ -60,12 +60,15 @@ const MAINTENANCE_SNAPSHOT: KipOperation[] = [
   },
   {
     command:
-      'FIND(?t.id, ?t.name, ?t.attributes) WHERE { ?t CONCEPT {type: "SleepTask"} } LIMIT 20',
+      'FIND(?t) WHERE { ?t CONCEPT {type: "SleepTask"} } LIMIT 20',
   },
   {
     command:
       'FIND(?c.id, ?c.name, ?c.schema_ref, ?c.facets) WHERE { ?c CONCEPT {} } ' +
       'ORDER BY ?c.updated_at ASC LIMIT 20',
+  },
+  {
+    command: 'FIND(?w) WHERE { ?w CONCEPT {type: "Watch"} FILTER(?w.attributes.status == "disarmed") } LIMIT 20',
   },
 ]
 
@@ -93,6 +96,8 @@ export async function formMemory(
     model,
     formationMessages(primer, input, timestamp),
   )
+
+  if (plan.value.runtime?.length) throw new OperationError('Formation cannot manage Watch arming or task leases', 422)
 
   const { operations, vocabulary } = await preparePlan(
     brain,
@@ -294,7 +299,7 @@ export async function maintainMemory(
   const plan = await createMutationPlan(
     env.AI,
     model,
-    maintenanceMessages(input, { snapshot, assessment }, timestamp),
+    maintenanceMessages(input, { snapshot, assessment, settlement }, timestamp),
   )
 
   const { operations, vocabulary } = await preparePlan(
@@ -304,13 +309,9 @@ export async function maintainMemory(
     'maintenance',
   )
 
-  const results = operations.length ? await brain.executeMaintenancePlan(operations) : []
+  const results = (operations.length || plan.value.runtime?.length) ? await brain.executeMaintenancePlan(operations, plan.value.runtime) : []
   throwOnKipError(results, 'maintenance KIP failed')
-  // The cycle read the Change Stream through the coordinate it was handed
-  // (`assessment.space_seq`): that is where the next cycle starts, and what a
-  // prose silence Watch's deadline is measured against (§5.11). Only a
-  // completed cycle counts — one that failed above may have read nothing.
-  await brain.recordConsumedSeq(assessment.space_seq)
+  // A model completion does not prove complete change-stream consumption.
 
   return {
     content: plan.value.summary || 'No maintenance changes were needed.',
@@ -318,6 +319,7 @@ export async function maintainMemory(
     changed: countChanges(results),
     commands: operations.length,
     settlement,
+    runtime: results.filter((result) => result.op_id?.startsWith('runtime_')),
     ...(vocabulary ? { vocabulary } : {}),
     usage: plan.usage,
   }
@@ -344,7 +346,7 @@ async function preparePlan(
   gate: (operations: readonly KipOperation[]) => void,
   mode: string,
 ): Promise<{ operations: KipOperation[]; vocabulary?: DeclaredVocabulary }> {
-  const operations = plan.commands.map((command) => ({ command }))
+  const operations = plan.commands.map((command) => ({ command, parameters: plan.parameters }))
   try {
     if (operations.length > 0) gate(operations)
   } catch (error) {
@@ -367,5 +369,5 @@ function resultOrThrow(result: KipResult, message: string): unknown {
 
 function throwOnKipError(results: readonly KipResult[], message: string): void {
   const failure = results.find((result) => result.status === 'failed')?.error
-  if (failure) throw new OperationError(message, 422, failure)
+  if (failure) throw new OperationError(message, 422, { error: failure, results })
 }

@@ -2411,7 +2411,7 @@ mod tests {
         .await;
         assert_eq!(
             user["result"]["schema_ref"],
-            "kip://profiles/cognitive-memory@2.0.0/Person"
+            "kip://profiles/cognitive-memory@2.1.0/Person"
         );
         assert_eq!(user["result"]["key"], "external-user-1");
     }

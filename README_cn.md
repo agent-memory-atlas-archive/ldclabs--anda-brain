@@ -6,6 +6,15 @@
 
 **[English](./README.md) | [中文](./README_cn.md)**
 
+## KIP 2.0 / CognitiveMemory 2.1 更新
+
+Rust 与 Worker 已对齐 KIP `d6e3a45`、AndaDB `bcd01d4`。Skill 行为保存为不可变的
+`SkillRevision`；Watch 进度和任务租约通过 Nexus 的受保护接口维护。旧的 family
+成功率晋升规则已移除；未配置独立观察者、冻结试验和可重放评估时，程序候选保持未验证，
+`skills.unsupported_reason` 明确报告该边界。现有 Brain API 保持可用；这两个适配器
+**未声明支持**可选的五意图 Memory Interface 或 `memory_*` 能力包。详见
+[同步说明](docs/kip-v2-cognitive-sync.md)。
+
 ## 不会睡觉的记忆，终将被自己淹没
 
 你的 AI 助手记住了你说过的每一句话。向量数据库里躺着几万条对话碎片，Markdown 备忘录写了上千行，键值缓存也在稳步膨胀。

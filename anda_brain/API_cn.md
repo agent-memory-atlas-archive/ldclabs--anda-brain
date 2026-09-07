@@ -1,5 +1,8 @@
 # Anda Brain API 文档（含 TypeScript 类型）
 
+批量记忆强度代谢跳过 SleepTask/Watch 运行记录；宿主结算错误通过
+assessment.settlement_errors 提供给维护模型。
+
 ## 1) 通用约定
 
 - Base URL: `http://{host}:{port}`
@@ -11,6 +14,13 @@
   - 内容协商仅作用于成功响应体；错误响应体始终为 JSON，与 `Accept` 无关
 - 大多数业务接口都会返回 RPC 包装后的结构体：`RpcResponse<T>`
 - MCP 客户端可使用内置的支持流式传输的 HTTP MCP 端点：`/mcp/<space_id>`，也可以使用本地 stdio server：`anda_brain mcp --space-id <space_id> [local|aws]`
+
+CognitiveMemory 2.1 对齐说明：现有 JSON/CBOR/Markdown 请求和鉴权保持兼容；没有新增
+五意图 Memory Interface 或标准 after barrier。conversation id 不是处理回执。
+维护报告 `skills` 新增可选 `unsupported_reason`，说明没有配置可信学习管线，旧计数
+保持零。Watch 的 `disarmed` 兼容字段也统计 Nexus 的 expired；文本 Watch 保持 deferred。
+模型生成的 Formation 请求不得覆盖宿主捕获的 ingest 或 msgN 绑定；学习/runtime Facet
+写入返回 UnsupportedCapability。原始管理 KIP 仍接受符合 Nexus 契约的受权写入。
 
 ---
 

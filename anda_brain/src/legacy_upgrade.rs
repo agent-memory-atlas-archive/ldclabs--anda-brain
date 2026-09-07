@@ -193,7 +193,7 @@ async fn a_kip_1x_space_migrates_onto_the_vocabulary_this_service_activates() {
     .unwrap();
     assert!(
         refs.to_string()
-            .contains("kip://profiles/cognitive-memory@2.0.0/Person"),
+            .contains("kip://profiles/cognitive-memory@2.1.0/Person"),
         "{refs}"
     );
 
@@ -215,7 +215,7 @@ async fn a_kip_1x_space_migrates_onto_the_vocabulary_this_service_activates() {
     .unwrap();
     assert_eq!(
         predicates.to_string(),
-        r#"["kip://profiles/cognitive-memory@2.0.0/prefers"]"#
+        r#"["kip://profiles/cognitive-memory@2.1.0/prefers"]"#
     );
 
     // A type the profile does not declare keeps its legacy symbol: this

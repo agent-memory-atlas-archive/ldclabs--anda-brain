@@ -330,7 +330,7 @@ impl AppState {
     /// Note: `pinned` and `autostart` take effect only on the load that
     /// actually initializes the space; a cache hit returns the space as it
     /// was first opened and ignores both parameters.
-    async fn load_space_with(
+    pub(crate) async fn load_space_with(
         &self,
         space_id: &str,
         pinned: bool,
@@ -535,10 +535,6 @@ pub struct Space {
     /// Serializes memory-metabolism settlements (plan M2); the settlement
     /// itself is idempotent, the lock just avoids wasted duplicate passes.
     settlement_lock: tokio::sync::Mutex<()>,
-    /// Bumped whenever this Space's vocabulary package is published — by the
-    /// `declare_memory_symbols` tool or the wiki digest — so Recall's cached
-    /// primer is refetched on the next read rather than at the end of its TTL.
-    schema_generation: Arc<std::sync::atomic::AtomicU64>,
     /// At most one dream self-test (plan M7) runs at a time; overlapping
     /// kicks are skipped, not queued.
     self_test_lock: tokio::sync::Mutex<()>,
@@ -1224,7 +1220,24 @@ impl Space {
     /// the last full cycle's — which is why `audited_at` travels with it.
     async fn maintenance_assessment(&self) -> crate::types::MaintenanceAssessment {
         let audit: Option<SchemaAudit> = self.db.get_extension_as("schema_audit");
+        let settlement = self.memory_settlement();
+        let settlement_errors = settlement
+            .as_ref()
+            .map(|report| {
+                [
+                    ("decay", &report.decay_error),
+                    ("corrections", &report.correction_scan_error),
+                    ("watches", &report.watches.error),
+                    ("skills", &report.skills.error),
+                    ("retention", &report.retention.error),
+                ]
+                .into_iter()
+                .filter_map(|(pass, error)| error.as_ref().map(|error| format!("{pass}: {error}")))
+                .collect()
+            })
+            .unwrap_or_default();
         crate::types::MaintenanceAssessment {
+            settlement_errors,
             audited_at: audit.as_ref().map(|audit| audit.audited_at),
             predicates: audit.map(|audit| audit.predicates).unwrap_or_default(),
             source_reliability: self
@@ -1234,9 +1247,8 @@ impl Space {
             space_seq: self.current_space_seq().await,
             armed_watches: settlement::watches_in_status(self, "armed").await,
             fired_watches: settlement::watches_in_status(self, "fired").await,
-            consumed_seq: self.db.get_extension_as(DELTA_CONSUMED_SEQ_KEY),
-            revised_roots: self
-                .memory_settlement()
+            consumed_seq: None,
+            revised_roots: settlement
                 .map(|report| report.revised_roots)
                 .unwrap_or_default(),
         }
@@ -1574,15 +1586,8 @@ impl Space {
                 .set_extension_from("correction_cursor".to_string(), corrections.watermark);
         }
 
-        // Watch expiry, every scope. A deadline passing does not care how
-        // expensive the cycle it landed in was, and a silence Watch that
-        // waited for a `full` cycle would be a promise the Brain kept only
-        // when it was already busy.
-        // The head is what a structured Watch is evaluated through; the
-        // consumption record is what a prose silence Watch waits on (§5.11).
-        let head_seq = self.current_space_seq().await;
-        let consumed_seq: Option<u64> = self.db.get_extension_as(DELTA_CONSUMED_SEQ_KEY);
-        report.watches = settlement::sweep_watches(self, now_ms, head_seq, consumed_seq).await;
+        // Nexus checks generation, element CAS and complete authorized coverage.
+        report.watches = settlement::sweep_watches(self).await;
         if let Some(error) = &report.watches.error {
             log::error!(
                 target: "brain",
@@ -1591,17 +1596,7 @@ impl Space {
             );
         }
 
-        // Skill lifecycle verdicts, every scope. Profile §14 rule 1 puts these
-        // in deterministic code rather than in a prompt: the Brain proposes,
-        // compiles and narrates; it never promotes.
-        report.skills = settlement::settle_skills(self, now_ms).await;
-        if let Some(error) = &report.skills.error {
-            log::error!(
-                target: "brain",
-                space_id = self.id;
-                "skill lifecycle pass failed — verdicts are NOT running: {error}"
-            );
-        }
+        report.skills = settlement::skill_settlement();
 
         // Retention expiry, full scope only. Both halves are the host
         // deciding *when* forgetting happens; the engine only ever decided
@@ -2153,10 +2148,6 @@ impl Space {
             // at open would leave the primer contradicting the prompts for the
             // whole run that created it.
             designate_self_concept(self.memory.nexus().as_ref()).await;
-            // The digest may have grown the vocabulary package on its way
-            // through; Recall's cached primer is stale from here.
-            self.schema_generation
-                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         }
         Ok(rt)
     }
@@ -2497,9 +2488,7 @@ impl Space {
         let note_tool = NoteTool::new();
         // Formation and Maintenance may grow this Space's vocabulary; Recall
         // may not, and gets the tool nowhere.
-        let schema_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let declare_tool = crate::vocabulary::DeclareSymbolsTool::new(memory.clone())
-            .with_schema_generation(schema_generation.clone());
+        let declare_tool = crate::vocabulary::DeclareSymbolsTool::new(memory.clone());
 
         let hooks = Arc::new(Hooks::new(db.clone()));
         let formation = Arc::new(FormationAgent::new(
@@ -2508,20 +2497,17 @@ impl Space {
             hooks.clone(),
             100000,
         ));
-        let recall = Arc::new(
-            RecallAgent::new(
-                memory.clone(),
-                recall_store,
-                recall_conversations,
-                hooks.clone(),
-                65535,
-                {
-                    let db = db.clone();
-                    Arc::new(move || memory_policy_of(&db))
-                },
-            )
-            .with_schema_generation(schema_generation.clone()),
-        );
+        let recall = Arc::new(RecallAgent::new(
+            memory.clone(),
+            recall_store,
+            recall_conversations,
+            hooks.clone(),
+            65535,
+            {
+                let db = db.clone();
+                Arc::new(move || memory_policy_of(&db))
+            },
+        ));
         let maintenance = Arc::new(MaintenanceAgent::new(
             memory.clone(),
             maintenance_store,
@@ -2541,7 +2527,10 @@ impl Space {
             .register_tool(Arc::new(memory_r))?
             .register_tool(Arc::new(memory_tool))?
             .register_tool(Arc::new(note_tool))?
-            .register_tool(Arc::new(declare_tool))?;
+            .register_tool(Arc::new(declare_tool))?
+            .register_tool(Arc::new(crate::cognitive::MemoryRuntimeTool::new(
+                memory.clone(),
+            )))?;
         #[allow(unused_mut)]
         let mut exported_tools = vec![MemoryTool::NAME.to_string()];
         #[cfg(feature = "wiki")]
@@ -2588,7 +2577,6 @@ impl Space {
             ledger,
             miss_cache,
             settlement_lock: tokio::sync::Mutex::new(()),
-            schema_generation,
             self_test_lock: tokio::sync::Mutex::new(()),
             shadow_lock: tokio::sync::Mutex::new(()),
             token_lock: tokio::sync::Mutex::new(()),
@@ -2702,6 +2690,31 @@ impl Space {
 /// the two executors the Space already has, so a pass cannot reach the write
 /// path by choosing the wrong one.
 impl settlement::RunKip for Space {
+    async fn advance_watch(
+        &self,
+        id: &str,
+        version: u64,
+        generation: u64,
+    ) -> Result<serde_json::Value, anda_kip::KipError> {
+        let nexus = self.memory.nexus();
+        tokio::time::timeout(
+            crate::agents::READONLY_KIP_TIMEOUT,
+            nexus.system_session().advance_watch(
+                anda_cognitive_nexus::nexus::DEFAULT_SPACE,
+                id,
+                version,
+                generation,
+                settlement::watch::CHANGES_PAGE_LIMIT,
+            ),
+        )
+        .await
+        .map_err(|_| {
+            anda_kip::KipError::outcome_unknown(
+                "Watch advancement timed out; re-read its version and WatchState",
+            )
+        })?
+    }
+
     fn space_id(&self) -> &str {
         &self.id
     }
@@ -2779,19 +2792,8 @@ impl BrainHook for Hooks {
                         usage.accumulate(&conversation.usage);
                         Some(usage)
                     });
-                // The cycle read the Change Stream through the coordinate it
-                // was handed (`assessment.space_seq`, BrainMaintenance.md
-                // §A.2): that is where the next cycle starts, and what a prose
-                // silence Watch's deadline is measured against (§5.11). Only a
-                // completed cycle counts — a failed one may have read nothing.
-                if conversation.status == ConversationStatus::Completed
-                    && let Some(seq) = consumed_seq_of(conversation)
-                {
-                    let _ = self.db.set_extension_from_with(
-                        DELTA_CONSUMED_SEQ_KEY.to_string(),
-                        |recorded: Option<u64>| Some(recorded.unwrap_or(0).max(seq)),
-                    );
-                }
+                // A completed model call does not attest a consumed change page.
+                // Per-Watch progress is retained by Nexus in WatchState.
                 // Dream self-test (plan M7): after the sleep cycle ends, probe
                 // whether recent memories are actually findable; failures
                 // become review SleepTasks for the next cycle.
@@ -3065,26 +3067,6 @@ impl Space {
 
 /// Timeout for one settlement-built write KIP command.
 const SETTLEMENT_KIP_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Space extension: the coordinate the last completed maintenance cycle read
-/// the Change Stream through (`assessment.space_seq` of that cycle).
-///
-/// Two readers. The next cycle starts its `CHANGES AFTER SEQ` here, and the
-/// Watch sweep fires a prose silence Watch only once this has reached the head
-/// at which it first saw the deadline passed (Profile §5.11).
-const DELTA_CONSUMED_SEQ_KEY: &str = "delta_consumed_seq";
-
-/// The coordinate a completed maintenance cycle consumed the stream through:
-/// the `assessment.space_seq` in the input it was run on.
-///
-/// Read back off the conversation rather than threaded through the agent,
-/// because the conversation is the durable record of what the cycle was
-/// handed — a value carried beside it could disagree with it.
-fn consumed_seq_of(conversation: &Conversation) -> Option<u64> {
-    let first: Message = serde_json::from_value(conversation.messages.first()?.clone()).ok()?;
-    let input: MaintenanceInput = serde_json::from_str(&first.text()?).ok()?;
-    input.assessment?.space_seq
-}
 
 /// How long a Space may go without a maintenance cycle before the background
 /// pass runs one on the clock.

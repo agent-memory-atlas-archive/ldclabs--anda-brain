@@ -23,6 +23,9 @@ const root = dirname(here)
 
 /** Each asset, with the constant it becomes and where it came from. */
 const ASSETS = [
+  ...[['KIPFormation.md', 'KIP_FORMATION_CARD'], ['KIPRecall.md', 'KIP_RECALL_CARD'],
+    ['KIPMaintenance.md', 'KIP_MAINTENANCE_CARD'], ['MemoryInterface.md', 'MEMORY_AGENT_CARD']]
+    .map(([file, constant]) => ({file, constant, origin: `anda-db/rs/anda_kip/brain/${file}`, doc: 'The upstream role card.'})),
   {
     file: 'KIPSyntax.md',
     constant: 'KIP_SYNTAX',

@@ -80,7 +80,8 @@ pub(crate) fn models_with_configured_completer(
 }
 
 /// Admin-creates space `id` (creator `[1]`, owner `[2]`, tier 1) and loads
-/// it unpinned.
+/// it unpinned without background autostart. Tests explicitly drive work; a
+/// startup task racing fixture insertion could otherwise consume its queue.
 pub(crate) async fn create_loaded_space(app: &AppState, id: &str) -> Arc<Space> {
     app.admin_create_space(
         Principal::from_slice(&[1]),
@@ -92,7 +93,7 @@ pub(crate) async fn create_loaded_space(app: &AppState, id: &str) -> Arc<Space> 
     .await
     .unwrap();
 
-    app.load_space(id, false).await.unwrap()
+    app.load_space_with(id, false, false).await.unwrap()
 }
 
 /// A deterministic ED25519 signing key.

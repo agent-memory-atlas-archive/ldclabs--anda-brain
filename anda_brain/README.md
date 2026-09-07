@@ -6,6 +6,21 @@ Business agents interact entirely through natural language and a REST API — no
 
 Anda Brain is designed to be **self-hosted** (the hosted cloud service has been discontinued). For a complete agent built on Anda Brain, see [Anda Bot](https://github.com/ldclabs/anda-bot).
 
+SleepTask and Watch are exempt from bulk mnemonic decay because all operational
+record updates require version guards. Failed host passes reach the model in
+assessment.settlement_errors.
+
+## KIP 2.0 / CognitiveMemory 2.1 update
+
+Rust and Worker track KIP `d6e3a45` and AndaDB `bcd01d4`. Skill behavior is an
+immutable `SkillRevision`; Watch progress and task leases use protected Nexus
+operations. The former family-rate Skill promotion rule has been removed. Without
+configured independent observers, frozen trials and replayable evaluations,
+procedures remain unproven and `skills.unsupported_reason` reports the limitation.
+Existing Brain endpoints remain available. The optional five-intent Memory Interface
+and its `memory_*` bundles are **not advertised** by these adapters. See the
+[sync notes](../docs/kip-v2-cognitive-sync.md) for implemented behavior and remaining boundaries.
+
 ## Architecture
 
 ```
@@ -105,15 +120,15 @@ Consolidates, prunes, and optimizes the knowledge graph during scheduled or on-d
 1. **Assessment** — Audit memory health (read-only): `DESCRIBE PRIMER`, pending SleepTasks, unconsolidated Events and Experiences, orphans, stale events, plus the runtime's own `assessment` block (per-predicate census, correction tallies, armed and fired Watches, the current `space_seq`).
 2. **SleepTask Processing** — Handle queued work under the Profile's classes: `consolidate`, `review_conflict`, `review_skill`, `resolve_identity`, `review_retention`, `review_derived`, `refresh_self_model`, `inspect_quarantine`.
 3. **Semantic consolidation** — Compress clusters of Events, Experiences and Evidence into derived Assertions, keeping Activity lineage back to the sources. A summary is not a new epistemic root.
-4. **Procedural consolidation** — Compare successful against failed Experiences and compile a `proposed` Skill with the `task_family` that can grade it. A pattern no outcome stream could prove wrong is an Insight, not a Skill.
+4. **Procedural consolidation** — Compare successful and failed Experiences and compile an unproven Skill with an immutable SkillRevision. Its task_family identifies comparison candidates; only a configured trial/evaluation pipeline can confer validated standing.
 5. **Identity review** — Review `same_as` suspicions, then `MERGE CONCEPT`, which is non-destructive: the source survives as merged historical identity.
 6. **Contradiction and derivation review** — Different actors' disagreement coexists; only an actor's own revision supersedes. After a revision, the settlement walks `LIST DEPENDENTS` and hands the agent each revised root with its dependents (`assessment.revised_roots`); the agent flags what no longer holds `stale`.
 7. **Mnemonic metabolism** — run by the runtime settlement before the cycle, not by the agent: `MnemonicState.memory_strength * decay_factor` on Concepts due for it. Never `confidence`; a fact nobody has asked about lately is no less credible. `salience` and `utility` stay with the agent — the sweep cannot make a per-memory judgement.
-8. **Commitments, Watches and the action gate** — Review what is owed and what is being waited for. The runtime has already evaluated every Watch whose condition is a structured filter against the change stream (Profile §5.11); the agent evaluates prose conditions against `CHANGES AFTER SEQ` from `assessment.consumed_seq` and records what it decided about each fired one as an `action_gate` outcome (`act` / `ask` / `defer` / `silence`). See "Waiting is active" below.
+8. **Commitments and Watches** — Review outstanding obligations and attention. Nexus advances structured Watches under generation/CAS/coverage checks; prose conditions remain deferred without a semantic evaluator. No model completion attests change-stream consumption. See the Watch contract below.
 9. **SelfModel and WorkingState refresh** — Consolidate identity from evidence rather than from the latest conversation, and rebuild the digest the next waking session resumes from, stamped with the `basis_seq` it was built at.
 10. **Retention review** — Decide what should carry an expiry and write it with `SET RETENTION`; the full settlement's sweep is what makes that write mean something. See "Retention expiry" below.
 
-Skill lifecycle transitions are deliberately absent from this list: they are deterministic code, not agent work. See "The Skill lifecycle is code, not a prompt" below.
+Skill lifecycle transitions require a configured protected evaluation pipeline and do not run in this deployment. See "Procedural candidates remain unproven" below.
 
 **Key behaviors:**
 - Single-execution guard — only one maintenance cycle can run at a time per space.
@@ -168,61 +183,44 @@ observed, not rewarded — which is also the difference between a memory system
 and a popularity contest. The `recall_reinforcement` policy knob is retained
 for stored-policy compatibility and does nothing.
 
-**Waiting is active:** every settlement evaluates the armed Watches whose
-`condition` is a structured filter — `element`, `slot` or `type`, narrowed by
-`ops` and `touched` (Profile §5.11) — against the Change Stream, from where
-each was last evaluated through the head. A `delta` Watch fires on the first
-change that matches, with the coordinate in `matched_seq`; a `silence` Watch
-whose awaited change arrived stands down as `disarmed`, because the silence it
-was armed for can no longer happen; a `silence` Watch past its `due_at` with
-nothing matched fires — silence concluded over a consumed stream, which is
-what §5.11 requires, not a clock reading. Each fire is the transition and its
-`watch_fire` Activity, atomically and guarded by `EXPECT VERSION`.
+**Watch progress is protected Nexus state.** Create a Watch as `disarmed`, then
+call the internal `memory_runtime` tool with `arm_watch`, its exact id and current
+`_system.version`. Arming captures an authorization view and creates a fresh
+`WatchState.arm_generation`. Settlement advances structured selectors through a
+bounded authorized change page using the current overall version and generation.
+Silence requires complete coverage through the deadline; a matching silence Watch
+ends as `expired`, counted in the legacy `disarmed` report field. Native advancement
+returns status, coverage and a receipt; it does not synthesize `watch_fire` Activities.
+Text conditions, including mixed selector/text objects, stay deferred without a
+configured semantic evaluator. A completed maintenance model call never advances a
+Space-wide consumption watermark. Old Watches without WatchState need explicit
+re-arming after their observation gap is reviewed. Firing grants no external authority.
 
-A Watch whose `condition` is prose stays with the model: matching "the vendor
-replied about the renewal" is interpretation, not arithmetic. The runtime keeps
-one promise for it all the same — a prose `silence` Watch past its deadline
-fires only once a completed maintenance cycle has consumed the stream through
-the head at which the sweep first saw the deadline passed (`due_seen_seq` on
-the Watch, `delta_consumed_seq` in the Space). The clock alone proves nothing:
-a matching change committed before the deadline may still be waiting for the
-model whose job it is to read it, and firing on the clock first is the false
-alarm §5.11 names. So a prose deadline fires on the cycle after the one that
-read past it, and never before.
+**Procedural candidates remain unproven.** `Skill.current_revision` selects an
+immutable `SkillRevision` whose `revision_of` points back to the Skill. Both can be
+created atomically. The internal `memory_runtime` tool computes the canonical
+SHA-256 digest of all revision attributes except `behavior_digest`; Nexus verifies it.
+No model plan can write TrialRecord, EvaluationRecord, AttemptRecord, OutcomeRecord,
+TrialState or GradingState. Same-family outcomes are merely comparison candidates;
+no automatic baseline or grade is inferred. Settlement preserves the historical
+counter fields at zero and includes `skills.unsupported_reason` until a trusted
+observer/trial/evaluation scheduler is configured. Historic counters or `adopted`
+labels are not validated learning evidence.
 
-Firing produces attention and nothing else: no SleepTask, no outward act, and
-no `action_gate` outcome, because `act` / `ask` / `defer` / `silence` are all
-judgements about what the deadline *means*. Those wait in
-`assessment.fired_watches` for the maintenance cycle.
+**Task work requires a lease.** The internal tool's `lease_task` operation acquires
+or renews a five-minute lease under the runtime Principal. After re-reading the
+version, maintenance commits terminal task state and outputs in one guarded MUTATE.
+WatchState and LeaseState cannot be written by model KML. There is no external
+dispatch adapter. Runtime authentication, tool capabilities and evaluator code never
+come from model-generated content.
 
-**The Skill lifecycle is code, not a prompt.** `proposed → trialed → adopted →
-revoked` moves only by deterministic verdict over Outcome Evidence — Profile
-§14 rule 1: "the Brain proposes, compiles, and narrates; it never promotes."
-
-Which outcomes count is rule 7, *attribution before counting*: an outcome grades
-a Skill only when it is **linked** to a decision that applied it — an
-`action_gate` Activity naming the Skill among its `inputs`, and the instrument's
-`outcome_observation` Activity naming that gate among its own. An outcome that
-merely shares the `task_family` is the **baseline** the trial is measured
-against, never a grade, so two Skills in one family are judged by their own runs
-rather than by each other's.
-
-Every transition commits as a `lifecycle_verdict` Activity citing the linked
-Evidence it read, with the rule identity pinned in `parameters_digest` and the
-basis on the Skill's own `TrialState` — the coordinate the trial opened at, the
-family's tallies excluding this Skill, and the quota of linked outcomes the rule
-needs — so an auditor can re-run it from state alone. The tallies live in
-`GradingState` and the revised admission bet in `MnemonicState.utility`: a
-record of what happened is not a forecast, and neither is authority.
-
-Adoption is comparative (better than the recorded baseline, not merely good) and
-provisional (a rate that falls back demotes to a re-trial); revocation uses the
-same margin in the other direction, plus the one asymmetry the Profile grants —
-a single high-severity matching-condition failure may revoke. A lifecycle that
-can only acquire cannot tell a habit from a superstition. The model's job is
-§11: compile a `proposed` Skill from contrastive Experience, attach the
-`task_family` its baseline comes from, and set the admission bet at
-compilation.
+**Current basis matters.** Recall loads a fresh Primer because policy, trust and
+identity can change independently of vocabulary. A stored WorkingState/DerivationState
+or bare `basis_seq` cannot override computed dependency validity. Derived refreshes
+must retain their actual read pins, context and ProjectionBasis; incomplete coverage
+or unavailable replay material remains explicit. Full KIP syntax is available to
+writing agents through `memory_runtime` operation `syntax`; routine context uses
+the upstream role cards and ontology.
 
 **Retention expiry:** a full settlement also acts on the two clocks that say
 when something should stop being kept, which are not the same clock. An

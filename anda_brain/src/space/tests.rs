@@ -1199,600 +1199,212 @@ async fn the_runtime_mints_the_observation_the_model_only_cites() {
     assert_eq!(stored(space.clone()).await.len(), 1);
 }
 
-/// The lifecycle end to end, against a real graph: compile a Skill, feed
-/// its family graded Outcome Evidence, and watch deterministic code —
-/// never a model — move it. Profile §14 rule 1: "The Brain proposes,
-/// compiles, and narrates; it never promotes."
+/// The 2.1 candidate has immutable behavior; descriptive feedback is no grade.
 #[tokio::test]
-async fn a_skill_is_promoted_by_its_outcome_stream_and_never_by_assertion() {
-    let app = test_app_state("skill_lifecycle");
-    let space = create_loaded_space(&app, "skill_lifecycle").await;
-    let now_ms = unix_ms();
-
-    seed_kip(
-        &space,
-        kip::request(
-            r#"MUTATE {
-  UPSERT CONCEPT ?s {
-    MATCH { type: "Skill", key: "redeploy" }
-    SET FIELDS { name: "Redeploy after a schema change" }
-    SET ATTRIBUTES {
-      skill_class: "recovery",
-      task_family: "deploy",
-      summary: "check the migration target before redeploying",
-      procedure: "1. verify the active database target 2. redeploy",
-      status: "proposed"
+async fn skill_candidates_keep_their_revision_and_unproven_standing() {
+    let app = test_app_state("revision_contract");
+    let space = create_loaded_space(&app, "revision_contract").await;
+    let attributes =
+        serde_json::json!({"task_family":"deploy", "procedure":"verify before deploying"});
+    let digest = anda_cognitive_nexus::content_digest(&attributes).unwrap();
+    seed_kip(&space, kip::request_with(r#"MUTATE {
+      CREATE CONCEPT ?skill { TYPE "Skill" SET ATTRIBUTES {skill_class:"workflow",summary:"verify",status:"proposed"} SET STRUCTURAL {("current_revision",?revision)} }
+      CREATE CONCEPT ?revision { TYPE "SkillRevision" SET ATTRIBUTES {task_family:"deploy",procedure:"verify before deploying",behavior_digest: :digest} SET STRUCTURAL {("revision_of",?skill)} }
+    }"#, kip::param("digest",digest))).await;
+    for _ in 0..8 {
+        seed_kip(&space, kip::request(r#"CREATE EVIDENCE ?e { SET FIELDS {evidence_class:"agent_statement",payload:"deployment succeeded"} }"#)).await;
     }
-  }
-}"#,
-        ),
-    )
-    .await;
-
-    // The gate below has to name the Skill it applied, and a Structural
-    // Reference names an element, never a key.
-    let skill_id = {
-        let response = space
-            .execute_kip_readonly(kip::request(
-                r#"FIND(?s.id) WHERE { ?s CONCEPT {type: "Skill", key: "redeploy"} } LIMIT 1"#,
-            ))
-            .await
-            .unwrap();
-        let rows = kip::ok_result(&response).cloned().unwrap_or_default();
-        let row = rows
-            .as_array()
-            .and_then(|rows| rows.first())
-            .cloned()
-            .unwrap_or_default();
-        // A single-projection row may come back bare or as a one-column
-        // array depending on the shape the engine chose; take either.
-        let id = match row.as_array().and_then(|columns| columns.first()) {
-            Some(value) => value.clone(),
-            None => row,
-        };
-        id.as_str()
-            .map(str::to_string)
-            .unwrap_or_else(|| panic!("the seeded Skill has an id: {rows}"))
-    };
-
-    // One graded run, attributed the way Profile §8.1 requires: a gate
-    // that names the Skill it applied, and an instrument's observation
-    // that names the gate and the outcome it wrote. Without both hops the
-    // outcome belongs to the family's baseline and grades nothing.
-    async fn grade(space: &Space, skill_id: &str, outcomes: &[(&str, f64)]) {
-        for (status, magnitude) in outcomes {
-            seed_kip(
-                space,
-                kip::request_with(
-                    r#"MUTATE {
-  CREATE ACTIVITY ?gate {
-    SET FIELDS { activity_class: "action_gate", status: "completed" }
-    SET FACET "DecisionRecord" { decision: "act", rationale: "redeploy under the compiled Skill" }
-    SET STRUCTURAL { ("inputs", :skill) }
-  }
-  CREATE EVIDENCE ?e {
-    SET FIELDS {
-      evidence_class: "outcome",
-      payload: {instrument: "ci", run: "x"},
-      observed_at: "2026-08-31T00:00:00Z"
-    }
-    SET FACET "OutcomeRecord" {
-      task_family: "deploy",
-      outcome_status: :status,
-      magnitude: :magnitude
-    }
-  }
-  CREATE ACTIVITY ?obs {
-    SET FIELDS { activity_class: "outcome_observation", status: "completed" }
-    SET STRUCTURAL { ("inputs", ?gate) ("outputs", ?e) }
-  }
-}"#,
-                    serde_json::Map::from_iter([
-                        ("skill".to_string(), serde_json::Value::from(skill_id)),
-                        ("status".to_string(), serde_json::Value::from(*status)),
-                        ("magnitude".to_string(), serde_json::Value::from(*magnitude)),
-                    ]),
-                ),
-            )
-            .await;
-        }
-    }
-
-    /// An outcome in the same family that nobody attributed to the Skill:
-    /// it belongs to the baseline and must never move a lifecycle.
-    async fn unattributed(space: &Space, outcomes: &[(&str, f64)]) {
-        for (status, magnitude) in outcomes {
-            seed_kip(
-                space,
-                kip::request_with(
-                    r#"MUTATE {
-  CREATE EVIDENCE ?e {
-    SET FIELDS {
-      evidence_class: "outcome",
-      payload: {instrument: "ci", run: "other"},
-      observed_at: "2026-08-31T00:00:00Z"
-    }
-    SET FACET "OutcomeRecord" {
-      task_family: "deploy",
-      outcome_status: :status,
-      magnitude: :magnitude
-    }
-  }
-}"#,
-                    serde_json::Map::from_iter([
-                        ("status".to_string(), serde_json::Value::from(*status)),
-                        ("magnitude".to_string(), serde_json::Value::from(*magnitude)),
-                    ]),
-                ),
-            )
-            .await;
-        }
-    }
-
-    async fn standing(space: &Space) -> (String, f64, u64) {
-        let response = space
-                .execute_kip_readonly(kip::request(
-                    r#"FIND(?s.attributes.status, ?s.facets["MnemonicState"].utility, ?s.facets["GradingState"].graded_count)
-WHERE { ?s CONCEPT {type: "Skill", key: "redeploy"} } LIMIT 1"#,
-                ))
-                .await
-                .unwrap();
-        let rows = kip::ok_result(&response).cloned().unwrap_or_default();
-        let row = rows
-            .as_array()
-            .and_then(|r| r.first())
-            .cloned()
-            .unwrap_or_default();
-        let columns = row.as_array().cloned().unwrap_or_default();
-        (
-            columns
-                .first()
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            columns
-                .get(1)
-                .and_then(serde_json::Value::as_f64)
-                .unwrap_or(0.0),
-            columns
-                .get(2)
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0),
-        )
-    }
-
-    /// The trial's recorded baseline rate and how many runs it counted.
-    async fn trial_state(space: &Space) -> Option<(f64, u64)> {
-        let response = space
-            .execute_kip_readonly(kip::request(
-                r#"FIND(?s.facets["TrialState"])
-WHERE { ?s CONCEPT {type: "Skill", key: "redeploy"} } LIMIT 1"#,
-            ))
-            .await
-            .unwrap();
-        let rows = kip::ok_result(&response).cloned().unwrap_or_default();
-        let row = rows.as_array()?.first()?.clone();
-        let facet = match row.as_array().and_then(|columns| columns.first()) {
-            Some(value) => value.clone(),
-            None => row,
-        };
-        let count = |name: &str| facet.get(name).and_then(serde_json::Value::as_u64);
-        let success = count("baseline_success_count")?;
-        let failure = count("baseline_failure_count")?;
-        let graded = count("baseline_graded_count")?;
-        let decided = success + failure;
-        (decided > 0).then(|| (success as f64 / decided as f64, graded))
-    }
-
-    // The family was already running at 1 success in 4 before anybody
-    // tried this Skill. Those runs are nobody's treatment set — they are
-    // what "how things were going" means (§6.5).
-    unattributed(
-        &space,
-        &[
-            ("success", 0.2),
-            ("failure", 0.2),
-            ("failure", 0.2),
-            ("failure", 0.2),
-        ],
-    )
-    .await;
-
-    // Runs nobody attributed to the Skill grade nothing: rule 7 makes the
-    // link the only path from an outcome to a tally.
-    let report = settlement::settle_skills(space.as_ref(), now_ms).await;
-    assert_eq!(report.error, None, "{report:?}");
-    assert_eq!(report.graded, 0, "{report:?}");
-    assert_eq!(standing(&space).await.0, "proposed");
-
-    // A poor first showing opens the trial and records the baseline it
-    // will later be judged against — the family's 1 of 4, so 0.250.
-    grade(
-        &space,
-        &skill_id,
-        &[("success", 0.5), ("failure", 0.2), ("failure", 0.2)],
-    )
-    .await;
-    let report = settlement::settle_skills(space.as_ref(), now_ms).await;
-    assert_eq!(report.error, None, "{report:?}");
-    assert_eq!(report.transitions, 1, "{report:?}");
-    assert_eq!(standing(&space).await.0, "trialed");
-    assert_eq!(
-        trial_state(&space).await,
-        Some((0.25, 4)),
-        "the baseline is the family without this Skill's own runs"
-    );
-
-    // The stream then does better than that baseline, over enough runs.
-    grade(&space, &skill_id, &[("success", 0.5); 6]).await;
-    let report = settlement::settle_skills(space.as_ref(), now_ms).await;
-    assert_eq!(report.transitions, 1, "{report:?}");
-    let (status, utility, graded) = standing(&space).await;
-    assert_eq!(status, "adopted");
-    assert_eq!(graded, 9, "every graded outcome counted exactly once");
-    assert!((utility - 7.0 / 9.0).abs() < 1e-9, "utility {utility}");
-
-    // Idempotent: the cursor advanced, so a replayed pass grades nothing
-    // and cannot promote on arithmetic instead of evidence.
-    let report = settlement::settle_skills(space.as_ref(), now_ms).await;
-    assert_eq!(report.graded, 0, "{report:?}");
-    assert_eq!(standing(&space).await.1, utility);
-
-    // One severe matching-condition failure revokes an adopted Skill
-    // without waiting for a re-verdict — the Profile's one sanctioned
-    // asymmetry, and it favours demotion.
-    grade(&space, &skill_id, &[("failure", 0.95)]).await;
-    let report = settlement::settle_skills(space.as_ref(), now_ms).await;
-    assert_eq!(report.transitions, 1, "{report:?}");
-    assert_eq!(standing(&space).await.0, "revoked");
-
-    // Every move left a recomputable verdict behind: Profile §9 wants the
-    // linked Evidence as `inputs`, the Skill it moved as `outputs`, the
-    // rule identity pinned in `parameters_digest`, and the basis on the
-    // Skill's own `TrialState` — so an auditor can re-run it from state.
-    let activities = space
-            .execute_kip_readonly(kip::request(
-                r#"FIND(?a.parameters_digest) WHERE { ?a ACTIVITY {activity_class: "lifecycle_verdict"} } LIMIT 20"#,
-            ))
-            .await
-            .unwrap();
-    let digests: Vec<String> =
-        serde_json::from_value(kip::ok_result(&activities).cloned().unwrap_or_default())
-            .unwrap_or_default();
-    assert_eq!(digests.len(), 3, "{digests:?}");
-    for digest in &digests {
-        assert!(
-            digest.contains(crate::settlement::skill::VERDICT_RULE),
-            "{digest}"
-        );
-        assert!(digest.contains("window=("), "{digest}");
-        assert!(digest.contains("basis_seq="), "{digest}");
-        assert!(digest.contains("baseline="), "{digest}");
-    }
-
-    // The Evidence is what the verdict read; the Skill is what it moved.
-    // The other way round would read as though the Skill caused the runs
-    // that graded it.
-    let cited = space
-            .execute_kip_readonly(kip::request(
-                r#"FIND(?a.inputs, ?a.outputs) WHERE { ?a ACTIVITY {activity_class: "lifecycle_verdict"} } LIMIT 20"#,
-            ))
-            .await
-            .unwrap();
-    let rows = kip::ok_result(&cited).cloned().unwrap_or_default();
-    let rows = rows.as_array().cloned().unwrap_or_default();
-    assert_eq!(rows.len(), 3, "{rows:?}");
-    let ids = |value: &serde_json::Value| -> Vec<String> {
-        value
-            .as_array()
-            .map(|refs| {
-                refs.iter()
-                    .filter_map(|r| r.get("id").and_then(|id| id.as_str()))
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    let mut graded_evidence = Vec::new();
-    for row in &rows {
-        let columns = row.as_array().unwrap();
-        let inputs = ids(&columns[0]);
-        assert!(
-            inputs.iter().all(|id| id.starts_with("E-")),
-            "inputs are the graded Outcome Evidence: {inputs:?}"
-        );
-        assert!(!inputs.is_empty(), "a verdict cites the outcomes it read");
-        graded_evidence.extend(inputs);
-        assert_eq!(
-            ids(&columns[1]),
-            vec!["C-1".to_string()],
-            "outputs are the Skill whose lifecycle it moved"
-        );
-    }
-    // Each graded outcome is cited by exactly one verdict: the cursor is
-    // what stops a replay from counting the same run twice.
-    let unique: std::collections::BTreeSet<_> = graded_evidence.iter().collect();
-    assert_eq!(unique.len(), graded_evidence.len(), "{graded_evidence:?}");
-    assert_eq!(graded_evidence.len(), 10);
-}
-
-/// The status of one Watch, by key.
-async fn watch_status(space: &Space, key: &str) -> String {
-    watch_attribute(space, key, "status").await
-}
-
-/// One attribute of one Watch, as text.
-async fn watch_attribute(space: &Space, key: &str, attribute: &str) -> String {
+    let report = space
+        .settle_memory_metabolism(MaintenanceScope::Quick, unix_ms())
+        .await
+        .unwrap();
+    assert_eq!(report.skills.transitions, 0);
+    assert!(report.skills.unsupported_reason.is_some());
     let response = space
-            .execute_kip_readonly(kip::request_with(
-                format!(
-                    r#"FIND(?w.attributes.{attribute}) WHERE {{ ?w CONCEPT {{type: "Watch", key: :key}} }} LIMIT 1"#
-                ),
-                kip::param("key", key),
-            ))
-            .await
-            .unwrap();
-    kip::ok_result(&response)
-        .and_then(serde_json::Value::as_array)
-        .and_then(|rows| rows.first())
-        .map(crate::types::attribute_text)
-        .unwrap_or_default()
-}
-
-/// Arms one Watch.
-async fn arm_watch(space: &Space, key: &str, class: &str, condition: serde_json::Value, due: &str) {
-    seed_kip(
-        space,
-        kip::request_with(
-            r#"MUTATE {
-  UPSERT CONCEPT ?w {
-    MATCH { type: "Watch", key: :key }
-    SET FIELDS { name: :key }
-    SET ATTRIBUTES {
-      watch_class: :class,
-      summary: "escalate if nothing lands",
-      condition: :condition,
-      status: "armed",
-      due_at: :due
-    }
-  }
-}"#,
-            serde_json::Map::from_iter([
-                ("key".to_string(), serde_json::Value::from(key)),
-                ("class".to_string(), serde_json::Value::from(class)),
-                ("condition".to_string(), condition),
-                ("due".to_string(), serde_json::Value::from(due)),
-            ]),
-        ),
-    )
-    .await;
-}
-
-/// The `activity_class` of every Activity in the Space.
-async fn activity_classes(space: &Space) -> Vec<String> {
-    let activities = space
         .execute_kip_readonly(kip::request(
-            r#"FIND(?a.activity_class) WHERE { ?a ACTIVITY {} } LIMIT 20"#,
+            r#"FIND(?s.attributes.status) WHERE { ?s CONCEPT {type:"Skill"} } LIMIT 10"#,
         ))
         .await
         .unwrap();
-    serde_json::from_value(kip::ok_result(&activities).cloned().unwrap_or_default())
-        .unwrap_or_default()
+    assert_eq!(
+        kip::ok_result(&response).unwrap(),
+        &serde_json::json!(["proposed"])
+    );
+    let refused = space.run_kip_settlement(kip::request(r#"UPDATE ?r SET ATTRIBUTES {procedure:"skip verification"} WHERE { ?r CONCEPT {type:"SkillRevision"} } LIMIT 1"#)).await.unwrap();
+    assert!(!kip::succeeded(&refused));
 }
 
-/// A prose silence Watch fires on its deadline only once the Brain has
-/// consumed the Change Stream through the head at which the sweep first
-/// saw the deadline passed (Profile §5.11). The clock alone proves
-/// nothing: a matching change committed before the deadline may still be
-/// waiting for the model whose job it is to decide whether a change
-/// matched a condition written in prose.
-#[tokio::test]
-async fn a_silence_watch_fires_when_its_deadline_passes() {
-    let app = test_app_state("watch_expiry");
-    let space = create_loaded_space(&app, "watch_expiry").await;
-    let now_ms = unix_ms();
-    let past = kip::timestamp(now_ms.saturating_sub(86_400_000));
-    let future = kip::timestamp(now_ms.saturating_add(86_400_000));
-    let prose = serde_json::Value::from("no reply from the vendor");
-
-    arm_watch(&space, "overdue", "silence", prose.clone(), &past).await;
-    arm_watch(&space, "not_yet", "silence", prose.clone(), &future).await;
-    // A delta Watch has no deadline semantics at all: it waits for a
-    // matching change, and in prose only the model can say what matches.
-    arm_watch(&space, "delta", "delta", prose, &past).await;
-
-    // First sight of the passed deadline: the head is recorded on the
-    // Watch and nothing fires.
-    let head = space.current_space_seq().await;
-    assert!(head.is_some());
-    let report = settlement::sweep_watches(space.as_ref(), now_ms, head, None).await;
-    assert_eq!(report.error, None, "{report:?}");
-    assert_eq!((report.fired, report.deferred), (0, 1), "{report:?}");
-    assert_eq!(watch_status(&space, "overdue").await, "armed");
-    let seen: u64 = watch_attribute(&space, "overdue", "due_seen_seq")
+async fn created_ref(
+    space: &Space,
+    command: &str,
+    parameters: serde_json::Map<String, serde_json::Value>,
+) -> String {
+    let response = space
+        .run_kip_settlement(kip::request_with(command, parameters))
         .await
-        .parse()
         .unwrap();
-    assert_eq!(Some(seen), head);
-
-    // The Brain has read the stream only up to before that head: held.
-    let report = settlement::sweep_watches(
-        space.as_ref(),
-        now_ms,
-        space.current_space_seq().await,
-        Some(seen - 1),
-    )
-    .await;
-    assert_eq!((report.fired, report.deferred), (0, 1), "{report:?}");
-    assert_eq!(watch_status(&space, "overdue").await, "armed");
-
-    // Consumed through it: silence is a fact, and the Watch fires.
-    let consumed = space.current_space_seq().await;
-    let report = settlement::sweep_watches(space.as_ref(), now_ms, consumed, consumed).await;
-    assert_eq!(report.error, None, "{report:?}");
-    assert_eq!((report.fired, report.deferred), (1, 0), "{report:?}");
-    assert_eq!(watch_status(&space, "overdue").await, "fired");
-    assert_eq!(watch_status(&space, "not_yet").await, "armed");
-    assert_eq!(watch_status(&space, "delta").await, "armed");
-
-    // Firing wrote its own provenance, and nothing else. An `action_gate`
-    // here would be the runtime inventing a decision — act, ask, defer and
-    // silence are all judgements about what the deadline means.
-    assert_eq!(
-        activity_classes(&space).await,
-        vec!["watch_fire".to_string()]
+    assert!(
+        kip::succeeded(&response),
+        "{}",
+        kip::error_message(&response)
     );
-
-    // Idempotent: the fired Watch is no longer armed, so a second sweep
-    // finds nothing and cannot fire it twice.
-    let consumed = space.current_space_seq().await;
-    let again = settlement::sweep_watches(space.as_ref(), now_ms, consumed, consumed).await;
-    assert_eq!((again.fired, again.deferred), (0, 0), "{again:?}");
-
-    // The decision is still outstanding, and the next cycle is handed the
-    // queue. Firing produced attention; what it means is the action gate's,
-    // and the gate is cognition.
-    let assessment = space.maintenance_assessment().await;
-    let fired: Vec<&str> = assessment
-        .fired_watches
-        .iter()
-        .map(|watch| watch.name.as_str())
-        .collect();
-    assert_eq!(fired, ["overdue"], "{assessment:?}");
-    let armed: Vec<&str> = assessment
-        .armed_watches
-        .iter()
-        .map(|watch| watch.name.as_str())
-        .collect();
-    assert_eq!(armed.len(), 2, "{armed:?}");
+    kip::ok_result(&response).unwrap()["handles"]["item"]
+        .as_str()
+        .unwrap()
+        .to_string()
 }
 
-/// A structured condition is the runtime's to evaluate (Profile §5.11):
-/// the sweep reads the Change Stream from where each Watch was last
-/// evaluated and matches the entries, so a delta Watch fires on the
-/// change it watches, a silence Watch whose change arrived stands down,
-/// and a silence Watch past its deadline with nothing matched fires in
-/// the same sweep — silence concluded over a consumed stream.
+async fn element_version(space: &Space, id: &str) -> u64 {
+    let response = space
+        .execute_kip_readonly(kip::request_with(
+            "FIND(?c._system.version) WHERE { ?c CONCEPT {id: :id} } LIMIT 1",
+            kip::param("id", id),
+        ))
+        .await
+        .unwrap();
+    kip::ok_result(&response).unwrap()[0].as_u64().unwrap()
+}
+
+async fn runtime_work(space: &Space, operation: &str, id: &str) -> serde_json::Value {
+    crate::cognitive::MemoryRuntimeTool::new(space.memory.clone())
+        .execute(
+            crate::cognitive::RuntimeArgs {
+                operation: operation.into(),
+                target_ref: Some(id.into()),
+                expected_version: Some(element_version(space, id).await),
+                content: None,
+            },
+            true,
+        )
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
-async fn a_structured_watch_is_evaluated_against_the_change_stream() {
-    let app = test_app_state("watch_structured");
-    let space = create_loaded_space(&app, "watch_structured").await;
-    let now_ms = unix_ms();
-    let past = kip::timestamp(now_ms.saturating_sub(86_400_000));
-
-    seed_kip(
-            &space,
-            kip::request(
-                r#"MUTATE { UPSERT CONCEPT ?p { MATCH { type: "Person", key: "vendor" } SET FIELDS { name: "Vendor" } } }"#,
-            ),
-        )
-        .await;
-    let vendor = {
-        let response = space
-            .execute_kip_readonly(kip::request(
-                r#"FIND(?c.id) WHERE { ?c CONCEPT {type: "Person", key: "vendor"} } LIMIT 1"#,
-            ))
-            .await
-            .unwrap();
-        serde_json::from_value::<Vec<String>>(kip::ok_result(&response).cloned().unwrap())
-            .unwrap()
-            .remove(0)
-    };
-
-    // Armed now, so only changes committed after arming count.
-    arm_watch(
+async fn watches_use_nexus_coverage_and_never_infer_text_consumption() {
+    let app = test_app_state("watch_contract");
+    let space = create_loaded_space(&app, "watch_contract").await;
+    let target = created_ref(
         &space,
-        "profile",
-        "delta",
-        serde_json::json!({"element": vendor}),
-        "",
+        r#"CREATE CONCEPT ?item {TYPE "Person" NAME "vendor"}"#,
+        Default::default(),
     )
     .await;
-    arm_watch(
-        &space,
-        "reply",
-        "silence",
-        serde_json::json!({"slot": {"subject": vendor, "predicate": "prefers"}}),
-        &past,
-    )
-    .await;
-    arm_watch(
-        &space,
-        "quiet",
-        "silence",
-        serde_json::json!({"element": vendor, "ops": ["lifecycle"]}),
-        &past,
-    )
-    .await;
-
-    // The vendor's profile changes, and a claim lands in the watched slot.
-    seed_kip(
-            &space,
-            kip::request_with(
-                r#"MUTATE {
-  UPDATE :vendor_id SET FIELDS { name: "Vendor Inc" }
-  UPSERT CONCEPT ?channel { MATCH { type: "Preference", key: "email" } SET FIELDS { name: "email" } }
-  ASSERT (:vendor, "prefers", ?channel) { by: :vendor, mode: "stated" }
-}"#,
-                serde_json::Map::from_iter([
-                    ("vendor_id".to_string(), serde_json::Value::from(vendor.as_str())),
-                    ("vendor".to_string(), serde_json::json!({"id": vendor})),
-                ]),
-            ),
-        )
-        .await;
-
-    let head = space.current_space_seq().await;
-    let report = settlement::sweep_watches(space.as_ref(), now_ms, head, None).await;
-    assert_eq!(report.error, None, "{report:?}");
-    assert_eq!(
+    let mut ids = Vec::new();
+    for (class, condition) in [
         (
-            report.fired,
-            report.disarmed,
-            report.deferred,
-            report.conflicted
+            "delta",
+            serde_json::json!({"element":target,"ops":["update"]}),
         ),
-        (2, 1, 0, 0),
-        "{report:?}"
-    );
-    assert_eq!(watch_status(&space, "profile").await, "fired");
-    assert_eq!(watch_status(&space, "reply").await, "disarmed");
-    assert_eq!(watch_status(&space, "quiet").await, "fired");
-    // A delta fire names the change it fired on; a stand-down names the
-    // change that answered the silence.
-    assert!(
-        !watch_attribute(&space, "profile", "matched_seq")
-            .await
-            .is_empty()
-    );
-    assert!(
-        !watch_attribute(&space, "reply", "matched_seq")
-            .await
-            .is_empty()
-    );
-    // Silence was concluded over a stream consumed through the head.
+        (
+            "silence",
+            serde_json::json!({"element":target,"ops":["create"]}),
+        ),
+        ("silence", serde_json::json!("no vendor reply")),
+        (
+            "silence",
+            serde_json::json!({"element":target,"text":"no vendor reply"}),
+        ),
+    ] {
+        let id = created_ref(&space, r#"CREATE CONCEPT ?item { TYPE "Watch" SET ATTRIBUTES {watch_class: :class,summary:"wait",status:"disarmed",condition: :condition,due_at:"2020-01-01T00:00:00Z"} }"#,
+            serde_json::Map::from_iter([("class".into(),serde_json::json!(class)),("condition".into(),condition)])).await;
+        runtime_work(&space, "arm_watch", &id).await;
+        ids.push(id);
+    }
+    let stale = element_version(&space, &ids[0]).await;
+    seed_kip(
+        &space,
+        kip::request_with(
+            "UPDATE :id SET FIELDS {name: \"vendor changed\"}",
+            kip::param("id", target),
+        ),
+    )
+    .await;
+    let first = settlement::sweep_watches(space.as_ref()).await;
     assert_eq!(
-        watch_attribute(&space, "quiet", "evaluated_seq")
-            .await
-            .parse::<u64>()
-            .ok(),
-        head
+        (first.fired, first.deferred, first.conflicted),
+        (2, 2, 0),
+        "{first:?}"
     );
+    let next = settlement::sweep_watches(space.as_ref()).await;
+    assert_eq!((next.fired, next.deferred), (0, 2));
+    let nexus = space.memory.nexus();
+    let error = nexus
+        .system_session()
+        .advance_watch(
+            anda_cognitive_nexus::nexus::DEFAULT_SPACE,
+            &ids[0],
+            stale,
+            1,
+            200,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, anda_kip::KipErrorCode::VersionConflict);
+}
 
-    // Two fires, two `watch_fire` Activities; standing down is not a fire.
-    assert_eq!(
-        activity_classes(&space).await,
-        vec!["watch_fire".to_string(), "watch_fire".to_string()]
-    );
+#[tokio::test]
+async fn deferred_text_watches_do_not_starve_structured_work() {
+    let app = test_app_state("watch_fairness");
+    let space = create_loaded_space(&app, "watch_fairness").await;
+    let target = created_ref(
+        &space,
+        r#"CREATE CONCEPT ?item {TYPE "Person" NAME "vendor"}"#,
+        Default::default(),
+    )
+    .await;
+    for index in 0..22 {
+        let condition = if index == 21 {
+            serde_json::json!({"element":target,"ops":["update"]})
+        } else {
+            serde_json::json!(format!("no reply {index}"))
+        };
+        let id = created_ref(&space,r#"CREATE CONCEPT ?item {TYPE "Watch" SET ATTRIBUTES {watch_class:"delta",summary:"wait",status:"disarmed",condition: :condition}}"#,kip::param("condition",condition)).await;
+        runtime_work(&space, "arm_watch", &id).await;
+    }
+    seed_kip(
+        &space,
+        kip::request_with(
+            r#"UPDATE :id SET FIELDS {name:"vendor changed"}"#,
+            kip::param("id", target),
+        ),
+    )
+    .await;
+    let report = settlement::sweep_watches(space.as_ref()).await;
+    assert_eq!(report.fired, 1, "{report:?}");
+    assert!(report.error.is_none(), "{report:?}");
+}
 
-    // Nothing armed is left, so the next sweep has nothing to evaluate.
-    let head = space.current_space_seq().await;
-    let again = settlement::sweep_watches(space.as_ref(), now_ms, head, None).await;
-    assert_eq!(
-        (again.fired, again.disarmed, again.deferred),
-        (0, 0, 0),
-        "{again:?}"
-    );
+#[tokio::test]
+async fn task_completion_requires_a_live_lease_and_current_version() {
+    let app = test_app_state("lease_contract");
+    let space = create_loaded_space(&app, "lease_contract").await;
+    let task = created_ref(&space,r#"CREATE CONCEPT ?item { TYPE "SleepTask" SET ATTRIBUTES {task_class:"consolidate",summary:"review",status:"pending"} }"#, Default::default()).await;
+    created_ref(
+        &space,
+        r#"CREATE CONCEPT ?item {TYPE "Person" NAME "memory"}"#,
+        Default::default(),
+    )
+    .await;
+    let settlement = space
+        .settle_memory_metabolism(MaintenanceScope::Quick, unix_ms())
+        .await
+        .unwrap();
+    assert!(settlement.decay_error.is_none(), "{settlement:?}");
+    assert!(settlement.decayed > 0);
+    assert_eq!(element_version(&space, &task).await, 1);
+    let early = space
+        .run_kip_settlement(kip::request_with(
+            r#"UPDATE :id SET ATTRIBUTES {status:"completed"} EXPECT VERSION 1"#,
+            kip::param("id", task.clone()),
+        ))
+        .await
+        .unwrap();
+    assert!(!kip::succeeded(&early));
+    let lease = runtime_work(&space, "lease_task", &task).await;
+    assert_eq!(lease["lease"]["fencing_token"], 1);
+    let version = element_version(&space, &task).await;
+    seed_kip(&space,kip::request_with(format!(r#"MUTATE {{ UPDATE :id SET ATTRIBUTES {{status:"completed"}} EXPECT VERSION {version} CREATE CONCEPT ?output {{ TYPE "Event" NAME "review completed" SET ATTRIBUTES {{summary:"review completed"}} }} }}"#),kip::param("id",task))).await;
 }
 
 /// Maintenance was reachable only by counting formation conversations, so
@@ -2596,7 +2208,7 @@ async fn memory_status_aggregates_counters_and_schema_audit() {
                 output: serde_json::json!([{
                     "id": concepts[0],
                     "name": "alpha",
-                    "schema_ref": "kip://profiles/cognitive-memory@2.0.0/Person",
+                    "schema_ref": "kip://profiles/cognitive-memory@2.1.0/Person",
                 }]),
                 is_error: None,
                 call_id: Some("c1".to_string()),
@@ -3067,7 +2679,7 @@ async fn space_agent_entrypoints_use_memory_and_model_without_network() {
     // under, so the meaning cannot drift when a package is republished.
     assert_eq!(
         counterparty["schema_ref"],
-        "kip://profiles/cognitive-memory@2.0.0/Person"
+        "kip://profiles/cognitive-memory@2.1.0/Person"
     );
     assert_eq!(counterparty["key"], "external-user-formation");
     assert_eq!(counterparty["name"], "Formation User");

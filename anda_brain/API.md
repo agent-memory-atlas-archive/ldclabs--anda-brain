@@ -1,5 +1,8 @@
 # Anda Brain API Documentation (with TypeScript Types)
 
+Bulk mnemonic decay excludes operational SleepTask/Watch Concepts. Host pass errors
+reach the maintenance model as assessment.settlement_errors.
+
 ## 1) Common Conventions
 
 - Base URL: `http://{host}:{port}`
@@ -11,6 +14,15 @@
   - Content negotiation applies to success bodies only; error response bodies are always JSON regardless of `Accept`
 - Most business endpoints return an RPC envelope: `RpcResponse<T>`
 - MCP clients can use the built-in Streamable HTTP endpoint: `/mcp/<space_id>`, or the local stdio server: `anda_brain mcp --space-id <space_id> [local|aws]`
+
+CognitiveMemory 2.1 synchronization preserves existing request shapes, authentication
+and JSON/CBOR/Markdown negotiation. No five-intent Memory Interface or standard after
+barrier is added; a conversation id is not a processing receipt. Settlement `skills`
+adds optional `unsupported_reason` when no trusted learning pipeline is configured;
+legacy counters stay zero. Watch `disarmed` also counts Nexus expiry, while text
+conditions remain deferred. Model-generated Formation requests cannot replace captured
+ingest/msgN bindings; learning/runtime Facet writes fail UnsupportedCapability.
+Authorized raw administrative KIP remains subject to the engine's full contracts.
 
 ---
 
@@ -323,7 +335,7 @@ export interface McpHttpServerConfig {
 
 export interface Concept {
   id?: string; // engine-assigned element id, e.g. "C-7"
-  schema_ref?: string; // the exact type symbol, e.g. "kip://profiles/cognitive-memory@2.0.0/Person"
+  schema_ref?: string; // the exact type symbol, e.g. "kip://profiles/cognitive-memory@2.1.0/Person"
   key?: string; // immutable Space-local logical key — the caller's handle
   name?: string; // mutable display label; never identity
   aliases?: string[];

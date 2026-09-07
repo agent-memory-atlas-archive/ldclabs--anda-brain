@@ -1,3 +1,4 @@
+import type { RuntimeOperation } from './cognitive.js'
 import type { KipResult } from '@ldclabs/kip-do'
 import type { IngestContext, KipExecution, KipOperation } from './kip.js'
 
@@ -42,10 +43,9 @@ export interface BrainRpc {
     operations: readonly KipOperation[],
     execution?: KipExecution,
   ): Promise<KipResult[]>
-  executeMaintenancePlan(operations: readonly KipOperation[]): Promise<KipResult[]>
+  executeMaintenancePlan(operations: readonly KipOperation[], runtime?: readonly RuntimeOperation[]): Promise<KipResult[]>
   maintenanceAssessment(): Promise<MaintenanceAssessment>
   settleMemory(nowMs: number): Promise<SettlementReport>
-  recordConsumedSeq(seq: number): Promise<void>
   stats(): Promise<BrainStats>
   vocabulary(): Promise<DeclaredVocabulary>
 }
@@ -129,7 +129,7 @@ export interface ArmedWatch {
 }
 
 export interface WatchSettlement {
-  /** Silence Watches whose deadline had passed and that this sweep fired. */
+  /** Delta or silence Watches fired by native advancement. */
   fired: number
   /**
    * Watches that were due but whose fire did not commit — the maintenance
@@ -194,6 +194,8 @@ export interface Dependent {
 }
 
 export interface SkillSettlement {
+  /** No evaluation ran without a configured observer/trial/evaluation pipeline. */
+  unsupported_reason?: string
   /** Skills whose tallies or standing moved. */
   graded: number
   /** Lifecycle transitions recorded as `lifecycle_verdict` Activities. */
@@ -205,6 +207,8 @@ export interface SkillSettlement {
 
 /** What the deterministic settlement did before the cycle's completion. */
 export interface SettlementReport {
+  /** A failed metabolism is not an empty successful sweep. */
+  decay_error?: string
   settled_at: string
   /** Concepts whose `MnemonicState.memory_strength` the bulk sweep decayed. */
   decayed: number
@@ -228,12 +232,7 @@ export interface MaintenanceAssessment {
    * reads from.
    */
   space_seq: number
-  /**
-   * The coordinate the last completed maintenance cycle read the Change
-   * Stream through — where this cycle's `CHANGES AFTER SEQ` starts. Recorded
-   * by the runtime when a cycle completes, from the `space_seq` that cycle
-   * was handed; absent until one has.
-   */
+  /** Legacy field, no longer populated; Nexus owns per-Watch consumed_seq. */
   consumed_seq?: number
   /** What the Brain is still waiting for — the delta evaluation's input. */
   armed_watches: ArmedWatch[]
@@ -265,6 +264,9 @@ export interface Usage {
  * would fail with `SchemaSymbolNotFound`.
  */
 export interface MutationPlan {
+  /** Host-computed digest bindings; never model-supplied authentication. */
+  parameters?: import('@ldclabs/kip-do').JsonMap
+  runtime?: RuntimeOperation[]
   commands: string[]
   types: string[]
   predicates: string[]

@@ -14,7 +14,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 /// Each is one mode's policy and this deployment's contract — the KIP language
 /// itself is not in here. `anda_kip` ships the syntax card and the Cognitive
 /// Memory Profile alongside the protocol they describe, and
-/// [`language_reference`] puts them in the model's context at completion time.
+/// [`mode_reference`] loads the applicable role cards and Profile at completion time.
 /// KIP 1.x taught the language from a copy pasted into each of these files;
 /// three hand-maintained copies of a protocol drift, and the one that drifts
 /// silently is the one a model then writes against.
@@ -22,8 +22,8 @@ pub const FORMATION_DEFAULT: &str = include_str!("../../assets/BrainFormation.md
 pub const RECALL_DEFAULT: &str = include_str!("../../assets/BrainRecall.md");
 pub const MAINTENANCE_DEFAULT: &str = include_str!("../../assets/BrainMaintenance.md");
 
-/// The KIP 2.0 language and memory ontology every mode prompt assumes is
-/// loaded, straight from the crate that implements them.
+/// The complete reference for callers that need it. Routine agent context uses
+/// mode_reference; writing agents can request full syntax on demand.
 pub fn language_reference() -> &'static str {
     static REFERENCE: OnceLock<String> = OnceLock::new();
     REFERENCE.get_or_init(|| {
@@ -33,6 +33,26 @@ pub fn language_reference() -> &'static str {
             anda_kip::COGNITIVE_MEMORY_PROFILE
         )
     })
+}
+
+/// The applicable role cards and ontology; complete syntax is loaded on demand.
+pub fn mode_reference(target: PromptTarget) -> String {
+    let cards = match target {
+        PromptTarget::Formation => anda_kip::KIP_FORMATION_CARD.to_string(),
+        PromptTarget::Recall => anda_kip::KIP_RECALL_CARD.to_string(),
+        PromptTarget::Maintenance => format!(
+            "{}\n\n{}\n\n{}",
+            anda_kip::KIP_RECALL_CARD,
+            anda_kip::KIP_FORMATION_CARD,
+            anda_kip::KIP_MAINTENANCE_CARD
+        ),
+    };
+    format!(
+        "{}\n\n{}\n\n{}",
+        cards,
+        anda_kip::COGNITIVE_MEMORY_PROFILE,
+        crate::cognitive::CAPABILITIES
+    )
 }
 
 /// Which agent prompt an override or optimizer edit targets.

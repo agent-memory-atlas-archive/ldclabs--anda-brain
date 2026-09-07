@@ -6,6 +6,7 @@ use std::str::FromStr;
 pub mod agents;
 pub mod assess;
 pub(crate) mod authz;
+pub(crate) mod cognitive;
 pub mod eval;
 pub mod handler;
 pub(crate) mod kip;

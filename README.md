@@ -6,6 +6,17 @@
 
 **[English](./README.md) | [中文](./README_cn.md)**
 
+## KIP 2.0 / CognitiveMemory 2.1 update
+
+Rust and Worker track KIP `d6e3a45` and AndaDB `bcd01d4`. Skill behavior is an
+immutable `SkillRevision`; Watch progress and task leases use protected Nexus
+operations. The former family-rate Skill promotion rule has been removed. Without
+configured independent observers, frozen trials and replayable evaluations,
+procedures remain unproven and `skills.unsupported_reason` reports the limitation.
+Existing Brain endpoints remain available. The optional five-intent Memory Interface
+and its `memory_*` bundles are **not advertised** by these adapters. See the
+[sync notes](docs/kip-v2-cognitive-sync.md) for implemented behavior and remaining boundaries.
+
 ## Memories That Never Sleep Will Eventually Drown Themselves
 
 Your AI assistant remembers every word you’ve ever said. Tens of thousands of conversation fragments lie in a vector database, thousands of lines are written in Markdown memos, and the key-value cache is steadily expanding.
