@@ -24,6 +24,8 @@ use ic_auth_types::ByteBufB64;
 use ic_cose_types::cose::{
     SIGN1_TAG, cwt::cwt_from, ed25519::VerifyingKey, sign1::cose_sign1_from, skip_prefix,
 };
+#[cfg(feature = "learning")]
+use object_store::ObjectStoreExt;
 use object_store::{ObjectStore, memory::InMemory};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -104,6 +106,9 @@ pub struct AppState {
     /// state loads — service mode included, so shadow-eval verdicts stop
     /// falling back to the evaluated space's own model.
     judge_model: Arc<Option<ModelConfig>>,
+    prompts: crate::agents::prompts::AgentPrompts,
+    clock: Arc<crate::runtime::BusinessClock>,
+    automatic: bool,
     /// Bounds requests that can each drive a full multi-turn LLM round.
     /// One budget for every channel: the HTTP LLM routes and the MCP LLM
     /// tools (recall/maintenance) drain this same semaphore, so neither
@@ -115,8 +120,14 @@ pub struct AppState {
     pub sharding: u32,
 }
 
+#[cfg(feature = "experiments")]
+pub mod experiments;
+mod processing;
 mod self_test;
 mod shadow;
+pub use processing::{ProcessingKind, ProcessingReport, ProcessingState, ProcessingWait};
+#[cfg(test)]
+mod close_tests;
 #[cfg(test)]
 mod tests;
 
@@ -144,11 +155,34 @@ impl AppState {
             models,
             ed25519_pubkeys,
             judge_model: Arc::new(None),
+            prompts: Default::default(),
+            clock: Arc::new(crate::runtime::BusinessClock::default()),
+            automatic: true,
             llm_semaphore: Arc::new(tokio::sync::Semaphore::new(DEFAULT_LLM_MAX_CONCURRENCY)),
             app_name,
             app_version,
             sharding,
         }
+    }
+
+    /// Installs immutable deployment prompts before this host is shared or
+    /// opens any Space. Rejects late changes instead of splitting the cache's
+    /// prompt identity from the agents it already owns.
+    pub fn with_agent_prompts(
+        mut self,
+        prompts: crate::agents::prompts::AgentPrompts,
+    ) -> Result<Self, BoxError> {
+        if Arc::strong_count(&self.spaces) != 1
+            || !self
+                .spaces
+                .try_read()
+                .map_err(|_| "host configuration is in use")?
+                .is_empty()
+        {
+            return Err("configure prompts before cloning the host or opening a Space".into());
+        }
+        self.prompts = prompts;
+        Ok(self)
     }
 
     /// Configures the independent judge model this state installs on every
@@ -187,13 +221,29 @@ impl AppState {
     /// candidate memory policy. Forks are fully isolated: nothing they do
     /// can reach the source space's graph, ledger, or metrics. This is the
     /// only supported way to open a throwaway copy of a space (shadow eval,
-    /// shared-formation eval forks): it owns the whole protocol — copy the
+    /// experiment forks): it owns the whole protocol — copy the
     /// objects, fork the state, and load without background autostart.
     pub async fn fork_space(
         &self,
         space_id: &str,
         policy: Option<MemoryPolicy>,
     ) -> Result<Arc<Space>, BoxError> {
+        #[cfg(feature = "learning")]
+        match self
+            .object_store
+            .head(&object_store::path::Path::from(format!(
+                "{space_id}/learning/registration"
+            )))
+            .await
+        {
+            Ok(_) => {
+                return Err(
+                    "a configured learning Space cannot be copied with its dispatch journal".into(),
+                );
+            }
+            Err(object_store::Error::NotFound { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         copy_space_objects(&self.object_store(), &store, space_id).await?;
         let state = self.fork_with_store(store);
@@ -365,6 +415,9 @@ impl AppState {
                     self.models.clone(),
                     pinned,
                     autostart,
+                    self.clock.clone(),
+                    self.automatic,
+                    self.prompts.clone(),
                 )
                 .await?;
                 if let Some(judge) = self.judge_model.as_ref()
@@ -546,6 +599,13 @@ fn settlement_error_messages(
         .unwrap_or_default()
 }
 
+#[derive(Default)]
+struct CloseState {
+    reconciled: bool,
+    closed: bool,
+    collections: Vec<Arc<Collection>>,
+}
+
 pub struct Space {
     id: String,
     engine: Engine,
@@ -553,6 +613,13 @@ pub struct Space {
     models: Arc<Models>,
     maintenance: Arc<MaintenanceAgent>,
     pinned: bool,
+    automatic: bool,
+    clock: Arc<crate::runtime::BusinessClock>,
+    tasks: crate::runtime::RuntimeTasks,
+    close_state: tokio::sync::Mutex<CloseState>,
+    interrupted_conversations: parking_lot::Mutex<BTreeMap<&'static str, BTreeSet<u64>>>,
+    #[cfg(feature = "learning")]
+    learning: Arc<crate::learning::LearningRuntime>,
     /// Memory usage ledger (plan M1): off-graph recall/correction counters.
     ledger: Arc<UsageLedger>,
     /// Negative-knowledge cache (plan M5): probe queries the graph had
@@ -589,7 +656,22 @@ pub struct Space {
 
 impl Space {
     pub fn is_processing(&self) -> bool {
-        self.formation.is_processing() || self.maintenance.is_processing()
+        let memory_busy = self.formation.is_processing() || self.maintenance.is_processing();
+        #[cfg(feature = "learning")]
+        {
+            memory_busy || self.learning.is_busy()
+        }
+        #[cfg(not(feature = "learning"))]
+        {
+            memory_busy
+        }
+    }
+
+    /// Trusted host control only. No model tool, HTTP or MCP route exposes
+    /// configuration, executor dispatch or independently authenticated outcomes.
+    #[cfg(feature = "learning")]
+    pub fn learning(&self) -> Arc<crate::learning::LearningRuntime> {
+        self.learning.clone()
     }
 
     fn get_tier(&self) -> SpaceTier {
@@ -827,9 +909,7 @@ impl Space {
         Ok(())
     }
 
-    /// The space's memory policy; absent means the process-wide eval
-    /// override (optimizer runs, plan M10) or [`MemoryPolicy::default`],
-    /// which reproduces the compiled-in behavior (plan module M-P).
+    /// The Space's persisted policy, or the compiled defaults when absent.
     fn memory_policy(&self) -> MemoryPolicy {
         memory_policy_of(&self.db)
     }
@@ -931,6 +1011,9 @@ impl Space {
         user: Principal,
         input: StringOr<FormationInput>,
     ) -> Result<AgentOutput, BoxError> {
+        if self.engine.is_cancelled() {
+            return Err("space is closed".into());
+        }
         // Reject empty input up front (both HTTP and MCP funnel through
         // here): it would otherwise persist a garbage conversation and burn
         // a full LLM encoding cycle on nothing. Checking part counts is not
@@ -985,7 +1068,10 @@ impl Space {
         &self,
         user: Principal,
         input: StringOr<RecallInput>,
-    ) -> Result<AgentOutput, BoxError> {
+    ) -> Result<(AgentOutput, Option<crate::recall_budget::RecallBudget>), BoxError> {
+        if self.engine.is_cancelled() {
+            return Err("space is closed".into());
+        }
         // Same guard as `probe_memory`: an empty query must not start a
         // billed multi-turn LLM run (covers `query` and `query_structured`
         // on both the HTTP and MCP channels).
@@ -996,7 +1082,8 @@ impl Space {
         if empty {
             return Err("recall query must not be empty".into());
         }
-        self.engine
+        let output = self
+            .engine
             .agent_run(
                 user,
                 AgentInput {
@@ -1006,7 +1093,23 @@ impl Space {
                     ..Default::default()
                 },
             )
-            .await
+            .await?;
+        let budgeted = serde_json::from_str::<crate::recall_budget::MemoryPacket>(&output.content)
+            .is_ok_and(|packet| packet.format == crate::recall_budget::PACKET_FORMAT)
+            || (output.content == "null"
+                && output
+                    .failed_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.starts_with("recall_")));
+        let budget = if budgeted {
+            match output.conversation {
+                Some(conversation) => self.recall.conversation_budget(conversation).await?,
+                None => None,
+            }
+        } else {
+            None
+        };
+        Ok((output, budget))
     }
 
     pub async fn query(
@@ -1014,7 +1117,10 @@ impl Space {
         user: Principal,
         input: StringOr<RecallInput>,
     ) -> Result<AgentOutput, BoxError> {
-        let mut output = self.run_recall(user, input).await?;
+        let (mut output, budget) = self.run_recall(user, input).await?;
+        if budget.is_some() {
+            return Ok(output);
+        }
         // The self-report footer (plan M4) is machine metadata; plain-text
         // callers must never see it. `query_structured` surfaces it instead.
         let (answer, meta) = assess::split_recall_meta(&output.content);
@@ -1051,7 +1157,29 @@ impl Space {
         user: Principal,
         input: StringOr<RecallInput>,
     ) -> Result<RecallOutput, BoxError> {
-        let output = self.run_recall(user, input).await?;
+        let (output, budget) = self.run_recall(user, input).await?;
+        if let Some(budget) = budget {
+            let packet =
+                serde_json::from_str::<crate::recall_budget::MemoryPacket>(&output.content).ok();
+            return Ok(RecallOutput {
+                found: packet.as_ref().is_some_and(|p| {
+                    p.items
+                        .iter()
+                        .any(|i| i.channel != crate::recall_budget::Channel::Primer)
+                }),
+                memory_budget: Some(crate::types::RecallBudgetReceipt {
+                    tokenizer: budget.tokenizer,
+                    token_limit: budget.max_tokens,
+                    tokens: crate::recall_budget::count(&output.content)?,
+                    context_token_limit: budget.context_tokens,
+                }),
+                answer: output.content,
+                usage: output.usage,
+                conversation: output.conversation,
+                failed_reason: output.failed_reason,
+                ..Default::default()
+            });
+        }
         let (answer, meta) = assess::split_recall_meta(&output.content);
         let memories = match output.conversation {
             Some(id) => match self.recall.conversations.get_conversation(id).await {
@@ -1090,6 +1218,7 @@ impl Space {
             failed_reason: output
                 .failed_reason
                 .map(|reason| assess::split_recall_meta(&reason).0),
+            memory_budget: None,
         })
     }
 
@@ -1161,6 +1290,9 @@ impl Space {
         user: Principal,
         mut input: MaintenanceInput,
     ) -> Result<AgentOutput, BoxError> {
+        if self.engine.is_cancelled() {
+            return Err("space is closed".into());
+        }
         // Caller-supplied parameters feed the KIP-writing maintenance prompt;
         // enforce the same bounds as `MemoryPolicy::validate` before anything
         // runs (both HTTP and MCP channels funnel through here).
@@ -1203,7 +1335,7 @@ impl Space {
         let settlement_error = match self
             .settle_memory_metabolism_using(
                 input.scope,
-                unix_ms(),
+                self.clock.now_ms(),
                 DECAY_MIN_INTERVAL_MS,
                 effective_policy,
             )
@@ -1546,7 +1678,7 @@ impl Space {
     ///
     /// Nothing here reads the usage ledger back into the graph: see the body
     /// for why recall no longer reinforces what it touched.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "experiments"))]
     async fn settle_memory_metabolism(
         &self,
         scope: MaintenanceScope,
@@ -1745,6 +1877,18 @@ impl Space {
 
         let mut report = crate::types::RetentionSettlement::default();
         let session = self.memory.nexus().system_session();
+        #[cfg(feature = "experiments")]
+        let session = if self.clock.is_manual() {
+            match session.with_simulated_lifecycle_time(&kip::timestamp(self.clock.now_ms())) {
+                Ok(session) => session,
+                Err(error) => {
+                    report.error = Some(error.to_string());
+                    return report;
+                }
+            }
+        } else {
+            session
+        };
 
         // The two passes are independent — different clocks, and different
         // permissions (`expire_lapsed_assertions` needs the Assertion write,
@@ -1805,6 +1949,7 @@ impl Space {
             return Ok(ProbeOutput {
                 found: false,
                 negative_cached: true,
+                search_exhaustive: Some(true),
                 hits: Vec::new(),
             });
         }
@@ -1818,20 +1963,9 @@ impl Space {
                 kip::param("query", query),
             ))
             .await?;
-        if !kip::succeeded(&response) {
-            return Err(format!("probe search failed: {}", kip::error_message(&response)).into());
-        }
-        let result = kip::ok_result(&response);
-        // §66.6: a page is cut from a bounded candidate window that spans the
-        // database while the search is Space-scoped, so an empty page is not
-        // always an empty index. The engine says which, and this is the one
-        // place the answer can be acted on — see the cache write below.
-        let exhaustive = result
-            .and_then(|result| result.get("search_context"))
-            .and_then(|context| context.get("exhaustive"))
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true);
-        let mut hits = result.map(assess::citations_from_json).unwrap_or_default();
+        let observation = assess::search_observation(&response)?;
+        let exhaustive = observation.exhaustive == Some(true);
+        let mut hits = assess::citations_from_json(assess::single_read_result(&response)?);
         // The engine's keyword fallback has no relevance threshold, so any
         // token can match the brain's own bookkeeping. A SleepTask is work the
         // maintenance cycle owes itself and a SelfModel is the brain's picture
@@ -1862,6 +1996,7 @@ impl Space {
         Ok(ProbeOutput {
             found: !hits.is_empty(),
             negative_cached: false,
+            search_exhaustive: observation.exhaustive,
             hits,
         })
     }
@@ -2134,7 +2269,11 @@ impl Space {
     /// claims the single-flight slot and refuses if formation or another cycle
     /// holds it, so a busy Space simply waits for the next tick.
     fn kick_scheduled_maintenance(self: &Arc<Self>) {
-        if self.is_processing() || !self.maintenance_overdue(unix_ms()) {
+        if !self.automatic
+            || self.engine.is_cancelled()
+            || self.is_processing()
+            || !self.maintenance_overdue(self.clock.now_ms())
+        {
             return;
         }
         let space = self.clone();
@@ -2291,6 +2430,9 @@ impl Space {
         user: Principal,
         conversation: u64,
     ) -> Result<(), BoxError> {
+        if self.engine.is_cancelled() {
+            return Err("space is closed".into());
+        }
         let ctx = self.engine.ctx_with(
             user,
             "formation_memory",
@@ -2305,7 +2447,11 @@ impl Space {
     /// The read-only gate is on what each operation *parses to*, never on a
     /// declared `language`, so a mutation cannot reach the engine through here
     /// however the envelope labels it.
-    pub async fn execute_kip_readonly(&self, req: Request) -> Result<Response, BoxError> {
+    pub async fn execute_kip_readonly(&self, mut req: Request) -> Result<Response, BoxError> {
+        if self.engine.is_cancelled() {
+            return Err("space is closed".into());
+        }
+        self.clock.bind_read(&mut req)?;
         let nexus = self.memory.nexus();
         match timeout(
             READONLY_KIP_TIMEOUT,
@@ -2403,8 +2549,119 @@ impl Space {
     /// metadata. Callers that open throwaway spaces (eval runs, forks) must
     /// close them through this method instead of reaching into the DB handle.
     pub async fn close(&self) -> Result<(), BoxError> {
+        let mut state = self.close_state.lock().await;
+        if state.closed {
+            return Ok(());
+        }
+        #[cfg(feature = "learning")]
+        self.learning.shutdown().await;
+        self.capture_interrupted_work();
+        self.tasks.cancel();
+        self.engine.cancel();
+        self.tasks.shutdown().await;
+
+        // A hard stop is needed for an unresponsive provider, but it may also
+        // drop a KIP/document write after its durable PUT. Treat that as a
+        // crash: recover under Nexus's exclusive lock before closing, never
+        // flush a poisoned generation or blindly replay the model workflow.
+        if !state.reconciled {
+            self.memory.nexus().recover().await?;
+            state.collections.clear();
+            for name in self.db.metadata().collections {
+                let collection = self
+                    .db
+                    .open_collection(name, async |collection| {
+                        collection.set_tokenizer(jieba_tokenizer());
+                        Ok(())
+                    })
+                    .await?;
+                state.collections.push(collection);
+            }
+            for name in ["conversations", "maintenance", "recall"] {
+                let collection = self
+                    .db
+                    .open_collection(name.into(), async |collection| {
+                        collection.set_tokenizer(jieba_tokenizer());
+                        Ok(())
+                    })
+                    .await?;
+                let interrupted = self
+                    .interrupted_conversations
+                    .lock()
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_default();
+                // Select the status column first, without fetching every
+                // historical message array. The host needs all active ids;
+                // query_ids would silently cap this cleanup at MAX_SEARCH_LIMIT.
+                let mut ids: BTreeSet<_> = collection
+                    .query_all_ids(anda_db::query::Filter::Field((
+                        "status".into(),
+                        anda_db::query::RangeQuery::Eq(Fv::Text(
+                            ConversationStatus::Working.to_string(),
+                        )),
+                    )))
+                    .await?
+                    .into_iter()
+                    .collect();
+                ids.extend(interrupted.iter().copied());
+                for id in ids {
+                    let conversation: Conversation = collection.get_as(id).await?;
+                    if matches!(
+                        conversation.status,
+                        ConversationStatus::Completed | ConversationStatus::Cancelled
+                    ) {
+                        continue;
+                    }
+                    if conversation.status == ConversationStatus::Working
+                        || interrupted.contains(&id)
+                    {
+                        let previous = conversation
+                            .failed_reason
+                            .map(|reason| format!("; previous failure: {reason}"))
+                            .unwrap_or_default();
+                        collection.update(id, BTreeMap::from([
+                            ("status".into(), Fv::Text(ConversationStatus::Cancelled.to_string())),
+                            ("failed_reason".into(), Fv::Text(format!("outcome_unknown: Space closed during processing; reconcile committed effects before retry{previous}"))),
+                            ("updated_at".into(), Fv::U64(unix_ms())),
+                        ])).await?;
+                    }
+                }
+            }
+            state.reconciled = true;
+        } else {
+            // A previous close may have failed or been cancelled while one
+            // collection checkpoint was in flight. Healthy closed generations
+            // stay closed; only poisoned checkpoint generations are reopened.
+            // Do not send Nexus queries through its already-closed slots.
+            for index in 0..state.collections.len() {
+                if state.collections[index].is_poisoned() {
+                    let name = state.collections[index].name().to_string();
+                    state.collections[index] = self
+                        .db
+                        .open_collection(name, async |collection| {
+                            collection.set_tokenizer(jieba_tokenizer());
+                            Ok(())
+                        })
+                        .await?;
+                }
+            }
+        }
         self.db.close().await?;
+        state.closed = true;
         Ok(())
+    }
+
+    fn capture_interrupted_work(&self) {
+        let mut interrupted = self.interrupted_conversations.lock();
+        for (name, id) in [
+            ("conversations", self.formation.processing_id()),
+            ("maintenance", self.maintenance.processing_id()),
+        ] {
+            if id != 0 {
+                interrupted.entry(name).or_default().insert(id);
+            }
+        }
     }
 
     async fn create(
@@ -2453,6 +2710,7 @@ impl Space {
         Ok(info)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn connect(
         object_store: Arc<dyn ObjectStore>,
         db_config: DBConfig,
@@ -2461,6 +2719,9 @@ impl Space {
         models: Arc<Models>,
         pinned: bool,
         autostart: bool,
+        clock: Arc<crate::runtime::BusinessClock>,
+        automatic: bool,
+        prompts: crate::agents::prompts::AgentPrompts,
     ) -> Result<Arc<Self>, BoxError> {
         let id = db_config.name.clone();
         let db = Arc::new(AndaDB::open(object_store.clone(), db_config).await?);
@@ -2552,7 +2813,16 @@ impl Space {
                 }
             })
         };
-        let memory_r = TimedMemoryReadonly::new(memory.clone());
+        #[cfg(feature = "learning")]
+        let learning = crate::learning::LearningRuntime::connect(
+            object_store.clone(),
+            format!("{id}/learning"),
+            memory.nexus(),
+            clock.clone(),
+        )
+        .await?;
+        let memory_r = TimedMemoryReadonly::new(memory.clone()).with_clock(clock.clone());
+        let tasks = crate::runtime::RuntimeTasks::default();
         let memory_tool = MemoryTool::new(memory.clone());
         let note_tool = NoteTool::new();
         // Formation and Maintenance may grow this Space's vocabulary; Recall
@@ -2560,39 +2830,59 @@ impl Space {
         let declare_tool = crate::vocabulary::DeclareSymbolsTool::new(memory.clone());
 
         let hooks = Arc::new(Hooks::new(db.clone()));
-        let formation = Arc::new(FormationAgent::new(
-            memory.clone(),
-            conversations.clone(),
-            hooks.clone(),
-            100000,
-        ));
-        let recall = Arc::new(RecallAgent::new(
-            memory.clone(),
-            recall_store,
-            recall_conversations,
-            hooks.clone(),
-            65535,
-            {
-                let db = db.clone();
-                Arc::new(move || memory_policy_of(&db))
-            },
-        ));
-        let maintenance = Arc::new(MaintenanceAgent::new(
-            memory.clone(),
-            maintenance_store,
-            maintenance_conversations,
-            hooks.clone(),
-        ));
+        let formation = Arc::new(
+            FormationAgent::new(memory.clone(), conversations.clone(), hooks.clone(), 100000)
+                .with_prompt(prompts.prompt(crate::agents::prompts::PromptTarget::Formation))
+                .with_clock(clock.clone())
+                .with_tasks(tasks.clone()),
+        );
+        let recall = Arc::new(
+            RecallAgent::new(
+                memory.clone(),
+                recall_store,
+                recall_conversations,
+                hooks.clone(),
+                65535,
+                {
+                    let db = db.clone();
+                    Arc::new(move || memory_policy_of(&db))
+                },
+            )
+            .with_prompt(prompts.prompt(crate::agents::prompts::PromptTarget::Recall))
+            .with_clock(clock.clone()),
+        );
+        let maintenance = Arc::new(
+            MaintenanceAgent::new(
+                memory.clone(),
+                maintenance_store,
+                maintenance_conversations,
+                hooks.clone(),
+            )
+            .with_prompt(prompts.prompt(crate::agents::prompts::PromptTarget::Maintenance))
+            .with_clock(clock.clone())
+            .with_tasks(tasks.clone()),
+        );
         // Build agent engine with all configured components
         #[allow(unused_mut)]
         let mut engine = Engine::builder()
+            // Notes and other durable agent state belong to this Space too.
+            // The engine default is a separate ephemeral store, which neither
+            // survives reopen nor participates in an experiment snapshot.
+            .with_store(anda_engine::store::Store::new(Arc::new(
+                object_store::prefix::PrefixStore::new(
+                    object_store.clone(),
+                    format!("{id}/engine"),
+                ),
+            )))
             .with_management(management)
             .with_models(models.clone())
             // `execute_kip`, but Formation only reaches the cognition-only
             // subset through it; maintenance keeps the whole of KML. The raw
             // `memory` handle stays available to host code, which is
             // deterministic and not what the gate is for.
-            .register_tool(Arc::new(GuardedMemory::new(memory.clone())))?
+            .register_tool(Arc::new(
+                GuardedMemory::new(memory.clone()).with_clock(clock.clone()),
+            ))?
             .register_tool(Arc::new(memory_r))?
             .register_tool(Arc::new(memory_tool))?
             .register_tool(Arc::new(note_tool))?
@@ -2602,6 +2892,12 @@ impl Space {
             )))?;
         #[allow(unused_mut)]
         let mut exported_tools = vec![MemoryTool::NAME.to_string()];
+        #[cfg(feature = "learning")]
+        {
+            engine = engine.register_tool(Arc::new(
+                crate::learning::recall::ProcedureStatusTool(learning.clone()),
+            ))?;
+        }
         #[cfg(feature = "wiki")]
         {
             engine = engine
@@ -2658,8 +2954,21 @@ impl Space {
             wiki_digest,
             engine,
             pinned,
+            automatic,
+            clock,
+            tasks,
+            close_state: tokio::sync::Mutex::new(CloseState::default()),
+            interrupted_conversations: parking_lot::Mutex::new(BTreeMap::new()),
+            #[cfg(feature = "learning")]
+            learning,
         });
         hooks.bind_space(Arc::downgrade(&this));
+        let weak = Arc::downgrade(&this);
+        this.tasks.set_cancel_hook(Arc::new(move || {
+            if let Some(space) = weak.upgrade() {
+                space.capture_interrupted_work();
+            }
+        }));
 
         if let Some(cfg) = db.get_extension_as::<ModelConfig>("byok") {
             let cfg: EngineModelConfig = cfg.into();
@@ -2829,6 +3138,47 @@ impl BrainHook for Hooks {
     }
 
     async fn on_conversation_end(&self, agent_name: &str, conversation: &Conversation) {
+        #[cfg(feature = "experiments")]
+        if self.space().is_some_and(|space| !space.automatic) {
+            use experiments::{CostStage, StageCost};
+            let stage = match agent_name {
+                "formation_memory" => Some(CostStage::Formation),
+                "recall_memory" => Some(CostStage::Recall),
+                "maintenance_memory" => Some(CostStage::Maintenance),
+                _ => None,
+            };
+            if let Some(stage) = stage {
+                // Each callback is one execution, including a failed attempt
+                // before Formation's retry. Do not overwrite it with final usage.
+                let known = conversation.usage.requests > 0
+                    || conversation.usage.input_tokens > 0
+                    || conversation.usage.output_tokens > 0;
+                let mut truncated = false;
+                self.db
+                    .set_extension_from_with("experiment_costs".into(), |value| {
+                        let mut rows: Vec<StageCost> = value.unwrap_or_default();
+                        if rows.len() >= 10_000 {
+                            truncated = true;
+                            return Some(rows);
+                        }
+                        rows.push(StageCost {
+                            stage,
+                            conversation: Some(conversation._id),
+                            failed: conversation.status != ConversationStatus::Completed,
+                            requests: known.then_some(conversation.usage.requests),
+                            input_tokens: known.then_some(conversation.usage.input_tokens),
+                            output_tokens: known.then_some(conversation.usage.output_tokens),
+                            elapsed_ms: None,
+                            accounting_complete: false,
+                        });
+                        Some(rows)
+                    });
+                if truncated {
+                    self.db
+                        .set_extension_from("experiment_costs_truncated".into(), true);
+                }
+            }
+        }
         match agent_name {
             "recall_memory" => {
                 let _ = self
@@ -2879,7 +3229,9 @@ impl BrainHook for Hooks {
                             "negative-knowledge cache clear after maintenance failed: {err:?}"
                         );
                     }
-                    space.kick_memory_self_test();
+                    if space.automatic && !space.engine.is_cancelled() {
+                        space.kick_memory_self_test();
+                    }
                 }
             }
             "formation_memory" => {
@@ -2913,6 +3265,9 @@ impl BrainHook for Hooks {
             None => return,
         };
 
+        if space.engine.is_cancelled() {
+            return;
+        }
         // A missing marker means nothing was processed yet; resume from the
         // beginning so conversations queued during maintenance are not stuck.
         let id = space.formation.get_processed().unwrap_or_default();
@@ -2933,8 +3288,10 @@ impl BrainHook for Hooks {
         // graph while formation is quiet (PRD §7.3, Daydream cadence).
         #[cfg(feature = "wiki")]
         {
-            space.kick_wiki_digest();
-            space.kick_wiki_housekeeping();
+            if space.automatic {
+                space.kick_wiki_digest();
+                space.kick_wiki_housekeeping();
+            }
         }
     }
 
@@ -2944,6 +3301,9 @@ impl BrainHook for Hooks {
             None => return None,
         };
 
+        if !space.automatic || space.engine.is_cancelled() {
+            return None;
+        }
         let at = space.maintenance.get_processed_at();
         let scope = if formation_id >= at.full + 168 {
             MaintenanceScope::Full
@@ -2978,6 +3338,9 @@ impl BrainHook for Hooks {
 async fn init_conversation_collection(collection: &mut Collection) -> Result<(), DBError> {
     collection.set_tokenizer(jieba_tokenizer());
     collection.create_btree_index_nx(&["user"]).await?;
+    // Closing reconciles only active rows, without scanning every historical
+    // message document. Build the index once on first upgraded open.
+    collection.create_btree_index_nx(&["status"]).await?;
     collection.remove_btree_index(&["thread"]).await?;
     collection.remove_btree_index(&["period"]).await?;
     collection
@@ -3169,10 +3532,10 @@ impl Space {
 }
 
 impl Space {
-    /// One-shot completion on this space's model, used only by the eval
-    /// harness (judge, user simulator, prompt optimizer). Not exposed over
-    /// HTTP/MCP.
-    pub(crate) async fn eval_complete(
+    /// Model completion for online self-test query generation and shadow
+    /// diagnostic fallback. It does not grant learning standing and is not
+    /// a separate HTTP/MCP operation.
+    pub(crate) async fn diagnostic_complete(
         &self,
         req: anda_core::CompletionRequest,
     ) -> Result<AgentOutput, BoxError> {
@@ -3214,8 +3577,7 @@ const DECAY_MIN_INTERVAL_MS: u64 = 7 * 24 * 3_600 * 1_000;
 /// actor its extracted claims are attributed to.
 pub(crate) const SELF_ACTOR_KEY: &str = "$self";
 
-/// This Space's memory policy: the stored one, an eval override, or the
-/// compiled defaults.
+/// This Space's memory policy: the stored instance policy or compiled defaults.
 ///
 /// A free function rather than only a [`Space`] method because the agents are
 /// built before the `Space` that owns them, and a policy knob read through a
@@ -3223,7 +3585,6 @@ pub(crate) const SELF_ACTOR_KEY: &str = "$self";
 /// itself.
 fn memory_policy_of(db: &AndaDB) -> MemoryPolicy {
     db.get_extension_as(MemoryPolicy::EXTENSION_KEY)
-        .or_else(MemoryPolicy::eval_override)
         .unwrap_or_default()
 }
 

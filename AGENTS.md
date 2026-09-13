@@ -41,12 +41,30 @@ without those siblings will not build.
 - `anda_brain/src/kip.rs`: the KIP 2.0 envelope seam (request builders, the
   read-only gate, two-level response reading, and the KIP string/timestamp
   literal helpers).
+- `anda_brain/src/assess/` and `assess.rs`: online diagnostic model routing,
+  typed read observations, Recall trace/citations and metadata. Preserve these
+  and the usage/correction ledgers; they are not the retired offline evaluator.
+- Offline product regressions live in sibling MIB. `src/eval.rs`, its modules,
+  the `eval` CLI and global prompt/policy overrides were retired in P7. Do not
+  recreate an equivalent comprehensive evaluator inside Brain. The independent
+  wiki corpus under `anda_brain/evals/wiki/` remains in use.
 - `anda_brain/src/settlement/`: bounded decay, correction discovery and Watch
   scheduling. `watch.rs` reads ids, overall versions and WatchState generations;
   Nexus owns matching and authorized coverage. No local family-rate Skill verdict
   runs without an independent observer/trial/evaluation pipeline.
 - `anda_brain/src/cognitive.rs`: model-facing host mechanics: full syntax,
   canonical content digests, protected Watch arming and bounded task leases.
+- `anda_brain/src/learning/`: optional trusted paired-trial contracts, Nexus
+  evaluator and persistent host runtime (`learning` feature). Native dispatch
+  gates require real leases, executable authority and dependency validation.
+  Fixed-cutoff native verdicts, persistent reviews, safety revocation and a
+  read-only Recall applicability gate require explicit host use. No production
+  bindings or automatic adoption are enabled by compilation.
+- `anda_brain/src/recall_budget/` and `agents/recall/budgeted.rs`: explicit
+  Recall packet and cumulative planning-input budgets with a pinned tokenizer.
+  Model selection names existing items only. Preserve required constraints,
+  native uncertainty and current procedure checks; never claim semantic
+  completeness or execution permission from a bounded packet.
 - `anda_brain/src/vocabulary.rs`: this Space's Schema Package and the
   `declare_memory_symbols` tool. Schema is protected control state in KIP 2.0 —
   KML cannot declare a type, so new vocabulary enters through the host here.
@@ -115,7 +133,7 @@ this can ship, for the same reason as the Cargo `[patch.crates-io]` above.
 ## Cargo Features
 
 The `anda_brain` library defaults to memory only — formation, recall,
-maintenance, and their HTTP routes. Two optional features add the rest:
+maintenance, and their HTTP routes. Optional features add:
 
 - `wiki`: the structured wiki (documents, versions, ACL-scoped reads, OKF
   import/export), its agent tools, the WikiDigest graph extraction, the
@@ -123,6 +141,15 @@ maintenance, and their HTTP routes. Two optional features add the rest:
   `UpdateSpaceInput`.
 - `mcp`: the MCP channel (stdio and Streamable HTTP). With `wiki` also on, the
   wiki tools join the MCP tool router.
+- `experiments`: trusted isolated runs, snapshots, business time, cost receipts,
+  forced Recall-budget creation and bounded evaluator-only procedure audits.
+  The audit is not an execution permit; unsupported MIB learning conditions
+  must remain explicitly refused until their actual host bindings exist.
+  Enables the sibling Nexus `simulation` feature only for host lifecycle tests.
+  No serialized clock override or automatic learning is exposed.
+- `learning`: trusted contracts/evaluator, native record adapters and persistent
+  host trial runtime. Explicit registration and executor/observer bindings are
+  required; do not widen model mutation permissions or auto-adopt candidates.
 
 The `anda_brain` binary declares `required-features = ["mcp", "wiki"]`: it is
 the full product, so every build of it must pass `--features mcp,wiki`. Cargo
@@ -211,6 +238,13 @@ or endpoints:
 - Keep English and Chinese docs in sync for user-facing API changes.
 
 ## Prompt and Asset Changes
+
+Trusted Rust hosts may use immutable `AgentPrompts` via
+`AppState::with_agent_prompts` before sharing a host or loading a Space. Only
+section A can be replaced; the compiled KIP reference prefix stays intact.
+Runtime policies are per-Space `MemoryPolicy` values. Neither configuration
+uses a process-global mutable override, and experiments pin actual instance
+prompt content in their manifests.
 
 Agent prompts in `anda_brain/assets/` are part of runtime behavior. Edit them
 only when the task calls for prompt behavior changes, and describe the intended

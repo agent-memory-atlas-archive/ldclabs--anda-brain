@@ -2294,6 +2294,7 @@ mod tests {
                 accept_json(),
                 headers(&app),
                 json_bytes(&RecallInput {
+                    budget: None,
                     query: "What did the handler remember?".to_string(),
                     context: Some(InputContext {
                         counterparty: Some("handler-user".to_string()),
@@ -2928,6 +2929,7 @@ mod tests {
                 accept_json(),
                 HeaderVals(read_token.clone(), 0),
                 json_bytes(&RecallInput {
+                    budget: None,
                     query: "Space token recall?".to_string(),
                     context: None,
                 }),

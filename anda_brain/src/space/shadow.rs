@@ -48,8 +48,9 @@ impl AppState {
         // the forks see its latest persisted state, then fork twice:
         // baseline keeps the current policy, candidate gets the proposed
         // one. The fork is still not a point-in-time snapshot — writes that
-        // land mid-fork may appear on one side — but both sides replay the
-        // same queries, so drift shows up as a tie, not a false win.
+        // land mid-fork may appear on one side and can produce false wins.
+        // This legacy diagnostic is not admission evidence. Strict paired
+        // experiments must use experiments::ExperimentSnapshot instead.
         // Settling both makes the comparison fair — same metabolism pass,
         // different knobs.
         space.flush().await.ok();
@@ -75,6 +76,7 @@ impl AppState {
         for (index, query) in queries.iter().enumerate() {
             let recall_input = || {
                 StringOr::Value(RecallInput {
+                    budget: None,
                     query: query.clone(),
                     context: None,
                 })
@@ -170,7 +172,7 @@ impl AppState {
 
     /// A sibling `AppState` over a different object store, sharing model and
     /// management configuration but with an empty space cache. Used by the
-    /// eval harness to open forked space copies in isolation.
+    /// shadow diagnostics and isolated experiments.
     pub fn fork_with_store(&self, object_store: Arc<dyn ObjectStore>) -> AppState {
         AppState {
             spaces: Arc::new(RwLock::new(BTreeMap::new())),
@@ -179,6 +181,9 @@ impl AppState {
             http_client: self.http_client.clone(),
             models: self.models.clone(),
             judge_model: self.judge_model.clone(),
+            prompts: self.prompts.clone(),
+            clock: self.clock.clone(),
+            automatic: false,
             llm_semaphore: self.llm_semaphore.clone(),
             ed25519_pubkeys: self.ed25519_pubkeys.clone(),
             management: self.management.clone(),
@@ -201,7 +206,7 @@ struct ShadowVerdict {
 }
 
 /// Copies every object of a space (`{space_id}/**`) from one object store to
-/// another, preserving paths. This is the eval fork primitive: AndaDB
+/// another, preserving paths. This is the diagnostic fork primitive: AndaDB
 /// metadata embeds its own base path, so a space must keep its id and be
 /// forked into a *different* store — never renamed inside the same store.
 pub(super) async fn copy_space_objects(
@@ -213,9 +218,17 @@ pub(super) async fn copy_space_objects(
     use object_store::ObjectStoreExt;
 
     let prefix = object_store::path::Path::from(space_id);
+    let learning_prefix = format!("{space_id}/learning/");
     let mut objects = src.list(Some(&prefix));
     let mut copied = 0u64;
     while let Some(meta) = objects.try_next().await? {
+        // Learning journals contain live dispatch identity, not factual memory.
+        // The caller also rejects an already configured source; this filter
+        // closes the small configure-during-copy window without adding a
+        // cross-component lock.
+        if meta.location.as_ref().starts_with(&learning_prefix) {
+            continue;
+        }
         let payload = src.get(&meta.location).await?.bytes().await?;
         dst.put(&meta.location, payload.into()).await?;
         copied += 1;

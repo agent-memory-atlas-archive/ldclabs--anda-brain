@@ -6,6 +6,13 @@
 
 **[English](./README.md) | [中文](./README_cn.md)**
 
+The opt-in `experiments` feature adds isolated host runs, consistent snapshots, completion waits and business time. Agent Notes now persist with their Space. See [P1 controls](anda_brain/README.md#isolated-experiments); The optional Bot MIB host and MIB memory backend are described in [P2 integration](anda_brain/README.md#mib-integration); complete cross-system cost accounting and empirical model validation remain explicit gates.
+
+[P6 longitudinal validation](anda_brain/README.md#mib-integration) adds bounded native procedure audits and forced Recall budgets for isolated runs. MIB checks actual three-condition capabilities; the current Bot persistent mode does not claim comparison/adoption or ungated execution bindings.
+
+[P7 retires the offline Eval API and CLI](anda_brain/README.md#offline-regression-and-instance-configuration). MIB now owns the migrated product regressions. Runtime policies belong to each Space; deployment prompts use immutable host configuration with the compiled KIP reference preserved.
+
+
 ## KIP 2.0 / CognitiveMemory 2.1 update
 
 Rust and Worker track KIP `d6e3a45` and AndaDB `bcd01d4`. Skill behavior is an
@@ -15,6 +22,23 @@ configured independent observers, frozen trials and replayable evaluations,
 procedures remain unproven and `skills.unsupported_reason` reports the limitation.
 Existing Brain endpoints remain available. The optional five-intent Memory Interface
 and its `memory_*` bundles are **not advertised** by these adapters.
+
+The opt-in Rust `learning` feature provides frozen paired-trial contracts,
+a trusted Nexus evaluator and a persistent host runtime. Explicit registration,
+an actual executor and separately authenticated observer measurements are required.
+Native leases, executable authority and dependency checks gate dispatch; finishing
+a cohort does not adopt a Skill. See the [implementation guide](anda_brain/README.md#offline-regression-and-instance-configuration),
+[P0 contracts](anda_brain/README.md#native-learning-contracts) and [P3 runtime](anda_brain/README.md#native-learning-contracts).
+The host can now settle after the fixed cutoff, persist review schedules, withdraw
+on independent safety signals, and check current recommendation eligibility.
+See [P4 comparative adoption](anda_brain/README.md#native-learning-contracts).
+Production bindings and calibrated real-model runs remain separate gates.
+
+Recall now accepts an optional hard `budget`, also enforceable through the Space
+memory policy. The host returns a counted memory packet, preserves required
+constraints/warnings, and bounds cumulative planner input using a pinned codec.
+Existing requests stay unchanged unless a policy enables the mode. See
+[P5 Recall budgets](anda_brain/API.md#recall-budget-contract).
 
 ## Memories That Never Sleep Will Eventually Drown Themselves
 

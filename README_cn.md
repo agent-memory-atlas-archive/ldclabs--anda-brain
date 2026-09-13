@@ -6,6 +6,13 @@
 
 **[English](./README.md) | [中文](./README_cn.md)**
 
+非默认 `experiments` feature 已提供宿主隔离运行、一致快照、完成等待和业务时间，Agent Notes 也随 Space 持久化。详见 [P1 控制接缝](anda_brain/README.md#isolated-experiments)；Bot 的可选 MIB 宿主与 MIB 记忆后端见 [P2 接入](anda_brain/README.md#mib-integration)；跨系统完整成本计量和真实模型实证仍须单独验收。
+
+[P6 长期验证](anda_brain/README.md#mib-integration) 增加有界原生程序审计和隔离运行的强制 Recall 预算。MIB 检查三组的真实能力；当前 Bot 持久记忆模式不声明已绑定比较采纳或无门槛执行。
+
+[P7 已退役离线 Eval API 和 CLI](anda_brain/README.md#offline-regression-and-instance-configuration)，迁移后的产品回归由 MIB 负责。运行策略归各 Space 所有；部署提示使用不可变宿主配置，并保留编译的 KIP 参考段。
+
+
 ## KIP 2.0 / CognitiveMemory 2.1 更新
 
 Rust 与 Worker 已对齐 KIP `d6e3a45`、AndaDB `bcd01d4`。Skill 行为保存为不可变的
@@ -13,6 +20,18 @@ Rust 与 Worker 已对齐 KIP `d6e3a45`、AndaDB `bcd01d4`。Skill 行为保存�
 成功率晋升规则已移除；未配置独立观察者、冻结试验和可重放评估时，程序候选保持未验证，
 `skills.unsupported_reason` 明确报告该边界。现有 Brain API 保持可用；这两个适配器
 **未声明支持**可选的五意图 Memory Interface 或 `memory_*` 能力包。
+
+Rust 可选的 `learning` feature 提供冻结配对合同、可信 Nexus 规则和持久化宿主运行时。
+必须显式注册配置，并接入实际 executor 和独立认证的 observer 测量；派发经过原生
+lease、可执行权限和依赖检查，收齐 cohort 不等于采纳 Skill。详见
+[实现与迁移说明](anda_brain/README.md#offline-regression-and-instance-configuration)、[P0 合同](anda_brain/README.md#native-learning-contracts)
+和 [P3 运行时](anda_brain/README.md#native-learning-contracts)。宿主现可在固定 cutoff 后结算，持久安排
+复核、接收独立安全撤销信号并检查当前推荐条件，见 [P4 比较采纳](anda_brain/README.md#native-learning-contracts)。
+生产绑定与真实模型校准仍须分别验收。
+
+Recall 已支持可选硬 `budget`，也可由 Space 记忆策略强制开启。宿主返回按固定 codec
+计数的记忆包，优先保留必要约束/警告，并限制规划输入的累计展开。没有策略启用时，
+旧请求行为保持不变。详见 [P5 Recall 预算](anda_brain/API.md#recall-budget-contract)。
 
 ## 不会睡觉的记忆，终将被自己淹没
 

@@ -163,6 +163,7 @@ impl RememberConversationInput {
 pub struct RecallMemoryInput {
     pub query: String,
     pub context: Option<InputContext>,
+    pub budget: Option<crate::recall_budget::RecallBudget>,
 }
 
 impl From<RecallMemoryInput> for RecallInput {
@@ -170,6 +171,7 @@ impl From<RecallMemoryInput> for RecallInput {
         Self {
             query: input.query,
             context: input.context,
+            budget: input.budget,
         }
     }
 }
@@ -1896,6 +1898,7 @@ mod tests {
                 RecallMemoryInput {
                     query: "机密内容是什么?".to_string(),
                     context: None,
+                    budget: None,
                 },
             )
             .await

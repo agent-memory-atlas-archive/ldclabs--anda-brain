@@ -1,31 +1,21 @@
-//! Shared assessment instruments (memory evolution plan, module M0).
+//! Online memory diagnostics and typed, read-only KIP observations.
 //!
-//! These are the pieces of the eval harness that are also useful outside it:
-//! the semantic-assertion judge, recall trace extraction, and read-only KIP
-//! probe helpers. The offline eval harness (`crate::eval`) and the online
-//! maintenance self-test (plan module M7) consume the same implementations,
-//! so "what CI measures" and "what the brain checks about itself" cannot
-//! drift apart.
+//! Self-test, shadow diagnostics, Recall citations/metadata and status counters
+//! share these instruments. SEARCH describes retrieval; only an explicit
+//! engine BELIEF projection can answer a belief question. Offline product
+//! evaluation belongs to MIB; none of these diagnostics grants Skill standing.
 
-use anda_core::{
-    AgentOutput, BoxError, CompletionRequest, ContentPart, Json, Message, ModelEffort, Usage,
-};
-use anda_kip::{Request, Response};
+use anda_core::{BoxError, ContentPart, Json, Message};
 
 use crate::kip;
+
+mod probe;
+pub use probe::{
+    ProbeObservation, SearchObservation, probe_observation, search_observation, single_read_result,
+};
 use serde::{Deserialize, Serialize};
 
-use crate::space::Space;
 use crate::types::MemoryCitation;
-
-/// Default similarity threshold for semantic assertion probes.
-pub const DEFAULT_ASSERTION_SEARCH_THRESHOLD: f64 = 0.35;
-
-/// Default result limit for semantic assertion probes.
-pub const DEFAULT_ASSERTION_SEARCH_LIMIT: usize = 8;
-
-/// Upper bound applied to serialized evidence blobs fed to a judge.
-pub(crate) const MAX_EVIDENCE_CHARS: usize = 6_000;
 
 /// Maintenance-backlog probes: episodic memory nobody has consolidated yet.
 ///
@@ -49,45 +39,8 @@ pub const UNCONSOLIDATED_COUNT_KQL: &[&str] = &[
 const ORPHAN_COUNT_KQL: &str =
     "FIND(COUNT(?c)) WHERE { ?c CONCEPT {} NOT { (?c, ?out, ?o) } NOT { (?s, ?in, ?c) } }";
 
-/// Minimal capabilities the assessment instruments need from their host:
-/// one-shot LLM completions (for judges and simulators) and read-only KIP
-/// access (for graph probes). `Space` implements it directly; eval drivers
-/// inherit it as a supertrait of `EvalDriver`.
-#[async_trait::async_trait]
-pub trait AssessContext: Send + Sync {
-    /// One-shot LLM completion. Hosts without a model can leave the default.
-    async fn complete(&self, _req: CompletionRequest) -> Result<AgentOutput, BoxError> {
-        Err("assess context does not support LLM completions".into())
-    }
-
-    /// Completion used by judges. Defaults to [`Self::complete`]; hosts with
-    /// an independent judge model override this (plan M9), so judge scores
-    /// stop sharing the evaluated system's blind spots.
-    async fn judge_complete(&self, req: CompletionRequest) -> Result<AgentOutput, BoxError> {
-        self.complete(req).await
-    }
-
-    async fn execute_kip_readonly(&self, request: Request) -> Result<Response, BoxError>;
-}
-
-#[async_trait::async_trait]
-impl AssessContext for Space {
-    async fn complete(&self, req: CompletionRequest) -> Result<AgentOutput, BoxError> {
-        self.eval_complete(req).await
-    }
-
-    async fn judge_complete(&self, req: CompletionRequest) -> Result<AgentOutput, BoxError> {
-        match self.judge_model() {
-            Some(model) => model.completion(req).await,
-            None => self.eval_complete(req).await,
-        }
-    }
-
-    async fn execute_kip_readonly(&self, request: Request) -> Result<Response, BoxError> {
-        // Inherent method (space.rs); takes priority over this trait method.
-        self.execute_kip_readonly(request).await
-    }
-}
+mod context;
+pub use context::AssessContext;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RecallTrace {
@@ -144,28 +97,6 @@ impl RecallTrace {
 
         Self { tools }
     }
-
-    /// Checks whether any term appears in a tool *output*. Tool names and
-    /// args are deliberately excluded: recall echoes the user's query into
-    /// search args, so matching them would misread "searched for it" as
-    /// "retrieved it" and flip grounding failures into synthesis failures.
-    pub fn contains_any_term(&self, terms: &[String]) -> bool {
-        if terms.is_empty() {
-            return false;
-        }
-
-        let haystack = self
-            .tools
-            .iter()
-            .filter_map(|tool| tool.output.as_ref())
-            .map(|output| serde_json::to_string(output).unwrap_or_default())
-            .collect::<Vec<_>>()
-            .join("\n")
-            .to_lowercase();
-        terms
-            .iter()
-            .any(|term| !term.trim().is_empty() && haystack.contains(&term.to_lowercase()))
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -181,80 +112,6 @@ pub struct ToolTrace {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_error: Option<bool>,
-}
-
-/// A judge invocation's verdict plus its token usage.
-#[derive(Debug, Clone)]
-pub struct JudgeCall<T> {
-    pub verdict: T,
-    pub usage: Usage,
-}
-
-/// Verdict for one semantic graph probe.
-#[derive(Debug, Clone, Deserialize)]
-pub struct AssertionVerdict {
-    pub holds: bool,
-
-    #[serde(default)]
-    pub reason: String,
-}
-
-const ASSERTION_INSTRUCTIONS: &str = r#"You are inspecting a knowledge graph for an AI memory system. You will receive a statement about what the graph may currently assert, plus raw evidence returned by a semantic graph search.
-
-Decide whether the evidence shows the statement currently holds in the graph. Superseded, archived, expired, or explicitly deactivated memories do NOT count as holding. Absence of any matching evidence means the statement does not hold. Do not assume facts beyond the evidence.
-
-Respond with ONLY a JSON object: {"holds": true, "reason": "..."}"#;
-
-/// Asks the judge whether `evidence` shows that `assertion` currently holds
-/// in the graph.
-pub async fn judge_assertion<C>(
-    ctx: &C,
-    assertion: &str,
-    evidence: &Json,
-) -> Result<JudgeCall<AssertionVerdict>, BoxError>
-where
-    C: AssessContext + ?Sized,
-{
-    let prompt = format!(
-        "# Statement to verify\n{}\n\n# Graph search evidence\n{}",
-        assertion,
-        truncate_chars(
-            &serde_json::to_string(evidence).unwrap_or_default(),
-            MAX_EVIDENCE_CHARS
-        ),
-    );
-
-    let output = ctx
-        .judge_complete(CompletionRequest {
-            instructions: ASSERTION_INSTRUCTIONS.to_string(),
-            prompt,
-            effort: Some(ModelEffort::Low),
-            ..Default::default()
-        })
-        .await?;
-
-    Ok(JudgeCall {
-        verdict: parse_json_payload(&output.content)?,
-        usage: output.usage,
-    })
-}
-
-/// Builds the semantic search command for an assertion probe. The search
-/// text is embedded in a KQL string literal via the crate's shared escaping
-/// helper ([`crate::kip::string_literal`]).
-pub fn assertion_search_request(search: &str, threshold: f64, limit: usize) -> Request {
-    // MODE is omitted deliberately: the engine picks hybrid where it has
-    // semantic capability and keyword otherwise, whereas asking for `semantic`
-    // outright is an `UnsupportedCapability` refusal on a deployment with no
-    // embedding model — which a probe would read as "the graph holds nothing".
-    kip::request_with(
-        "SEARCH CONCEPT :term THRESHOLD :threshold LIMIT :limit",
-        serde_json::Map::from_iter([
-            ("term".to_string(), Json::from(search)),
-            ("threshold".to_string(), Json::from(threshold)),
-            ("limit".to_string(), Json::from(limit)),
-        ]),
-    )
 }
 
 /// Extracts the first JSON object from model output, tolerating code fences
@@ -399,7 +256,9 @@ fn collect_citations(
                 .get("name")
                 .and_then(Json::as_str)
                 .map(str::to_string),
-            confidence: object.get("confidence").and_then(Json::as_f64),
+            confidence: is_assertion_entity_id(id)
+                .then(|| object.get("confidence").and_then(Json::as_f64))
+                .flatten(),
             // Whose stance this is, when the cited element carries one. Never
             // the caller's Principal: attribution is cognition, authority is
             // Governance, and citing one as the other is the confusion KIP 2.0
@@ -423,8 +282,9 @@ fn element_reference(value: &Json) -> Option<String> {
     }
 }
 
-/// Walks a KIP result recursively, visiting every object that carries a
-/// Cognitive Element `id`.
+/// Visits returned elements through known protocol containers. Element
+/// attributes, Evidence payloads, explanations and reference objects are not
+/// recursively promoted into retrieved memories.
 pub(crate) fn collect_entity_objects(
     value: &Json,
     visit: &mut impl FnMut(&str, &serde_json::Map<String, Json>),
@@ -436,38 +296,68 @@ pub(crate) fn collect_entity_objects(
             }
         }
         Json::Object(map) => {
-            // A lone `{"id": ...}` is a reference, not a retrieved element —
-            // `asserted_by`, an evidence citation, a structural edge. Metering
-            // one as a recall would reinforce a memory nobody read, and
-            // reinforcement is supposed to track what the answer actually used.
-            //
-            // A SEARCH hit is `{id, kind, score, element}`: the wrapper repeats
-            // the id but holds none of the content, so visiting it would take
-            // the id and leave the real element deduplicated away — every
-            // citation coming back with no type and no name.
+            if map.get("error").is_some_and(|error| !error.is_null()) {
+                return;
+            }
+            if map.contains_key("kip") {
+                if map.get("kip").and_then(Json::as_str) != Some("2.0")
+                    || !matches!(
+                        map.get("status").and_then(Json::as_str),
+                        Some("succeeded" | "partial")
+                    )
+                {
+                    return;
+                }
+                if let Some(Json::Array(results)) = map.get("results") {
+                    for result in results {
+                        // Only confirmed successful operations in a partial
+                        // batch contribute retrieval diagnostics.
+                        if result.get("status").and_then(Json::as_str) == Some("succeeded") {
+                            collect_entity_objects(result, visit);
+                        }
+                    }
+                }
+                return;
+            }
+            if let Some(result) = map.get("result") {
+                if map
+                    .get("status")
+                    .is_none_or(|status| status.as_str() == Some("succeeded"))
+                {
+                    collect_entity_objects(result, visit);
+                }
+                return;
+            }
+            if let Some(Json::Array(hits)) = map.get("hits") {
+                for hit in hits {
+                    if let Some(element) = hit.get("element")
+                        && hit.get("id").and_then(Json::as_str)
+                            == element.get("id").and_then(Json::as_str)
+                    {
+                        collect_entity_objects(element, visit);
+                    }
+                }
+                return;
+            }
+            if let Some(element) = map.get("element") {
+                if map.get("id").and_then(Json::as_str) == element.get("id").and_then(Json::as_str)
+                {
+                    collect_entity_objects(element, visit);
+                }
+                return;
+            }
             if let Some(Json::String(id)) = map.get("id")
-                && map.len() > 1
                 && is_entity_id(id)
-                && !wraps_element(map, id)
+                && (map.contains_key("_system")
+                    || map.contains_key("schema_ref")
+                    || map.contains_key("predicate_ref")
+                    || map.contains_key("asserted_by"))
             {
                 visit(id, map);
-            }
-            for nested in map.values() {
-                collect_entity_objects(nested, visit);
             }
         }
         _ => {}
     }
-}
-
-/// Whether this object is an envelope around the element it names, rather than
-/// the element itself.
-fn wraps_element(map: &serde_json::Map<String, Json>, id: &str) -> bool {
-    map.get("element")
-        .and_then(Json::as_object)
-        .and_then(|element| element.get("id"))
-        .and_then(Json::as_str)
-        == Some(id)
 }
 
 /// Opening tag of the recall self-report footer (plan module M4).
@@ -533,8 +423,8 @@ where
     C: AssessContext + ?Sized,
 {
     match ctx.execute_kip_readonly(kip::request(command)).await {
-        Ok(response) if kip::succeeded(&response) => {
-            let count = kip::ok_result(&response).and_then(first_integer);
+        Ok(response) if single_read_result(&response).is_ok() => {
+            let count = single_read_result(&response).ok().and_then(first_integer);
             if count.is_none() {
                 log::warn!(target: "brain", command = command; "kip_count: no integer in result");
             }
@@ -580,59 +470,13 @@ where
 pub fn first_integer(value: &Json) -> Option<u64> {
     match value {
         Json::Number(number) => number.as_u64(),
-        Json::Array(items) => items.iter().find_map(first_integer),
-        Json::Object(map) => map.values().find_map(first_integer),
+        Json::Array(items) if items.len() == 1 => first_integer(&items[0]),
+        Json::Object(map) if !map.get("error").is_some_and(|error| !error.is_null()) => map
+            .get("result")
+            .or_else(|| map.get("count"))
+            .and_then(first_integer),
         _ => None,
     }
-}
-
-pub fn response_hit_count(response: &Response) -> usize {
-    response
-        .results
-        .iter()
-        .filter_map(|result| result.result.as_ref())
-        .map(json_hit_count)
-        .sum()
-}
-
-fn json_hit_count(value: &Json) -> usize {
-    match value {
-        Json::Null => 0,
-        Json::Bool(false) => 0,
-        Json::Bool(true) => 1,
-        Json::Number(number) => {
-            if number.as_f64().unwrap_or_default() == 0.0 {
-                0
-            } else {
-                1
-            }
-        }
-        Json::String(text) => usize::from(!text.trim().is_empty()),
-        Json::Array(items) => {
-            if items.iter().all(looks_like_serialized_kip_response) {
-                items.iter().map(json_hit_count).sum()
-            } else {
-                items.len()
-            }
-        }
-        Json::Object(map) => {
-            if map.is_empty() {
-                0
-            } else if let Some(result) = map.get("result") {
-                json_hit_count(result)
-            } else if map.contains_key("error") {
-                0
-            } else {
-                1
-            }
-        }
-    }
-}
-
-fn looks_like_serialized_kip_response(value: &Json) -> bool {
-    value
-        .as_object()
-        .is_some_and(|map| map.contains_key("result") || map.contains_key("error"))
 }
 
 #[cfg(test)]
@@ -665,9 +509,11 @@ mod tests {
         let trace = RecallTrace::from_messages(&messages);
 
         assert_eq!(trace.tools.len(), 1);
-        assert!(trace.contains_any_term(&["concise".to_string()]));
-        // Terms that only appear in args must not count as evidence.
-        assert!(!trace.contains_any_term(&["Preference".to_string()]));
+        assert_eq!(trace.tools[0].call_id.as_deref(), Some("call_1"));
+        assert_eq!(
+            trace.tools[0].output,
+            Some(json!([{"name":"prefers concise"}]))
+        );
     }
 
     #[test]
@@ -828,15 +674,58 @@ mod tests {
         assert_eq!(meta.uncertainty, Some(0.1));
     }
 
-    #[test]
-    fn response_hit_count_handles_batch_responses() {
-        let response = Response::ok(json!([
-            {"result": [{"name": "a"}, {"name": "b"}]},
-            {"result": []},
-            {"error": {"code": "KIP_3002"}}
-        ]));
+    #[tokio::test]
+    async fn search_observation_reads_real_nexus_results() {
+        use crate::testkit::{app_state_core, create_loaded_space};
+        use anda_engine::model::Models;
+        use std::sync::Arc;
 
-        assert_eq!(response_hit_count(&response), 2);
+        let app = app_state_core(
+            "search_counts",
+            Arc::new(Models::default()),
+            vec![],
+            "test",
+            0,
+        );
+        let space = create_loaded_space(&app, "search_counts").await;
+        // No model is installed: these probes execute the real local Nexus.
+        let response = space
+            .execute_kip_readonly(crate::kip::request(
+                "SEARCH CONCEPT \"unfindable-zqxv\" LIMIT 8",
+            ))
+            .await
+            .unwrap();
+        assert!(crate::kip::succeeded(&response), "{response:?}");
+        assert_eq!(crate::kip::ok_result(&response).unwrap()["hits"], json!([]));
+        assert_eq!(search_observation(&response).unwrap().hits.len(), 0);
+
+        let inserted = anda_kip::execute_request(
+            space.memory.nexus().as_ref(),
+            &crate::kip::request(
+                r#"MUTATE {
+                CREATE CONCEPT ?a {TYPE "Person" NAME "probeunique Alpha"}
+                CREATE CONCEPT ?b {TYPE "Person" NAME "probeunique Beta"}
+            }"#,
+            ),
+        )
+        .await;
+        assert!(crate::kip::succeeded(&inserted), "{inserted:?}");
+        let response = space
+            .execute_kip_readonly(crate::kip::request(
+                "SEARCH CONCEPT \"probeunique\" LIMIT 8",
+            ))
+            .await
+            .unwrap();
+        assert!(crate::kip::succeeded(&response), "{response:?}");
+        let hits = crate::kip::ok_result(&response).unwrap()["hits"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            search_observation(&response).unwrap().hits.len(),
+            hits.len()
+        );
+        assert_eq!(hits.len(), 2);
+        space.close().await.unwrap();
     }
 
     #[test]
@@ -847,34 +736,8 @@ mod tests {
     }
 
     #[test]
-    fn an_assertion_probe_binds_its_term_instead_of_splicing_it() {
-        // The search term comes from an eval set, and a quote or a backslash in
-        // it used to have to be escaped into the command text. A bound
-        // parameter occupies a complete value position, so the term is data
-        // even when it looks like syntax.
-        let request = assertion_search_request("say \"hi\" \\ bye", 0.5, 3);
-        request.validate().unwrap();
-        assert_eq!(
-            request.operations[0].command.as_deref(),
-            Some("SEARCH CONCEPT :term THRESHOLD :threshold LIMIT :limit")
-        );
-        assert_eq!(
-            request.parameters.as_ref().unwrap()["term"],
-            Json::from("say \"hi\" \\ bye")
-        );
-    }
-
-    #[test]
     fn parse_json_payload_rejects_non_json() {
-        assert!(parse_json_payload::<AssertionVerdict>("no json here").is_err());
-    }
-
-    #[test]
-    fn parse_assertion_verdict() {
-        let verdict: AssertionVerdict =
-            parse_json_payload("{\"holds\": false, \"reason\": \"superseded\"}").unwrap();
-        assert!(!verdict.holds);
-        assert_eq!(verdict.reason, "superseded");
+        assert!(parse_json_payload::<Json>("no json here").is_err());
     }
 
     #[test]

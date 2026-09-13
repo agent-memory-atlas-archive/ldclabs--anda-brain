@@ -91,11 +91,19 @@ pub(crate) struct Observation(pub Option<Arc<anda_kip::IngestContext>>);
 #[derive(Clone)]
 pub struct GuardedMemory {
     memory: Arc<MemoryManagement>,
+    clock: Arc<crate::runtime::BusinessClock>,
 }
 
 impl GuardedMemory {
     pub fn new(memory: Arc<MemoryManagement>) -> Self {
-        Self { memory }
+        Self {
+            memory,
+            clock: Arc::new(crate::runtime::BusinessClock::default()),
+        }
+    }
+    pub(crate) fn with_clock(mut self, clock: Arc<crate::runtime::BusinessClock>) -> Self {
+        self.clock = clock;
+        self
     }
 }
 
@@ -134,6 +142,7 @@ impl Tool<BaseCtx> for GuardedMemory {
             Ok(request) => request,
             Err(err) => return Ok(error_output(Response::from(err))),
         };
+        self.clock.bind_read(&mut request)?;
         // The observation rides the envelope so the model's commands cite
         // `:msg1` instead of retyping what was said. Attached here rather than
         // where the request is built because this is the only seam that knows

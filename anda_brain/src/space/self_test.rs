@@ -91,7 +91,7 @@ LIMIT {window}"#
                 kip::param("after", cursor.after),
             ))
             .await?;
-        if !kip::succeeded(&response) {
+        if assess::single_read_result(&response).is_err() {
             log::error!(
                 target: "brain",
                 space_id = self.id;
@@ -101,23 +101,14 @@ LIMIT {window}"#
             );
             return Ok(None);
         }
-        let sampled =
-            self_test_candidates(kip::ok_result(&response).unwrap_or(&serde_json::Value::Null));
+        let sampled = self_test_candidates(assess::single_read_result(&response)?);
 
         // A short window means the cursor has reached the end of the graph.
         // Park it back at zero so coverage cycles — but only once the retest
         // horizon has passed, or a small graph would re-test the same handful
         // of memories on every cycle and burn its whole token budget doing it.
         let reached_end = sampled.len() < window;
-        let next_after = sampled.last().map(|c| c.seq).unwrap_or(cursor.after);
-        let wrap = reached_end && now_ms.saturating_sub(cursor.cycled_at) >= SELF_TEST_RETEST_MS;
-        self.db.set_extension_from(
-            "memory_self_test_cursor".to_string(),
-            SelfTestCursor {
-                after: if wrap { 0 } else { next_after },
-                cycled_at: if wrap { now_ms } else { cursor.cycled_at },
-            },
-        );
+        let sampled_after = sampled.last().map(|c| c.seq).unwrap_or(cursor.after);
 
         // Prefer memories with no usage evidence at all: recalled ones are
         // proven groundable, already-tested ones had their chance.
@@ -136,6 +127,17 @@ LIMIT {window}"#
         }
         candidates.retain(|candidate| !candidate.subject_name.is_empty());
         if candidates.is_empty() {
+            let wrap =
+                reached_end && now_ms.saturating_sub(cursor.cycled_at) >= SELF_TEST_RETEST_MS;
+            self.db
+                .save_extension_from(
+                    "memory_self_test_cursor".into(),
+                    &SelfTestCursor {
+                        after: if wrap { 0 } else { sampled_after },
+                        cycled_at: if wrap { now_ms } else { cursor.cycled_at },
+                    },
+                )
+                .await?;
             return Ok(None);
         }
 
@@ -191,7 +193,9 @@ LIMIT {window}"#
                 .map(|query| query.query.trim())
                 .filter(|query| !query.is_empty())
             else {
-                continue;
+                return Err(
+                    "self-test query generation did not cover every selected candidate".into(),
+                );
             };
             let response = self
                 .execute_kip_readonly(kip::request_with(
@@ -199,26 +203,22 @@ LIMIT {window}"#
                     kip::param("query", query),
                 ))
                 .await?;
-            let Some(result) = kip::ok_result(&response) else {
-                // An errored/timed-out search is *unknown*, not
-                // "ungroundable": counting it would fabricate a false
-                // negative, lower the groundability metric, and burn a
-                // re-encode task on a healthy memory. Abort the whole pass; a
-                // later one re-samples from the same cursor.
-                return Err(format!(
-                    "self-test grounding search errored for {}: {}",
-                    candidate.id,
-                    kip::error_message(&response)
-                )
-                .into());
-            };
+            let observation = assess::search_observation(&response)?;
+            let result = assess::single_read_result(&response)?;
             let mut hit_ids = BTreeSet::new();
             assess::collect_entity_objects(result, &mut |id, _| {
                 hit_ids.insert(id.to_string());
             });
+            let grounded =
+                hit_ids.contains(&candidate.subject) || hit_ids.contains(&candidate.object);
+            if !grounded && observation.exhaustive != Some(true) {
+                return Err(
+                    "self-test grounding is unknown under incomplete search coverage".into(),
+                );
+            }
             report.tested += 1;
             tested_entities.insert(candidate.id.clone());
-            if hit_ids.contains(&candidate.subject) || hit_ids.contains(&candidate.object) {
+            if grounded {
                 report.grounded += 1;
                 continue;
             }
@@ -261,7 +261,22 @@ LIMIT {window}"#
         });
         self.db
             .set_extension_from("memory_self_test".to_string(), report.clone());
-        self.db.flush_metadata(now_ms).await.ok();
+        // Advance only past the batch actually generated and checked. Prompt
+        // budget truncation and failed/unknown probes must not skip candidates.
+        let next_after = candidates.last().map(|c| c.seq).unwrap_or(cursor.after);
+        let wrap = reached_end
+            && next_after == sampled_after
+            && now_ms.saturating_sub(cursor.cycled_at) >= SELF_TEST_RETEST_MS;
+        self.db
+            .save_extension_from(
+                "memory_self_test_cursor".into(),
+                &SelfTestCursor {
+                    after: if wrap { 0 } else { next_after },
+                    cycled_at: if wrap { now_ms } else { cursor.cycled_at },
+                },
+            )
+            .await?;
+        self.db.flush_metadata(now_ms).await?;
         Ok(Some(report))
     }
 

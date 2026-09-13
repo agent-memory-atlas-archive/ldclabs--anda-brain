@@ -7,15 +7,21 @@ pub mod agents;
 pub mod assess;
 pub(crate) mod authz;
 pub(crate) mod cognitive;
-pub mod eval;
 pub mod handler;
 pub(crate) mod kip;
+#[cfg(feature = "learning")]
+pub mod learning;
+
+mod runtime;
+#[cfg(feature = "experiments")]
+pub use space::experiments;
 pub(crate) mod ledger;
 #[cfg(test)]
 mod legacy_upgrade;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod payload;
+pub mod recall_budget;
 pub(crate) mod settlement;
 pub mod space;
 #[cfg(test)]

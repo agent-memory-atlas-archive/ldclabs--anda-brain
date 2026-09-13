@@ -33,6 +33,7 @@ use super::{
     push_completed_history,
 };
 use crate::types::{MemoryPolicy, RecallInput};
+mod budgeted;
 #[cfg(feature = "wiki")]
 use crate::wiki::{WikiReadTool, WikiSearchTool};
 
@@ -52,6 +53,17 @@ pub static FUNCTION_DEFINITION: LazyLock<FunctionDefinition> = LazyLock::new(|| 
         "parameters": {
             "type": "object",
             "properties": {
+            "budget": {
+                "type": ["object", "null"],
+                "description": "Optional hard-budget memory packet mode. The host returns selected authorized items and coverage, not a free-form answer. A Space policy may enforce tighter limits. Null preserves the policy/default behavior.",
+                "properties": {
+                    "tokenizer": {"type":"string","enum":["o200k_base@tiktoken-rs-0.12.0"]},
+                    "max_tokens": {"type":"integer","minimum":1,"maximum":65536},
+                    "context_tokens": {"type":"integer","minimum":1,"maximum":131072}
+                },
+                "required": ["tokenizer","max_tokens","context_tokens"],
+                "additionalProperties": false
+            },
             "query": {
                 "type": "string",
                 "description": "A natural language question about older or out-of-context memory. Be specific and include the subject, timeframe, and topic when known. Examples: 'What do we know about the current user's communication preferences?', 'What happened in our last discussion about Project Aurora?', 'Who are the members of the engineering team?'"
@@ -101,10 +113,7 @@ pub static FUNCTION_DEFINITION: LazyLock<FunctionDefinition> = LazyLock::new(|| 
                 "additionalProperties": false
             }
             },
-            "required": [
-                "query",
-                "context"
-            ],
+            "required": ["query", "context", "budget"],
             "additionalProperties": false
         },
         "strict": true
@@ -115,6 +124,7 @@ pub static FUNCTION_DEFINITION: LazyLock<FunctionDefinition> = LazyLock::new(|| 
 pub struct TimedMemoryReadonly {
     memory: Arc<MemoryManagement>,
     timeout: Duration,
+    clock: Arc<crate::runtime::BusinessClock>,
 }
 
 impl TimedMemoryReadonly {
@@ -122,7 +132,12 @@ impl TimedMemoryReadonly {
         Self {
             memory,
             timeout: READONLY_KIP_TIMEOUT,
+            clock: Arc::new(crate::runtime::BusinessClock::default()),
         }
+    }
+    pub(crate) fn with_clock(mut self, clock: Arc<crate::runtime::BusinessClock>) -> Self {
+        self.clock = clock;
+        self
     }
 }
 
@@ -151,10 +166,11 @@ impl Tool<BaseCtx> for TimedMemoryReadonly {
         args: Self::Args,
         _resources: Vec<Resource>,
     ) -> Result<ToolOutput<Self::Output>, BoxError> {
-        let request = match args.into_request() {
+        let mut request = match args.into_readonly_request() {
             Ok(request) => request,
             Err(err) => return Ok(error_output(Response::from(err))),
         };
+        self.clock.bind_read(&mut request)?;
         let nexus = self.memory.nexus();
         let res = match timeout(
             self.timeout,
@@ -198,6 +214,7 @@ pub type MemoryPolicyReader = Arc<dyn Fn() -> MemoryPolicy + Send + Sync>;
 
 #[derive(Clone)]
 pub struct RecallAgent {
+    prompt: Arc<str>,
     pub conversations: Conversations,
     /// The collection backing `conversations`. `Conversations` wraps document
     /// access only, so cursor paging in `Space::list_conversations` goes
@@ -208,6 +225,7 @@ pub struct RecallAgent {
     history: Arc<RwLock<VecDeque<Document>>>,
     max_input_tokens: usize,
     policy: MemoryPolicyReader,
+    clock: Arc<crate::runtime::BusinessClock>,
 }
 
 impl RecallAgent {
@@ -221,6 +239,8 @@ impl RecallAgent {
         policy: MemoryPolicyReader,
     ) -> Self {
         Self {
+            prompt: super::prompts::active_prompt(super::prompts::PromptTarget::Recall),
+            clock: Arc::new(crate::runtime::BusinessClock::default()),
             conversations,
             conversations_collection,
             memory,
@@ -254,6 +274,21 @@ impl RecallAgent {
         }
     }
 
+    pub(crate) fn with_prompt(mut self, prompt: Arc<str>) -> Self {
+        self.prompt = prompt;
+        self
+    }
+
+    pub(crate) fn with_clock(mut self, clock: Arc<crate::runtime::BusinessClock>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    #[cfg(feature = "experiments")]
+    pub(crate) fn clear_history(&self) {
+        self.history.write().clear();
+    }
+
     pub async fn init(&self) -> Result<(), BoxError> {
         let (conversations, _) = self
             .conversations
@@ -265,7 +300,14 @@ impl RecallAgent {
         // otherwise the next push_back would evict the newest entry first.
         let mut history: Vec<Conversation> = conversations
             .into_iter()
-            .filter(|c| c.status == ConversationStatus::Completed)
+            .filter(|c| {
+                c.status == ConversationStatus::Completed
+                    && c._id
+                        > self
+                            .conversations_collection
+                            .get_extension_as::<u64>("history_boundary")
+                            .unwrap_or(0)
+            })
             .take(RECALL_HISTORY_LIMIT)
             .collect();
         history.reverse();
@@ -359,6 +401,29 @@ impl RecallAgent {
         }
     }
 
+    /// Reads the canonical budget recorded by budget mode. Unbudgeted raw or
+    /// structured prompts return `None`.
+    pub(crate) async fn conversation_budget(
+        &self,
+        conversation: u64,
+    ) -> Result<Option<crate::recall_budget::RecallBudget>, BoxError> {
+        let conversation = self.conversations.get_conversation(conversation).await?;
+        let first = conversation
+            .messages
+            .first()
+            .ok_or("recall conversation has no input message")?;
+        let message: Message = serde_json::from_value(first.clone())?;
+        let prompt = message
+            .content
+            .iter()
+            .find_map(|part| match part {
+                anda_core::ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .ok_or("recall conversation has no text input")?;
+        Ok(RecallInput::parse_prompt(prompt)?.and_then(|input| input.budget))
+    }
+
     async fn failed_output(
         &self,
         mut conversation: Conversation,
@@ -416,6 +481,8 @@ impl Agent<AgentCtx> for RecallAgent {
     fn tool_dependencies(&self) -> Vec<String> {
         #[allow(unused_mut)]
         let mut tools = vec![MemoryReadonly::NAME.to_string()];
+        #[cfg(feature = "learning")]
+        tools.push(crate::learning::recall::ProcedureStatusTool::NAME.to_string());
         #[cfg(feature = "wiki")]
         tools.extend([
             WikiSearchTool::NAME.to_string(),
@@ -430,6 +497,15 @@ impl Agent<AgentCtx> for RecallAgent {
         prompt: String, // RecallInput serialized as JSON string
         _resources: Vec<Resource>,
     ) -> Result<AgentOutput, BoxError> {
+        let budget_input = RecallInput::parse_prompt(&prompt)?;
+        if let Some(budget) = crate::recall_budget::RecallBudget::resolve(
+            (self.policy)().recall_budget.as_ref(),
+            budget_input
+                .as_ref()
+                .and_then(|input| input.budget.as_ref()),
+        )? {
+            return self.run_budgeted(ctx, prompt, budget_input, budget).await;
+        }
         let caller = ctx.caller();
         let now_ms = unix_ms();
         let token_count = estimate_tokens(&prompt);
@@ -500,11 +576,11 @@ impl Agent<AgentCtx> for RecallAgent {
                 instructions: format!(
                     "{}\n\n---\n\n{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Your Notes:\n{}\n\n# Counterparty profile:\n{}\n\n# Current Datetime: {}",
                     super::prompts::mode_reference(super::prompts::PromptTarget::Recall),
-                    super::prompts::active_prompt(super::prompts::PromptTarget::Recall),
+                    self.prompt,
                     primer,
                     serde_json::to_string(&notes).unwrap_or_default(),
                     serde_json::to_string(&counterparty_info).unwrap_or_default(),
-                    local_date_hour(now_ms).unwrap_or_default()
+                    local_date_hour(self.clock.now_ms()).unwrap_or_default()
                 ),
                 prompt,
                 chat_history,
@@ -883,6 +959,7 @@ mod tests {
 
     fn recall_prompt(query: &str, counterparty: Option<&str>) -> String {
         serde_json::to_string(&RecallInput {
+            budget: None,
             query: query.to_string(),
             context: counterparty.map(|counterparty| InputContext {
                 counterparty: Some(counterparty.to_string()),
@@ -910,7 +987,7 @@ mod tests {
                 .pointer("/required")
                 .and_then(|v| v.as_array())
                 .map(|values| values.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
-            Some(vec!["query", "context"])
+            Some(vec!["query", "context", "budget"])
         );
     }
 
@@ -937,17 +1014,13 @@ mod tests {
             RecallAgent::NAME
         );
         let tools = Agent::<AgentCtx>::tool_dependencies(space.recall.as_ref());
+        #[allow(unused_mut)]
+        let mut expected = vec!["execute_kip_readonly".to_string()];
+        #[cfg(feature = "learning")]
+        expected.push("check_procedure_status".to_string());
         #[cfg(feature = "wiki")]
-        assert_eq!(
-            tools,
-            vec![
-                "execute_kip_readonly".to_string(),
-                "wiki_search".to_string(),
-                "wiki_read".to_string(),
-            ]
-        );
-        #[cfg(not(feature = "wiki"))]
-        assert_eq!(tools, vec!["execute_kip_readonly".to_string()]);
+        expected.extend(["wiki_search".to_string(), "wiki_read".to_string()]);
+        assert_eq!(tools, expected);
     }
 
     #[tokio::test]

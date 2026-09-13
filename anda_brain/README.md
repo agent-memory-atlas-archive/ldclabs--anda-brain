@@ -50,7 +50,7 @@ and its `memory_*` bundles are **not advertised** by these adapters.
 - **Triple serialization** — Supports JSON, CBOR, and Markdown for request/response payloads (negotiated via `Content-Type` / `Accept` headers).
 - **Built-in MCP server** — MCP-capable agents can use Anda Brain through Streamable HTTP or stdio tools without writing REST glue code.
 - **Pluggable storage backends** — Local filesystem, AWS S3, or in-memory (for development/testing).
-- **Longitudinal eval harness** — Development/CI support for replaying user timelines, probing graph state, scoring checkpoints, and attributing memory failures to Formation, Recall, or Maintenance.
+- **MIB offline regression** — Product timelines and business outcomes are evaluated by the independent MIB runner; Brain retains online diagnostics and native learning-mechanism tests.
 
 ## Agents
 
@@ -86,6 +86,14 @@ Receives conversation messages and encodes them into structured memory within th
   shape, caps how many a space may hold, and versions the result.
 
 ### Recall — Memory Retrieval (`recall_memory`)
+
+The optional `RecallInput.budget` (or an enforced `memory_policy.recall_budget`)
+selects a host-packed JSON memory response instead of free-form synthesis.
+The whole packet and cumulative normalized planning input use the pinned
+`o200k_base@tiktoken-rs-0.12.0` counter. Required commitments/warnings precede
+optional items, failed coverage is explicit, and diagnostic histories/artifacts
+cannot bypass the packet limit. Existing requests without a budget policy keep
+the normal flow below. See [P5 contract](API.md#recall-budget-contract).
 
 Translates natural language queries into knowledge graph lookups and returns synthesized answers.
 
@@ -127,7 +135,7 @@ Consolidates, prunes, and optimizes the knowledge graph during scheduled or on-d
 9. **SelfModel and WorkingState refresh** — Consolidate identity from evidence rather than from the latest conversation, and rebuild the digest the next waking session resumes from, stamped with the `basis_seq` it was built at.
 10. **Retention review** — Decide what should carry an expiry and write it with `SET RETENTION`; the full settlement's sweep is what makes that write mean something. See "Retention expiry" below.
 
-Skill lifecycle transitions require a configured protected evaluation pipeline and do not run in this deployment. See "Procedural candidates remain unproven" below.
+Skill lifecycle transitions require the explicitly configured protected host evaluation pipeline. Standard model-driven maintenance does not grant standing. See "Procedural candidates remain unproven" below.
 
 **Key behaviors:**
 - Single-execution guard — only one maintenance cycle can run at a time per space.
@@ -170,7 +178,7 @@ settlement report is stored in the `memory_settlement` extension.
 **Reading does not reinforce.** Every completed recall still records which
 graph entities it surfaced, into an off-graph usage ledger (`memory_usage`
 collection) that the dream self-test, the health metrics and the scenario
-miner read. That record stops there. An earlier design closed the loop —
+diagnostic inspection reads. That record stops there. An earlier design closed the loop —
 settlement raised the recalled Concepts' `memory_strength` by a
 `recall_reinforcement` gain — and that is precisely what the reference Recall
 policy forbids (§1 "MUST NOT ... change memory_strength, increment recall
@@ -205,6 +213,95 @@ no automatic baseline or grade is inferred. Settlement preserves the historical
 counter fields at zero and includes `skills.unsupported_reason` until a trusted
 observer/trial/evaluation scheduler is configured. Historic counters or `adopted`
 labels are not validated learning evidence.
+
+### Native learning contracts
+
+With the Rust `learning` feature, `anda_brain::learning`
+provides `PairedTrialPlan`, `ExecutionContract`, `PairedRule`, and `register_paired_rule`. A trusted
+host freezes the plan as an artifact before baseline execution, uses its pin
+for both arms' `AttemptRecord.selection_policy` and `TrialRecord.parameters`,
+and registers the rule once per Nexus instance (including after restart).
+`attempt_context()` and `comparability()` build the pinned KIP fields.
+
+The `anda-brain:paired-bounded-v2` rule compares one candidate revision against a stable task policy with
+the same factual memory, model, tools, budget and task/state/seed pairs. It
+requires the entire predeclared cohort and a one-sided Hoeffding lower bound
+above the positive practical-improvement margin, and an absolute candidate
+failure-rate ceiling. The observer configuration binds the workflow contract
+and the complete attempt budget. Missing treatment outcomes
+count as failure; missing or unknown control outcomes leave the comparison
+insufficient. Duplicate pairs/observations, changed pins, or extra applied Skill
+revisions are rejected. A new monitoring trial retains the original acquisition
+through `AdoptionBasis`; native tests verify adoption, subsequent revocation and
+rejection of re-entry using the old trial. Multi-Skill bundles, adaptive stopping
+and filtering a window out of one trial's ledger are not supported. Parameters have no production
+defaults and require calibration.
+
+`ExecutionContract` pins tool/time/token ceilings, cutoff and the review deadline.
+The host must call `validate_settlement()` before a final verdict and enforce
+expiry at read time: the current Nexus evaluator input does not contain the
+EvaluationRecord cutoff. OutcomeRecord has no custom cost fields, so the trusted
+verifier checks bounded success and retains measurements in Evidence payloads.
+`workflow_contract()` supplies the first resettable task-family contract. See the
+[frozen workflow contract](assets/learning/workflow-contract-v1.json).
+The previous v1 evaluator digest is rejected rather than assigned these new semantics.
+
+`Space::learning()` now provides explicit registration, frozen enrollment,
+persistent dispatch/recovery and separately authenticated Outcome ingestion.
+It uses native leases and dispatch authority checks; no executable authority or
+Skill standing is assigned automatically. The host supplies the real executor
+and observer, and calls the bounded `drive` step. Compilation does not deploy
+those bindings. The host's `settle` step now performs
+fixed-cutoff native comparison and atomic standing updates. Persistent reviews,
+new monitoring trials, independently authenticated safety revocation, and current
+read-time recommendation checks are implemented. Recall's internal read-only
+`check_procedure_status` tool reports these checks and does not grant execution
+authority. The [runtime implementation](src/learning/runtime.rs) exposes the trusted host interfaces.
+The native tests use deterministic fixture outcomes to verify KIP transactions,
+not to claim empirical learning. Run them without a model provider:
+
+```bash
+RUST_MIN_STACK=16777216 cargo test -p anda_brain --lib --features learning learning::
+```
+
+### Isolated experiments
+
+With the Rust `experiments` feature, the host-only
+`Experiment` owner supplies isolated stores, quiescent immutable snapshots,
+per-conversation completion waits, monotonic business time, session boundaries,
+and cost receipts with explicit unknown values. It enables Nexus's non-default
+`simulation` host API for lifecycle expiry; authentication, lease and audit
+clocks remain real. No HTTP/MCP clock override or MIB adapter is exposed.
+Notes now persist under each Space's `engine/` object-store prefix and are
+included in experiment snapshots. See the [experiment API](src/space/experiments.rs) and [MIB integration](#mib-integration).
+
+`Experiment::create_with_recall_budget` pins a forced P5 policy before the run
+is exposed, including across snapshot forks and session boundaries.
+`audit_procedures()` supplies a bounded native inventory for evaluator-side
+before/after checks. It does not establish applicability or execution permission.
+See [P6 validation and remaining bindings](#mib-integration).
+
+### MIB integration
+
+The sibling Anda Bot `mib` feature provides an isolated loopback host before
+production home/daemon initialization. Its agent endpoint is
+`/mib-agent/v0.1`; its memory backend endpoint is `/mib-memory/v0.1`.
+Each run has a separate store and business clock. Formation/Maintenance wait
+for exact terminal records, repeated requests preserve their original result,
+and current-task tool replies remain available in no-memory mode. See the
+[Bot host contract](https://github.com/ldclabs/anda-bot/blob/main/docs/mib-integration.md)
+and [MIB backend contract](https://github.com/ldclabs/MIB/blob/main/docs/harness/MIB-Memory-Backend.md).
+
+P6's [longitudinal harness](https://github.com/ldclabs/MIB/blob/main/docs/harness/MIB-Learning-Longitudinal.md)
+requires explicit normal/no-memory/ungated capabilities, matched business
+identities and fixed budgets. The current Bot provides persistent/no-memory
+modes; native normal/ungated business bindings remain pending. Unknown costs
+stay unknown, and engineering fixtures never establish model-learning success.
+The evaluator-only `learning_audit` reads bounded native inventories (256 items
+per kind, 4 MiB total projection); an incomplete count cannot prove absence.
+It never grants applicability or execution permission and is not fed back to
+Formation. Complete accounting and real provider calibration are separate
+acceptance work.
 
 **Task work requires a lease.** The internal tool's `lease_task` operation acquires
 or renews a five-minute lease under the runtime Principal. After re-reading the
@@ -269,7 +366,9 @@ only into the ledger's isolated `self_test_count` — the brain testing itself
 never reinforces its own memories. The pass report lives in the
 `memory_self_test` extension and surfaces as the `groundability` graph stat.
 
-**Metamemory:** `POST /v1/{space_id}/probe` answers "do I know anything
+**Metamemory:** `search_exhaustive` reports optional search-window coverage;
+missing coverage is unknown. A search miss is not a negative BELIEF, and only
+explicit exhaustive misses enter the cache. `POST /v1/{space_id}/probe` answers "do I know anything
 about this?" with pure search — no LLM, no recall cost. Queries that find
 nothing are remembered in a negative-knowledge cache (cleared whenever
 formation completes, 1h TTL backstop), so agents stop paying to hit the same
@@ -302,234 +401,59 @@ can never pollute its conversations, usage ledger, or metrics. The report
 promotion stays human: read the report, then `update_space` with the
 candidate policy if it won.
 
-## Longitudinal Evaluation
+## Offline regression and instance configuration
 
-Anda Brain includes an eval-first harness in `anda_brain::eval`. It drives the
-same deep interface used by real callers:
+The Rust `anda_brain::eval` API and the `anda_brain eval` CLI, including
+`--optimize`, `--mine`, validation/report modes and their fixture profiles,
+have been retired. MIB owns the migrated product regressions. Brain retains
+its online self-test, `/probe`, citations/metadata, usage and correction ledgers,
+shadow diagnostics, isolated experiment controls and native learning runtime.
+The separate wiki retrieval corpus remains at `evals/wiki/retrieval.json`.
 
-1. Replay normal turns through Formation.
-2. Optionally trigger Maintenance by explicit turns or every N normal turns.
-3. Run checkpoint turns through Recall.
-4. Execute read-only KIP probes before each checkpoint.
-5. Score answer utility, forgetting quality, graph health, uncertainty, latency,
-   and token cost.
-6. Attribute failures to `formation_miss`, `bad_consolidation`,
-   `bad_grounding`, `bad_synthesis`, or `overconfidence`.
-
-The harness is intended for local experiments, regression tests, and CI
-benchmarks. It is not a public HTTP endpoint. See
-[`evals/style_preference.json`](evals/style_preference.json) for a minimal
-scenario shape.
-
-Beyond the basic replay loop, the harness supports:
-
-- **Sampling & variance** — `checkpoint_samples: N` in a profile (or
-  `--checkpoint-samples N`) runs Recall N times per checkpoint and reports the
-  mean score plus `total_stddev` (propagated through suite and experiment
-  aggregates). Findings only count when they appear in a majority of samples.
-  `--confidence-z Z` makes `--min-score` gate on `total - Z * stddev`, so a
-  lucky single roll cannot pass CI.
-- **LLM judge** — `"judge": "llm"` in a profile scores each answer against the
-  checkpoint's `scoring_rubric` and the scenario's `hidden_profile`.
-  Paraphrases count fully, and correct meta-references to superseded facts
-  ("unlike your old BBQ preference…") are not penalized as stale. The judge
-  also emits attributed findings and a per-checkpoint `satisfaction` signal.
-  The lexical scorer remains the default for deterministic smoke runs.
-- **Semantic probes** — an expectation may state an `assertion` in natural
-  language ("an active, non-superseded BBQ preference for user_042") instead
-  of hand-written KQL. The harness runs a semantic graph search and asks the
-  judge whether the evidence shows the statement, so probes stay correct
-  across valid encoding variations. Raw `probe` KQL remains as fallback.
-  `search_threshold` (default 0.35) and `search_limit` (default 8) tune the
-  search per expectation. A probe whose KIP request itself fails degrades to
-  a `graph_probe_error` finding — the expectation is scored as unknown, not
-  as a memory failure, and the run continues.
-- **Noise pressure** — a scenario-level `noise` config deterministically
-  inserts chit-chat turns between authored anchors (`between_turns`, `seed`,
-  optional `corpus`), scaling a 6-turn script into a long timeline where
-  Formation must keep the needle in a haystack. Noise turns count toward
-  `maintenance_every_n_turns` exactly like real user turns, so enabling noise
-  also increases auto-maintenance frequency — deliberately, so Maintenance
-  has real material to metabolize.
-- **Simulated users** — `"type": "simulated"` turns carry an `intent`; an
-  eval-only user simulator writes the actual message from `hidden_profile`,
-  the recent transcript, and the satisfaction trail, adapting its behavior
-  when the memory system has been failing it. Reports include a
-  `satisfaction_trajectory` — the survival-pressure signal.
-- **Trajectory metrics** — aggregate scores weight later checkpoints more
-  (an established memory failing late costs more than an early miss), and
-  the aggregate `evolution_quality` compares late-half vs early-half
-  checkpoint scores: above 0.5 means the system improved over the timeline.
-  The trajectory value is informational — the aggregated `total` stays the
-  weighted mean of checkpoint totals (each of which used its own
-  checkpoint-level evolution estimate) and is not recomputed from it.
-  `graph_health` reads real metabolism counters (unconsolidated backlog, orphans)
-  via read-only KIP instead of probe execution success.
-- **Shared-formation experiments** — `--shared-formation` (with multiple
-  `--profile`) replays formation once per scenario, snapshots the space, and
-  forks the snapshot into an isolated in-memory store per profile. Every
-  maintenance policy is then measured on identical encoded memory, removing
-  formation LLM variance as a confound — and the most expensive phase runs
-  once instead of once per profile. Requires all user turns to precede the
-  first checkpoint (validated); use the default interleaved mode otherwise.
-- **Prompt & policy optimization** — `--optimize
-  formation|recall|maintenance|auto|policy` runs an offline evolution loop
-  with the eval suite as fitness. Prompt genomes get surgical find/replace
-  edits from an optimizer LLM; the `policy` genome mutates the numeric
-  `MemoryPolicy` knobs instead (1–3 bounded ±50% steps per generation,
-  range-validated — cheaper to evaluate and safer to apply). Candidates must
-  beat the baseline beyond the sampling noise band or they are reverted.
-  Accepted prompts (`Brain*.md`), the accepted policy
-  (`memory_policy.json`), and the full decision log are written to
-  `--optimize-out` (default `./eval_optimize`) for human review — nothing is
-  written back to `assets/`. Note: the noise band only covers Recall
-  sampling variance (`checkpoint_samples`) — each generation re-runs
-  formation, whose LLM variance is *not* in the band, so prefer more
-  scenarios and samples over trusting a single close call.
-- **Holdout gate (anti-overfitting)** — `--holdout-scenario <file>` (with
-  `--optimize`) runs a held-out suite whenever train accepts a candidate: a
-  train win that drops the holdout total more than `holdout_epsilon`
-  (default 0.01) below its baseline is rejected as overfitting, and the
-  per-generation holdout totals land in the optimize report.
-- **Independent judge** — `--judge-model-name/-api-key/-api-base/-family`
-  (env `JUDGE_MODEL_*`) route all judge completions (checkpoint scoring and
-  semantic assertion probes) to a separate model, so judge scores stop
-  sharing the evaluated system's blind spots. An empty API key keeps the
-  old same-model behavior.
-- **Scenario mining** — `--mine` (with `--space-id` pointing at an existing
-  space) distills the space's correction ledger into new eval scenarios:
-  each superseded memory plus its source-conversation excerpts is handed to
-  an LLM that writes a correction-replay scenario (strictly parsed and
-  validated like hand-written fixtures, obvious PII scrubbed from both LLM
-  input and output). Results land in `--mine-out` (default
-  `anda_brain/evals/mined/`, deliberately *outside* the auto-validated
-  `evals/*.json` glob) and require human review before promotion into the
-  train or holdout suites. This is how the fitness function grows toward
-  the production failure distribution.
-- **Hermetic runs & cleanup** — every run executes in freshly created,
-  run-scoped spaces named `{space_id}_{profile}_{scenario}_{run_id}`
-  (lowercased to AndaDB's `[a-z0-9_]` charset and capped at 64 chars with a
-  hash suffix), so reruns never see memory left over from a previous run.
-  These spaces are deleted from the object store once their report is
-  collected — including when a scenario aborts — and pass `--keep-spaces` to
-  keep them for post-mortem inspection (e.g. poking the graph with read-only
-  KIP).
-
-Scenario and profile JSON is parsed strictly: an unknown field (usually a
-typo like `forbidden_terms` for `forbidden_answer_terms`) fails the load
-instead of silently weakening the rubric.
-
-Validate scenario/profile inputs without running models:
+From the sibling MIB checkout, run the public regression contracts without a model:
 
 ```bash
-cargo run -p anda_brain --features mcp,wiki -- \
-  eval \
-  --scenario anda_brain/evals/style_preference.json \
-  --scenario anda_brain/evals/project_budget.json \
-  --profile anda_brain/evals/default_profile.json \
-  --validate-only \
-  --summary-only
+python scripts/check-brain-product-regression.py --output-dir /tmp/brain-product-regression
 ```
 
-Run a scenario locally:
+For a configured business Agent, use MIB's normal submission path:
 
 ```bash
-cargo run -p anda_brain --features mcp,wiki -- \
-  --model-api-key "$MODEL_API_KEY" \
-  eval \
-  --space-id style_eval \
-  --scenario anda_brain/evals/style_preference.json \
-  --profile anda_brain/evals/default_profile.json \
-  --output /tmp/style_eval_report.json \
-  local --db /tmp/anda-brain-eval-db
+python -m mib_runner benchmark \
+  --profile profiles/MIB-Brain-Product-Regression-0.1-Dev.json \
+  --schema schemas/mib-scenario.schema.json \
+  --submission /absolute/path/agent.json \
+  --output-report /tmp/product-real.report.json
+python -m mib_runner verify-score /tmp/product-real.report.json
 ```
 
-Run a small suite by repeating `--scenario`. The suite writes one
-`EvalSuiteReport` with per-scenario reports plus aggregate score, usage, and
-failure attribution:
+The contract fixture verifies the harness and its oracle, not model quality.
+P6's actual normal/ungated learning bindings and three-arm provider runs remain
+separate pending work. The [MIB migration guide](https://github.com/ldclabs/MIB/blob/main/docs/harness/MIB-Brain-Legacy-Migration.md)
+records the nine product goals, removed Rust APIs and validation evidence.
 
-```bash
-cargo run -p anda_brain --features mcp,wiki -- \
-  --model-api-key "$MODEL_API_KEY" \
-  eval \
-  --space-id memory_suite \
-  --scenario anda_brain/evals/style_preference.json \
-  --scenario anda_brain/evals/project_budget.json \
-  --scenario anda_brain/evals/preference_reversal.json \
-  --profile anda_brain/evals/default_profile.json \
-  --output /tmp/anda_brain_eval_suite.json \
-  local --db /tmp/anda-brain-eval-suite-db
+Memory policies come only from each Space's persisted `MemoryPolicy` or the
+compiled defaults. `UpdateSpaceInput.memory_policy` remains the configuration
+entry point; there is no process-global policy override. Trusted Rust hosts can
+configure deployment prompts before sharing an `AppState` or opening a Space:
+
+```rust
+use anda_brain::agents::prompts::{AgentPrompts, PromptTarget};
+
+let prompts = AgentPrompts::default().with_deployment_section(
+    PromptTarget::Recall,
+    "# A. Deployment contract\nYour reviewed deployment instructions here.",
+)?;
+let app = app.with_agent_prompts(prompts)?;
 ```
 
-Compare maintenance policies by repeating both `--scenario` and `--profile`.
-The experiment writes one `EvalExperimentReport` with `best_suite_id` and
-ranked `comparisons`, so profiles can be compared by quality, findings, and
-token cost:
-
-```bash
-cargo run -p anda_brain --features mcp,wiki -- \
-  --model-api-key "$MODEL_API_KEY" \
-  eval \
-  --space-id memory_experiment \
-  --scenario anda_brain/evals/style_preference.json \
-  --scenario anda_brain/evals/project_budget.json \
-  --scenario anda_brain/evals/preference_reversal.json \
-  --profile anda_brain/evals/no_maintenance_profile.json \
-  --profile anda_brain/evals/default_profile.json \
-  --profile anda_brain/evals/quick_profile.json \
-  --output /tmp/anda_brain_eval_experiment.json \
-  local --db /tmp/anda-brain-eval-experiment-db
-```
-
-Add `--summary-only` to any eval command to print a compact human-readable
-summary instead of JSON. Omit it for artifacts intended for CI or downstream
-analysis.
-
-Use gates in CI to fail when aggregate quality falls below a floor. The report
-is written before the command exits non-zero, and gated runs include a top-level
-`gate` object with the criteria, pass/fail state, and failure messages:
-
-```bash
-cargo run -p anda_brain --features mcp,wiki -- \
-  --model-api-key "$MODEL_API_KEY" \
-  eval \
-  --space-id memory_ci \
-  --scenario anda_brain/evals/style_preference.json \
-  --scenario anda_brain/evals/project_budget.json \
-  --profile anda_brain/evals/default_profile.json \
-  --output /tmp/anda_brain_ci_eval.json \
-  --min-score 0.75 \
-  --max-findings 3 \
-  local --db /tmp/anda-brain-ci-eval-db
-```
-
-Report shapes:
-
-- `EvalValidationReport`: emitted by `--validate-only`; contains `passed`, `planned_runs`, scenario/profile plans, and validation `issues` with `error` or `warning` severity.
-- `EvalReport`: single scenario result; contains `scenario_id`, aggregate `score`, optional `total_stddev`, `attribution`, `usage`, `satisfaction_trajectory`, optional `gate`, and per-turn reports (with per-sample scores, probes, graph stats, and judge reasoning).
-- `EvalSuiteReport`: one profile across multiple scenarios; contains `suite_id`, aggregate `score`, optional `total_stddev`, `attribution`, `usage`, optional `gate`, and child `reports`.
-- `EvalExperimentReport`: multiple profiles across the same scenario set; contains `experiment_id`, aggregate `score`, optional `total_stddev`, `best_suite_id`, ranked `comparisons`, optional `shared_formation` reports, optional `gate`, and child `suites`.
-- `EvalScore`: normalized `total`, `memory_utility`, `evolution_quality`, `uncertainty_calibration`, `forgetting_quality`, `graph_health`, `latency_penalty`, and `token_cost_penalty`.
-- `AttributionSummary`: counts failures by `formation_miss`, `bad_consolidation`, `bad_grounding`, `bad_synthesis`, `overconfidence`, `graph_probe_error`, `latency_cost`, `token_cost`, and `judge_error`.
-- `OptimizeReport`: emitted by `--optimize`; contains `baseline_total`, `final_total`, per-generation edits with accept/reject decisions, and `accepted_prompts`.
-
-Included starter scenarios:
-
-- [`evals/style_preference.json`](evals/style_preference.json) — long-term writing style preference.
-- [`evals/project_budget.json`](evals/project_budget.json) — project context and rough budget recall.
-- [`evals/preference_reversal.json`](evals/preference_reversal.json) — newer preference superseding stale preference.
-- [`evals/fact_correction.json`](evals/fact_correction.json) — corrected fact superseding stale fact.
-- [`evals/counterparty_boundary.json`](evals/counterparty_boundary.json) — preferences isolated by counterparty.
-- [`evals/travel_logistics.json`](evals/travel_logistics.json) — durable travel logistics and preferences.
-- [`evals/expiring_discount.json`](evals/expiring_discount.json) — expired time-sensitive facts not reused.
-- [`evals/noisy_style_preference.json`](evals/noisy_style_preference.json) — longitudinal pressure: style preferences must survive injected noise and a simulated follow-up, measured at two checkpoints for trajectory.
-
-Included starter profiles:
-
-- [`evals/no_maintenance_profile.json`](evals/no_maintenance_profile.json) — Formation plus Recall without scheduled maintenance.
-- [`evals/default_profile.json`](evals/default_profile.json) — daydream maintenance every two normal turns.
-- [`evals/quick_profile.json`](evals/quick_profile.json) — quick maintenance every two normal turns.
-- [`evals/llm_judge_profile.json`](evals/llm_judge_profile.json) — LLM judge with three recall samples per checkpoint for mean±stddev scoring.
+The supplied text replaces only section A, is limited to 128 KiB, and must start
+with `# A.`. The compiled KIP reference prefix is retained verbatim. The prompt
+configuration is immutable and inherited by agent instances and isolated forks;
+snapshot identity checks include its actual contents. `active_prompt()` now
+returns compiled defaults only. No HTTP/MCP prompt mutation endpoint is added.
+Prompt configuration is host-owned and must be supplied again at startup;
+per-Space `MemoryPolicy` remains persisted.
 
 ## API Endpoints
 
@@ -936,14 +860,20 @@ their HTTP routes. Everything else is opt-in:
 | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `wiki`  | The structured wiki (documents, versions, ACL-scoped reads, OKF import/export), the `wiki_search`/`wiki_read`/`wiki_commit` agent tools, WikiDigest graph extraction, and the `/v1/{space_id}/wiki/*` routes. Also adds the `wiki_*` fields of `SpaceInfo` and `UpdateSpaceInput`. |
 | `mcp`   | The MCP channel: the stdio server and the Streamable HTTP service. With `wiki` on as well, the wiki tools join the MCP tool router.                                                        |
+| `experiments` | Isolated Rust host runs, immutable snapshots, business time, session boundaries and cost receipts. Enables Nexus `simulation`, without changing production clocks or enabling learning. |
+| `learning` | Paired contracts/evaluator, native records, persistent host trial/settlement/review runtime, and a read-only Recall applicability tool. Explicit executor/observer/current-context bindings are required; no model standing writes or production scheduler is installed. |
 
 ```toml
 # Embedding the library: memory only
-anda_brain = "0.11"
+anda_brain = "0.12"
 
 # …or the full surface
-anda_brain = { version = "0.11", features = ["mcp", "wiki"] }
+anda_brain = { version = "0.12", features = ["mcp", "wiki"] }
 ```
+
+These development APIs require the local 0.12 checkout and the sibling
+`patch.crates-io` overrides in [Cargo.toml](../Cargo.toml). Trusted experiment
+hosts add `experiments`; it is independent of the `learning` feature.
 
 The `anda_brain` **binary** is the full product and declares
 `required-features = ["mcp", "wiki"]`, so every command below passes

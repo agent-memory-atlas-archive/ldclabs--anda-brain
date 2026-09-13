@@ -1,5 +1,4 @@
 packages:
-  - 'anda-brain-openclaw'
   - 'anda-brain-worker'
 allowBuilds:
   # Build script not needed; denied so `pnpm install` stays non-interactive in CI.

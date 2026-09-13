@@ -1,13 +1,12 @@
-//! Agent system prompts with a process-wide override layer.
+//! Immutable agent prompt configuration owned by a host instance.
 //!
-//! The three system prompts are the evolvable genome of Anda Brain: the eval
-//! optimizer (`anda_brain::eval::optimize`) proposes targeted edits, installs
-//! them here, and re-runs the eval suite as a fitness function. Agents read
-//! the active prompt at completion time, so overrides take effect immediately
-//! without rebuilding spaces. Production runs never set overrides.
+//! Defaults are compiled in. A trusted launcher may replace a deployment's
+//! section A before creating an AppState; the vendored KIP reference prefix
+//! always comes from the compiled asset. No process-wide mutable layer exists.
 
+use anda_core::BoxError;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock};
 
 /// Compiled-in default prompts.
 ///
@@ -55,7 +54,7 @@ pub fn mode_reference(target: PromptTarget) -> String {
     )
 }
 
-/// Which agent prompt an override or optimizer edit targets.
+/// Which agent receives a deployment-specific configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptTarget {
@@ -83,10 +82,8 @@ impl PromptTarget {
     }
 }
 
-static OVERRIDES: RwLock<[Option<Arc<str>>; 3]> = RwLock::new([None, None, None]);
-
-/// Shared `Arc` copies of the compiled defaults, built once per slot so the
-/// hot completion path never re-copies a multi-KB prompt string.
+/// Shared immutable compiled defaults. Retained as the default-prompt getter
+/// for existing integrations; it can no longer observe a global override.
 static DEFAULTS: [OnceLock<Arc<str>>; 3] = [OnceLock::new(), OnceLock::new(), OnceLock::new()];
 
 fn slot(target: PromptTarget) -> usize {
@@ -97,58 +94,99 @@ fn slot(target: PromptTarget) -> usize {
     }
 }
 
-/// Returns the active prompt: the installed override, or the compiled default.
 pub fn active_prompt(target: PromptTarget) -> Arc<str> {
-    {
-        let overrides = OVERRIDES.read().expect("prompt overrides lock poisoned");
-        if let Some(text) = &overrides[slot(target)] {
-            return text.clone();
-        }
-    }
     DEFAULTS[slot(target)]
         .get_or_init(|| Arc::from(target.default_prompt()))
         .clone()
 }
 
-/// Installs (`Some`) or clears (`None`) a process-wide prompt override.
-pub fn set_override(target: PromptTarget, text: Option<String>) {
-    let mut overrides = OVERRIDES.write().expect("prompt overrides lock poisoned");
-    overrides[slot(target)] = text.map(Arc::from);
+/// Trusted, immutable instance configuration. Only the deployment section can
+/// be supplied by the host; protocol policy is always the compiled reference.
+/// This is Rust configuration, never an agent tool or a public HTTP payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentPrompts([Arc<str>; 3]);
+
+impl Default for AgentPrompts {
+    fn default() -> Self {
+        Self([
+            active_prompt(PromptTarget::Formation),
+            active_prompt(PromptTarget::Recall),
+            active_prompt(PromptTarget::Maintenance),
+        ])
+    }
 }
 
-/// Clears all overrides; used between optimizer generations and in tests.
-pub fn clear_overrides() {
-    let mut overrides = OVERRIDES.write().expect("prompt overrides lock poisoned");
-    *overrides = [None, None, None];
-}
+impl AgentPrompts {
+    /// Replaces only the selected deployment's section A in this value.
+    /// Other instances and the compiled default getter remain unchanged.
+    pub fn with_deployment_section(
+        mut self,
+        target: PromptTarget,
+        section: &str,
+    ) -> Result<Self, BoxError> {
+        if !section.starts_with("# A.") || section.len() > 128 * 1024 {
+            return Err("deployment prompt must start with # A. and fit within 128 KiB".into());
+        }
+        let (reference, _) = target
+            .default_prompt()
+            .split_once("\n# A.")
+            .ok_or("compiled prompt is missing its deployment boundary")?;
+        self.0[slot(target)] = Arc::from(format!("{reference}\n{section}"));
+        Ok(self)
+    }
 
-/// Serializes tests that touch the process-wide override state.
-#[cfg(test)]
-pub(crate) static TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub fn prompt(&self, target: PromptTarget) -> Arc<str> {
+        self.0[slot(target)].clone()
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn overrides_replace_and_restore_defaults() {
-        let _guard = TEST_GUARD.lock().unwrap_or_else(|err| err.into_inner());
-        clear_overrides();
-        assert_eq!(&*active_prompt(PromptTarget::Recall), RECALL_DEFAULT);
-
-        set_override(PromptTarget::Recall, Some("custom recall".to_string()));
-        assert_eq!(&*active_prompt(PromptTarget::Recall), "custom recall");
-        // Other targets are untouched.
-        assert_eq!(&*active_prompt(PromptTarget::Formation), FORMATION_DEFAULT);
-
-        set_override(PromptTarget::Recall, None);
-        assert_eq!(&*active_prompt(PromptTarget::Recall), RECALL_DEFAULT);
-
-        set_override(PromptTarget::Maintenance, Some("m".to_string()));
-        clear_overrides();
+    fn instance_prompt_edits_preserve_compiled_reference_and_other_instances() {
+        let baseline = AgentPrompts::default();
+        let changed = baseline
+            .clone()
+            .with_deployment_section(PromptTarget::Recall, "# A. local\nINSTANCE_ONLY")
+            .unwrap();
+        let reference = RECALL_DEFAULT.split_once("\n# A.").unwrap().0;
         assert_eq!(
-            &*active_prompt(PromptTarget::Maintenance),
-            MAINTENANCE_DEFAULT
+            changed
+                .prompt(PromptTarget::Recall)
+                .split_once("\n# A.")
+                .unwrap()
+                .0,
+            reference
+        );
+        assert!(
+            changed
+                .prompt(PromptTarget::Recall)
+                .ends_with("INSTANCE_ONLY")
+        );
+        assert_eq!(
+            baseline.prompt(PromptTarget::Recall).as_ref(),
+            RECALL_DEFAULT
+        );
+        assert_eq!(active_prompt(PromptTarget::Recall).as_ref(), RECALL_DEFAULT);
+        assert_eq!(
+            changed.prompt(PromptTarget::Formation),
+            baseline.prompt(PromptTarget::Formation)
+        );
+        assert!(
+            baseline
+                .clone()
+                .with_deployment_section(PromptTarget::Recall, "replace reference policy")
+                .is_err()
+        );
+        assert!(
+            baseline
+                .with_deployment_section(
+                    PromptTarget::Recall,
+                    &format!("# A.{}", "x".repeat(128 * 1024))
+                )
+                .is_err()
         );
     }
 }

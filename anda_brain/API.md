@@ -78,6 +78,13 @@ export interface FormationInput {
 export interface RecallInput {
   query: string; // must not be empty/blank (400)
   context?: InputContext;
+  budget?: RecallBudget | null;
+}
+
+export interface RecallBudget {
+  tokenizer?: 'o200k_base@tiktoken-rs-0.12.0';
+  max_tokens?: number; // 1–65536; default 4096 after explicit opt-in
+  context_tokens?: number; // 1–131072; default 32768; cumulative normalized planner inputs
 }
 
 export interface MaintenanceParameters {
@@ -558,7 +565,7 @@ Both MCP modes use the same model, auth, and storage configuration as the HTTP s
 | Tool | Input | Output | Scope |
 | ---- | ----- | ------ | ----- |
 | `anda_brain_remember_conversation` | `FormationInput` shape (`messages`, `context`, `timestamp`) | `AgentOutput` | `write` |
-| `anda_brain_recall_memory` | `RecallInput` shape (`query`, `context`) | `AgentOutput` | `read` |
+| `anda_brain_recall_memory` | `RecallInput` shape (`query`, `context`, optional `budget`) | `AgentOutput` | `read` |
 | `anda_brain_run_maintenance` | `MaintenanceInput` shape | `AgentOutput` | `write` |
 | `anda_brain_get_space_info` | none | `SpaceInfo` | `read` |
 | `anda_brain_get_formation_status` | none | `FormationStatus` | `read` |
@@ -612,6 +619,37 @@ When `ED25519_PUBKEYS` is set, configure the remote MCP client with an `Authoriz
 - Request body: `RecallInput` (raw string is also accepted in Markdown mode)
 - Response: `RpcResponse<AgentOutput>`
 
+<a id="recall-budget-contract"></a>
+
+### Recall budget contract
+
+Optional `budget` enables a host-selected JSON memory packet in `content` rather
+than a free-form answer. `memory_policy.recall_budget` can enforce the same
+limits for every Recall; a request may tighten them but cannot raise or disable
+the policy. An absent/null policy and request preserve the legacy response.
+
+The fixed codec counts the entire compact packet, including escaping and
+coverage. `context_tokens` additionally bounds the cumulative versioned
+serialization of planner input across this Recall. Provider message templates,
+billing and RPC/MCP transport replicas are outside these scopes. No model-name
+tokenizer guessing or heuristic fallback is used. Diagnostic histories, thoughts,
+artifacts and tool calls are not returned alongside the budgeted packet.
+
+`recall_structured` puts this same packet in `answer`, leaves trace citations
+out of the envelope, and adds `memory_budget` with `tokenizer`, `token_limit`,
+`tokens`, and `context_token_limit`; `found` means non-primer candidates were
+delivered, not that semantic relevance or completeness was proved. Markdown
+returns the same packet text. `budget_insufficient` or literal `null` with a
+static `failed_reason` is unusable/incomplete, not a successful empty answer.
+Budget-mode failures use fixed codes: `recall_output_budget_exhausted`,
+`recall_required_read_incomplete`, `recall_context_budget_exhausted`,
+`recall_deadline_reached`, `recall_model_unavailable`,
+`recall_planner_incomplete`, or `recall_procedure_window_incomplete`.
+A packet is always a candidate read (`semantic_complete=false`, `action_ready=false`).
+Required constraints and warnings are an indivisible set; if they do not fit,
+ordinary memories are withheld. No fallback token estimate or free-form answer
+bypasses this contract.
+
 ### POST `/v1/{space_id}/maintenance`
 
 - Purpose: Trigger maintenance (sleep/consolidation)
@@ -652,11 +690,19 @@ Explicit `parameters` override the space policy; omitted members use policy defa
 - Auth: SpaceToken/CWT `read` (public spaces are unauthenticated; private spaces require a valid token)
 - Response: `RpcResponse<SpaceInfo>`
 
+### POST `/v1/{space_id}/probe`
+
+- Purpose: model-free retrieval reachability; `found:false` is not a rejected belief.
+- Auth: the existing Space `read` permission and public-space read rules.
+- Request: `{"query":"...", "limit":8}`.
+- Response: `RpcResponse<ProbeOutput>` with `found`, `negative_cached`, optional `hits` and optional `search_exhaustive`. Coverage comes from the SEARCH result's top-level field; omission means unknown and remaining pagination means false. The negative cache stores only explicitly exhaustive search misses, not proof of absence or rejected belief.
+
 ### GET `/v1/{space_id}/formation_status`
 
 - Purpose: Get formation status
 - Auth: SpaceToken/CWT `read` (public spaces are unauthenticated; private spaces require a valid token)
 - Response: `RpcResponse<FormationStatus>`
+- This is lightweight monitoring; cursors are not per-job success evidence. Rust hosts can use `Space::processing_report` / `wait_for_processing` to distinguish queued, running, failed, cancelled, interrupted and timed-out work. Reconcile the same conversation ID after timeout instead of resubmitting.
 
 ### GET `/v1/{space_id}/conversations/{conversation_id}?collection=<collection>`
 
@@ -888,3 +934,48 @@ if (recall.error) {
 - Success: HTTP `200`, response body is usually `RpcResponse<T>`
 - Error response bodies are always JSON, even when the request asked for `application/cbor` or `text/markdown` (this includes the wiki `409` conflict body carrying `error.data.current_version`); only success bodies follow the `Accept` header
 - MCP tools mirror this classification: caller-fixable failures surface as JSON-RPC `invalid_params`/`invalid_request` (a wiki commit conflict carries the same `data.current_version` retry payload as the HTTP `409` body), and only true internal failures use `internal_error`
+
+
+### Isolated MIB host
+
+The sibling Anda Bot `mib` feature exposes separate loopback protocols at
+`/mib-agent/v0.1` and `/mib-memory/v0.1`. These are not routes of this production
+Brain API. They use `experiments` for isolated state, completion barriers,
+monotonic business time and cleanup. See [P2 integration](README.md#mib-integration).
+The adapter does not advertise online learning; costs with missing provider or
+observer telemetry remain incomplete.
+
+The Rust `Experiment::create_with_recall_budget` factory persists a forced P5
+budget before exposing a run. `audit_procedures()` returns a bounded read-only
+native inventory; truncated counts cannot prove absence. The Bot-only MIB
+extension `learning_audit` exposes this inventory to the evaluator, never the
+business model. It neither enables learning nor grants execution authority.
+See [P6 validation](README.md#mib-integration).
+
+The former Rust `anda_brain::eval` API and `eval` CLI (including optimizer/miner
+flags) have been retired in P7. MIB supplies the public product-regression
+profile; self-test, shadow diagnostics, probes, citations and ledgers remain
+online instruments. Runtime policies use the Space's persisted `MemoryPolicy`.
+Trusted Rust hosts can call `AppState::with_agent_prompts(AgentPrompts)` before
+sharing/opening the host to supply immutable deployment sections; each section
+starts with `# A.`, fits 128 KiB and retains the compiled reference prefix.
+This configuration is not an HTTP/MCP prompt operation. See [P7 migration](README.md#offline-regression-and-instance-configuration).
+
+
+### Trusted learning runtime (Rust only)
+
+With `learning`, `Space::learning()` exposes explicit registration, frozen
+cohorts, bounded `drive` steps, metadata discovery after restart, and separately
+authenticated Outcome ingestion. Native leases, current executable authority,
+dependency validity and policy pins gate dispatch. These are host APIs and add
+no HTTP/MCP routes or model mutation authority. Cohort completion does not adopt
+a Skill. `settle(job_id)` recomputes the native ledger after the fixed cutoff
+and atomically records the verdict/standing. `reviews()` and `enroll_review()`
+provide recoverable monitoring with retained acquisition evidence;
+`submit_safety_signal()` accepts separately authenticated safety withdrawal.
+`bind_application_context()` accepts short-lived trusted host observations;
+`procedure_status()` and Recall's internal `check_procedure_status` tool read
+current eligibility without granting execution permission. Unverified conditions
+or an expired review block recommendations. Configured learning Spaces cannot
+copy their operational journals via fork/snapshot. See [P3 runtime](README.md#native-learning-contracts)
+and [P4 lifecycle and recovery](README.md#native-learning-contracts).

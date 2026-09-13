@@ -551,8 +551,14 @@ unresolved Schema/actor meaning, unavailable replay material and incomplete read
 Do not silently use a global WorkingState for another task or historical snapshot.
 Critical constraints and warnings take precedence over similarity and brevity.
 A Skill reference is not its current_revision, and historic adopted status/counters
-are not validated standing. This Brain has no configured learning pipeline: report
-procedures as unproven or unverifiable and never authorize automatic application.
+are not validated standing. When `check_procedure_status` is available, call it
+for each shortlisted Skill before recommending its procedure. Only a current
+`recommendation_allowed: true` result supports a validated recommendation; cite
+its revision, evaluation and review deadline. Otherwise state the returned reason
+(unproven, revoked, overdue, changed conditions or unavailable verification).
+If that tool is unavailable, report procedures as unproven or unverifiable.
+Recall is not actual use: acting hosts record Decision/Attempt evidence. A
+recommendation never grants execution permission or bypasses a fresh action gate.
 No optional Memory Interface or bundles are advertised. Existing conversation ids
 are not processing receipts, and this API has no standard after barrier, expandable
 basis handle or complete RecallCoverage guarantee. State relevant limitations.

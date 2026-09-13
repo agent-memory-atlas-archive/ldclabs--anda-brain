@@ -76,6 +76,13 @@ export interface FormationInput {
 export interface RecallInput {
   query: string; // 不能为空/纯空白（否则 400）
   context?: InputContext;
+  budget?: RecallBudget | null;
+}
+
+export interface RecallBudget {
+  tokenizer?: 'o200k_base@tiktoken-rs-0.12.0';
+  max_tokens?: number; // 1–65536；显式启用后的默认值为 4096
+  context_tokens?: number; // 1–131072；默认 32768；整次规划输入规范序列化的累计上限
 }
 
 export interface MaintenanceParameters {
@@ -550,7 +557,7 @@ MCP_AUTH_TOKEN="$SPACE_TOKEN" \
 | Tool | Input | Output | Scope |
 | ---- | ----- | ------ | ----- |
 | `anda_brain_remember_conversation` | `FormationInput` 形状（`messages`, `context`, `timestamp`） | `AgentOutput` | `write` |
-| `anda_brain_recall_memory` | `RecallInput` 形状（`query`, `context`） | `AgentOutput` | `read` |
+| `anda_brain_recall_memory` | `RecallInput` 形状（`query`, `context`，可选 `budget`） | `AgentOutput` | `read` |
 | `anda_brain_run_maintenance` | `MaintenanceInput` 形状 | `AgentOutput` | `write` |
 | `anda_brain_get_space_info` | 无 | `SpaceInfo` | `read` |
 | `anda_brain_get_formation_status` | 无 | `FormationStatus` | `read` |
@@ -604,6 +611,30 @@ MCP_AUTH_TOKEN="$SPACE_TOKEN" \
 - 请求体：`RecallInput`（Markdown 模式下也允许原始字符串）
 - 响应：`RpcResponse<AgentOutput>`
 
+<a id="recall-budget-contract"></a>
+
+### Recall 预算合同
+
+可选 `budget` 启用宿主选择的 JSON 记忆包，放在 `content` 中，替代自由生成的答案。
+`memory_policy.recall_budget` 可对所有 Recall 强制同一上限；请求只能收紧，不能提高或
+关闭策略。策略和请求均省略/null 时保持旧行为。
+
+固定 codec 对 compact JSON 记忆包全文计数，含转义和 coverage；`context_tokens`
+另行限制本次 Recall 所有规划输入规范序列化的累计 token。提供商消息模板、计费和
+RPC/MCP 传输副本不属于这些范围。不根据模型名猜编码，也不回退字符数估算。
+预算响应不会附带历史、thoughts、artifacts 或工具调用作为记忆旁路。
+
+`recall_structured` 将同一包放在 `answer`，不从完整 trace 另外复制 citations，并增加
+`memory_budget`：`tokenizer`、`token_limit`、`tokens`、`context_token_limit`；此模式的
+`found` 仅表示交付了非 Primer 候选，不表示已证明语义相关或完整。Markdown 返回同一
+包文本。`budget_insufficient` 或带静态 `failed_reason` 的字面量 `null` 表示不可用/
+不充分，不能当成成功的空答案。预算失败使用固定代码：`recall_output_budget_exhausted`、
+`recall_required_read_incomplete`、`recall_context_budget_exhausted`、
+`recall_deadline_reached`、`recall_model_unavailable`、
+`recall_planner_incomplete` 或 `recall_procedure_window_incomplete`。
+记忆包始终是候选读取（`semantic_complete=false`、`action_ready=false`）。
+必要约束和警告作为整体保留；无法容纳时不交付普通记忆，不用估算或自由答案绕过预算。
+
 ### POST `/v1/{space_id}/maintenance`
 
 - 作用：触发维护（睡眠/整理）
@@ -644,11 +675,19 @@ MCP_AUTH_TOKEN="$SPACE_TOKEN" \
 - 鉴权：SpaceToken/CWT `read`（公开空间免鉴权，私有空间需有效 token）
 - 响应：`RpcResponse<SpaceInfo>`
 
+### POST `/v1/{space_id}/probe`
+
+- 作用：无需模型的检索可达性检查；`found:false` 不代表信念被否定。
+- 鉴权：沿用 Space 的 `read` 权限和公开空间读取规则。
+- 请求：`{"query":"...", "limit":8}`。
+- 响应：`RpcResponse<ProbeOutput>`，含 `found`、`negative_cached`、可选 `hits` 和可选 `search_exhaustive`。后者来自 SEARCH result 顶层覆盖字段；缺省表示未知，有剩余分页时为 false。负缓存仅保存明确穷尽的检索 miss，不能作为不存在或信念被否定的证明。
+
 ### GET `/v1/{space_id}/formation_status`
 
 - 作用：获取记忆写入状态（更轻量级的接口，专门用于监控记忆写入进度）
 - 鉴权：SpaceToken/CWT `read`（公开空间免鉴权，私有空间需有效 token）
 - 响应：`RpcResponse<FormationStatus>`
+- 此接口是轻量监控，游标不是逐任务成功证明。Rust 宿主可用 `Space::processing_report` / `wait_for_processing` 区分排队、运行、失败、取消、中断和超时；超时后继续核对同一 conversation ID，不重新提交。
 
 ### GET `/v1/{space_id}/conversations/{conversation_id}?collection=<collection>`
 
@@ -883,3 +922,39 @@ if (recall.error) {
 - 成功时：HTTP `200`，响应体通常为 `RpcResponse<T>`
 - 错误响应体始终为 JSON，即使请求指定了 `application/cbor` 或 `text/markdown`（包括携带 `error.data.current_version` 的 wiki `409` 冲突响应体）；只有成功响应体遵循 `Accept` 协商
 - MCP 工具沿用同一分类：调用方可修复的失败以 JSON-RPC `invalid_params`/`invalid_request` 返回（wiki 提交冲突携带与 HTTP `409` 相同的 `data.current_version` 重试载荷），只有真正的内部错误才用 `internal_error`
+
+
+### 隔离的 MIB 宿主
+
+相邻 Anda Bot 的 `mib` feature 在本机提供独立的 `/mib-agent/v0.1` 和
+`/mib-memory/v0.1` 协议；它们不属于本生产 Brain API 的路由。宿主使用
+`experiments` 实现隔离状态、完成屏障、单调业务时间和清理，详见
+[P2 接入](README.md#mib-integration)。适配器不声明在线学习能力；
+缺少 provider 或 observer 遥测的成本仍明确标为不完整。
+
+Rust 工厂 `Experiment::create_with_recall_budget` 在运行对外可用前持久化强制
+P5 预算。`audit_procedures()` 返回有界、只读的原生程序清单；截断计数不能证明
+不存在。仅 Bot MIB 的 `learning_audit` 扩展将该清单交给评测侧，不进入业务模型。
+它不启用学习，也不赋予执行权限。详见 [P6 验证](README.md#mib-integration)。
+
+P7 已退役 Rust `anda_brain::eval` API 与 `eval` CLI（含 optimizer/miner 参数）。
+MIB 提供公开产品回归 profile；自测、shadow 诊断、probe、引用与账本继续作为线上
+工具。运行策略使用各 Space 持久化的 `MemoryPolicy`。可信 Rust 宿主可以在共享或
+打开 Space 前调用 `AppState::with_agent_prompts(AgentPrompts)` 提供不可变的部署
+段：每段以 `# A.` 开头、最多 128 KiB，编译参考前缀保持原样。这不是 HTTP/MCP
+提示操作。详见 [P7 迁移](README.md#offline-regression-and-instance-configuration)。
+
+
+### 可信学习运行时（仅 Rust）
+
+启用 `learning` feature 后，`Space::learning()` 提供显式注册、冻结 cohort、
+有界 `drive` 步骤、重启后发现工作及独立认证的 Outcome 接收。原生 lease、当前
+可执行权限、依赖有效性和 policy pin 共同约束派发。这些宿主 API 不增加 HTTP/MCP
+路由或模型写权限；收齐 cohort 不会采纳 Skill。`settle(job_id)` 在固定 cutoff 后
+重算原生账本，原子提交裁决与 standing。`reviews()` 和 `enroll_review()` 提供保留
+原始采纳依据的持久复核；`submit_safety_signal()` 接受独立认证的安全撤销信号。
+`bind_application_context()` 接受短时有效的可信宿主环境观测，`procedure_status()`
+及 Recall 内部的 `check_procedure_status` 工具只读检查当前推荐条件，不授予执行权限。
+条件无法验证或复核到期时停止推荐。已配置 learning 的 Space 不允许通过 fork/snapshot
+复制操作 journal。详见 [P3 运行时](README.md#native-learning-contracts) 和
+[P4 生命周期与恢复](README.md#native-learning-contracts)。

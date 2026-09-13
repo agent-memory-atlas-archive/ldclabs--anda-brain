@@ -25,7 +25,7 @@ use anda_engine::{
     unix_ms,
 };
 use ic_cose_types::cose::ed25519::{SigningKey, VerifyingKey};
-use object_store::memory::InMemory;
+use object_store::{ObjectStoreExt, memory::InMemory};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -198,11 +198,23 @@ async fn copy_space_objects_forks_space_into_isolated_store() {
         .unwrap();
     space.db.close().await.unwrap();
 
+    // Operational learning state is never part of a factual/diagnostic fork,
+    // even if it appears after the caller's initial configured-space check.
+    let learning_registration = object_store::path::Path::from("fork_space/learning/registration");
+    app.object_store()
+        .put(&learning_registration, b"live journal".to_vec().into())
+        .await
+        .unwrap();
+
     let fork_store: Arc<dyn super::ObjectStore> = Arc::new(InMemory::new());
     let copied = super::copy_space_objects(&app.object_store(), &fork_store, "fork_space")
         .await
         .unwrap();
     assert!(copied > 0);
+    assert!(matches!(
+        fork_store.head(&learning_registration).await,
+        Err(object_store::Error::NotFound { .. })
+    ));
 
     // Copying a missing space fails loudly instead of forking nothing.
     let empty: Arc<dyn super::ObjectStore> = Arc::new(InMemory::new());
@@ -323,6 +335,7 @@ async fn collection_bootstrap_helpers_create_and_prune_indexes() {
         .unwrap();
     let meta = conversations.metadata();
     assert!(meta.btree_indexes.contains_key("user"));
+    assert!(meta.btree_indexes.contains_key("status"));
     assert!(!meta.btree_indexes.contains_key("thread"));
     assert!(!meta.btree_indexes.contains_key("period"));
     assert!(
@@ -373,6 +386,7 @@ async fn connected_space_keeps_the_trimmed_conversation_index_layout() {
     ] {
         let meta = collection.metadata();
         assert!(meta.btree_indexes.contains_key("user"));
+        assert!(meta.btree_indexes.contains_key("status"));
         assert!(!meta.btree_indexes.contains_key("thread"));
         assert!(!meta.btree_indexes.contains_key("period"));
         assert!(
@@ -1039,23 +1053,36 @@ async fn a_published_v1_space_resets_only_legacy_bookkeeping_once() {
 async fn usage_ledger_counts_recalls_and_corrections_without_touching_the_graph() {
     let app = test_app_state("usage_ledger");
     let space = create_loaded_space(&app, "usage_ledger").await;
-
-    let entities = std::collections::BTreeSet::from(["P:1:prefers".to_string(), "C:9".to_string()]);
+    let (concepts, propositions) = seed_people(&space).await;
+    let concept = &concepts[0];
+    let proposition = &propositions[0];
+    let before = mnemonic_state(&space, concept).await;
+    assert!(
+        !before.is_null(),
+        "the test must inspect a real existing memory"
+    );
+    let entities = std::collections::BTreeSet::from([proposition.clone(), concept.clone()]);
     space.ledger.record_recall(&entities, 100).await.unwrap();
     space
         .ledger
         .record_recall(
-            &std::collections::BTreeSet::from(["P:1:prefers".to_string()]),
+            &std::collections::BTreeSet::from([proposition.clone()]),
             200,
         )
         .await
         .unwrap();
 
-    let row = space.ledger.get("P:1:prefers").await.unwrap().unwrap();
+    let row = space.ledger.get(proposition).await.unwrap().unwrap();
     assert_eq!(row.recall_count, 2);
     assert_eq!(row.last_recalled_at, 200);
     assert_eq!(
-        space.ledger.get("C:9").await.unwrap().unwrap().recall_count,
+        space
+            .ledger
+            .get(concept)
+            .await
+            .unwrap()
+            .unwrap()
+            .recall_count,
         1
     );
 
@@ -1063,26 +1090,27 @@ async fn usage_ledger_counts_recalls_and_corrections_without_touching_the_graph(
     assert!(
         space
             .ledger
-            .record_correction("P:1:prefers", 300)
+            .record_correction(proposition, 300)
             .await
             .unwrap()
     );
     assert!(
         !space
             .ledger
-            .record_correction("P:1:prefers", 400)
+            .record_correction(proposition, 400)
             .await
             .unwrap()
     );
-    let row = space.ledger.get("P:1:prefers").await.unwrap().unwrap();
+    let row = space.ledger.get(proposition).await.unwrap().unwrap();
     assert_eq!(row.correction_count, 1);
     assert_eq!(row.last_corrected_at, 300);
 
-    // The counts stay in the ledger and reach the graph through nothing:
-    // the entities recalled above carry no `MnemonicState` at all, which
-    // is what "reading does not reinforce" has to look like from the
-    // graph's side.
-    assert_eq!(mnemonic_state(&space, "C:9").await, serde_json::Value::Null);
+    // Usage is diagnostic observation, not independent task success. Inspect
+    // an existing KIP 2 memory, rather than a nonexistent legacy-shaped ID:
+    // neither accessibility nor graph standing changes when usage is counted.
+    assert_eq!(mnemonic_state(&space, concept).await, before);
+    assert!(element_exists(&space, proposition).await);
+    space.close().await.unwrap();
 }
 
 /// The gate is only worth anything if the engine really does tell the
@@ -2139,6 +2167,29 @@ async fn memory_self_test_flags_unfindable_memories() {
     assert_eq!(stored.groundability(), Some(1.0));
 }
 
+#[tokio::test]
+async fn failed_self_test_generation_does_not_advance_its_cursor() {
+    let app = test_app_state_with_final_model("self_test_cursor_failure");
+    let space = create_loaded_space(&app, "self_test_cursor_failure").await;
+    seed_people(&space).await;
+    let before = serde_json::json!({"after":0,"cycled_at":unix_ms()});
+    space
+        .db
+        .save_extension_from("memory_self_test_cursor".into(), &before)
+        .await
+        .unwrap();
+    // This model returns prose, not a valid generated-query batch.
+    assert!(space.run_memory_self_test(unix_ms()).await.is_err());
+    assert_eq!(
+        space
+            .db
+            .get_extension_as::<serde_json::Value>("memory_self_test_cursor")
+            .unwrap(),
+        before
+    );
+    space.close().await.unwrap();
+}
+
 #[derive(Debug)]
 struct JudgeCompleter;
 
@@ -2184,111 +2235,6 @@ async fn judge_complete_routes_to_independent_model() {
         .await
         .unwrap();
     assert_eq!(out.content, "done");
-}
-
-/// Answers the scenario-mining call with a fixed valid scenario that
-/// deliberately contains PII the miner must scrub.
-#[derive(Debug)]
-struct MinerCompleter;
-
-impl CompletionFeaturesDyn for MinerCompleter {
-    fn model_name(&self) -> String {
-        "miner-test-model".to_string()
-    }
-
-    fn completion(&self, _req: CompletionRequest) -> BoxPinFut<Result<AgentOutput, BoxError>> {
-        Box::pin(async move {
-            let scenario = serde_json::json!({
-                "scenario": {
-                    "id": "pref_fix",
-                    "hidden_profile": {"contact": "work address"},
-                    "timeline": [
-                        {"turn": 1, "type": "normal",
-                         "timestamp": "2026-06-01T10:00:00Z",
-                         "user": "My email is bob@example.com and card 12345678901."},
-                        {"turn": 2, "type": "normal",
-                         "timestamp": "2026-06-05T10:00:00Z",
-                         "user": "Correction: use my work address instead."},
-                        {"turn": 3, "type": "maintenance",
-                         "maintenance": {"trigger": "on_demand", "scope": "quick"}},
-                        {"turn": 4, "type": "checkpoint_synthetic",
-                         "timestamp": "2026-06-06T10:00:00Z",
-                         "query": "Which contact should you use?",
-                         "evaluation": {
-                             "scoring_rubric": "honor the correction",
-                             "required_answer_terms": ["work"],
-                             "forbidden_answer_terms": ["card"]
-                         }}
-                    ]
-                }
-            });
-            Ok(AgentOutput {
-                content: scenario.to_string(),
-                usage: Usage {
-                    input_tokens: 30,
-                    output_tokens: 15,
-                    ..Default::default()
-                },
-                ..Default::default()
-            })
-        })
-    }
-}
-
-#[tokio::test]
-async fn mine_scenarios_distills_corrections_and_scrubs_pii() {
-    let models = Models::default();
-    models.set_model(Model::with_completer(Arc::new(MinerCompleter)));
-    let app = test_app_state_with_models("mine_corrections", Arc::new(models));
-    let space = create_loaded_space(&app, "mine_corrections").await;
-    let now_ms = unix_ms();
-    seed_people(&space).await;
-
-    // One revised Assertion is the mining signal.
-    let response = space
-        .execute_kip_readonly(kip::request(
-            r#"FIND(?a.id) WHERE { ?a ASSERTION {} } LIMIT 1"#,
-        ))
-        .await
-        .unwrap();
-    let signal: String =
-        serde_json::from_value::<Vec<String>>(kip::ok_result(&response).cloned().unwrap())
-            .unwrap()
-            .remove(0);
-    space
-        .ledger
-        .record_correction(&signal, now_ms)
-        .await
-        .unwrap();
-
-    let (mined, usage) = crate::eval::mine::mine_scenarios(
-        space.as_ref(),
-        &crate::eval::mine::MineConfig {
-            since_ms: 0,
-            max_scenarios: 4,
-        },
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(mined.len(), 1);
-    assert_eq!(mined[0].signal, signal);
-    let scenario = &mined[0].scenario;
-    assert_eq!(scenario.id, "mined_pref_fix");
-    assert!(
-        scenario
-            .description
-            .as_deref()
-            .unwrap()
-            .contains("review before adding")
-    );
-    // PII scrubbed from the produced scenario.
-    let encoded = serde_json::to_string(scenario).unwrap();
-    assert!(encoded.contains("[email]"), "{encoded}");
-    assert!(encoded.contains("[number]"), "{encoded}");
-    assert!(!encoded.contains("bob@example.com"));
-    assert!(!encoded.contains("12345678901"));
-    assert!(usage.input_tokens > 0);
 }
 
 #[tokio::test]
@@ -2818,6 +2764,7 @@ async fn space_agent_entrypoints_use_memory_and_model_without_network() {
     assert_eq!(counterparty["name"], "Formation User");
 
     let recall = RecallInput {
+        budget: None,
         query: "What color is preferred?".to_string(),
         context: Some(InputContext {
             counterparty: Some("external-user-formation".to_string()),

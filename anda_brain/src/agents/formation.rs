@@ -34,15 +34,23 @@ const REVIEW_INSTRUCTIONS: &str = include_str!("../../assets/BrainFormationRevie
 use super::RUNNER_MAX_MODEL_TURNS as FORMATION_MAX_MODEL_TURNS;
 
 /// Resets the AtomicU64 to 0 on drop (panic guard for processing_conversation).
-struct ProcessingGuard(Arc<AtomicU64>);
+struct ProcessingGuard(Option<Arc<AtomicU64>>);
+impl ProcessingGuard {
+    fn disarm(mut self) {
+        self.0.take();
+    }
+}
 impl Drop for ProcessingGuard {
     fn drop(&mut self) {
-        self.0.store(0, Ordering::SeqCst);
+        if let Some(value) = &self.0 {
+            value.store(0, Ordering::SeqCst);
+        }
     }
 }
 
 #[derive(Clone)]
 pub struct FormationAgent {
+    prompt: Arc<str>,
     memory: Arc<MemoryManagement>,
     /// The collection backing `memory`'s conversations. `MemoryManagement`
     /// wraps document access only, so the `brain_processed` watermark — a
@@ -52,6 +60,8 @@ pub struct FormationAgent {
     hook: Arc<dyn BrainHook>,
     history: Arc<RwLock<VecDeque<Document>>>,
     max_input_tokens: usize,
+    clock: Arc<crate::runtime::BusinessClock>,
+    tasks: crate::runtime::RuntimeTasks,
 }
 
 impl FormationAgent {
@@ -63,6 +73,9 @@ impl FormationAgent {
         max_input_tokens: usize,
     ) -> Self {
         Self {
+            prompt: super::prompts::active_prompt(super::prompts::PromptTarget::Formation),
+            clock: Arc::new(crate::runtime::BusinessClock::default()),
+            tasks: crate::runtime::RuntimeTasks::default(),
             max_input_tokens,
             memory,
             conversations,
@@ -79,6 +92,26 @@ impl FormationAgent {
     /// user, so there is no single-user list to query; walk backwards from
     /// the newest conversation and keep the latest completed formation ones.
     /// The scan is bounded: this is best-effort context, not recovery state.
+    pub(crate) fn with_prompt(mut self, prompt: Arc<str>) -> Self {
+        self.prompt = prompt;
+        self
+    }
+
+    pub(crate) fn with_clock(mut self, clock: Arc<crate::runtime::BusinessClock>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    pub(crate) fn with_tasks(mut self, tasks: crate::runtime::RuntimeTasks) -> Self {
+        self.tasks = tasks;
+        self
+    }
+
+    #[cfg(feature = "experiments")]
+    pub(crate) fn clear_history(&self) {
+        self.history.write().clear();
+    }
+
     pub async fn init(&self) -> Result<(), BoxError> {
         // Matches the `push_completed_history` cap in `drive_runner_loop`.
         const HISTORY_LEN: usize = 2;
@@ -91,6 +124,11 @@ impl FormationAgent {
         while id > 0 && scanned < SCAN_LIMIT && newest.len() < HISTORY_LEN {
             scanned += 1;
             if let Ok(conv) = self.memory.get_conversation(id).await
+                && conv._id
+                    > self
+                        .conversations
+                        .get_extension_as::<u64>("history_boundary")
+                        .unwrap_or(0)
                 && conv.status == ConversationStatus::Completed
                 && conv
                     .label
@@ -108,6 +146,10 @@ impl FormationAgent {
 
     pub fn is_processing(&self) -> bool {
         self.processing_conversation.load(Ordering::SeqCst) != 0
+    }
+
+    pub(crate) fn processing_id(&self) -> u64 {
+        self.processing_conversation.load(Ordering::SeqCst)
     }
 
     pub fn get_processed(&self) -> Option<DocumentId> {
@@ -225,13 +267,13 @@ impl FormationAgent {
 
         let agent = self.clone();
         let pc = self.processing_conversation.clone();
-        tokio::spawn(async move {
-            // Guard resets processing_conversation to 0 if the task panics.
-            let guard = ProcessingGuard(pc);
+        let guard = ProcessingGuard(Some(pc));
+        self.tasks.spawn(async move {
+            // Guard is captured before spawn so cancellation before polling also releases the slot.
             agent.process_loop(ctx, conversation).await;
             // Normal exit: process_loop already manages the atomic properly,
             // so defuse the guard to avoid clobbering a valid value.
-            std::mem::forget(guard);
+            guard.disarm();
         });
     }
 
@@ -463,11 +505,11 @@ impl FormationAgent {
                 instructions: format!(
                     "{}\n\n---\n\n{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Your Notes:\n{}\n\n# Counterparty Profile:\n{}\n\n# Current Datetime: {}",
                     super::prompts::mode_reference(super::prompts::PromptTarget::Formation),
-                    super::prompts::active_prompt(super::prompts::PromptTarget::Formation),
+                    self.prompt,
                     primer,
                     serde_json::to_string(&notes.items).unwrap_or_default(),
                     serde_json::to_string(&counterparty_info).unwrap_or_default(),
-                    local_date_hour(now_ms).unwrap_or_default()
+                    local_date_hour(self.clock.now_ms()).unwrap_or_default()
                 ),
                 prompt,
                 chat_history,
@@ -1026,7 +1068,7 @@ mod tests {
         let processing = Arc::new(AtomicU64::new(42));
 
         {
-            let _guard = ProcessingGuard(processing.clone());
+            let _guard = ProcessingGuard(Some(processing.clone()));
             assert_eq!(processing.load(Ordering::SeqCst), 42);
         }
 

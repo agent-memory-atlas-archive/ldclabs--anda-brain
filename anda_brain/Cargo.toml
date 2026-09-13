@@ -22,6 +22,11 @@ required-features = ["mcp", "wiki"]
 
 [features]
 default = []
+# Trusted trial/settlement/review runtime and read-only Recall applicability.
+# Explicit host bindings are required; compilation installs no production scheduler.
+learning = []
+# Isolated host-only experiment controls; no HTTP clock override or learning enablement.
+experiments = ["dep:sha2", "anda_cognitive_nexus/simulation"]
 # Structured wiki: documents, versions, ACL-scoped reads, OKF import/export,
 # the wiki agent tools, and the WikiDigest graph extraction, plus their HTTP
 # routes and `SpaceInfo`/`UpdateSpaceInput` fields.
@@ -31,6 +36,7 @@ wiki = ["dep:sha3", "dep:unicode-normalization"]
 mcp = ["dep:rmcp", "dep:schemars"]
 
 [dependencies]
+tiktoken-rs = "=0.12.0"
 async-trait = { workspace = true }
 anda_core = { workspace = true }
 anda_engine = { workspace = true }
@@ -47,7 +53,8 @@ ic_auth_types = { workspace = true }
 ic_cose_types = { workspace = true }
 futures = { workspace = true }
 parking_lot = { workspace = true }
-tokio-util = { workspace = true }
+tokio-util = { workspace = true, features = ["rt"] }
+sha2 = { workspace = true, optional = true }
 structured-logger = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

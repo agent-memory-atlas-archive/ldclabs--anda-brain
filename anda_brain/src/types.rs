@@ -481,6 +481,25 @@ pub struct RecallInput {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<InputContext>,
+    /// Opt into a host-packed memory response and bounded model input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<crate::recall_budget::RecallBudget>,
+}
+
+impl RecallInput {
+    /// Structured Recall requests must not silently become unbudgeted prose
+    /// when a malformed or unsupported budget fails deserialization.
+    pub(crate) fn parse_prompt(text: &str) -> Result<Option<Self>, BoxError> {
+        match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(value)
+                if value.is_object()
+                    && (value.get("query").is_some() || value.get("budget").is_some()) =>
+            {
+                Ok(Some(serde_json::from_value(value)?))
+            }
+            _ => Ok(None),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -489,6 +508,8 @@ pub struct RecallInputRef<'a> {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: &'a Option<InputContext>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget: &'a Option<crate::recall_budget::RecallBudget>,
 }
 
 impl<'a> From<&'a RecallInput> for RecallInputRef<'a> {
@@ -496,6 +517,7 @@ impl<'a> From<&'a RecallInput> for RecallInputRef<'a> {
         Self {
             query: &input.query,
             context: &input.context,
+            budget: &input.budget,
         }
     }
 }
@@ -942,6 +964,9 @@ pub struct MemoryPolicy {
     /// space has no policy, so an unset policy is not a behavior change.
     #[serde(default = "MemoryPolicy::default_recall_max_rounds")]
     pub recall_max_rounds: u32,
+    /// Optional enforced ceilings. A request may tighten, never raise them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recall_budget: Option<crate::recall_budget::RecallBudget>,
 
     /// Shadow-evolution replay sample size (consumed from P4).
     #[serde(default = "MemoryPolicy::default_shadow_replay_sample")]
@@ -963,53 +988,15 @@ impl Default for MemoryPolicy {
             self_test_token_budget: Self::default_self_test_token_budget(),
             recall_search_threshold: Self::default_recall_search_threshold(),
             recall_max_rounds: Self::default_recall_max_rounds(),
+            recall_budget: None,
             shadow_replay_sample: Self::default_shadow_replay_sample(),
         }
     }
 }
 
-/// Process-wide policy override for optimizer runs (plan M10). Like the
-/// prompt override layer (`agents::prompts`), production never sets it: the
-/// eval CLI installs candidate policies here so run-scoped spaces (which
-/// have no stored policy) pick them up, and clears it when the run ends.
-static EVAL_POLICY_OVERRIDE: std::sync::RwLock<Option<MemoryPolicy>> = std::sync::RwLock::new(None);
-
 impl MemoryPolicy {
-    /// The space extension key the policy is stored under.
+    /// The per-Space extension key used for persisted policy configuration.
     pub const EXTENSION_KEY: &'static str = "memory_policy";
-
-    /// The active eval policy override, when one is installed.
-    pub fn eval_override() -> Option<MemoryPolicy> {
-        EVAL_POLICY_OVERRIDE
-            .read()
-            .expect("policy override lock poisoned")
-            .clone()
-    }
-
-    /// Installs (`Some`) or clears (`None`) the process-wide eval override.
-    pub fn set_eval_override(policy: Option<MemoryPolicy>) {
-        *EVAL_POLICY_OVERRIDE
-            .write()
-            .expect("policy override lock poisoned") = policy;
-    }
-}
-
-/// Arms a drop-time clear of the process-wide eval policy override. The
-/// optimizer holds one for the duration of a policy-genome run, so an early
-/// `?` return or panic can never leak a candidate policy into later evals
-/// (or parallel tests) through the global.
-pub struct EvalPolicyOverrideGuard(());
-
-impl EvalPolicyOverrideGuard {
-    pub fn arm() -> Self {
-        Self(())
-    }
-}
-
-impl Drop for EvalPolicyOverrideGuard {
-    fn drop(&mut self) {
-        MemoryPolicy::set_eval_override(None);
-    }
 }
 
 impl MemoryPolicy {
@@ -1064,6 +1051,9 @@ impl MemoryPolicy {
     /// into an unbounded LLM bill. Run before persisting so a bad policy can
     /// never be stored, only rejected.
     pub fn validate(&self) -> Result<(), BoxError> {
+        if let Some(budget) = &self.recall_budget {
+            budget.validate()?;
+        }
         fn in_range(name: &str, value: f64, min_exclusive: f64, max: f64) -> Result<(), BoxError> {
             if value.is_finite() && min_exclusive < value && value <= max {
                 Ok(())
@@ -1196,11 +1186,12 @@ pub struct MemoryCitation {
 /// assert, hedge, or ask.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RecallOutput {
-    /// The synthesized answer with the self-report footer stripped.
+    /// The synthesized answer, or the complete JSON memory packet in budget mode.
     pub answer: String,
 
     /// Whether the graph held relevant memory. From the model's self-report
     /// when present, otherwise inferred from the retrieval trace.
+    /// In budget mode this only reports delivery of non-primer candidates.
     pub found: bool,
 
     /// Model-reported uncertainty, 0 (certain) ..= 1 (guessing).
@@ -1208,6 +1199,7 @@ pub struct RecallOutput {
     pub uncertainty: Option<f64>,
 
     /// Memories the retrieval trace shows were surfaced for this answer.
+    /// Empty in budget mode: all delivered memory data stays inside `answer`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub memories: Vec<MemoryCitation>,
 
@@ -1218,6 +1210,18 @@ pub struct RecallOutput {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failed_reason: Option<String>,
+    /// Counts the one semantic packet in `answer`; RPC framing/replicas are
+    /// transport metadata and are not an additional memory channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_budget: Option<RecallBudgetReceipt>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RecallBudgetReceipt {
+    pub tokenizer: String,
+    pub token_limit: u32,
+    pub tokens: usize,
+    pub context_token_limit: u32,
 }
 
 /// What one sweep did.
@@ -1405,16 +1409,21 @@ pub struct ProbeInput {
     pub limit: Option<usize>,
 }
 
-/// Result of the metamemory probe: a cheap, LLM-free existence check that
+/// Result of the metamemory probe: a cheap, LLM-free search that
 /// tells an agent whether a full recall is worth its latency and tokens.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ProbeOutput {
-    /// Whether the graph holds anything matching the query.
+    /// Whether this search surfaced a relevant hit, not whether a claim is true.
     pub found: bool,
 
     /// True when answered from the negative-knowledge cache without touching
     /// the graph.
     pub negative_cached: bool,
+
+    /// Coverage of the search candidate window (of the original search for a
+    /// cached miss). None is unknown. Even exhaustive search is not BELIEF.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_exhaustive: Option<bool>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hits: Vec<MemoryCitation>,
@@ -1964,6 +1973,7 @@ mod tests {
     #[test]
     fn input_refs_borrow_request_fields_without_reencoding() {
         let recall = RecallInput {
+            budget: None,
             query: "find user preferences".to_string(),
             context: Some(InputContext {
                 counterparty: Some("alice".to_string()),

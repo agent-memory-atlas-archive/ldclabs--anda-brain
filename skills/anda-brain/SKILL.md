@@ -361,6 +361,23 @@ Content-Type: application/json
 
 Note: `result.content` is the primary contract. Additional fields may vary by model/runtime.
 
+**Optional budget mode (Rust service):** add `budget` with the fixed tokenizer
+`o200k_base@tiktoken-rs-0.12.0`, `max_tokens` (1–65536), and `context_tokens`
+(1–131072). An explicit empty object defaults to 4096 output / 32768 cumulative
+normalized planning-input tokens. `memory_policy.recall_budget` can enforce
+ceilings; omitting the request budget cannot disable that policy.
+
+In this mode `content` is one compact JSON memory packet, not a synthesized
+answer. Its complete text, including coverage/escaping, fits `max_tokens`.
+Transport wrappers, MCP replicas and provider billing templates are separate.
+The host preserves necessary constraints/warnings and clears history, thoughts,
+tool calls and artifacts from the response. `recall_structured.answer` carries
+the same packet and `memory_budget` reports its count; extra trace citations are
+not copied outside the packet. Treat `budget_insufficient` or literal `null`
+with `failed_reason` as unusable/incomplete. `semantic_complete` and
+`action_ready` remain false; no optional Memory Interface bundle is claimed.
+See [public contract](https://github.com/ldclabs/anda-brain/blob/main/anda_brain/API.md#recall-budget-contract) for the exact scope and failure codes.
+
 **Query examples:**
 
 | Intent | Example query |
@@ -643,6 +660,7 @@ The plugin registers a `recall_memory` tool that the LLM can invoke:
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `query` | `string` | Yes | Natural language question (e.g. "What are Alice's preferences?") |
+| `budget` | object/null | No | Optional fixed-codec memory packet and cumulative planning-input limits; Space policy may enforce tighter caps |
 | `context.counterparty` | `string` | No | Current user identifier |
 | `context.agent` | `string` | No | Calling agent identifier |
 | `context.topic` | `string` | No | Topic hint for disambiguation |
@@ -716,3 +734,55 @@ Migration is per-space and one-way. It preserves source records, conservatively
 maps native fields/lifecycle/time, and leaves unsupported learning/runtime state
 as Legacy records. Old-id usage and derived caches reset once; conversations,
 policies, tokens and wiki records remain.
+
+## Completion and experiment boundaries
+
+Formation/maintenance acceptance and high-water marks do not prove that a
+particular conversation completed. Retain the returned conversation ID and
+inspect that record; Rust hosts can use `Space::wait_for_processing`. Timeout
+requires reconciliation of the same ID, not another submission.
+
+A `/probe` miss is retrieval information, not rejected belief. Optional
+`search_exhaustive` is search-window coverage; omission means unknown.
+The Rust `experiments` feature is a trusted host interface for isolated runs,
+without a production HTTP/MCP clock override. The sibling Anda Bot optional
+`mib` feature supplies separate loopback Agent and memory-backend protocols over
+this host interface. Its run/request IDs, terminal waits, memory controls and
+cost receipts are evaluation contracts, not production learning capability. Notes now persist
+in the Space's `engine/` storage namespace; experiment session boundaries retain
+or discard them according to the explicit memory condition.
+
+
+The optional Rust `learning` feature adds `Space::learning()` for trusted host
+registration, persistent paired-trial dispatch and authenticated observer
+measurements. This is not an HTTP/MCP operation. Model messages cannot supply
+observer authority, lift a revision to executable, or mark a Skill adopted.
+`ReadyForEvaluation` only means the fixed cohort has terminal records. The host
+calls `settle` after its predeclared cutoff to atomically commit a replayed native
+verdict and standing. `reviews`/`enroll_review` retain acquisition evidence in new
+monitoring trials; independent safety signals can revoke without a sample quota.
+Recall's internal `check_procedure_status` tool checks the exact revision,
+current policy/dependencies, review expiry and short-lived host application
+context. A failed/unavailable check cannot support a validated recommendation.
+Recall is not actual use, and recommendation/adoption never grant execution
+permission. Production executor, observer and current-context bindings remain
+explicit host responsibilities; see [public contract](https://github.com/ldclabs/anda-brain/blob/main/anda_brain/README.md#native-learning-contracts).
+Configured learning Spaces cannot be forked with their operational journal;
+prepare the immutable factual baseline before configuring the controller.
+
+Isolated experiment hosts can use `Experiment::create_with_recall_budget` to
+force P5 limits and `audit_procedures()` for evaluator-only native inventories.
+The sibling Bot's `learning_audit` extension must never be fed back through
+Observe or used as an execution permit. Incomplete audits cannot prove absence.
+MIB requires explicit normal/no-memory/ungated capability declarations; Bot's
+current persistent mode is not a configured learning condition. See
+[public contract](https://github.com/ldclabs/anda-brain/blob/main/anda_brain/README.md#mib-integration) for the remaining host bindings.
+
+The offline Rust `anda_brain::eval` API and `eval` CLI, optimizer and miner are
+retired. Use MIB's public product regression profile and normal submission
+protocol. Online diagnostics, self-test, shadow reports, probes and ledgers are
+retained; none substitutes for native learning evidence. Runtime policies are
+per-Space. Trusted Rust hosts may configure immutable `AgentPrompts` before
+sharing an AppState or opening a Space; only section A is replaceable and the
+compiled KIP reference stays intact. This is not a model-facing prompt tool.
+See [public contract](https://github.com/ldclabs/anda-brain/blob/main/anda_brain/README.md#offline-regression-and-instance-configuration) for the migration and removed APIs.
