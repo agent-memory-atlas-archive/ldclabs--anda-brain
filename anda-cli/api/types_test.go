@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 )
@@ -105,8 +106,8 @@ func TestMessageContentTextAndFirstText(t *testing.T) {
 	}
 }
 
-func TestKipCommandItemObjectWithoutParameters(t *testing.T) {
-	var item KipCommandItem
+func TestKipOperationObjectWithoutParameters(t *testing.T) {
+	var item KipOperation
 	if err := json.Unmarshal([]byte(`{"command":"DESCRIBE PRIMER"}`), &item); err != nil {
 		t.Fatalf("unmarshal command object without parameters: %v", err)
 	}
@@ -150,7 +151,7 @@ func TestAddSpaceTokenInputLabelsEncoding(t *testing.T) {
 	withLabels, err := json.Marshal(AddSpaceTokenInput{
 		Scope:  TokenScopeRead,
 		Name:   "hr-viewer",
-		Labels: []string{"hr", "finance"},
+		Labels: &[]string{"hr", "finance"},
 	})
 	if err != nil {
 		t.Fatalf("marshal input with labels: %v", err)
@@ -167,6 +168,13 @@ func TestAddSpaceTokenInputLabelsEncoding(t *testing.T) {
 	if string(unrestricted) != `{"scope":"write","name":"writer"}` {
 		t.Fatalf("unexpected encoding without labels: %s", unrestricted)
 	}
+	unlabeled, err := json.Marshal(AddSpaceTokenInput{Scope: TokenScopeRead, Name: "public-viewer", Labels: &[]string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(unlabeled) != `{"scope":"read","name":"public-viewer","labels":[]}` {
+		t.Fatalf("empty labels must stay distinct from unrestricted: %s", unlabeled)
+	}
 }
 
 func TestSpaceTokenDecodesLabels(t *testing.T) {
@@ -175,8 +183,15 @@ func TestSpaceTokenDecodesLabels(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &st); err != nil {
 		t.Fatalf("unmarshal space token: %v", err)
 	}
-	if len(st.Labels) != 1 || st.Labels[0] != "hr" {
+	if st.Labels == nil || len(*st.Labels) != 1 || (*st.Labels)[0] != "hr" {
 		t.Fatalf("unexpected labels: %+v", st.Labels)
+	}
+	var unlabeled SpaceToken
+	if err := json.Unmarshal([]byte(`{"name":"viewer","scope":"read","labels":[]}`), &unlabeled); err != nil {
+		t.Fatal(err)
+	}
+	if unlabeled.Labels == nil || len(*unlabeled.Labels) != 0 {
+		t.Fatalf("unlabeled-only restriction lost: %+v", unlabeled.Labels)
 	}
 
 	var unrestricted SpaceToken
@@ -264,7 +279,7 @@ func TestKipRequestSingleCommand(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"command":"DESCRIBE PRIMER"}`), &req); err != nil {
 		t.Fatalf("unmarshal single-command request: %v", err)
 	}
-	if req.Command != "DESCRIBE PRIMER" || len(req.Commands) != 0 {
+	if req.Command != "DESCRIBE PRIMER" || len(req.Operations) != 0 {
 		t.Fatalf("unexpected request: %+v", req)
 	}
 
@@ -274,5 +289,109 @@ func TestKipRequestSingleCommand(t *testing.T) {
 	}
 	if string(encoded) != `{"command":"DESCRIBE PRIMER"}` {
 		t.Fatalf("unexpected encoding: %s", encoded)
+	}
+}
+
+func TestKipBatchRequestAndResponse(t *testing.T) {
+	var request KipRequest
+	if err := json.Unmarshal([]byte(`{"operations":["DESCRIBE PRIMER",{"op_id":"schema","command":"DESCRIBE SCHEMA ENVIRONMENT"}],"execution":{"mode":"independent"}}`), &request); err != nil {
+		t.Fatalf("unmarshal KIP 2.0 batch: %v", err)
+	}
+	if len(request.Operations) != 2 || request.Execution == nil || request.Execution.Mode != "independent" {
+		t.Fatalf("batch request lost operations or mode: %+v", request)
+	}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(encoded, []byte(`"operations"`)) || bytes.Contains(encoded, []byte(`"commands"`)) {
+		t.Fatalf("wrong batch wire shape: %s", encoded)
+	}
+
+	var response KipResponse[any]
+	if err := json.Unmarshal([]byte(`{"kip":"2.0","status":"succeeded","results":[{"status":"succeeded","result":{"value":1},"next_cursor":"next"}]}`), &response); err != nil {
+		t.Fatalf("unmarshal KIP 2.0 response: %v", err)
+	}
+	if err := response.Failure(); err != nil {
+		t.Fatalf("unexpected failure: %v", err)
+	}
+	if len(response.Results) != 1 || response.Results[0].NextCursor != "next" || response.Results[0].Result == nil {
+		t.Fatalf("response lost operation result: %+v", response)
+	}
+
+	if err := json.Unmarshal([]byte(`{"kip":"2.0","status":"failed","results":[{"status":"failed","error":{"code":"SyntaxError","message":"bad command"}}]}`), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Failure() == nil {
+		t.Fatal("operation-level failure was not detected")
+	}
+}
+
+func TestCurrentSpaceAndConceptFieldsSurviveDecode(t *testing.T) {
+	var concept Concept
+	input := []byte(`{"id":"C-7","kind":"concept","schema_ref":"kip://profiles/cognitive-memory@2.1.0/Person","key":"user-1","name":"Alice","governance":{"authority_class":"descriptive"}}`)
+	if err := json.Unmarshal(input, &concept); err != nil {
+		t.Fatal(err)
+	}
+	if concept.SchemaRef == "" || concept.Key != "user-1" {
+		t.Fatalf("identity lost: %+v", concept)
+	}
+	encoded, err := json.Marshal(concept)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{`"schema_ref"`, `"key"`, `"governance"`} {
+		if !bytes.Contains(encoded, []byte(field)) {
+			t.Fatalf("%s lost on output: %s", field, encoded)
+		}
+	}
+
+	var info SpaceInfo
+	if err := json.Unmarshal([]byte(`{"id":"s1","wiki_docs":7,"wiki_chunks":11,"wiki_versions":8,"wiki_queries":3,"wiki_digested":6,"wiki_stale_docs":2}`), &info); err != nil {
+		t.Fatal(err)
+	}
+	if info.WikiDocs == nil || *info.WikiDocs != 7 || info.WikiDigested == nil || *info.WikiDigested != 6 || info.WikiStaleDocs == nil || *info.WikiStaleDocs != 2 {
+		t.Fatalf("wiki stats lost: %+v", info)
+	}
+	var empty SpaceInfo
+	if err := json.Unmarshal([]byte(`{"id":"empty","wiki_docs":0}`), &empty); err != nil {
+		t.Fatal(err)
+	}
+	encodedInfo, err := json.Marshal(empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(encodedInfo, []byte(`"wiki_docs":0`)) {
+		t.Fatalf("zero-valued wiki stats disappeared: %s", encodedInfo)
+	}
+	var config ModelConfig
+	if err := json.Unmarshal([]byte(`{"family":"anthropic","model":"m","api_base":"u","api_key":"k","effort":"high"}`), &config); err != nil {
+		t.Fatal(err)
+	}
+	if config.Effort != "high" {
+		t.Fatalf("effort lost: %+v", config)
+	}
+}
+
+func TestMemoryPolicyOmissionsUseServerDefaults(t *testing.T) {
+	maxRounds := uint32(8)
+	data, err := json.Marshal(UpdateSpaceInput{MemoryPolicy: &MemoryPolicy{RecallMaxRounds: &maxRounds}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != `{"memory_policy":{"recall_max_rounds":8}}` {
+		t.Fatalf("unspecified policy members must remain omitted: %s", data)
+	}
+}
+
+func TestWikiCommitCanClearTagsAndMetadata(t *testing.T) {
+	tags := []string{}
+	metadata := map[string]any{}
+	data, err := json.Marshal(WikiCommitInput{Title: "T", Content: "# T", Tags: &tags, Metadata: &metadata})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte(`"tags":[]`)) || !bytes.Contains(data, []byte(`"metadata":{}`)) {
+		t.Fatalf("clear operations were omitted: %s", data)
 	}
 }

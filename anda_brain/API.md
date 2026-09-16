@@ -7,11 +7,12 @@ reach the maintenance model as assessment.settlement_errors.
 
 - Base URL: `http://{host}:{port}`
 - Auth header: `Authorization: Bearer <token>`
+- Sharded deployments: send `Shard-Id: <index>` (or `X-Shard`) matching the server's `SHARDING_IDX`; the default is `0`.
 - If `ED25519_PUBKEYS` is empty/not provided, authentication is disabled.
 - Supported serialization formats:
   - Request: `Content-Type: application/json | application/cbor | text/markdown`
   - Response: `Accept: application/json | application/cbor | text/markdown`
-  - Content negotiation applies to success bodies only; error response bodies are always JSON regardless of `Accept`
+  - Content negotiation applies to success bodies. Handler errors use JSON regardless of `Accept`; middleware load shedding (`429`/`503`) and unmatched routes can return plain text or an empty body.
 - Most business endpoints return an RPC envelope: `RpcResponse<T>`
 - MCP clients can use the built-in Streamable HTTP endpoint: `/mcp/<space_id>`, or the local stdio server: `anda_brain mcp --space-id <space_id> [local|aws]`
 
@@ -87,6 +88,194 @@ export interface RecallBudget {
   context_tokens?: number; // 1–131072; default 32768; cumulative normalized planner inputs
 }
 
+export interface MemoryPolicy {
+  version?: number;
+  memory_strength_decay_factor?: number;
+  recall_reinforcement?: number; // retained for stored-policy compatibility; inert
+  correction_penalty?: number; // retained for stored-policy compatibility; inert
+  decay_floor?: number;
+  stale_event_threshold_days?: number;
+  unconsolidated_max_backlog?: number;
+  orphan_max_count?: number;
+  self_test_queries_per_cycle?: number;
+  self_test_token_budget?: number;
+  recall_search_threshold?: number; // declared but not consumed yet
+  recall_max_rounds?: number;
+  recall_budget?: RecallBudget | null;
+  shadow_replay_sample?: number;
+}
+
+export interface MemoryCitation {
+  entity: string;
+  type?: string;
+  name?: string;
+  confidence?: number;
+  source?: string;
+  created_at?: string;
+}
+
+export interface RecallBudgetReceipt {
+  tokenizer: string;
+  token_limit: number;
+  tokens: number;
+  context_token_limit: number;
+}
+
+export interface RecallOutput {
+  answer: string;
+  found: boolean;
+  uncertainty?: number;
+  memories?: MemoryCitation[];
+  conversation?: number;
+  usage: Usage;
+  failed_reason?: string;
+  memory_budget?: RecallBudgetReceipt;
+}
+
+export interface ProbeInput {
+  query: string;
+  limit?: number;
+}
+
+export interface ProbeOutput {
+  found: boolean;
+  negative_cached: boolean;
+  search_exhaustive?: boolean;
+  hits?: MemoryCitation[];
+}
+
+export interface MemoryPinInput {
+  entity: string; // graph element id such as C-7, P-3, or A-2
+  pinned?: boolean; // default true
+}
+
+export interface MemoryPinOutput {
+  entity: string;
+  pinned: boolean;
+  updated: number; // number of changed retention records
+}
+
+export interface MemoryForgetInput {
+  entities: string[];
+  dry_run?: boolean; // default false; inspect a dry run before deletion
+}
+
+export interface MemoryForgetEntity {
+  entity: string;
+  existed: boolean;
+  error?: string;
+}
+
+export interface MemoryForgetReport {
+  dry_run: boolean;
+  deleted_concepts: number;
+  deleted_propositions: number;
+  entities?: MemoryForgetEntity[];
+}
+
+export interface MemoryMetrics {
+  recalls_completed: number;
+  entities_recalled: number;
+  probe_hits: number;
+  probe_misses: number;
+  negative_cache_hits: number;
+  self_test_tested: number;
+  self_test_grounded: number;
+  reencode_tasks: number;
+  corrections: number;
+  decayed: number;
+  uncertainty_reports: number;
+  uncertainty_sum: number;
+  forgotten_entities: number;
+  updated_at: number;
+}
+
+export interface MemoryGraphCounters {
+  concepts: number;
+  propositions: number;
+  unconsolidated?: number;
+  orphans?: number;
+  predicate_types?: number;
+  as_of?: number;
+}
+
+export interface WatchSettlement {
+  fired: number;
+  conflicted: number;
+  disarmed: number;
+  deferred: number;
+  error?: string;
+}
+
+export interface SkillSettlement {
+  unsupported_reason?: string;
+  graded: number;
+  transitions: number;
+  conflicted: number;
+  error?: string;
+}
+
+export interface MemorySettlementReport {
+  settled_at: number;
+  revised_roots?: unknown[];
+  decayed: number;
+  decay_ran: boolean;
+  new_corrections: number;
+  watches: WatchSettlement;
+  skills: SkillSettlement;
+  decay_error?: string;
+  correction_scan_error?: string;
+  correction_scan_incomplete: boolean;
+  correction_scan_through_seq: number;
+  retention: {
+    expired_assertions: number;
+    archived: number;
+    held: number;
+    refused: number;
+    remaining: number;
+    error?: string;
+  };
+}
+
+export interface SelfTestReport {
+  tested_at: number;
+  tested: number;
+  grounded: number;
+  reencode_tasks: number;
+  usage: Usage;
+}
+
+export interface ShadowEvalInput {
+  policy: MemoryPolicy;
+  replay_sample?: number; // default from policy, at most 16
+}
+
+export interface ShadowReport {
+  compared_at: number;
+  replayed: number;
+  baseline_wins: number;
+  candidate_wins: number;
+  ties: number;
+  judge_errors: number;
+  candidate_policy: MemoryPolicy;
+  usage: Usage;
+  samples?: { query: string; winner: 'baseline' | 'candidate' | 'tie' | 'error'; reason?: string }[];
+}
+
+export interface MemoryStatus {
+  metrics: MemoryMetrics;
+  groundability?: number;
+  probe_hit_rate?: number;
+  correction_rate?: number;
+  avg_uncertainty?: number;
+  maintenance_tokens_per_recall?: number;
+  graph: MemoryGraphCounters;
+  last_settlement?: MemorySettlementReport;
+  last_self_test?: SelfTestReport;
+  last_shadow?: ShadowReport;
+  last_schema_audit?: { audited_at: number; predicates?: Record<string, number> };
+}
+
 export interface MaintenanceParameters {
   stale_event_threshold_days?: number; // [1, 365]
   memory_strength_decay_factor?: number; // (0, 1]; alias: confidence_decay_factor
@@ -105,7 +294,7 @@ export interface AddSpaceTokenInput {
   scope: TokenScope; // minting "*" requires a "*"-scoped CWT
   name: string; // required, unique per space
   expires_at?: number; // Unix timestamp in milliseconds
-  labels?: string[]; // wiki ACL labels; omitted = unrestricted
+  labels?: string[]; // wiki ACL labels; omitted = unrestricted, [] = unlabeled only
 }
 
 export interface RevokeSpaceTokenInput {
@@ -120,6 +309,7 @@ export interface UpdateSpaceInput {
   wiki_digest?: boolean; // enable WikiDigest graph extraction (default false)
   wiki_audit_reads?: boolean; // event external wiki reads (default false)
   wiki_acl_defaults?: Record<string, string>; // namespace -> default ACL label
+  memory_policy?: MemoryPolicy; // replaces the space policy; omitted members use server defaults
 }
 
 export interface FormationRestartInput {
@@ -219,7 +409,6 @@ export interface WikiHit {
   text: string;
   doc_title: string;
   heading_path: string[];
-  score?: number;
   citation: WikiCitation;
 }
 
@@ -343,10 +532,13 @@ export interface McpHttpServerConfig {
 }
 
 export interface Concept {
-  id?: string; // engine-assigned element id, e.g. "C-7"
+  id: string; // engine-assigned element id, e.g. "C-7"
+  kind: 'concept';
+  space_id?: string;
   schema_ref?: string; // the exact type symbol, e.g. "kip://profiles/cognitive-memory@2.1.0/Person"
   key?: string; // immutable Space-local logical key — the caller's handle
   name?: string; // mutable display label; never identity
+  canonical_id?: string;
   aliases?: string[];
   attributes?: Record<string, unknown>;
   facets?: Record<string, Record<string, unknown>>; // e.g. MnemonicState
@@ -359,8 +551,9 @@ export interface ModelConfig {
   model: string;
   api_base: string;
   api_key: string;
-  disabled: boolean;
+  disabled?: boolean;
   label?: string;
+  effort?: 'minimal' | 'low' | 'medium' | 'high' | 'max';
   bearer_auth?: boolean;
   stream?: boolean;
   context_window?: number;
@@ -380,7 +573,7 @@ export interface SpaceToken {
   created_at: number; // Unix timestamp in milliseconds
   updated_at: number; // Unix timestamp in milliseconds
   expires_at?: number; // Unix timestamp in milliseconds
-  labels?: string[]; // wiki ACL labels: token sees unlabeled content plus these
+  labels?: string[]; // wiki ACL labels: [] sees unlabeled content only; omitted = unrestricted
 }
 
 export interface StorageStats {
@@ -497,12 +690,22 @@ export interface ServiceInfo {
   description: string;
 }
 
-export type KipOperation = string | { op_id?: string; command: string; parameters?: Record<string, unknown> };
+export type KipOperation = string | {
+  op_id?: string;
+  language?: 'KQL' | 'KML' | 'META'; // advisory; parsed command controls the read-only gate
+  command?: string;
+  ast?: unknown;
+  parameters?: Record<string, unknown>;
+  idempotency_key?: string;
+  options?: { extensions?: Record<string, unknown> };
+  extensions?: Record<string, unknown>;
+};
 
 export interface KipRequest {
   command?: string; // a single command; mutually exclusive with `operations`
   operations?: KipOperation[]; // several commands in one round-trip
-  read?: { snapshot_token?: string }; // bind every operation to one read coordinate
+  execution?: { mode: 'independent' | 'sequence' | 'atomic'; on_error?: 'stop' | 'continue'; isolation?: string; idempotency_key?: string; extensions?: Record<string, unknown> }; // required for more than one operation
+  read?: { snapshot_token?: string; extensions?: Record<string, unknown> }; // bind every operation to one read coordinate
   parameters?: Record<string, unknown>; // values bound into `:placeholders`
   dry_run?: boolean; // validate and plan without committing
 }
@@ -520,18 +723,27 @@ export interface KipOperationResult<T> {
   op_id?: string;
   status: 'succeeded' | 'failed' | 'skipped' | 'rolled_back' | 'no_effect';
   result?: T;
+  context?: unknown;
   error?: KipError;
   warnings?: unknown[];
   next_cursor?: string;
+  receipt?: unknown;
+  extensions?: Record<string, unknown>;
 }
 
 export interface KipResponse<T> {
   kip: '2.0';
+  request_id?: string;
   status: 'succeeded' | 'failed' | 'partial' | 'outcome_unknown';
   results: KipOperationResult<T>[];
-  snapshot?: { seq?: number; token?: string };
+  execution?: unknown;
+  context?: unknown;
+  snapshot?: { space_id?: string; snapshot_seq: number; schema_environment_version?: number; snapshot_token?: string; extensions?: Record<string, unknown> };
+  receipt?: unknown;
   warnings?: unknown[];
+  next_cursor?: string;
   error?: KipError; // set only when the request failed before its operations
+  extensions?: Record<string, unknown>;
 }
 ```
 
@@ -545,7 +757,7 @@ export interface KipResponse<T> {
 
 ## 3) MCP Server
 
-When the HTTP service starts, Anda Brain exposes a Streamable HTTP MCP endpoint for MCP-capable agents:
+By default, the HTTP service exposes a Streamable HTTP MCP endpoint for MCP-capable agents; `MCP_HTTP_ENABLED=false` disables it:
 
 ```text
 https://your-brain-host/mcp/my_space_001
@@ -573,6 +785,12 @@ Both MCP modes use the same model, auth, and storage configuration as the HTTP s
 | `anda_brain_get_or_init_user` | `{ user, name? }` | `Concept` | `write` |
 | `anda_brain_list_conversations` | `{ collection?, cursor?, limit? }` | `{ conversations, next_cursor }` | `read` |
 | `anda_brain_get_conversation` | `{ conversation_id, collection?, delta?, messages_offset?, artifacts_offset? }` | `Conversation` or `ConversationDelta` | `read` |
+| `anda_brain_wiki_search` | wiki query, filters, and result limit | `WikiSearchOutput` | `read` |
+| `anda_brain_wiki_read` | document id and selector | `WikiReadOutput` | `read` |
+| `anda_brain_wiki_commit` | document fields and full Markdown content | `WikiCommitOutput` | `write` |
+| `anda_brain_wiki_verify` | citation URI or explicit citation fields | `WikiVerifyOutput` | `read` |
+
+The MCP read-only KIP tool uses `commands` and supplies independent execution for batches. The HTTP `/execute_kip_readonly` endpoint uses `operations` and requires an explicit `execution.mode` for batches. Wiki MCP tools are available when the `wiki` feature is enabled (always true for the service binary).
 
 When `ED25519_PUBKEYS` is set, configure the remote MCP client with an `Authorization` bearer token, or configure stdio with `MCP_AUTH_TOKEN` / `--mcp-auth-token`. `read` tools can also access public spaces without a token. For remote MCP behind a company domain or reverse proxy, set `MCP_HTTP_ALLOWED_HOSTS` to the accepted Host values. Use `--mcp-auto-create-space` for local stdio development or `MCP_HTTP_AUTO_CREATE_SPACE=true` for remote development if the target space does not exist yet; remote auto-create requires `ED25519_PUBKEYS` plus a CWT with `write` scope for the target space before the missing space is created.
 
@@ -582,11 +800,11 @@ When `ED25519_PUBKEYS` is set, configure the remote MCP client with an `Authoriz
 
 ## 4.1 Public Endpoints
 
-### GET `/`
+### GET `/favicon.ico` and GET `/apple-touch-icon.webp`
 
-- Description: Returns the product website (HTML or Markdown).
+- Description: Static product icons
 - Auth: None
-- Response: `text/html` or `text/markdown`
+- Response: `image/x-icon` or `image/webp`
 
 ### GET `/info`
 
@@ -615,9 +833,17 @@ When `ED25519_PUBKEYS` is set, configure the remote MCP client with an `Authoriz
 ### POST `/v1/{space_id}/recall`
 
 - Purpose: Recall memory via natural-language query
-- Auth: SpaceToken/CWT `read` (public spaces are unauthenticated; private spaces require a valid token)
+- Auth: SpaceToken/CWT `read` (public spaces are unauthenticated; private spaces require a valid token). Label-restricted space tokens receive `403` because agentic Recall can traverse all wiki labels.
 - Request body: `RecallInput` (raw string is also accepted in Markdown mode)
-- Response: `RpcResponse<AgentOutput>`
+- Response (JSON/CBOR): `RpcResponse<AgentOutput>`
+- Response (Markdown): plain `AgentOutput.content`
+
+### POST `/v1/{space_id}/recall_structured`
+
+- Purpose: Return a synthesized answer with trace-derived memory citations, `found`, and optional uncertainty.
+- Auth and request body: same as `/recall`; label-restricted tokens receive `403`.
+- Response (JSON/CBOR): `RpcResponse<RecallOutput>`
+- Response (Markdown): plain `RecallOutput.answer`
 
 <a id="recall-budget-contract"></a>
 
@@ -659,6 +885,20 @@ bypasses this contract.
 
 Explicit `parameters` override the space policy; omitted members use policy defaults. The same effective parameters reach deterministic settlement and the model, without changing the persisted space policy.
 
+### POST `/v1/{space_id}/memory/pin`
+
+- Purpose: Pin or unpin one graph entity to exempt its memory strength from disuse decay.
+- Auth: SpaceToken/CWT `write`
+- Request body: `MemoryPinInput`; `pinned` defaults to `true`.
+- Response: `RpcResponse<MemoryPinOutput>`
+
+### POST `/v1/{space_id}/memory/forget`
+
+- Purpose: Physically remove graph entities; inspect `dry_run: true` before deletion.
+- Auth: SpaceToken/CWT `write`
+- Request body: `MemoryForgetInput`; `dry_run` defaults to `false`.
+- Response: `RpcResponse<MemoryForgetReport>`; per-entity errors appear in `result.entities`.
+
 ### GET `/v1/{space_id}/memory_status`
 
 - Purpose: Read memory statistics and the latest maintenance report.
@@ -674,6 +914,7 @@ Explicit `parameters` override the space policy; omitted members use policy defa
 - Purpose: Execute a KIP 2.0 request (read-only: KQL and META)
 - Auth: SpaceToken/CWT `read` (public spaces are unauthenticated; private spaces require a valid token)
 - Request body: `KipRequest`, or a bare JSON string read as one command
+- A batch with more than one `operations` entry must declare `execution.mode`; check `status` and each `results[].status` even when HTTP returns `200`.
 - Response: `KipResponse<T>` (the result type follows the commands)
 - Read-only is enforced on what each command *parses to*, so a KML mutation is refused here however the request labels it
 
@@ -689,6 +930,10 @@ Explicit `parameters` override the space policy; omitted members use policy defa
 - Purpose: Get space status and statistics
 - Auth: SpaceToken/CWT `read` (public spaces are unauthenticated; private spaces require a valid token)
 - Response: `RpcResponse<SpaceInfo>`
+
+### GET `/v1/{space_id}/status`
+
+- Alias for `/v1/{space_id}/info`, with the same authorization and response.
 
 ### POST `/v1/{space_id}/probe`
 
@@ -738,7 +983,7 @@ Explicit `parameters` override the space policy; omitted members use policy defa
 
 The wiki is the space's versioned reference memory (policies, manuals, SOPs, API docs). Writes are git-like immutable commits with CAS concurrency control; searches return verifiable `wiki://` citations. ACL: documents may carry an `acl_label`; space tokens with `labels` see unlabeled content plus their granted labels — enforced inside the retrieval query itself. Anonymous readers of public spaces see unlabeled content only; denials surface as 404.
 
-Wiki-specific error semantics: `409` commit conflict (`error.data.current_version` carries the version to rebase on), `413` content over 1 MiB, `404` not found / ACL-denied.
+Wiki-specific error semantics: `409` commit conflict (`RpcError.data.current_version` carries the version to rebase on), `413` content over 1 MiB, `404` not found / ACL-denied.
 
 ### POST `/v1/{space_id}/wiki/docs`
 
@@ -836,7 +1081,7 @@ Wiki-specific error semantics: `409` commit conflict (`error.data.current_versio
 
 - Purpose: Add a Space Token
 - Auth: Must pass CWT `write` (user management-level auth). Minting a `*` (full-scope) token requires a `*`-scoped CWT — a `write` CWT cannot mint tokens above its own scope.
-- Request body: `AddSpaceTokenInput` — `name` is required and must be unique within the space (it is the token's audit identity and its revocation handle)
+- Request body: `AddSpaceTokenInput` — `name` is required and unique within the space. `labels` is allowed only for `read` tokens; `[]` restricts reads to unlabeled wiki content, while omission is unrestricted.
 - Response: `RpcResponse<SpaceToken>` (new token, always prefixed with `ST`; this is the only response that carries the full token value)
 
 ### POST `/v1/{space_id}/management/revoke_space_token`
@@ -848,10 +1093,17 @@ Wiki-specific error semantics: `409` commit conflict (`error.data.current_versio
 
 ### PATCH `/v1/{space_id}/management/update_space`
 
-- Purpose: Update space information (name, description, public/private)
+- Purpose: Update space information, wiki settings, and the optional `memory_policy` (validated and persisted as a replacement policy).
 - Auth: Must pass CWT `write` (user management-level auth)
 - Request body: `UpdateSpaceInput`
 - Response: `RpcResponse<true>`
+
+### POST `/v1/{space_id}/management/shadow_eval`
+
+- Purpose: Compare a candidate memory policy against the current one by replaying recent Recall queries on forks. This can make multiple model calls.
+- Auth: CWT `write` (space tokens are not accepted).
+- Request body: `ShadowEvalInput`; `replay_sample` defaults to the space policy and is capped at `16`.
+- Response: `RpcResponse<ShadowReport>`
 
 ### PATCH `/v1/{space_id}/management/restart_formation`
 - Purpose: Restart a formation task by conversation ID (for failed/stale formations)
@@ -908,7 +1160,16 @@ async function rpcPost<TReq, TRes>(
     body: JSON.stringify(body),
   });
 
-  return (await res.json()) as RpcResponse<TRes>;
+  const responseText = await res.text();
+  if (!res.ok) {
+    let message = responseText || `HTTP ${res.status}`;
+    try {
+      const error = JSON.parse(responseText) as RpcError;
+      if (error.message) message = error.message;
+    } catch { /* middleware errors can be plain text */ }
+    throw new Error(`HTTP ${res.status}: ${message}`);
+  }
+  return JSON.parse(responseText) as RpcResponse<TRes>;
 }
 
 // Recall
@@ -931,8 +1192,12 @@ if (recall.error) {
 
 - Authentication failure: HTTP `401`, response body is `RpcError`
 - Invalid request/parameters: HTTP `400`, response body is `RpcError`
+- Forbidden access: HTTP `403`; missing space or wiki document: HTTP `404`
+- Wiki commit conflicts: HTTP `409`, with the current version in `RpcError.data.current_version`; oversized wiki content: HTTP `413`
+- LLM request load shedding: HTTP `429`; global HTTP load shedding: HTTP `503`. These middleware responses are plain text.
 - Success: HTTP `200`, response body is usually `RpcResponse<T>`
-- Error response bodies are always JSON, even when the request asked for `application/cbor` or `text/markdown` (this includes the wiki `409` conflict body carrying `error.data.current_version`); only success bodies follow the `Accept` header
+- Handler errors are JSON even when `Accept` requests CBOR or Markdown. Unmatched routes and middleware errors may have a plain text or empty body. Only success bodies follow `Accept`.
+- A KIP request can return HTTP `200` with `KipResponse.status` or an operation's `status` equal to `failed`; inspect both KIP levels.
 - MCP tools mirror this classification: caller-fixable failures surface as JSON-RPC `invalid_params`/`invalid_request` (a wiki commit conflict carries the same `data.current_version` retry payload as the HTTP `409` body), and only true internal failures use `internal_error`
 
 

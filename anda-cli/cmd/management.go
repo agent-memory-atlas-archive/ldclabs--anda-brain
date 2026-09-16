@@ -37,22 +37,29 @@ var addTokenCmd = &cobra.Command{
 		scope, _ := cmd.Flags().GetString("scope")
 		name, _ := cmd.Flags().GetString("name")
 		labels, _ := cmd.Flags().GetStringSlice("labels")
+		unlabeledOnly, _ := cmd.Flags().GetBool("unlabeled-only")
 		if scope != "read" && scope != "write" && scope != "*" {
 			exitError(fmt.Errorf("invalid scope: %s", scope))
 		}
 		if name == "" {
 			exitError(fmt.Errorf("--name is required"))
 		}
-		if len(labels) > 0 && scope != "read" {
-			exitError(fmt.Errorf("--labels requires --scope read: label-restricted tokens are read-only wiki viewers"))
+		if (cmd.Flags().Changed("labels") || unlabeledOnly) && scope != "read" {
+			exitError(fmt.Errorf("--labels and --unlabeled-only require --scope read: restricted tokens are read-only wiki viewers"))
+		}
+		if unlabeledOnly && cmd.Flags().Changed("labels") {
+			exitError(fmt.Errorf("--unlabeled-only and --labels are mutually exclusive"))
 		}
 
 		input := &api.AddSpaceTokenInput{
 			Scope: api.TokenScope(scope),
 			Name:  name,
 		}
-		if len(labels) > 0 {
-			input.Labels = labels
+		if cmd.Flags().Changed("labels") {
+			input.Labels = &labels
+		} else if unlabeledOnly {
+			empty := []string{}
+			input.Labels = &empty
 		}
 
 		client := newClient()
@@ -142,9 +149,18 @@ var updateSpaceCmd = &cobra.Command{
 			input.WikiACLDefaults = &defaults
 			hasField = true
 		}
+		if cmd.Flags().Changed("memory-policy") {
+			value, _ := cmd.Flags().GetString("memory-policy")
+			policy, err := readJSONObject[api.MemoryPolicy](value)
+			if err != nil {
+				exitError(fmt.Errorf("--memory-policy: %w", err))
+			}
+			input.MemoryPolicy = &policy
+			hasField = true
+		}
 
 		if !hasField {
-			exitError(fmt.Errorf("at least one of --name, --description, --public, --wiki-digest, --wiki-audit-reads, or --wiki-acl-defaults is required"))
+			exitError(fmt.Errorf("at least one update-space field is required"))
 		}
 
 		client := newClient()
@@ -228,6 +244,14 @@ var updateBYOKCmd = &cobra.Command{
 			input.Disabled = &disabled
 		}
 		input.Label, _ = cmd.Flags().GetString("label")
+		input.Effort, _ = cmd.Flags().GetString("effort")
+		if input.Effort != "" {
+			switch input.Effort {
+			case "minimal", "low", "medium", "high", "max":
+			default:
+				exitError(fmt.Errorf("invalid --effort %q", input.Effort))
+			}
+		}
 		input.BearerAuth, _ = cmd.Flags().GetBool("bearer-auth")
 		input.Stream, _ = cmd.Flags().GetBool("stream")
 		input.ContextWindow, _ = cmd.Flags().GetInt("context-window")
@@ -265,6 +289,7 @@ func init() {
 	addTokenCmd.Flags().String("name", "", "Token name (required)")
 	addTokenCmd.Flags().String("scope", "*", "Token scope: read, write, *")
 	addTokenCmd.Flags().StringSlice("labels", nil, "Wiki ACL labels the token may read, comma-separated or repeated (requires --scope read; unrestricted when omitted)")
+	addTokenCmd.Flags().Bool("unlabeled-only", false, "Read only unlabeled wiki content (requires --scope read)")
 	restartFormationCmd.Flags().Uint64("conversation", 0, "Conversation ID")
 
 	revokeTokenCmd.Flags().String("name", "", "Revoke by unique token name instead of full token value")
@@ -275,6 +300,7 @@ func init() {
 	updateSpaceCmd.Flags().Bool("wiki-digest", false, "Enable/disable WikiDigest background extraction (--wiki-digest=false to disable)")
 	updateSpaceCmd.Flags().Bool("wiki-audit-reads", false, "Enable/disable read auditing for external wiki reads (--wiki-audit-reads=false to disable)")
 	updateSpaceCmd.Flags().StringSlice("wiki-acl-defaults", nil, "Namespace default ACL labels as namespace=label pairs, comma-separated or repeated; replaces the whole map (pass \"\" to clear all defaults)")
+	updateSpaceCmd.Flags().String("memory-policy", "", "Replace memory policy from inline JSON or @file")
 
 	updateBYOKCmd.Flags().String("family", "", "Model family (e.g. gemini, anthropic, openai, deepseek, mimo) (required)")
 	updateBYOKCmd.Flags().String("model", "", "Model name (required)")
@@ -282,6 +308,7 @@ func init() {
 	updateBYOKCmd.Flags().String("api-key", os.Getenv("ANDA_BYOK_API_KEY"), "Model API key, or @file/path to a file containing it (required; env: ANDA_BYOK_API_KEY)")
 	updateBYOKCmd.Flags().Bool("disabled", false, "Whether the BYOK config is disabled")
 	updateBYOKCmd.Flags().String("label", "", "Model label")
+	updateBYOKCmd.Flags().String("effort", "", "Model reasoning effort: minimal, low, medium, high, max")
 	updateBYOKCmd.Flags().Bool("bearer-auth", false, "Send the API key as a Bearer Authorization header")
 	updateBYOKCmd.Flags().Bool("stream", false, "Enable streaming responses from the model provider")
 	updateBYOKCmd.Flags().Int("context-window", 0, "Model context window in tokens (0 = provider default)")

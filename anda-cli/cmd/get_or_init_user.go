@@ -10,7 +10,7 @@ var getOrInitUserCmd = &cobra.Command{
 	Short: "Get or initialize a user concept",
 	Long: `Get or initialize a user concept node in the space.
 
-This endpoint returns the raw concept object instead of an RPC envelope.
+The HTTP endpoint returns an RPC envelope containing the Concept.
 
 Example:
   anda-cli --space-id my_space --token $TOKEN get-or-init-user principal_123

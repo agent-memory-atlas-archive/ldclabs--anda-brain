@@ -17,6 +17,25 @@ func (e *RpcError) Error() string {
 	return e.Message
 }
 
+// HTTPError keeps the status and structured error payload, including wiki
+// conflict retry data, while still rendering a useful CLI message.
+type HTTPError struct {
+	StatusCode int
+	RPC        *RpcError
+	Body       string
+}
+
+func (e *HTTPError) Error() string {
+	if e.RPC != nil {
+		if e.RPC.Data != nil {
+			data, _ := json.Marshal(e.RPC.Data)
+			return fmt.Sprintf("HTTP %d: %s (data: %s)", e.StatusCode, e.RPC.Message, data)
+		}
+		return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.RPC.Message)
+	}
+	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Body)
+}
+
 // RpcResponse is the generic RPC envelope.
 type RpcResponse[T any] struct {
 	Result     *T        `json:"result,omitempty"`
@@ -511,13 +530,17 @@ type FormationInput struct {
 type RecallInput struct {
 	Query   string        `json:"query"`
 	Context *InputContext `json:"context,omitempty"`
+	Budget  *RecallBudget `json:"budget,omitempty"`
 }
 
 type MaintenanceParameters struct {
-	StaleEventThresholdDays *int     `json:"stale_event_threshold_days,omitempty"`
-	ConfidenceDecayFactor   *float64 `json:"confidence_decay_factor,omitempty"`
-	UnsortedMaxBacklog      *int     `json:"unsorted_max_backlog,omitempty"`
-	OrphanMaxCount          *int     `json:"orphan_max_count,omitempty"`
+	StaleEventThresholdDays   *int     `json:"stale_event_threshold_days,omitempty"`
+	MemoryStrengthDecayFactor *float64 `json:"memory_strength_decay_factor,omitempty"`
+	UnconsolidatedMaxBacklog  *int     `json:"unconsolidated_max_backlog,omitempty"`
+	OrphanMaxCount            *int     `json:"orphan_max_count,omitempty"`
+	// Deprecated aliases remain accepted by the server for older callers.
+	ConfidenceDecayFactor *float64 `json:"confidence_decay_factor,omitempty"`
+	UnsortedMaxBacklog    *int     `json:"unsorted_max_backlog,omitempty"`
 }
 
 type MaintenanceInput struct {
@@ -534,7 +557,7 @@ type AddSpaceTokenInput struct {
 	// Labels restricts the token to wiki content carrying these ACL labels
 	// (plus unlabeled content). Nil = unrestricted. The server only accepts
 	// labels on read-scoped tokens.
-	Labels []string `json:"labels,omitempty"`
+	Labels *[]string `json:"labels,omitempty"`
 }
 
 type RevokeSpaceTokenInput struct {
@@ -560,6 +583,7 @@ type UpdateSpaceInput struct {
 	// wiki documents. When present it replaces the whole map (a pointer to an
 	// empty map clears all defaults; nil leaves the map unchanged).
 	WikiACLDefaults *map[string]string `json:"wiki_acl_defaults,omitempty"`
+	MemoryPolicy    *MemoryPolicy      `json:"memory_policy,omitempty"`
 }
 
 type ModelConfig struct {
@@ -569,6 +593,7 @@ type ModelConfig struct {
 	APIKey        string `json:"api_key"`
 	Disabled      *bool  `json:"disabled,omitempty"`
 	Label         string `json:"label,omitempty"`
+	Effort        string `json:"effort,omitempty"` // minimal, low, medium, high, max
 	BearerAuth    bool   `json:"bearer_auth,omitempty"`
 	Stream        bool   `json:"stream,omitempty"`
 	ContextWindow int    `json:"context_window,omitempty"`
@@ -591,11 +616,59 @@ type GetOrInitUserInput struct {
 }
 
 type Concept struct {
-	ID         string         `json:"id,omitempty"`
-	Type       string         `json:"type,omitempty"`
-	Name       string         `json:"name,omitempty"`
-	Attributes map[string]any `json:"attributes,omitempty"`
-	Metadata   map[string]any `json:"metadata,omitempty"`
+	ID          string                    `json:"id,omitempty"`
+	Kind        string                    `json:"kind,omitempty"`
+	SpaceID     string                    `json:"space_id,omitempty"`
+	SchemaRef   string                    `json:"schema_ref,omitempty"`
+	Key         string                    `json:"key,omitempty"`
+	Name        string                    `json:"name,omitempty"`
+	CanonicalID string                    `json:"canonical_id,omitempty"`
+	Aliases     []string                  `json:"aliases,omitempty"`
+	Attributes  map[string]any            `json:"attributes,omitempty"`
+	Facets      map[string]map[string]any `json:"facets,omitempty"`
+	Retention   map[string]any            `json:"retention,omitempty"`
+	System      map[string]any            `json:"_system,omitempty"`
+	// Deprecated KIP 1.x fields retained for callers decoding older data.
+	Type     string                     `json:"type,omitempty"`
+	Metadata map[string]any             `json:"metadata,omitempty"`
+	Extra    map[string]json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON preserves envelope fields added by newer KIP versions.
+func (c *Concept) UnmarshalJSON(data []byte) error {
+	type known Concept
+	var value known
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for _, key := range []string{"id", "kind", "space_id", "schema_ref", "key", "name", "canonical_id", "aliases", "attributes", "facets", "retention", "_system", "type", "metadata"} {
+		delete(fields, key)
+	}
+	*c = Concept(value)
+	c.Extra = fields
+	return nil
+}
+
+func (c Concept) MarshalJSON() ([]byte, error) {
+	type known Concept
+	data, err := json.Marshal(known(c))
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	for key, value := range c.Extra {
+		if _, known := fields[key]; !known {
+			fields[key] = value
+		}
+	}
+	return json.Marshal(fields)
 }
 
 type SpaceTier struct {
@@ -612,7 +685,7 @@ type SpaceToken struct {
 	UpdatedAt int64      `json:"updated_at"`
 	ExpiresAt *int64     `json:"expires_at,omitempty"`
 	// Labels are the wiki ACL labels this token may read (nil = unrestricted).
-	Labels []string `json:"labels,omitempty"`
+	Labels *[]string `json:"labels,omitempty"`
 }
 
 type StorageStats map[string]any
@@ -634,6 +707,12 @@ type SpaceInfo struct {
 	FormationProcessedID   int64         `json:"formation_processed_id"`
 	MaintenanceProcessedID int64         `json:"maintenance_processed_id"`
 	MaintenanceAt          MaintenanceAt `json:"maintenance_at"`
+	WikiDocs               *int          `json:"wiki_docs,omitempty"`
+	WikiChunks             *int          `json:"wiki_chunks,omitempty"`
+	WikiVersions           *int          `json:"wiki_versions,omitempty"`
+	WikiQueries            *uint64       `json:"wiki_queries,omitempty"`
+	WikiDigested           *uint64       `json:"wiki_digested,omitempty"`
+	WikiStaleDocs          *uint64       `json:"wiki_stale_docs,omitempty"`
 }
 
 type FormationStatus struct {
@@ -657,10 +736,10 @@ type MaintenanceAt struct {
 }
 
 type Usage struct {
-	InputTokens  int `json:"input_tokens,omitempty"`
-	OutputTokens int `json:"output_tokens,omitempty"`
-	CachedTokens int `json:"cached_tokens,omitempty"`
-	Requests     int `json:"requests,omitempty"`
+	InputTokens  uint64 `json:"input_tokens"`
+	OutputTokens uint64 `json:"output_tokens"`
+	CachedTokens uint64 `json:"cached_tokens"`
+	Requests     uint64 `json:"requests"`
 }
 
 type AgentOutput struct {
@@ -719,17 +798,28 @@ type ServiceInfo struct {
 	Description string `json:"description"`
 }
 
-type KipCommandObject struct {
-	Command    string         `json:"command"`
-	Parameters map[string]any `json:"parameters,omitempty"`
+type KipOperationObject struct {
+	OpID           string          `json:"op_id,omitempty"`
+	Language       string          `json:"language,omitempty"`
+	Command        string          `json:"command,omitempty"`
+	AST            json.RawMessage `json:"ast,omitempty"`
+	Parameters     map[string]any  `json:"parameters,omitempty"`
+	IdempotencyKey string          `json:"idempotency_key,omitempty"`
+	Options        json.RawMessage `json:"options,omitempty"`
+	Extensions     map[string]any  `json:"extensions,omitempty"`
 }
 
-type KipCommandItem struct {
+type KipOperation struct {
 	String *string
-	Object *KipCommandObject
+	Object *KipOperationObject
 }
 
-func (item *KipCommandItem) UnmarshalJSON(data []byte) error {
+// Deprecated: the HTTP API calls these operations. These aliases keep older
+// Go source compiling while request bodies use KipRequest.Operations.
+type KipCommandItem = KipOperation
+type KipCommandObject = KipOperationObject
+
+func (item *KipOperation) UnmarshalJSON(data []byte) error {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 {
 		return fmt.Errorf("kip command item cannot be empty")
@@ -750,13 +840,15 @@ func (item *KipCommandItem) UnmarshalJSON(data []byte) error {
 	}
 
 	if trimmed[0] == '{' {
-		var commandObject KipCommandObject
-		if err := json.Unmarshal(trimmed, &commandObject); err != nil {
+		var commandObject KipOperationObject
+		decoder := json.NewDecoder(bytes.NewReader(trimmed))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&commandObject); err != nil {
 			return fmt.Errorf("invalid kip command object: %w", err)
 		}
 		commandObject.Command = strings.TrimSpace(commandObject.Command)
-		if commandObject.Command == "" {
-			return fmt.Errorf("kip command object requires non-empty command")
+		if commandObject.Command == "" && len(commandObject.AST) == 0 {
+			return fmt.Errorf("kip operation object requires command or ast")
 		}
 		item.Object = &commandObject
 		item.String = nil
@@ -766,7 +858,7 @@ func (item *KipCommandItem) UnmarshalJSON(data []byte) error {
 	return fmt.Errorf("kip command item must be string or object")
 }
 
-func (item KipCommandItem) MarshalJSON() ([]byte, error) {
+func (item KipOperation) MarshalJSON() ([]byte, error) {
 	if item.String != nil {
 		return json.Marshal(*item.String)
 	}
@@ -777,18 +869,35 @@ func (item KipCommandItem) MarshalJSON() ([]byte, error) {
 }
 
 type KipRequest struct {
-	// Command is a single KIP command string. Mutually exclusive with Commands.
-	Command    string           `json:"command,omitempty"`
-	Commands   []KipCommandItem `json:"commands,omitempty"`
-	Parameters map[string]any   `json:"parameters,omitempty"`
-	DryRun     bool             `json:"dry_run,omitempty"`
+	// Command and Operations are mutually exclusive. Batches require Execution.
+	Command    string         `json:"command,omitempty"`
+	Operations []KipOperation `json:"operations,omitempty"`
+	Execution  *KipExecution  `json:"execution,omitempty"`
+	Read       *KipRead       `json:"read,omitempty"`
+	Parameters map[string]any `json:"parameters,omitempty"`
+	DryRun     bool           `json:"dry_run,omitempty"`
+}
+
+type KipExecution struct {
+	Mode           string         `json:"mode"` // independent, sequence, atomic
+	OnError        string         `json:"on_error,omitempty"`
+	Isolation      string         `json:"isolation,omitempty"`
+	IdempotencyKey string         `json:"idempotency_key,omitempty"`
+	Extensions     map[string]any `json:"extensions,omitempty"`
+}
+
+type KipRead struct {
+	SnapshotToken string         `json:"snapshot_token,omitempty"`
+	Extensions    map[string]any `json:"extensions,omitempty"`
 }
 
 type KipError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-	Hint    string `json:"hint,omitempty"`
-	Data    any    `json:"data,omitempty"`
+	Code     string `json:"code"`
+	Message  string `json:"message"`
+	Category string `json:"category,omitempty"`
+	Hint     string `json:"hint,omitempty"`
+	Retry    any    `json:"retry,omitempty"`
+	Details  any    `json:"details,omitempty"`
 }
 
 func (e *KipError) Error() string {
@@ -801,8 +910,48 @@ func (e *KipError) Error() string {
 	return e.Message
 }
 
+type KipOperationResult[T any] struct {
+	OpID       string          `json:"op_id,omitempty"`
+	Status     string          `json:"status"`
+	Result     *T              `json:"result,omitempty"`
+	Context    json.RawMessage `json:"context,omitempty"`
+	Error      *KipError       `json:"error,omitempty"`
+	Warnings   []any           `json:"warnings,omitempty"`
+	NextCursor string          `json:"next_cursor,omitempty"`
+	Receipt    json.RawMessage `json:"receipt,omitempty"`
+	Extensions json.RawMessage `json:"extensions,omitempty"`
+}
+
 type KipResponse[T any] struct {
-	Result     *T        `json:"result,omitempty"`
-	Error      *KipError `json:"error,omitempty"`
-	NextCursor string    `json:"next_cursor,omitempty"`
+	Kip        string                  `json:"kip"`
+	RequestID  string                  `json:"request_id,omitempty"`
+	Status     string                  `json:"status"`
+	Results    []KipOperationResult[T] `json:"results"`
+	Execution  json.RawMessage         `json:"execution,omitempty"`
+	Context    json.RawMessage         `json:"context,omitempty"`
+	Snapshot   json.RawMessage         `json:"snapshot,omitempty"`
+	Receipt    json.RawMessage         `json:"receipt,omitempty"`
+	Warnings   []any                   `json:"warnings,omitempty"`
+	NextCursor string                  `json:"next_cursor,omitempty"`
+	Error      *KipError               `json:"error,omitempty"`
+	Extensions json.RawMessage         `json:"extensions,omitempty"`
+}
+
+// Failure checks both KIP error levels; a 200 HTTP response can still fail.
+func (r *KipResponse[T]) Failure() error {
+	if r == nil {
+		return fmt.Errorf("empty KIP response")
+	}
+	if r.Error != nil {
+		return r.Error
+	}
+	for _, result := range r.Results {
+		if result.Error != nil {
+			return result.Error
+		}
+	}
+	if r.Status != "succeeded" {
+		return fmt.Errorf("KIP status: %s", r.Status)
+	}
+	return nil
 }

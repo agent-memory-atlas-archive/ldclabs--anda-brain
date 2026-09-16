@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -17,14 +16,15 @@ var executeKIPReadonlyCmd = &cobra.Command{
 	Long: `Execute a KIP request in read-only mode.
 
 Input JSON can be provided via --request, --file, or stdin.
-The request accepts either a single "command" string or a "commands" array.
+The HTTP request accepts either a single "command" string or an "operations"
+array. More than one operation requires "execution":{"mode":"independent"}.
 
 Example:
   anda-cli --space-id my_space --token $TOKEN execute-kip-readonly \
 		--request '{"command":"DESCRIBE PRIMER"}'
 
   anda-cli --space-id my_space --token $TOKEN execute-kip-readonly \
-		--request '{"commands":["DESCRIBE PRIMER"]}'
+		--request '{"operations":["DESCRIBE PRIMER","DESCRIBE SCHEMA ENVIRONMENT"],"execution":{"mode":"independent"}}'
 
   anda-cli --space-id my_space --token $TOKEN execute-kip-readonly --file ./kip_request.json
 
@@ -43,16 +43,26 @@ Example:
 			exitError(err)
 		}
 
-		var input api.KipRequest
-		if err := json.Unmarshal(raw, &input); err != nil {
+		input, err := readJSONObject[api.KipRequest](string(raw))
+		if err != nil {
 			exitError(fmt.Errorf("invalid request JSON: %w", err))
 		}
 		input.Command = strings.TrimSpace(input.Command)
-		if input.Command == "" && len(input.Commands) == 0 {
-			exitError(fmt.Errorf("invalid request JSON: either command or commands is required"))
+		if input.Command == "" && len(input.Operations) == 0 {
+			exitError(fmt.Errorf("invalid request JSON: either command or operations is required"))
 		}
-		if input.Command != "" && len(input.Commands) > 0 {
-			exitError(fmt.Errorf("invalid request JSON: command and commands are mutually exclusive"))
+		if input.Command != "" && len(input.Operations) > 0 {
+			exitError(fmt.Errorf("invalid request JSON: command and operations are mutually exclusive"))
+		}
+		if len(input.Operations) > 1 && input.Execution == nil {
+			exitError(fmt.Errorf("invalid request JSON: multiple operations require execution.mode"))
+		}
+		if input.Execution != nil {
+			switch input.Execution.Mode {
+			case "independent", "sequence", "atomic":
+			default:
+				exitError(fmt.Errorf("invalid execution.mode %q", input.Execution.Mode))
+			}
 		}
 
 		client := newClient()
@@ -60,11 +70,10 @@ Example:
 		if err != nil {
 			exitError(err)
 		}
-		if resp.Error != nil {
-			exitError(resp.Error)
-		}
-
 		printJSON(resp)
+		if err := resp.Failure(); err != nil {
+			exitError(err)
+		}
 	},
 }
 

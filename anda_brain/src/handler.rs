@@ -237,7 +237,7 @@ pub async fn post_probe(
 /// POST /v1/{space_id}/memory/pin
 ///
 /// Pins/unpins a graph entity (memory evolution plan, M6); pinned memories
-/// are exempt from confidence decay.
+/// are exempt from disuse decay of memory strength.
 pub async fn post_memory_pin(
     State(app): State<AppState>,
     AppPath(space_id): AppPath<String>,

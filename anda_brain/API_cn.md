@@ -7,11 +7,12 @@ assessment.settlement_errors 提供给维护模型。
 
 - Base URL: `http://{host}:{port}`
 - 认证头：`Authorization: Bearer <token>`
+- 分片部署：发送与服务端 `SHARDING_IDX` 相同的 `Shard-Id: <index>`（或 `X-Shard`）；默认值为 `0`。
 - 若 `ED25519_PUBKEYS` 为空或未提供，则鉴权将被关闭。
 - 支持的序列化格式：
   - 请求：`Content-Type: application/json | application/cbor | text/markdown`
   - 响应：`Accept: application/json | application/cbor | text/markdown`
-  - 内容协商仅作用于成功响应体；错误响应体始终为 JSON，与 `Accept` 无关
+  - 内容协商仅作用于成功响应体。处理器错误使用 JSON，与 `Accept` 无关；中间件限流（`429`/`503`）和未匹配路由可能返回纯文本或空响应体。
 - 大多数业务接口都会返回 RPC 包装后的结构体：`RpcResponse<T>`
 - MCP 客户端可使用内置的支持流式传输的 HTTP MCP 端点：`/mcp/<space_id>`，也可以使用本地 stdio server：`anda_brain mcp --space-id <space_id> [local|aws]`
 
@@ -85,6 +86,194 @@ export interface RecallBudget {
   context_tokens?: number; // 1–131072；默认 32768；整次规划输入规范序列化的累计上限
 }
 
+export interface MemoryPolicy {
+  version?: number;
+  memory_strength_decay_factor?: number;
+  recall_reinforcement?: number; // retained for stored-policy compatibility; inert
+  correction_penalty?: number; // retained for stored-policy compatibility; inert
+  decay_floor?: number;
+  stale_event_threshold_days?: number;
+  unconsolidated_max_backlog?: number;
+  orphan_max_count?: number;
+  self_test_queries_per_cycle?: number;
+  self_test_token_budget?: number;
+  recall_search_threshold?: number; // declared but not consumed yet
+  recall_max_rounds?: number;
+  recall_budget?: RecallBudget | null;
+  shadow_replay_sample?: number;
+}
+
+export interface MemoryCitation {
+  entity: string;
+  type?: string;
+  name?: string;
+  confidence?: number;
+  source?: string;
+  created_at?: string;
+}
+
+export interface RecallBudgetReceipt {
+  tokenizer: string;
+  token_limit: number;
+  tokens: number;
+  context_token_limit: number;
+}
+
+export interface RecallOutput {
+  answer: string;
+  found: boolean;
+  uncertainty?: number;
+  memories?: MemoryCitation[];
+  conversation?: number;
+  usage: Usage;
+  failed_reason?: string;
+  memory_budget?: RecallBudgetReceipt;
+}
+
+export interface ProbeInput {
+  query: string;
+  limit?: number;
+}
+
+export interface ProbeOutput {
+  found: boolean;
+  negative_cached: boolean;
+  search_exhaustive?: boolean;
+  hits?: MemoryCitation[];
+}
+
+export interface MemoryPinInput {
+  entity: string; // 图谱实体 ID，例如 C-7、P-3、A-2
+  pinned?: boolean; // default true
+}
+
+export interface MemoryPinOutput {
+  entity: string;
+  pinned: boolean;
+  updated: number; // 更改的 retention 记录数
+}
+
+export interface MemoryForgetInput {
+  entities: string[];
+  dry_run?: boolean; // default false; inspect a dry run before deletion
+}
+
+export interface MemoryForgetEntity {
+  entity: string;
+  existed: boolean;
+  error?: string;
+}
+
+export interface MemoryForgetReport {
+  dry_run: boolean;
+  deleted_concepts: number;
+  deleted_propositions: number;
+  entities?: MemoryForgetEntity[];
+}
+
+export interface MemoryMetrics {
+  recalls_completed: number;
+  entities_recalled: number;
+  probe_hits: number;
+  probe_misses: number;
+  negative_cache_hits: number;
+  self_test_tested: number;
+  self_test_grounded: number;
+  reencode_tasks: number;
+  corrections: number;
+  decayed: number;
+  uncertainty_reports: number;
+  uncertainty_sum: number;
+  forgotten_entities: number;
+  updated_at: number;
+}
+
+export interface MemoryGraphCounters {
+  concepts: number;
+  propositions: number;
+  unconsolidated?: number;
+  orphans?: number;
+  predicate_types?: number;
+  as_of?: number;
+}
+
+export interface WatchSettlement {
+  fired: number;
+  conflicted: number;
+  disarmed: number;
+  deferred: number;
+  error?: string;
+}
+
+export interface SkillSettlement {
+  unsupported_reason?: string;
+  graded: number;
+  transitions: number;
+  conflicted: number;
+  error?: string;
+}
+
+export interface MemorySettlementReport {
+  settled_at: number;
+  revised_roots?: unknown[];
+  decayed: number;
+  decay_ran: boolean;
+  new_corrections: number;
+  watches: WatchSettlement;
+  skills: SkillSettlement;
+  decay_error?: string;
+  correction_scan_error?: string;
+  correction_scan_incomplete: boolean;
+  correction_scan_through_seq: number;
+  retention: {
+    expired_assertions: number;
+    archived: number;
+    held: number;
+    refused: number;
+    remaining: number;
+    error?: string;
+  };
+}
+
+export interface SelfTestReport {
+  tested_at: number;
+  tested: number;
+  grounded: number;
+  reencode_tasks: number;
+  usage: Usage;
+}
+
+export interface ShadowEvalInput {
+  policy: MemoryPolicy;
+  replay_sample?: number; // default from policy, at most 16
+}
+
+export interface ShadowReport {
+  compared_at: number;
+  replayed: number;
+  baseline_wins: number;
+  candidate_wins: number;
+  ties: number;
+  judge_errors: number;
+  candidate_policy: MemoryPolicy;
+  usage: Usage;
+  samples?: { query: string; winner: 'baseline' | 'candidate' | 'tie' | 'error'; reason?: string }[];
+}
+
+export interface MemoryStatus {
+  metrics: MemoryMetrics;
+  groundability?: number;
+  probe_hit_rate?: number;
+  correction_rate?: number;
+  avg_uncertainty?: number;
+  maintenance_tokens_per_recall?: number;
+  graph: MemoryGraphCounters;
+  last_settlement?: MemorySettlementReport;
+  last_self_test?: SelfTestReport;
+  last_shadow?: ShadowReport;
+  last_schema_audit?: { audited_at: number; predicates?: Record<string, number> };
+}
+
 export interface MaintenanceParameters {
   stale_event_threshold_days?: number; // [1, 365]
   memory_strength_decay_factor?: number; // (0, 1]；旧名 confidence_decay_factor 仍被接受
@@ -103,7 +292,7 @@ export interface AddSpaceTokenInput {
   scope: TokenScope; // 铸造 "*" 需要 "*" scope 的 CWT
   name: string; // 必填，空间内唯一
   expires_at?: number; // Unix timestamp in milliseconds
-  labels?: string[]; // wiki ACL 标签；缺省 = 不受限
+  labels?: string[]; // wiki ACL 标签；缺省 = 不受限，[] = 仅无标签内容
 }
 
 export interface RevokeSpaceTokenInput {
@@ -118,6 +307,7 @@ export interface UpdateSpaceInput {
   wiki_digest?: boolean; // 开启 WikiDigest 图谱蒸馏（默认关闭）
   wiki_audit_reads?: boolean; // 外部 wiki 读操作写审计事件（默认关闭）
   wiki_acl_defaults?: Record<string, string>; // namespace -> 默认 ACL 标签
+  memory_policy?: MemoryPolicy; // 替换空间策略；省略的成员使用服务端默认值
 }
 
 export interface FormationRestartInput {
@@ -217,7 +407,6 @@ export interface WikiHit {
   text: string;
   doc_title: string;
   heading_path: string[];
-  score?: number;
   citation: WikiCitation;
 }
 
@@ -341,11 +530,18 @@ export interface McpHttpServerConfig {
 }
 
 export interface Concept {
-  id?: string;
-  type?: string;
+  id: string;
+  kind: 'concept';
+  space_id?: string;
+  schema_ref?: string;
+  key?: string;
   name?: string;
+  canonical_id?: string;
+  aliases?: string[];
   attributes?: Record<string, unknown>;
-  metadata?: Record<string, unknown>;
+  facets?: Record<string, Record<string, unknown>>;
+  retention?: { retention_class?: string; expires_at?: string; legal_hold?: boolean };
+  _system?: Record<string, unknown>;
 }
 
 export interface ModelConfig {
@@ -353,8 +549,9 @@ export interface ModelConfig {
   model: string;
   api_base: string;
   api_key: string;
-  disabled: boolean;
+  disabled?: boolean;
   label?: string;
+  effort?: 'minimal' | 'low' | 'medium' | 'high' | 'max';
   bearer_auth?: boolean;
   stream?: boolean;
   context_window?: number;
@@ -374,7 +571,7 @@ export interface SpaceToken {
   created_at: number; // Unix timestamp in milliseconds
   updated_at: number; // Unix timestamp in milliseconds
   expires_at?: number; // Unix timestamp in milliseconds
-  labels?: string[]; // wiki ACL 标签：仅可见无标签内容 + 所列标签
+  labels?: string[]; // wiki ACL 标签：[] 仅可见无标签内容；缺省不受限
 }
 
 export interface StorageStats {
@@ -491,12 +688,22 @@ export interface ServiceInfo {
   description: string;
 }
 
-export type KipOperation = string | { op_id?: string; command: string; parameters?: Record<string, unknown> };
+export type KipOperation = string | {
+  op_id?: string;
+  language?: 'KQL' | 'KML' | 'META'; // 声明仅供参考；只读限制以解析后的命令为准
+  command?: string;
+  ast?: unknown;
+  parameters?: Record<string, unknown>;
+  idempotency_key?: string;
+  options?: { extensions?: Record<string, unknown> };
+  extensions?: Record<string, unknown>;
+};
 
 export interface KipRequest {
   command?: string; // 单条命令；与 `operations` 互斥
   operations?: KipOperation[]; // 一次往返执行多条命令
-  read?: { snapshot_token?: string }; // 把所有操作绑定到同一读取坐标
+  execution?: { mode: 'independent' | 'sequence' | 'atomic'; on_error?: 'stop' | 'continue'; isolation?: string; idempotency_key?: string; extensions?: Record<string, unknown> }; // 多于一条操作时必填
+  read?: { snapshot_token?: string; extensions?: Record<string, unknown> }; // 把所有操作绑定到同一读取坐标
   parameters?: Record<string, unknown>; // 绑定到命令中 `:placeholder` 的值
   dry_run?: boolean; // 仅校验与规划，不提交
 }
@@ -514,18 +721,27 @@ export interface KipOperationResult<T> {
   op_id?: string;
   status: 'succeeded' | 'failed' | 'skipped' | 'rolled_back' | 'no_effect';
   result?: T;
+  context?: unknown;
   error?: KipError;
   warnings?: unknown[];
   next_cursor?: string;
+  receipt?: unknown;
+  extensions?: Record<string, unknown>;
 }
 
 export interface KipResponse<T> {
   kip: '2.0';
+  request_id?: string;
   status: 'succeeded' | 'failed' | 'partial' | 'outcome_unknown';
   results: KipOperationResult<T>[];
-  snapshot?: { seq?: number; token?: string };
+  execution?: unknown;
+  context?: unknown;
+  snapshot?: { space_id?: string; snapshot_seq: number; schema_environment_version?: number; snapshot_token?: string; extensions?: Record<string, unknown> };
+  receipt?: unknown;
   warnings?: unknown[];
+  next_cursor?: string;
   error?: KipError; // 仅当请求在进入 operations 之前就失败时才设置
+  extensions?: Record<string, unknown>;
 }
 ```
 
@@ -537,7 +753,7 @@ export interface KipResponse<T> {
 
 ## 3) MCP Server
 
-HTTP 服务启动时，Anda Brain 会暴露支持流式传输的 HTTP MCP 端点，供支持 MCP 客户端的智能体直接调用：
+默认情况下，HTTP 服务会暴露支持流式传输的 HTTP MCP 端点；`MCP_HTTP_ENABLED=false` 可关闭它：
 
 ```text
 https://your-brain-host/mcp/my_space_001
@@ -565,6 +781,12 @@ MCP_AUTH_TOKEN="$SPACE_TOKEN" \
 | `anda_brain_get_or_init_user` | `{ user, name? }` | `Concept` | `write` |
 | `anda_brain_list_conversations` | `{ collection?, cursor?, limit? }` | `{ conversations, next_cursor }` | `read` |
 | `anda_brain_get_conversation` | `{ conversation_id, collection?, delta?, messages_offset?, artifacts_offset? }` | `Conversation` 或 `ConversationDelta` | `read` |
+| `anda_brain_wiki_search` | wiki 查询、过滤条件和结果上限 | `WikiSearchOutput` | `read` |
+| `anda_brain_wiki_read` | 文档 ID 和读取选择器 | `WikiReadOutput` | `read` |
+| `anda_brain_wiki_commit` | 文档字段和完整 Markdown 内容 | `WikiCommitOutput` | `write` |
+| `anda_brain_wiki_verify` | citation URI 或显式引用字段 | `WikiVerifyOutput` | `read` |
+
+MCP 只读 KIP 工具使用 `commands`，并为批量读取补上 independent 执行模式。HTTP `/execute_kip_readonly` 使用 `operations`，批量请求须显式提供 `execution.mode`。Wiki MCP 工具在启用 `wiki` feature 时提供；服务二进制始终启用该 feature。
 
 当设置了 `ED25519_PUBKEYS` 时，远程 MCP 客户端需要携带 `Authorization` bearer token；stdio 模式请通过 `MCP_AUTH_TOKEN` 或 `--mcp-auth-token` 配置 CWT 或 space token。`read` 工具也可无 token 访问 public space。远程 MCP 经过公司域名或反向代理暴露时，请设置 `MCP_HTTP_ALLOWED_HOSTS`。本地 stdio 开发可用 `--mcp-auto-create-space` 自动创建目标 space；远程开发可用 `MCP_HTTP_AUTO_CREATE_SPACE=true`，但在远程自动创建不存在的 space 前，必须配置好 `ED25519_PUBKEYS`，且客户端需提供该 space 拥有 `write` 范围的 CWT。
 
@@ -574,11 +796,11 @@ MCP_AUTH_TOKEN="$SPACE_TOKEN" \
 
 ## 4.1 公共接口
 
-### GET `/`
+### GET `/favicon.ico` 和 GET `/apple-touch-icon.webp`
 
-- 说明：返回产品网页（HTML 或 Markdown）。
+- 说明：产品图标静态资源
 - 鉴权：无
-- 响应：`text/html` 或 `text/markdown`
+- 响应：`image/x-icon` 或 `image/webp`
 
 ### GET `/info`
 
@@ -607,9 +829,17 @@ MCP_AUTH_TOKEN="$SPACE_TOKEN" \
 ### POST `/v1/{space_id}/recall`
 
 - 作用：按自然语言召回记忆
-- 鉴权：SpaceToken/CWT `read`（公开空间免鉴权，私有空间需有效 token）
+- 鉴权：SpaceToken/CWT `read`（公开空间免鉴权，私有空间需有效 token）。带标签限制的 space token 会收到 `403`，因为 agentic Recall 可跨所有 wiki 标签读取。
 - 请求体：`RecallInput`（Markdown 模式下也允许原始字符串）
-- 响应：`RpcResponse<AgentOutput>`
+- 响应（JSON/CBOR）：`RpcResponse<AgentOutput>`
+- 响应（Markdown）：纯文本 `AgentOutput.content`
+
+### POST `/v1/{space_id}/recall_structured`
+
+- 作用：返回合成答案、从检索轨迹提取的记忆引用、`found` 和可选不确定性。
+- 鉴权和请求体：同 `/recall`；带标签限制的 token 返回 `403`。
+- 响应（JSON/CBOR）：`RpcResponse<RecallOutput>`
+- 响应（Markdown）：纯文本 `RecallOutput.answer`
 
 <a id="recall-budget-contract"></a>
 
@@ -644,6 +874,20 @@ RPC/MCP 传输副本不属于这些范围。不根据模型名猜编码，也不
 
 `parameters` 中明确提供的值覆盖空间策略；省略项使用空间策略的默认值。同一份有效参数同时用于确定性 settlement 和维护模型，不修改持久化的空间策略。
 
+### POST `/v1/{space_id}/memory/pin`
+
+- 作用：固定或取消固定一个图谱实体；固定后其记忆强度不参与闲置衰减。
+- 鉴权：SpaceToken/CWT `write`
+- 请求体：`MemoryPinInput`；`pinned` 默认 `true`。
+- 响应：`RpcResponse<MemoryPinOutput>`
+
+### POST `/v1/{space_id}/memory/forget`
+
+- 作用：物理删除图谱实体；删除前可用 `dry_run: true` 检查影响。
+- 鉴权：SpaceToken/CWT `write`
+- 请求体：`MemoryForgetInput`；`dry_run` 默认 `false`。
+- 响应：`RpcResponse<MemoryForgetReport>`；单个实体的错误位于 `result.entities`。
+
 ### GET `/v1/{space_id}/memory_status`
 
 - 用途：读取记忆统计和最近一次维护报告。
@@ -659,6 +903,7 @@ RPC/MCP 传输副本不属于这些范围。不根据模型名猜编码，也不
 - 作用：执行 KIP 请求（只读模式，适用于查询）
 - 鉴权：SpaceToken/CWT `read`（公开空间免鉴权，私有空间需有效 token）
 - 请求体：`KipRequest`，或直接一个 JSON 字符串（按单条命令解析）
+- 若 `operations` 超过一项，必须提供 `execution.mode`；即使 HTTP 返回 `200`，也要检查顶层 `status` 和每个 `results[].status`。
 - 响应：`KipResponse<T>`（结果类型随命令而定）
 - 只读由命令**解析出的语义**决定：无论请求怎么标注，KML 变更都会在这里被拒绝
 
@@ -674,6 +919,10 @@ RPC/MCP 传输副本不属于这些范围。不根据模型名猜编码，也不
 - 作用：获取空间状态和统计
 - 鉴权：SpaceToken/CWT `read`（公开空间免鉴权，私有空间需有效 token）
 - 响应：`RpcResponse<SpaceInfo>`
+
+### GET `/v1/{space_id}/status`
+
+- `/v1/{space_id}/info` 的别名，鉴权和响应相同。
 
 ### POST `/v1/{space_id}/probe`
 
@@ -723,7 +972,7 @@ RPC/MCP 传输副本不属于这些范围。不根据模型名猜编码，也不
 
 Wiki 是空间的版本化参考记忆（政策、手册、SOP、API 文档）。写入是 Git 式不可变提交（CAS 并发控制）；检索返回可校验的 `wiki://` 引用。ACL：文档可携带 `acl_label`；带 `labels` 的 space token 仅可见无标签内容 + 所授标签——过滤在检索查询内部执行。公开空间的匿名读者仅可见无标签内容；越权一律表现为 404。
 
-Wiki 专属错误语义：`409` 提交冲突（`error.data.current_version` 为应 rebase 的版本）、`413` 内容超 1 MiB、`404` 不存在或 ACL 拒绝。
+Wiki 专属错误语义：`409` 提交冲突（`RpcError.data.current_version` 为应 rebase 的版本）、`413` 内容超 1 MiB、`404` 不存在或 ACL 拒绝。
 
 ### POST `/v1/{space_id}/wiki/docs`
 
@@ -821,7 +1070,7 @@ Wiki 专属错误语义：`409` 提交冲突（`error.data.current_version` 为�
 
 - 作用：新增 Space Token
 - 鉴权：必须通过 CWT `write`（用户管理级鉴权）。铸造 `*`（全 scope）token 需要 `*` scope 的 CWT——`write` CWT 不能铸造高于自身 scope 的 token
-- 请求体：`AddSpaceTokenInput` —— `name` 必填且空间内唯一（是 token 的审计身份与吊销句柄）
+- 请求体：`AddSpaceTokenInput` —— `name` 必填且空间内唯一。仅 `read` token 可设置 `labels`；`[]` 表示仅可读无标签 wiki 内容，省略表示不受标签限制。
 - 响应：`RpcResponse<SpaceToken>`（新 token，前缀总是 `ST`；这是唯一携带完整 token 值的响应）
 
 ### POST `/v1/{space_id}/management/revoke_space_token`
@@ -833,10 +1082,17 @@ Wiki 专属错误语义：`409` 提交冲突（`error.data.current_version` 为�
 
 ### PATCH `/v1/{space_id}/management/update_space`
 
-- 作用：更新空间信息（名称、描述、公开/私有）
+- 作用：更新空间信息、wiki 设置及可选的 `memory_policy`（校验后作为新策略持久化）。
 - 鉴权：必须通过 CWT `write`（用户管理级鉴权）
 - 请求体：`UpdateSpaceInput`
 - 响应：`RpcResponse<true>`
+
+### POST `/v1/{space_id}/management/shadow_eval`
+
+- 作用：在空间副本上重放近期 Recall，对比候选记忆策略和当前策略；可能产生多次模型调用。
+- 鉴权：CWT `write`（不接受 space token）。
+- 请求体：`ShadowEvalInput`；`replay_sample` 默认采用空间策略，上限为 `16`。
+- 响应：`RpcResponse<ShadowReport>`
 
 ### PATCH `/v1/{space_id}/management/restart_formation`
 
@@ -896,7 +1152,16 @@ async function rpcPost<TReq, TRes>(
     body: JSON.stringify(body),
   });
 
-  return (await res.json()) as RpcResponse<TRes>;
+  const responseText = await res.text();
+  if (!res.ok) {
+    let message = responseText || `HTTP ${res.status}`;
+    try {
+      const error = JSON.parse(responseText) as RpcError;
+      if (error.message) message = error.message;
+    } catch { /* 中间件错误可能是纯文本 */ }
+    throw new Error(`HTTP ${res.status}: ${message}`);
+  }
+  return JSON.parse(responseText) as RpcResponse<TRes>;
 }
 
 // Recall
@@ -919,8 +1184,12 @@ if (recall.error) {
 
 - 认证失败：HTTP `401`，响应体为 `RpcError`
 - 参数错误：HTTP `400`，响应体为 `RpcError`
+- 无权访问：HTTP `403`；空间或 wiki 文档不存在：HTTP `404`
+- Wiki 提交冲突：HTTP `409`，当前版本位于 `RpcError.data.current_version`；wiki 内容超限：HTTP `413`
+- 模型请求限流：HTTP `429`；全局 HTTP 限流：HTTP `503`。这些中间件响应是纯文本。
 - 成功时：HTTP `200`，响应体通常为 `RpcResponse<T>`
-- 错误响应体始终为 JSON，即使请求指定了 `application/cbor` 或 `text/markdown`（包括携带 `error.data.current_version` 的 wiki `409` 冲突响应体）；只有成功响应体遵循 `Accept` 协商
+- 处理器错误即使在 `Accept` 请求 CBOR 或 Markdown 时也返回 JSON；未匹配路由和中间件错误可能是纯文本或空响应体。只有成功响应体遵循 `Accept`。
+- KIP 请求可能返回 HTTP `200`，但 `KipResponse.status` 或某项操作的 `status` 为 `failed`；必须检查两层 KIP 状态。
 - MCP 工具沿用同一分类：调用方可修复的失败以 JSON-RPC `invalid_params`/`invalid_request` 返回（wiki 提交冲突携带与 HTTP `409` 相同的 `data.current_version` 重试载荷），只有真正的内部错误才用 `internal_error`
 
 

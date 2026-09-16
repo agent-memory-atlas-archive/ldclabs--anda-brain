@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -127,5 +128,22 @@ func TestClientErrorEnvelope(t *testing.T) {
 	want := "HTTP 400: space not found"
 	if err.Error() != want {
 		t.Fatalf("unexpected error: %q, want %q", err.Error(), want)
+	}
+}
+
+func TestClientPreservesWikiConflictRetryData(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"message":"version conflict","data":{"current_version":12}}`))
+	}))
+	defer server.Close()
+	_, err := NewClient(server.URL, "s1", "token").WikiCommit(context.Background(), &WikiCommitInput{Title: "T", Content: "# T"})
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusConflict || httpErr.RPC == nil {
+		t.Fatalf("missing structured conflict: %v", err)
+	}
+	data, ok := httpErr.RPC.Data.(map[string]any)
+	if !ok || data["current_version"] != float64(12) {
+		t.Fatalf("retry data lost: %+v", httpErr.RPC.Data)
 	}
 }

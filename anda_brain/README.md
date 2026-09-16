@@ -465,7 +465,6 @@ Detailed API docs (with TypeScript request/response types):
 
 | Method  | Path                                                   | Description                                                                   | Auth Scope                   |
 | ------- | ------------------------------------------------------ | ----------------------------------------------------------------------------- | ---------------------------- |
-| `GET`   | `/`                                                    | Anda Brain website                                                            | —                            |
 | `GET`   | `/favicon.ico`                                         | Favicon                                                                       | —                            |
 | `GET`   | `/apple-touch-icon.webp`                               | Apple touch icon                                                              | —                            |
 | `GET`   | `/info`                                                | Service info (name, version, sharding)                                        | —                            |
@@ -476,7 +475,7 @@ Detailed API docs (with TypeScript request/response types):
 | `POST`  | `/v1/{space_id}/recall`                                | Query memory with natural language                                            | `read` (CWT or space token)  |
 | `POST`  | `/v1/{space_id}/recall_structured`                     | Recall with machine-readable provenance (citations, found, uncertainty)       | `read` (CWT or space token)  |
 | `POST`  | `/v1/{space_id}/probe`                                 | LLM-free metamemory existence check with negative-knowledge caching           | `read` (CWT or space token)  |
-| `POST`  | `/v1/{space_id}/memory/pin`                            | Pin/unpin a memory (pinned memories are exempt from confidence decay)         | `write` (CWT or space token) |
+| `POST`  | `/v1/{space_id}/memory/pin`                            | Pin/unpin a memory (pinned memories are exempt from disuse decay)             | `write` (CWT or space token) |
 | `POST`  | `/v1/{space_id}/memory/forget`                         | Privacy-grade deletion (dry-run supported; physically removes, not archives)  | `write` (CWT or space token) |
 | `GET`   | `/v1/{space_id}/memory_status`                         | Memory observability: usage/probe/self-test counters, rates, graph counts    | `read` (CWT or space token)  |
 | `POST`  | `/v1/{space_id}/management/shadow_eval`                | Compare a candidate memory policy on forked copies (recent-recall replay)     | `write` (CWT)                |

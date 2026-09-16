@@ -123,17 +123,34 @@ anda-cli --space-id my_space --token $TOKEN recall "What are the user's preferen
 anda-cli --space-id my_space --token $TOKEN recall \
   --context-counterparty u1 "What happened in the last meeting?"
 
+# Return structured provenance, or opt into a bounded memory packet
+anda-cli --space-id my_space --token $TOKEN recall --structured "What happened?"
+anda-cli --space-id my_space --token $TOKEN recall --budget \
+  --budget-max-tokens 2048 --budget-context-tokens 16000 "What should I know?"
+
+# Model-free retrieval check and memory observability
+anda-cli --space-id my_space --token $TOKEN probe --limit 8 "project name"
+anda-cli --space-id my_space --token $TOKEN memory-status
+
+# Pin/unpin an entity, then inspect a deletion before applying it
+anda-cli --space-id my_space --token $TOKEN memory pin C-7
+anda-cli --space-id my_space --token $TOKEN memory pin --pinned=false C-7
+anda-cli --space-id my_space --token $TOKEN memory forget --dry-run C-7
+anda-cli --space-id my_space --token $TOKEN memory forget C-7
+
 # Trigger maintenance
 anda-cli --space-id my_space --token $TOKEN maintenance
 anda-cli --space-id my_space --token $TOKEN maintenance --trigger on_demand --scope full
+anda-cli --space-id my_space --token $TOKEN maintenance \
+  --memory-strength-decay-factor 0.95 --unconsolidated-max-backlog 50
 
 # Execute a single read-only KIP command
 anda-cli --space-id my_space --token $TOKEN execute-kip-readonly \
   --request '{"command":"DESCRIBE PRIMER"}'
 
-# Execute read-only KIP request from inline JSON (batch commands)
+# Execute a KIP 2.0 batch (HTTP uses operations; MCP tools use commands)
 anda-cli --space-id my_space --token $TOKEN execute-kip-readonly \
-  --request '{"commands":[{"command":"query_domain","parameters":{"query":"user preferences"}}]}'
+  --request '{"operations":["DESCRIBE PRIMER","DESCRIBE SCHEMA ENVIRONMENT"],"execution":{"mode":"independent"}}'
 
 # Execute read-only KIP request from file
 anda-cli --space-id my_space --token $TOKEN execute-kip-readonly --file ./kip_request.json
@@ -180,6 +197,12 @@ anda-cli --space-id my_space --token $CWT_TOKEN management add-token --name writ
 anda-cli --space-id my_space --token $CWT_TOKEN management add-token \
   --name hr-viewer --scope read --labels hr,finance
 
+# Read only unlabeled wiki documents; distinct from an unrestricted token
+anda-cli --space-id my_space --token $CWT_TOKEN management add-token \
+  --name public-viewer --scope read --unlabeled-only
+
+# Label-restricted tokens cannot use agentic recall or read conversation history.
+
 # Revoke a space token by full value
 anda-cli --space-id my_space --token $CWT_TOKEN management revoke-token ST_xxx
 
@@ -197,6 +220,14 @@ anda-cli --space-id my_space --token $CWT_TOKEN management update-space \
   --wiki-digest \
   --wiki-audit-reads \
   --wiki-acl-defaults internal=staff,hr=hr
+
+# Replace the space memory policy (omitted members use server defaults)
+anda-cli --space-id my_space --token $CWT_TOKEN management update-space \
+  --memory-policy @./memory-policy.json
+
+# Compare a candidate policy before promoting it
+anda-cli --space-id my_space --token $CWT_TOKEN management shadow-eval \
+  --policy @./memory-policy.json --replay-sample 4
 
 # Restart formation for a conversation
 anda-cli --space-id my_space --token $CWT_TOKEN management restart-formation --conversation 42
@@ -216,10 +247,43 @@ anda-cli --space-id my_space --token $CWT_TOKEN management update-byok \
   --context-window 200000 \
   --max-output 8192
 
+# Reasoning effort can be set to minimal, low, medium, high, or max
+anda-cli --space-id my_space --token $CWT_TOKEN management update-byok \
+  --family anthropic --model claude-opus-4-6 \
+  --api-base https://api.anthropic.com/v1 --api-key @./api_key.txt --effort high
+
 # Or via environment variable:
 export ANDA_BYOK_API_KEY=sk-xxx
 anda-cli --space-id my_space --token $CWT_TOKEN management update-byok \
   --family anthropic --model claude-opus-4-6 --api-base https://api.anthropic.com/v1
+```
+
+### Wiki
+
+The `wiki` command covers the versioned reference document API. A write token is needed for commits, archive, restore, and digest; import/export require `*` scope. Read commands follow the space's public and ACL rules; `events` requires an unrestricted read credential. Citation verification does not require a model call.
+
+```bash
+# Commit a Markdown document; use --doc-id and --parent-version for a CAS update
+anda-cli --space-id my_space --token $TOKEN wiki commit \
+  --file ./guide.md --title "Guide" --namespace docs --tags onboarding
+anda-cli --space-id my_space --token $TOKEN wiki commit --input @./commit.json
+
+# In a commit JSON update, tags:[] clears tags and metadata:{} clears metadata
+
+anda-cli --space-id my_space --token $TOKEN wiki list --namespace docs --limit 20
+anda-cli --space-id my_space --token $TOKEN wiki get 7
+anda-cli --space-id my_space --token $TOKEN wiki read 7 --anchor setup
+anda-cli --space-id my_space --token $TOKEN wiki versions 7
+anda-cli --space-id my_space --token $TOKEN wiki search "installation" --namespaces docs
+anda-cli --space-id my_space --token $TOKEN wiki verify --uri 'wiki://my_space/7@12#0-100'
+anda-cli --space-id my_space --token $TOKEN wiki events --doc-id 7
+anda-cli --space-id my_space --token $TOKEN wiki archive 7
+anda-cli --space-id my_space --token $TOKEN wiki restore 7
+anda-cli --space-id my_space --token $TOKEN wiki digest
+
+# OKF bundle JSON has an entries array of {path, content} objects
+anda-cli --space-id my_space --token $FULL_TOKEN wiki import --input @./bundle.json
+anda-cli --space-id my_space --token $FULL_TOKEN wiki export --namespace docs
 ```
 
 ### Admin (requires platform admin auth)

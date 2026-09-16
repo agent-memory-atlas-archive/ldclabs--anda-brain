@@ -86,9 +86,9 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any) ([]b
 	if resp.StatusCode >= 400 {
 		var rpcErr RpcError
 		if json.Unmarshal(respBody, &rpcErr) == nil && rpcErr.Message != "" {
-			return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, rpcErr.Message)
+			return nil, &HTTPError{StatusCode: resp.StatusCode, RPC: &rpcErr}
 		}
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+		return nil, &HTTPError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 
 	return respBody, nil

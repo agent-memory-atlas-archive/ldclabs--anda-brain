@@ -1436,11 +1436,11 @@ pub struct ProbeOutput {
 }
 
 /// Pins (or unpins) one graph entity (memory evolution plan, module M6).
-/// Pinned memories are exempt from confidence decay; entity ids come from
+/// Pinned memories are exempt from disuse decay; entity ids come from
 /// `recall_structured` citations or probe hits.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MemoryPinInput {
-    /// `"C:<id>"` or `"P:<id>:<predicate>"`.
+    /// A graph element id such as `"C-7"`, `"P-3"` or `"A-2"`.
     pub entity: String,
 
     /// `true` to pin, `false` to unpin.
@@ -1456,8 +1456,8 @@ fn default_true() -> bool {
 /// Always run with `dry_run: true` first; the report shows what would go.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MemoryForgetInput {
-    /// Entity ids to delete: `"C:<id>"` (detaches and removes the concept
-    /// and all its propositions) or `"P:<id>:<predicate>"`.
+    /// Graph element ids to delete: `"C-7"` (purges the concept and its
+    /// propositions), `"P-3"` or `"A-2"`.
     pub entities: Vec<String>,
 
     #[serde(default)]
