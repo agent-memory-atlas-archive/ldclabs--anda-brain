@@ -2,6 +2,159 @@
 
 All notable changes to the Anda Brain project.
 
+## [0.12.0] — 2026-09-16
+
+**KIP 2.0 / CognitiveMemory 2.1 is a breaking release.** Anda Brain and its
+Cloudflare Worker now use the 2.0 memory model. Existing natural-language Brain
+endpoints remain, but direct KIP clients, response readers and persisted 1.x
+spaces must follow the changes below. A Proposition records meaning; an
+Assertion records an actor's stance and Evidence. Existence is not belief.
+
+### Upgrading a KIP 1.x space
+
+- Stop the 1.x writer, take a consistent backup and rehearse on a copy. Each
+  space migrates on **first access**, replacing its 1.x graph collections in
+  place. The migration is one-way; rollback requires the original backup.
+  It checkpoints extraction and vocabulary so interrupted runs can resume.
+- The migration preserves original rows in `kip_legacy_v1` and `LegacyRecord`,
+  maps recorded claims, valid time, retention, pinning and mnemonic values,
+  and retains conversations, policies, tokens and wiki data. Reconstructible
+  same-actor corrections become native supersession; ambiguous old corrections
+  remain auditable rather than becoming current belief. Unsupported learning
+  and operational artifacts keep Legacy identities without acquiring standing
+  or leases. It does not invent Evidence, verified identity, trust or authority.
+  Malformed identifiers and unresolved references can still require repair.
+- Stored 1.x element ids such as `C:7` and `P:11:has_allergy` must be
+  re-resolved; 2.0 uses ids such as `C-7`, `P-11` and `A-3`. Old-id usage,
+  derived metrics and miss caches reset once. The migration is tested against
+  an object-store snapshot produced by the published 0.11 packages. See the
+  [upgrade guide](anda_brain/README.md#upgrading-a-space-written-by-a-kip-1x-build).
+- Pre-release 2.0 development spaces with an older same-version Cognitive
+  Memory Profile may need recreation if package installation reports
+  `DigestMismatch`. The Worker has no 1.x Durable Object migration and starts
+  with a clean KIP 2.0 store.
+
+### Breaking KIP and API contracts
+
+- Belief questions use `BELIEF` projection; raw `FIND` remains for audit.
+  `insufficient` is not "no". Corrections create a new Assertion and
+  supersede the old one instead of rewriting a claim. Assertion confidence
+  does not decay with time.
+- Schema is protected, versioned control state rather than graph content.
+  Each space activates the Cognitive Memory Profile and its own
+  `kip://anda-brain/memory` package. Formation and Maintenance can propose
+  types and predicates through the host's `declare_memory_symbols` tool;
+  Recall cannot publish vocabulary, and KML cannot declare it.
+- `POST /v1/{space_id}/execute_kip_readonly` accepts the KIP 2.0
+  `{command}` or `{operations}` envelope (also a bare JSON command string).
+  Responses have top-level `status`, per-operation `results[]` and optional
+  request-level errors. Callers must check per-operation status, including
+  `no_effect` and `skipped`, and the top-level `outcome_unknown`; the absence
+  of an error does not prove a commit. Error codes are named registry values
+  such as `NotFoundOrNotVisible`, which does not distinguish absence from
+  invisibility, with `retry.class` rather than `KIP_` numbers.
+  Read-only and model write gates inspect parsed commands, not labels.
+- `Concept` now uses `schema_ref`, immutable `key`, `facets` and `_system`
+  instead of 1.x `type`/`metadata`; `name` remains a mutable label.
+  `get_or_init_user` matches on `key`. The `unsorted` graph counter becomes
+  `unconsolidated`; orphan and predicate-type counters follow the 2.0 model.
+  Maintenance settings become `memory_strength_decay_factor` and
+  `unconsolidated_max_backlog`; their old names still deserialize for stored
+  policy compatibility.
+
+### Formation, recall and maintenance
+
+- Formation captures one Evidence record per input message from the received
+  bytes, with a stable ingestion key and a bound `:msg1`…`:msg16` reference.
+  Replays deduplicate instead of retyping, truncating or duplicating what a
+  speaker said. Attribution remains separate from the authenticated caller.
+- Disuse settlement changes `MnemonicState.memory_strength` on Concepts,
+  never Assertion confidence. Recall reinforcement affects accessibility,
+  not truth. Pinning uses a retention class. Full Rust maintenance cycles
+  expire lapsed Assertions and archive records past `retention.expires_at`,
+  respecting legal holds. `POST /v1/{space_id}/memory/forget` performs an
+  authorized `PURGE` and leaves an erased identity stub; archive and
+  tombstone do not fulfill erasure.
+- Correction discovery has a durable transaction/id cursor, reports incomplete
+  pages and supplies revised roots with bounded `LIST DEPENDENTS` results to
+  Maintenance. Vocabulary publication invalidates Recall's cached primer.
+  Wiki withdrawal transitions exact document-owned Assertions under version
+  checks; restoring even the same document version creates a new Assertion
+  generation.
+- Watch arming and advancement use protected Nexus state, generations,
+  authorization coverage and version checks. Structured conditions advance
+  from the Change Stream; a silence Watch fires only after complete coverage
+  through its deadline. Text and mixed conditions remain deferred without a
+  semantic evaluator. Completing a model call does not prove stream coverage.
+  SleepTask completion likewise requires a live lease and guarded commit.
+  Older 2.0 operational records need explicit 2.1 replacements before native
+  arming or leasing.
+- Optional Recall budgets return a host-packed memory packet using the pinned
+  `o200k_base@tiktoken-rs-0.12.0` counter. Required constraints and warnings
+  precede optional content; packet and cumulative planning-input limits are
+  enforced without claiming semantic completeness or execution permission.
+  Requests without a budget policy retain ordinary Recall behavior.
+
+### Learning, experiments and removed interfaces
+
+- Skill behavior now lives in immutable `SkillRevision` records. Family
+  membership discovers comparison candidates; it neither picks a baseline nor
+  grants standing. Model plans cannot write trial, outcome, evaluation,
+  grading or lease control state. Unproven candidates remain unproven.
+- The opt-in Rust `learning` feature adds trusted frozen paired-trial
+  contracts, native record adapters, a Nexus evaluator, persistent host trial
+  runtime, fixed-cutoff settlement, review and safety revocation, and a
+  read-only Recall applicability check. Actual executor and independent
+  observer bindings are required; compiling the feature does not enable
+  production dispatch or automatic adoption. The optional Memory Interface
+  and its bundles are not advertised by either deployment.
+- The opt-in `experiments` feature adds isolated stores, snapshots, business
+  time, cost receipts, forced Recall budgets and bounded evaluator-only
+  procedure audits. The Rust `anda_brain::eval` API, `eval` CLI, global
+  prompt/policy overrides and bundled offline product fixtures are retired;
+  [MIB](anda_brain/README.md#offline-regression-and-instance-configuration)
+  owns product regressions. Online diagnostics, usage/correction ledgers,
+  shadow reports and the independent wiki retrieval corpus remain. The
+  `anda-brain-openclaw` package was removed.
+
+### Cloudflare Worker
+
+- The Worker runs an independent KIP 2.0 engine on `@ldclabs/kip-do` 0.13,
+  with one SQLite Durable Object per space. Direct KIP accepts structured
+  operations, parameters, `op_id` and `execution` modes `independent` or
+  `sequence` with stop-on-error; `atomic` is refused because no transaction
+  spans operations. Mutation outcomes live in
+  `extensions["kip-do/outcome"]`.
+- The Worker has host-owned vocabulary, keyword `SEARCH`, deterministic
+  mnemonic settlement, correction discovery, protected structured Watches,
+  task leases and `SET RETENTION`. It has no semantic/hybrid search, atomic
+  operation batch or retention-expiry sweep. It does not provide the Rust
+  service's wiki, MCP, CBOR/Markdown negotiation or asynchronous Formation
+  queue. Model maintenance cannot `PURGE`, `PURGE PAYLOAD` or set a legal hold.
+
+### Known limit
+
+- Rust bulk decay, correction discovery and self-test sampling still use
+  full-scan KQL capped at 65,536 solutions. On larger graphs these passes can
+  stop and report incomplete work; see the
+  [maintenance notes](anda_brain/README.md).
+
+### Fixes and release engineering
+
+- Search citations read the hit's nested `element`; probe misses are cached
+  only after exhaustive search. `IS_NULL` on absent paths works, and bare
+  `{"id": ...}` references no longer count as recalled memories. Both
+  engines reuse Propositions staged earlier in the same transaction.
+- Published Rust dependencies replace sibling `[patch.crates-io]` paths:
+  `anda_kip`, `anda_cognitive_nexus`, AndaDB and `anda_object_store` use 0.13;
+  `anda_core` and Anda Engine use 0.16; `cose2` uses 0.5 and
+  `ic_cose_types` 0.11. The Worker installs published `@ldclabs/kip-do`
+  0.13 from the pnpm lockfile. CI no longer checks out sibling runtimes.
+- KIP 2.0 reference policies and role cards are synchronized with the
+  published runtime; the Worker vendors and generates its prompt assets.
+  Deployment-specific `# A.` sections remain separate. The Rust runtime
+  supplies the syntax card and Profile from `anda_kip`.
+
 ## [0.11.0] — 2026-08-07
 
 ### Changed

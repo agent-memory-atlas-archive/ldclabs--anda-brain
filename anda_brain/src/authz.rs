@@ -4,11 +4,20 @@
 //! verification, space load, space-token verification — and both channels
 //! must resolve the caller's audit actor and wiki ACL view identically (the
 //! wiki launch review's P0-1 was exactly such a divergence). This module is
-//! the single source for that logic: HTTP handlers call [`authorize`] (or
-//! its [`ensure_sharding`]/[`check_cwt`]/[`load_space`] pieces when a body
-//! parse sits between the historical steps and error precedence must be
-//! preserved), and the MCP channel wraps [`authorize`] thinly, keeping only
-//! auto-create on its side.
+//! the single source for that logic.
+//!
+//! # Naming the admission rule
+//!
+//! [`authorize`] takes the token scope and the admission mode as separate
+//! arguments, and only a handful of their pairings are ones this service
+//! means. Spelling both out per call site made that pairing a convention
+//! every new endpoint had to know rather than a name it could pick, so HTTP
+//! handlers call one of [`read_public`], [`read_lenient`], [`credentialed`]
+//! or [`cwt_only`] instead — or the [`ensure_sharding`]/[`check_cwt`]/
+//! [`load_space`] pieces where a body parse sits between the historical steps
+//! and error precedence must be preserved. The MCP channel reaches
+//! [`authorize`] directly, because its auto-create fallback re-runs the whole
+//! prelude against a space that did not exist the first time.
 //!
 //! Channel-specific error surfaces stay channel-local:
 //! `From<AuthzError> for AppError` maps to HTTP statuses without leaking
@@ -206,12 +215,106 @@ pub async fn load_space(app: &AppState, space_id: &str) -> Result<Arc<Space>, Au
     })
 }
 
+/// Admits a caller to a read endpoint whose result depends on who is asking
+/// — wiki reads, conversations, agentic recall. See [`AuthzMode::PublicRead`].
+pub async fn read_public(
+    app: &AppState,
+    space_id: &str,
+    token: &str,
+    sharding: u32,
+    now_ms: u64,
+) -> Result<(Arc<Space>, Caller), AuthzError> {
+    authorize(
+        app,
+        space_id,
+        token,
+        Some(sharding),
+        TokenScope::Read,
+        AuthzMode::PublicRead,
+        now_ms,
+    )
+    .await
+}
+
+/// Admits a caller to a read endpoint that never consumes their identity —
+/// info, status, probe, read-only KIP. See [`AuthzMode::PublicReadLenient`].
+///
+/// Returns the space alone: an endpoint that admits anonymous readers without
+/// verifying a supplied token has no caller to speak of, and handing one back
+/// would invite a handler to read an ACL view this mode never established.
+pub async fn read_lenient(
+    app: &AppState,
+    space_id: &str,
+    token: &str,
+    sharding: u32,
+    now_ms: u64,
+) -> Result<Arc<Space>, AuthzError> {
+    let (space, _) = authorize(
+        app,
+        space_id,
+        token,
+        Some(sharding),
+        TokenScope::Read,
+        AuthzMode::PublicReadLenient,
+        now_ms,
+    )
+    .await?;
+    Ok(space)
+}
+
+/// Admits a caller that always has to present a credential with `scope`: a
+/// CWT, or failing that a space token. See [`AuthzMode::Credentialed`].
+pub async fn credentialed(
+    app: &AppState,
+    space_id: &str,
+    token: &str,
+    sharding: u32,
+    scope: TokenScope,
+    now_ms: u64,
+) -> Result<(Arc<Space>, Caller), AuthzError> {
+    authorize(
+        app,
+        space_id,
+        token,
+        Some(sharding),
+        scope,
+        AuthzMode::Credentialed,
+        now_ms,
+    )
+    .await
+}
+
+/// Admits a caller to a management endpoint: only a CWT is accepted, and
+/// space tokens are rejected outright. See [`AuthzMode::CwtOnly`].
+pub async fn cwt_only(
+    app: &AppState,
+    space_id: &str,
+    token: &str,
+    sharding: u32,
+    scope: TokenScope,
+    now_ms: u64,
+) -> Result<(Arc<Space>, Caller), AuthzError> {
+    authorize(
+        app,
+        space_id,
+        token,
+        Some(sharding),
+        scope,
+        AuthzMode::CwtOnly,
+        now_ms,
+    )
+    .await
+}
+
 /// The shared authorization prelude: sharding check (when `sharding` is
 /// `Some`), CWT verification, space load, then space-token verification per
 /// [`AuthzMode`]. Step order matters and mirrors what every call site did
 /// historically: authentication failures surface before load failures, and
 /// space-token verification (which bumps the token's usage counter) runs
 /// only after the space is available.
+///
+/// Prefer the named entries above; reach for this one only where the mode is
+/// genuinely a variable, as it is for the MCP channel's auto-create retry.
 pub async fn authorize(
     app: &AppState,
     space_id: &str,
@@ -274,7 +377,7 @@ pub async fn authorize(
 /// Shared by the HTTP and MCP channels so both audit trails name identical
 /// subjects.
 #[cfg(feature = "wiki")]
-pub fn wiki_actor(t: &Option<CWToken>, st: Option<&SpaceToken>) -> String {
+fn wiki_actor(t: &Option<CWToken>, st: Option<&SpaceToken>) -> String {
     if let Some(t) = t {
         return t.user.to_string();
     }
@@ -291,7 +394,7 @@ pub fn wiki_actor(t: &Option<CWToken>, st: Option<&SpaceToken>) -> String {
 /// and stored conversations — recall conversations persist the full runner
 /// history, including wiki tool output from behind any label. Shared by the
 /// HTTP and MCP channels so the guards cannot drift apart.
-pub fn label_restricted(st: Option<&SpaceToken>) -> bool {
+fn label_restricted(st: Option<&SpaceToken>) -> bool {
     st.is_some_and(|st| st.labels.is_some())
 }
 
@@ -302,7 +405,7 @@ pub fn label_restricted(st: Option<&SpaceToken>) -> bool {
 /// anonymous public fallback: recall runs on a then-private space embed
 /// labeled wiki tool output verbatim, and flipping the space public later
 /// must not hand that history to the world.
-pub fn conversation_read_forbidden(
+fn conversation_read_forbidden(
     t: &Option<CWToken>,
     st: Option<&SpaceToken>,
     collection: Option<&str>,
@@ -324,7 +427,7 @@ pub fn conversation_read_forbidden(
 /// Shared by the HTTP and MCP channels so the two never diverge (the launch
 /// review's P0-1 was exactly such a divergence).
 #[cfg(feature = "wiki")]
-pub fn wiki_read_access(t: &Option<CWToken>, st: Option<&SpaceToken>) -> WikiAccess {
+fn wiki_read_access(t: &Option<CWToken>, st: Option<&SpaceToken>) -> WikiAccess {
     let labels = if t.is_some() {
         None
     } else if let Some(st) = st {

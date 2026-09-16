@@ -8,12 +8,17 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: anda-brain
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: anda-brain
       - name: Install protobuf compiler (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -27,23 +32,49 @@ jobs:
         run: brew install protobuf
       - name: Install Rust stable
         run: rustup update --no-self-update stable
-      - name: Validate eval fixtures
-        # Globs every fixture so newly added files are validated without
-        # workflow edits; *_profile.json are profiles, the rest scenarios.
-        shell: bash
-        run: |
-          args=()
-          for fixture in anda_brain/evals/*.json; do
-            case "$fixture" in
-              *_profile.json) args+=(--profile "$fixture") ;;
-              *) args+=(--scenario "$fixture") ;;
-            esac
-          done
-          cargo run -p anda_brain --features mcp,wiki -- eval "${args[@]}" --validate-only
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features
+        run: cargo clippy -p anda_brain --all-targets --all-features -- -D warnings
       - name: Run tests
+        env:
+          # CognitiveMemory 2.1 schema validation exceeds Rust's 2 MiB test
+          # thread default in debug builds on the supported CI platforms.
+          RUST_MIN_STACK: 16777216
         run: cargo test --workspace --all-features -- --nocapture
+      - name: Check optional library surfaces
+        env:
+          RUST_MIN_STACK: 16777216
+        run: |
+          cargo test -p anda_brain --lib
+          cargo test -p anda_brain --lib --features wiki
+          cargo test -p anda_brain --lib --features mcp
+          cargo test -p anda_brain --lib --features learning,experiments
+  mib-regression:
+    name: MIB public product regression (no model)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: anda-brain
+      - uses: actions/checkout@v4
+        with:
+          repository: ldclabs/MIB
+          ref: ${{ vars.MIB_REF || '9425e33b43377c02111ea0bab3ba042f10dc7811' }}
+          path: mib
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install MIB runner
+        working-directory: mib
+        run: python -m pip install '.[test]'
+      - name: Run migrated public regressions
+        working-directory: mib
+        run: python scripts/check-brain-product-regression.py --output-dir '${{ runner.temp }}/brain-product-regression'
+      - name: Retain regression evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mib-brain-product-regression
+          path: ${{ runner.temp }}/brain-product-regression
   test-cli:
     name: Test anda-cli (Go)
     runs-on: ubuntu-latest
@@ -61,31 +92,16 @@ jobs:
         run: go vet ./...
       - name: Run tests
         run: go test ./...
-  test-openclaw:
-    name: Test anda-brain-openclaw (TypeScript)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-      - name: Typecheck
-        run: pnpm -C anda-brain-openclaw run typecheck
-      - name: Lint
-        run: pnpm -C anda-brain-openclaw run lint
-      - name: Build
-        run: pnpm -C anda-brain-openclaw run build
   test-worker:
     name: Test anda-brain-worker (TypeScript)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: anda-brain
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: anda-brain
       - uses: pnpm/action-setup@v4
         with:
           version: 11
@@ -93,6 +109,7 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+          cache-dependency-path: anda-brain/pnpm-lock.yaml
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Check

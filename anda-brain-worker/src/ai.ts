@@ -1,3 +1,4 @@
+import { digestParameters, runtimeOperations } from './cognitive.js'
 import type {
   AiBinding,
   JsonObject,
@@ -7,7 +8,8 @@ import type {
   Usage,
 } from './types.js'
 
-export const DEFAULT_AI_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
+/** Default model; context cost includes reference policy, role cards and ontology. */
+export const DEFAULT_AI_MODEL = '@cf/meta/llama-4-scout-17b-16e-instruct'
 
 export interface AiMessage {
   role: 'system' | 'user' | 'assistant'
@@ -30,14 +32,38 @@ const MUTATION_PLAN_SCHEMA: JsonObject = {
   type: 'object',
   additionalProperties: false,
   properties: {
+    types: {
+      type: 'array',
+      maxItems: 16,
+      items: { type: 'string' },
+      description:
+        'UpperCamelCase Concept type names this plan needs and the Space does not ' +
+        'already resolve. The host publishes them before running any command.',
+    },
+    predicates: {
+      type: 'array',
+      maxItems: 16,
+      items: { type: 'string' },
+      description:
+        'snake_case predicate names this plan needs and the Space does not already ' +
+        'resolve.',
+    },
     commands: {
       type: 'array',
       maxItems: 4,
       items: { type: 'string' },
     },
     summary: { type: 'string' },
+    digests: { type: 'object', description: 'Optional digest_ parameter name to canonical JSON content. Host computes SHA-256; use :digest_revision in behavior_digest. Content includes every revision attribute except behavior_digest.' },
+    runtime: { type: 'array', maxItems: 4, items: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        operation: { type: 'string', enum: ['arm_watch', 'lease_task'] },
+        target_ref: { type: 'string' }, expected_version: { type: 'integer', minimum: 1 },
+      }, required: ['operation', 'target_ref', 'expected_version'],
+    } },
   },
-  required: ['commands', 'summary'],
+  required: ['types', 'predicates', 'commands', 'summary'],
 }
 
 const RECALL_PLAN_SCHEMA: JsonObject = {
@@ -130,7 +156,36 @@ function validateMutationPlan(value: unknown): MutationPlan {
   if (typeof object.summary !== 'string') {
     throw new AiResponseError('memory mutation plan is missing `summary`')
   }
-  return { commands, summary: object.summary.trim() }
+  return {
+    commands,
+    // A model that declares nothing is the common case, and it is not an error:
+    // the Profile already names most of what a memory needs.
+    types: readSymbols(object.types),
+    predicates: readSymbols(object.predicates),
+    summary: object.summary.trim(),
+    parameters: digestParameters(object.digests),
+    runtime: runtimeOperations(object.runtime),
+  }
+}
+
+/**
+ * The symbols a plan proposes.
+ *
+ * Shape only. Whether a name is a legal symbol, whether the Space already has
+ * it, and whether it fits under the cap are the host's decisions, made where
+ * the vocabulary is — not here, where a refusal would look like a malformed
+ * model response.
+ */
+function readSymbols(value: unknown): string[] {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value)) {
+    throw new AiResponseError('declared symbols must be an array of strings')
+  }
+  return value
+    .filter((item): item is string => typeof item === 'string')
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .slice(0, 16)
 }
 
 function validateRecallPlan(value: unknown): RecallPlan {

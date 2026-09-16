@@ -1,0 +1,35 @@
+UPSERT {
+  CONCEPT ?alice { {type: "Person", name: "fixture_alice"} }
+  CONCEPT ?old { {type: "Preference", name: "fixture_dark"} SET ATTRIBUTES {strength: 0.8} }
+  CONCEPT ?new { {type: "Preference", name: "fixture_light"} }
+  CONCEPT ?event {
+    {type: "Event", name: "fixture_event"}
+    SET ATTRIBUTES {summary: "Alice revised a preference", start_time: "2026-01-01T00:00:00Z"}
+  }
+  CONCEPT ?insight {
+    {type: "Insight", name: "fixture_insight"}
+    SET ATTRIBUTES {insight_class: "lesson_learned", description: "Verify changes before deploying"}
+  }
+  CONCEPT ?commitment {
+    {type: "Commitment", name: "fixture_commitment"}
+    SET ATTRIBUTES {commitment_class: "promise", description: "Send the report", status: "pending", due_at: "2030-01-01T00:00:00Z"}
+  }
+  CONCEPT ?task {
+    {type: "SleepTask", name: "fixture_task"}
+    SET ATTRIBUTES {target_type: "Event", target_name: "fixture_event", requested_action: "consolidate_to_semantic", reason: "Review the preference change", status: "pending", priority: 1}
+  }
+}
+WITH METADATA {source: "fixture", author: "$self", confidence: 0.9}
+
+UPSERT {
+  CONCEPT ?pinned { {type: "Preference", name: "fixture_pinned"} }
+}
+WITH METADATA {source: "fixture", author: "$self", pinned: true, memory_strength: 0.8, salience: 0.6}
+
+UPSERT {
+  PROPOSITION ?old { ({type: "Person", name: "fixture_alice"}, "prefers", {type: "Preference", name: "fixture_dark"}) }
+  WITH METADATA {status: "retracted", superseded: true, valid_until: "2020-01-01T00:00:00Z", expires_at: "2020-01-01T00:00:00Z"}
+  PROPOSITION ?new { ({type: "Person", name: "fixture_alice"}, "prefers", {type: "Preference", name: "fixture_light"}) }
+  WITH METADATA {status: "active"}
+}
+WITH METADATA {source: "fixture", author: "$self", confidence: 0.9}

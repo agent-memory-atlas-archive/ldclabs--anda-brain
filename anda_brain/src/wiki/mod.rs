@@ -824,7 +824,13 @@ impl WikiService {
     /// range, or the bounded full text. Historical versions are re-chunked
     /// in memory (the chunker is deterministic), so time-travel reads work
     /// without keeping historical chunk rows.
-    pub async fn read(&self, input: WikiReadInput) -> Result<WikiReadOutput, WikiError> {
+    ///
+    /// Private, like the three unscoped reads below it: this one answers with
+    /// document bytes and applies no label check, so the only way to reach it
+    /// is [`WikiService::read_scoped`], which guards the document first. A
+    /// visible pair of `read`/`read_scoped` invited a caller to pick the
+    /// wrong one, and picking wrong is an ACL bypass rather than a bug.
+    async fn read(&self, input: WikiReadInput) -> Result<WikiReadOutput, WikiError> {
         let doc = self.doc_record(input.doc_id).await?;
         let version_id = input.version.unwrap_or(doc.current_version);
         let version = self.version_record(version_id).await?;
@@ -926,7 +932,7 @@ impl WikiService {
     /// match stored content. `Superseded` reports the version that replaced
     /// the cited one. Mismatches are never evented: any anonymous caller
     /// could otherwise flood the audit log through `/wiki/verify`.
-    pub async fn verify(
+    async fn verify(
         &self,
         actor: String,
         input: WikiVerifyInput,
@@ -1032,7 +1038,7 @@ impl WikiService {
         Ok(self.doc_record(doc_id).await?.into())
     }
 
-    pub async fn list_docs(
+    pub(super) async fn list_docs(
         &self,
         input: WikiListDocsInput,
     ) -> Result<WikiDocListOutput, WikiError> {
@@ -1089,7 +1095,7 @@ impl WikiService {
         })
     }
 
-    pub async fn list_versions(
+    async fn list_versions(
         &self,
         doc_id: u64,
         cursor: Option<String>,
@@ -1297,7 +1303,7 @@ impl WikiService {
         Ok(())
     }
 
-    pub fn acl_defaults(&self) -> BTreeMap<String, String> {
+    fn acl_defaults(&self) -> BTreeMap<String, String> {
         self.docs
             .get_extension_as::<BTreeMap<String, String>>("wiki_acl_defaults")
             .unwrap_or_default()

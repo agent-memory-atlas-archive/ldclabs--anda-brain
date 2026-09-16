@@ -1,5 +1,8 @@
 # Anda Brain API 文档（含 TypeScript 类型）
 
+批量记忆强度代谢跳过 SleepTask/Watch 运行记录；宿主结算错误通过
+assessment.settlement_errors 提供给维护模型。
+
 ## 1) 通用约定
 
 - Base URL: `http://{host}:{port}`
@@ -11,6 +14,15 @@
   - 内容协商仅作用于成功响应体；错误响应体始终为 JSON，与 `Accept` 无关
 - 大多数业务接口都会返回 RPC 包装后的结构体：`RpcResponse<T>`
 - MCP 客户端可使用内置的支持流式传输的 HTTP MCP 端点：`/mcp/<space_id>`，也可以使用本地 stdio server：`anda_brain mcp --space-id <space_id> [local|aws]`
+
+CognitiveMemory 2.1 对齐说明：现有 JSON/CBOR/Markdown 请求和鉴权保持兼容；没有新增
+五意图 Memory Interface 或标准 after barrier。conversation id 不是处理回执。
+维护报告 `skills` 新增可选 `unsupported_reason`，说明没有配置可信学习管线，旧计数
+保持零。Watch 的 `disarmed` 兼容字段也统计 Nexus 的 expired；文本 Watch 保持 deferred。
+模型生成的 Formation 请求不得覆盖宿主捕获的 ingest 或 msgN 绑定；学习/runtime Facet
+写入返回 UnsupportedCapability。原始管理 KIP 仍接受符合 Nexus 契约的受权写入。
+使用精确 `@2.0.0` schema_ref 的旧 Watch/SleepTask 不能原地改成 2.1，需要显式创建、
+重连并核验替代记录后再归档旧记录。
 
 ---
 
@@ -33,7 +45,7 @@ export interface RpcResponse<T> {
 export interface InputContext {
   counterparty?: string;
   agent?: string;
-  source?: string;
+  source?: string; // 来源线程/渠道；不是提交或消息的去重键
   topic?: string;
 }
 
@@ -58,18 +70,25 @@ export interface Message {
 export interface FormationInput {
   messages: Message[]; // 至少包含一条非空消息（否则 400）
   context?: InputContext;
-  timestamp: string; // ISO 8601
+  timestamp?: string; // ISO 8601；建议提供
 }
 
 export interface RecallInput {
   query: string; // 不能为空/纯空白（否则 400）
   context?: InputContext;
+  budget?: RecallBudget | null;
+}
+
+export interface RecallBudget {
+  tokenizer?: 'o200k_base@tiktoken-rs-0.12.0';
+  max_tokens?: number; // 1–65536；显式启用后的默认值为 4096
+  context_tokens?: number; // 1–131072；默认 32768；整次规划输入规范序列化的累计上限
 }
 
 export interface MaintenanceParameters {
   stale_event_threshold_days?: number; // [1, 365]
-  confidence_decay_factor?: number; // (0, 1]
-  unsorted_max_backlog?: number; // [1, 10000]
+  memory_strength_decay_factor?: number; // (0, 1]；旧名 confidence_decay_factor 仍被接受
+  unconsolidated_max_backlog?: number; // [1, 10000]；旧名 unsorted_max_backlog 仍被接受
   orphan_max_count?: number; // [1, 10000]
 }
 
@@ -299,7 +318,7 @@ export interface WikiEventInfo {
 export interface WikiDigestReport {
   digested: number; // 本轮蒸馏进图谱的版本数
   facts: number; // 写入的命题数（metadata 携带 wiki:// 引用）
-  superseded: number; // 被标记 superseded 的旧命题数
+  superseded: number; // 因文档不再陈述而被 digest 撤回（retract）的断言数
   skipped: number;
   citations_checked: number; // 蒸馏后引用抽检
   citations_invalid: number;
@@ -472,27 +491,47 @@ export interface ServiceInfo {
   description: string;
 }
 
-export type KipCommandItem = string | { command: string; parameters: Record<string, unknown> };
+export type KipOperation = string | { op_id?: string; command: string; parameters?: Record<string, unknown> };
 
 export interface KipRequest {
-  commands: KipCommandItem[];
-  parameters?: Record<string, unknown>;
-  dry_run?: boolean; // if true, the request will be parsed and validated but not executed (no side effects)
+  command?: string; // 单条命令；与 `operations` 互斥
+  operations?: KipOperation[]; // 一次往返执行多条命令
+  read?: { snapshot_token?: string }; // 把所有操作绑定到同一读取坐标
+  parameters?: Record<string, unknown>; // 绑定到命令中 `:placeholder` 的值
+  dry_run?: boolean; // 仅校验与规划，不提交
 }
 
 export interface KipError {
-  code: string;
+  code: string; // 注册表名称，如 "NotFoundOrNotVisible"，不再是数字码
   message: string;
+  category?: string;
   hint?: string;
-  data?: unknown;
+  retry?: { class: string; after_ms?: number };
+  details?: unknown;
+}
+
+export interface KipOperationResult<T> {
+  op_id?: string;
+  status: 'succeeded' | 'failed' | 'skipped' | 'rolled_back' | 'no_effect';
+  result?: T;
+  error?: KipError;
+  warnings?: unknown[];
+  next_cursor?: string;
 }
 
 export interface KipResponse<T> {
-  result?: T;
-  error?: KipError;
-  next_cursor?: string;
+  kip: '2.0';
+  status: 'succeeded' | 'failed' | 'partial' | 'outcome_unknown';
+  results: KipOperationResult<T>[];
+  snapshot?: { seq?: number; token?: string };
+  warnings?: unknown[];
+  error?: KipError; // 仅当请求在进入 operations 之前就失败时才设置
 }
 ```
+
+> **KIP 2.0。** 普通错误在 operation 层，信封错误才在请求层，客户端两处都要读。
+> `outcome_unknown` 既不是成功也不是失败：写入可能已经提交，正确做法是按幂等键
+> 查事务，而不是当作没发生过重发一次。
 
 ---
 
@@ -518,7 +557,7 @@ MCP_AUTH_TOKEN="$SPACE_TOKEN" \
 | Tool | Input | Output | Scope |
 | ---- | ----- | ------ | ----- |
 | `anda_brain_remember_conversation` | `FormationInput` 形状（`messages`, `context`, `timestamp`） | `AgentOutput` | `write` |
-| `anda_brain_recall_memory` | `RecallInput` 形状（`query`, `context`） | `AgentOutput` | `read` |
+| `anda_brain_recall_memory` | `RecallInput` 形状（`query`, `context`，可选 `budget`） | `AgentOutput` | `read` |
 | `anda_brain_run_maintenance` | `MaintenanceInput` 形状 | `AgentOutput` | `write` |
 | `anda_brain_get_space_info` | 无 | `SpaceInfo` | `read` |
 | `anda_brain_get_formation_status` | 无 | `FormationStatus` | `read` |
@@ -572,6 +611,30 @@ MCP_AUTH_TOKEN="$SPACE_TOKEN" \
 - 请求体：`RecallInput`（Markdown 模式下也允许原始字符串）
 - 响应：`RpcResponse<AgentOutput>`
 
+<a id="recall-budget-contract"></a>
+
+### Recall 预算合同
+
+可选 `budget` 启用宿主选择的 JSON 记忆包，放在 `content` 中，替代自由生成的答案。
+`memory_policy.recall_budget` 可对所有 Recall 强制同一上限；请求只能收紧，不能提高或
+关闭策略。策略和请求均省略/null 时保持旧行为。
+
+固定 codec 对 compact JSON 记忆包全文计数，含转义和 coverage；`context_tokens`
+另行限制本次 Recall 所有规划输入规范序列化的累计 token。提供商消息模板、计费和
+RPC/MCP 传输副本不属于这些范围。不根据模型名猜编码，也不回退字符数估算。
+预算响应不会附带历史、thoughts、artifacts 或工具调用作为记忆旁路。
+
+`recall_structured` 将同一包放在 `answer`，不从完整 trace 另外复制 citations，并增加
+`memory_budget`：`tokenizer`、`token_limit`、`tokens`、`context_token_limit`；此模式的
+`found` 仅表示交付了非 Primer 候选，不表示已证明语义相关或完整。Markdown 返回同一
+包文本。`budget_insufficient` 或带静态 `failed_reason` 的字面量 `null` 表示不可用/
+不充分，不能当成成功的空答案。预算失败使用固定代码：`recall_output_budget_exhausted`、
+`recall_required_read_incomplete`、`recall_context_budget_exhausted`、
+`recall_deadline_reached`、`recall_model_unavailable`、
+`recall_planner_incomplete` 或 `recall_procedure_window_incomplete`。
+记忆包始终是候选读取（`semantic_complete=false`、`action_ready=false`）。
+必要约束和警告作为整体保留；无法容纳时不交付普通记忆，不用估算或自由答案绕过预算。
+
 ### POST `/v1/{space_id}/maintenance`
 
 - 作用：触发维护（睡眠/整理）
@@ -579,12 +642,25 @@ MCP_AUTH_TOKEN="$SPACE_TOKEN" \
 - 请求体：`MaintenanceInput`
 - 响应：`RpcResponse<AgentOutput>`
 
+`parameters` 中明确提供的值覆盖空间策略；省略项使用空间策略的默认值。同一份有效参数同时用于确定性 settlement 和维护模型，不修改持久化的空间策略。
+
+### GET `/v1/{space_id}/memory_status`
+
+- 用途：读取记忆统计和最近一次维护报告。
+- 鉴权：SpaceToken/CWT `read`；公开空间允许匿名读取。
+- 响应：`RpcResponse<MemoryStatus>`，保持 JSON/CBOR/Markdown 协商。
+- `result.last_settlement.correction_scan_incomplete`：本次有界扫描尚未证明 backlog 已耗尽，后续维护会从事务内部继续。
+- `result.last_settlement.correction_scan_through_seq`：已完整读取的最大事务序号。
+- `result.last_settlement.correction_scan_error`：扫描失败原因；失败不会推进游标。
+- 这些字段表示更正发现进度，不表示模型完成审查或 Watch 获得完整授权覆盖。
+
 ### POST `/v1/{space_id}/execute_kip_readonly`
 
 - 作用：执行 KIP 请求（只读模式，适用于查询）
 - 鉴权：SpaceToken/CWT `read`（公开空间免鉴权，私有空间需有效 token）
-- 请求体：`KipRequest`
-- 响应：`KipResponse<T>`（根据请求中的命令不同，返回不同的结果类型）
+- 请求体：`KipRequest`，或直接一个 JSON 字符串（按单条命令解析）
+- 响应：`KipResponse<T>`（结果类型随命令而定）
+- 只读由命令**解析出的语义**决定：无论请求怎么标注，KML 变更都会在这里被拒绝
 
 ### POST `/v1/{space_id}/get_or_init_user`
 
@@ -599,11 +675,19 @@ MCP_AUTH_TOKEN="$SPACE_TOKEN" \
 - 鉴权：SpaceToken/CWT `read`（公开空间免鉴权，私有空间需有效 token）
 - 响应：`RpcResponse<SpaceInfo>`
 
+### POST `/v1/{space_id}/probe`
+
+- 作用：无需模型的检索可达性检查；`found:false` 不代表信念被否定。
+- 鉴权：沿用 Space 的 `read` 权限和公开空间读取规则。
+- 请求：`{"query":"...", "limit":8}`。
+- 响应：`RpcResponse<ProbeOutput>`，含 `found`、`negative_cached`、可选 `hits` 和可选 `search_exhaustive`。后者来自 SEARCH result 顶层覆盖字段；缺省表示未知，有剩余分页时为 false。负缓存仅保存明确穷尽的检索 miss，不能作为不存在或信念被否定的证明。
+
 ### GET `/v1/{space_id}/formation_status`
 
 - 作用：获取记忆写入状态（更轻量级的接口，专门用于监控记忆写入进度）
 - 鉴权：SpaceToken/CWT `read`（公开空间免鉴权，私有空间需有效 token）
 - 响应：`RpcResponse<FormationStatus>`
+- 此接口是轻量监控，游标不是逐任务成功证明。Rust 宿主可用 `Space::processing_report` / `wait_for_processing` 区分排队、运行、失败、取消、中断和超时；超时后继续核对同一 conversation ID，不重新提交。
 
 ### GET `/v1/{space_id}/conversations/{conversation_id}?collection=<collection>`
 
@@ -719,7 +803,7 @@ Wiki 专属错误语义：`409` 提交冲突（`error.data.current_version` 为�
 
 ### POST `/v1/{space_id}/wiki/digest`
 
-- 作用：把待处理 wiki 版本蒸馏进 Cognitive Nexus（命题 metadata 携带 `wiki://` 引用）；新版本不再断言的旧命题被标记 superseded（需先 `update_space {"wiki_digest": true}` 开启）
+- 作用：把待处理 wiki 版本蒸馏进 Cognitive Nexus（每条事实写成 Proposition + 归属于 Brain 的 Assertion，并引用对应段落作为 Evidence）；新版本不再陈述的事实，digest 撤回它自己的 Assertion——Proposition 与他人的 Assertion 不受影响（需先 `update_space {"wiki_digest": true}` 开启）
 - 鉴权：SpaceToken/CWT `write`
 - 响应：`RpcResponse<WikiDigestReport>`
 
@@ -838,3 +922,39 @@ if (recall.error) {
 - 成功时：HTTP `200`，响应体通常为 `RpcResponse<T>`
 - 错误响应体始终为 JSON，即使请求指定了 `application/cbor` 或 `text/markdown`（包括携带 `error.data.current_version` 的 wiki `409` 冲突响应体）；只有成功响应体遵循 `Accept` 协商
 - MCP 工具沿用同一分类：调用方可修复的失败以 JSON-RPC `invalid_params`/`invalid_request` 返回（wiki 提交冲突携带与 HTTP `409` 相同的 `data.current_version` 重试载荷），只有真正的内部错误才用 `internal_error`
+
+
+### 隔离的 MIB 宿主
+
+相邻 Anda Bot 的 `mib` feature 在本机提供独立的 `/mib-agent/v0.1` 和
+`/mib-memory/v0.1` 协议；它们不属于本生产 Brain API 的路由。宿主使用
+`experiments` 实现隔离状态、完成屏障、单调业务时间和清理，详见
+[P2 接入](README.md#mib-integration)。适配器不声明在线学习能力；
+缺少 provider 或 observer 遥测的成本仍明确标为不完整。
+
+Rust 工厂 `Experiment::create_with_recall_budget` 在运行对外可用前持久化强制
+P5 预算。`audit_procedures()` 返回有界、只读的原生程序清单；截断计数不能证明
+不存在。仅 Bot MIB 的 `learning_audit` 扩展将该清单交给评测侧，不进入业务模型。
+它不启用学习，也不赋予执行权限。详见 [P6 验证](README.md#mib-integration)。
+
+P7 已退役 Rust `anda_brain::eval` API 与 `eval` CLI（含 optimizer/miner 参数）。
+MIB 提供公开产品回归 profile；自测、shadow 诊断、probe、引用与账本继续作为线上
+工具。运行策略使用各 Space 持久化的 `MemoryPolicy`。可信 Rust 宿主可以在共享或
+打开 Space 前调用 `AppState::with_agent_prompts(AgentPrompts)` 提供不可变的部署
+段：每段以 `# A.` 开头、最多 128 KiB，编译参考前缀保持原样。这不是 HTTP/MCP
+提示操作。详见 [P7 迁移](README.md#offline-regression-and-instance-configuration)。
+
+
+### 可信学习运行时（仅 Rust）
+
+启用 `learning` feature 后，`Space::learning()` 提供显式注册、冻结 cohort、
+有界 `drive` 步骤、重启后发现工作及独立认证的 Outcome 接收。原生 lease、当前
+可执行权限、依赖有效性和 policy pin 共同约束派发。这些宿主 API 不增加 HTTP/MCP
+路由或模型写权限；收齐 cohort 不会采纳 Skill。`settle(job_id)` 在固定 cutoff 后
+重算原生账本，原子提交裁决与 standing。`reviews()` 和 `enroll_review()` 提供保留
+原始采纳依据的持久复核；`submit_safety_signal()` 接受独立认证的安全撤销信号。
+`bind_application_context()` 接受短时有效的可信宿主环境观测，`procedure_status()`
+及 Recall 内部的 `check_procedure_status` 工具只读检查当前推荐条件，不授予执行权限。
+条件无法验证或复核到期时停止推荐。已配置 learning 的 Space 不允许通过 fork/snapshot
+复制操作 journal。详见 [P3 运行时](README.md#native-learning-contracts) 和
+[P4 生命周期与恢复](README.md#native-learning-contracts)。

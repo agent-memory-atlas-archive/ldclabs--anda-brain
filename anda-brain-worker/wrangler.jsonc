@@ -11,8 +11,12 @@
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["AndaBrain"] }
   ],
+  // The three mode prompts are the KIP 2.0 reference Brain policies plus the
+  // syntax card and the Cognitive Memory Profile — roughly 20k tokens before
+  // the payload. A 24k-context model cannot hold one, so the default is a
+  // long-context model; override AI_MODEL with a larger one in production.
   "vars": {
-    "AI_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+    "AI_MODEL": "@cf/meta/llama-4-scout-17b-16e-instruct"
   },
   "observability": { "enabled": true }
 }

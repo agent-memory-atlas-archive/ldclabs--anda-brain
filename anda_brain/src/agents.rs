@@ -3,50 +3,180 @@ mod maintenance;
 pub mod prompts;
 mod recall;
 
-use anda_core::{BoxError, ContentPart, Document, FunctionDefinition, Message, Principal, Usage};
-use anda_db::schema::DocumentId;
+use anda_core::{
+    BoxError, ContentPart, Document, FunctionDefinition, Json, Message, Principal, Resource, Tool,
+    ToolGroupInfo, ToolOutput, Usage,
+};
+use anda_db::{query::Fv, schema::DocumentId};
 use anda_engine::{
-    context::CompletionRunner,
-    memory::{Conversation, ConversationStatus},
+    context::{BaseCtx, CompletionRunner},
+    memory::{Conversation, ConversationStatus, KipArgs, MemoryManagement},
     unix_ms,
 };
+use anda_kip::Response;
 use parking_lot::RwLock;
-use serde_json::json;
-use std::{collections::VecDeque, sync::LazyLock};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::Arc,
+};
+
+use crate::kip;
 
 pub use formation::*;
 pub use maintenance::*;
 pub use recall::*;
 
-/// The KIP tool contract the brain exposes, replacing
-/// `anda_engine::memory::FUNCTION_DEFINITION` on both the writable
-/// `execute_kip` tool (via `MemoryManagement::with_kip_function_definitions`)
-/// and the read-only [`TimedMemoryReadonly`]. It keeps `parameters` optional
-/// where the engine's default requires it.
-pub(crate) static KIP_FUNCTION_DEFINITION: LazyLock<FunctionDefinition> = LazyLock::new(|| {
-    serde_json::from_value(json!({
-        "name": "execute_kip",
-        "description": "Executes one or more KIP (Knowledge Interaction Protocol) commands against the Cognitive Nexus to interact with your persistent memory.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "commands": {
-                    "type": "array",
-                    "description": "An array of KIP commands for batch execution (reduces round-trips). Commands are executed sequentially; execution stops on first KML error.",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "parameters": {
-                    "type": "object",
-                    "description": "An optional JSON object of key-value pairs used for safe substitution of placeholders in the command string(s). Placeholders should start with ':' (e.g., :name, :limit). IMPORTANT: A placeholder must represent a complete JSON value token (e.g., name: :name). Do not embed placeholders inside quoted strings (e.g., \"Hello :name\"), because substitution uses JSON serialization."
-                },
-            },
-            "required": ["commands"]
-        },
-        "strict": true
-    })).unwrap()
-});
+/// Reads the Person Concept a counterparty handle keys.
+///
+/// The handle is the Concept's `key`, not its `name`: a key is immutable
+/// Space-local identity, while a name is a mutable display label that several
+/// Concepts may share. A Person is semantic cognition and never a claim that
+/// this Concept can authenticate as anybody.
+pub(crate) const PERSON_BY_KEY: &str =
+    r#"FIND(?person) WHERE { ?person CONCEPT {type: "Person", key: :key} } LIMIT 1"#;
+
+/// The first row of a `FIND` result, or `Json::Null` when nothing matched.
+///
+/// A miss is not an error: "this Space holds no such Concept yet" is an
+/// ordinary answer, and raising it would make an empty memory look like a
+/// broken one.
+pub(crate) fn first_row(result: Json) -> Json {
+    match result {
+        Json::Array(rows) => rows.into_iter().next().unwrap_or(Json::Null),
+        other => other,
+    }
+}
+
+/// The observation the running formation pass was called on (Spec §71.1).
+///
+/// Carried through the context's extension state rather than through the
+/// tool's arguments, because the arguments are the model's and this is not: a
+/// field the model could write would let a conversation nominate its own
+/// Evidence payload, which is the fabrication the mechanism exists to prevent.
+/// A tool call's `BaseCtx` is a child of the agent's and inherits its state at
+/// creation, so setting it once before the completion covers every
+/// `execute_kip` the pass makes.
+///
+/// `None` is a real value and has to be set: formation processes conversations
+/// one after another on the same context, and leaving the previous one's
+/// observation in place would mint the wrong Evidence for the next.
+#[derive(Clone)]
+pub(crate) struct Observation(pub Option<Arc<anda_kip::IngestContext>>);
+
+/// `execute_kip`, with each writing agent's clause gate applied to it.
+///
+/// One tool serves both writing agents because both deployment contracts name
+/// `execute_kip` and the definition ships with the protocol; branching on the
+/// calling agent keeps the model-facing surface identical while the authority
+/// behind it is not. `BaseCtx::agent` is the agent whose context spawned this
+/// tool call, which the engine sets when it dispatches — not anything the
+/// model can write.
+///
+/// Formation gets the cognition subset and Maintenance the custodial one; the
+/// two gates and the reasons for each verb they hold back live in
+/// [`kip::execute_cognition_request`] and [`kip::execute_maintenance_request`].
+/// Every other caller reaches the ungated tool, which is what host code needs:
+/// the settlement passes and the forget path are deterministic, and a gate on
+/// what a *model* may plan has nothing to say about them.
+///
+/// Why a wrapper rather than a Governance grant: every agent here executes as
+/// the Space's system Principal ([`anda_cognitive_nexus::CognitiveNexus`]'s
+/// `Executor` impl runs `system_session()`), and the KIP request envelope
+/// carries no Principal of its own — §35's `context` explicitly grants neither
+/// identity nor authority — so the reference Maintenance policy §2 distinction
+/// between granted and ungranted permissions has nothing to attach to. Until
+/// the engine can hand an agent a scoped session, this is where "Formation
+/// writes cognition; it does not administer memory" is actually enforced
+/// instead of merely written down.
+#[derive(Clone)]
+pub struct GuardedMemory {
+    memory: Arc<MemoryManagement>,
+    clock: Arc<crate::runtime::BusinessClock>,
+}
+
+impl GuardedMemory {
+    pub fn new(memory: Arc<MemoryManagement>) -> Self {
+        Self {
+            memory,
+            clock: Arc::new(crate::runtime::BusinessClock::default()),
+        }
+    }
+    pub(crate) fn with_clock(mut self, clock: Arc<crate::runtime::BusinessClock>) -> Self {
+        self.clock = clock;
+        self
+    }
+}
+
+impl Tool<BaseCtx> for GuardedMemory {
+    type Args = KipArgs;
+    type Output = Response;
+
+    fn name(&self) -> String {
+        self.memory.name()
+    }
+
+    fn description(&self) -> String {
+        self.memory.description()
+    }
+
+    fn group(&self) -> Option<ToolGroupInfo> {
+        self.memory.group()
+    }
+
+    fn definition(&self) -> FunctionDefinition {
+        self.memory.definition()
+    }
+
+    async fn call(
+        &self,
+        ctx: BaseCtx,
+        args: Self::Args,
+        resources: Vec<Resource>,
+    ) -> Result<ToolOutput<Self::Output>, BoxError> {
+        let formation = ctx.agent == FormationAgent::NAME;
+        if !formation && ctx.agent != MaintenanceAgent::NAME {
+            return self.memory.call(ctx, args, resources).await;
+        }
+
+        let mut request = match args.into_request() {
+            Ok(request) => request,
+            Err(err) => return Ok(error_output(Response::from(err))),
+        };
+        self.clock.bind_read(&mut request)?;
+        // The observation rides the envelope so the model's commands cite
+        // `:msg1` instead of retyping what was said. Attached here rather than
+        // where the request is built because this is the only seam that knows
+        // both the pass it belongs to and the request it is going on.
+        if formation
+            && let Some(Observation(Some(observation))) = ctx.get_state::<Observation>()
+            && let Err(error) = kip::attach_observation(&mut request, &observation)
+        {
+            return Ok(error_output(Response::from(
+                anda_kip::KipError::not_authorized(error),
+            )));
+        }
+        let nexus = self.memory.nexus();
+        let nexus = nexus.as_ref();
+        Ok(error_output(if formation {
+            kip::execute_cognition_request(nexus, &request).await
+        } else {
+            kip::execute_maintenance_request(nexus, &request).await
+        }))
+    }
+}
+
+/// Wraps a KIP response as a tool output.
+///
+/// Anything short of `succeeded` is flagged as an error, `partial` included: a
+/// batch where one operation failed is not a clean result, and the
+/// per-operation detail the model needs to tell which is already in the
+/// payload.
+fn error_output(res: Response) -> ToolOutput<Response> {
+    let is_error = (!kip::succeeded(&res)).then_some(true);
+    let mut output = ToolOutput::new(res);
+    output.is_error = is_error;
+    output
+}
 
 #[async_trait::async_trait]
 pub trait BrainHook: Send + Sync {
@@ -265,6 +395,70 @@ pub(super) async fn drive_runner_loop<H: RunnerHost>(
     // hold turns skipped by the throttle.
     if unpersisted_turns > 0 && conversation.status == ConversationStatus::Working {
         host.persist_snapshot(conversation).await;
+    }
+}
+
+/// Marks a conversation failed and persists the verdict.
+///
+/// A persistence failure is logged, never propagated: the processing loop has
+/// already decided the conversation is over, and a store that would not take
+/// the verdict must not turn one failure into two. `update` is the store's
+/// own `update_conversation`, passed in because the two agents keep their
+/// conversations in different stores with the same method on each.
+pub(super) async fn mark_conversation_failed<F, Fut, E>(
+    update: F,
+    label: &str,
+    conversation: &mut Conversation,
+    reason: String,
+) where
+    F: FnOnce(u64, BTreeMap<String, Fv>) -> Fut,
+    Fut: Future<Output = Result<(), E>>,
+{
+    log::error!(
+        target: "brain",
+        "{label} conversation {} failed: {}",
+        conversation._id,
+        reason
+    );
+    conversation.failed_reason = Some(reason);
+    conversation.status = ConversationStatus::Failed;
+    conversation.updated_at = unix_ms();
+    if let Ok(changes) = conversation.to_changes() {
+        let _ = update(conversation._id, changes).await;
+    }
+}
+
+/// Persists the current full conversation snapshot; `to_changes` failures
+/// are logged and must not interrupt the processing loop.
+///
+/// `clear_failed_reason` writes an explicit null when the conversation has
+/// no failure, so a reason persisted by an earlier failed attempt does not
+/// survive the retry that succeeded. Formation retries; maintenance does
+/// not, and leaves the field alone.
+pub(super) async fn persist_conversation_snapshot<F, Fut, E>(
+    update: F,
+    label: &str,
+    conversation: &Conversation,
+    clear_failed_reason: bool,
+) where
+    F: FnOnce(u64, BTreeMap<String, Fv>) -> Fut,
+    Fut: Future<Output = Result<(), E>>,
+{
+    match conversation.to_changes() {
+        Ok(mut changes) => {
+            if clear_failed_reason && conversation.failed_reason.is_none() {
+                changes.insert("failed_reason".to_string(), Fv::Null);
+            }
+            let _ = update(conversation._id, changes).await;
+        }
+        Err(err) => {
+            log::error!(
+                target: "brain",
+                "Failed to serialize {label} conversation {} changes: {:?}",
+                conversation._id,
+                err
+            );
+        }
     }
 }
 

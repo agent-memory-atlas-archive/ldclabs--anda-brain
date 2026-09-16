@@ -1,28 +1,38 @@
 You have just completed the initial memory encoding for the conversation visible in your chat history above. Now perform a systematic review to ensure completeness and correctness.
 
-### Step 1 — Verify Persisted Data
+### Step 1 — Verify what committed
 
-Query the Cognitive Nexus using KQL to confirm what was actually written:
-- Retrieve the Events, Concepts, and Propositions you created. Check each by name or type.
-- Verify that every new concept has a `belongs_to_domain` proposition.
+A successful parse is not a commit. Read back what the transaction actually wrote:
 
-### Step 2 — Completeness Check
+- Retrieve the Evidence, Concepts, Propositions and Assertions you created, by id from the receipt's handles or by the keys you set.
+- Check that every truth-sensitive claim is an Assertion with a real `asserted_by`, a `mode`, and at least one Evidence citation — a Proposition standing alone is a statement nobody made.
+- Check that the Evidence payloads quote what was observed and carry the `conversation` id.
 
-Re-read the original input messages (in chat history) and verify ALL extractable knowledge was captured:
-1. **Episodic**: Event with complete attributes — summary, participants, event_class, start_time.
-2. **Semantic**: All stable facts, preferences, identity info, decisions, relationships, commitments, tasks, deadlines.
-3. **Cognitive**: Behavioral patterns, communication preferences, decision criteria (if present in the conversation).
-4. **Associations**: All related concepts properly linked via propositions.
-5. **Event-to-knowledge links**: Events linked to extracted semantic concepts via `derived_from` or equivalent.
+### Step 2 — Completeness
 
-### Step 3 — Quality Validation
+Re-read the original input messages and verify all durable knowledge was captured:
 
-1. Every element has required metadata: `source`, `author`, `confidence`, `observed_at`.
-2. Confidence properly calibrated: explicitly stated → 0.85–1.0; implied → 0.7–0.85; inferred → 0.5–0.7.
-3. Naming conventions: UpperCamelCase types, snake_case predicates.
-4. Event names follow deterministic pattern: `<EventClass>:<date>:<topic_slug>`.
-5. No duplicate concepts or propositions.
+1. **Episodic**: an Event where something happened worth anchoring — summary, participants, outcome, time.
+2. **Semantic**: stable claims, preferences, identity facts, decisions, relationships — each as Proposition + Assertion attributed to whoever made it.
+3. **Prospective**: promises, deadlines and reminders as `Commitment`, never as a retention expiry.
+4. **Experience**: only where the trajectory itself could teach future behaviour — with ordered `has_step` edges, including the failed attempts.
+5. **Lineage**: derived memory linked back to what it came from (`derived_from`), so a later correction can find it.
+
+### Step 3 — Quality
+
+1. Attribution is right: `by:` names the actor whose stance it is, not the caller and not `$self` for something a user said.
+2. `mode` matches how you came to it — `stated` for what someone said, `observed` for what the trace shows, `inferred` for what you concluded, with the premises cited.
+3. Confidence, when supplied, reflects the evidence for that attributed stance. It may be absent; never invent a score from a fixed range merely to fill the field. Salience and utility are optional too.
+4. Naming: UpperCamelCase types, snake_case predicates, and a symbol this Space already declares wherever one fits.
+5. No duplicate Concepts, and no second Assertion by the same actor about a Proposition you already asserted this run.
 
 ### Step 4 — Corrections
 
-Issue UPSERT/DELETE commands for any issues found. Prefer UPSERT for additions and updates; use DELETE only for genuinely incorrect data.
+Fix what is wrong, without falsifying what happened:
+
+- Missing memory → write it, in one more atomic `MUTATE`.
+- A claim you attributed or worded wrongly → a **new** Assertion with `SUPERSEDING` the old one. Never `UPDATE` an Assertion; the engine refuses it, and rewriting a stance would make the record disagree with the conversation it came from.
+- Wrong Evidence → `TRANSITION :old TO "corrected" BY :new`, never an edit in place.
+- Something that should not have been stored at all → say so in your output. `TRANSITION ... TO "tombstoned"` is maintenance's, not yours.
+
+Nothing here is repaired by making the past less true.

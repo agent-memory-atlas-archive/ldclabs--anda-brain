@@ -16,7 +16,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -28,6 +28,13 @@ struct ProcessingGuard(Arc<AtomicBool>);
 impl Drop for ProcessingGuard {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+struct ConversationGuard(Arc<AtomicU64>);
+impl Drop for ConversationGuard {
+    fn drop(&mut self) {
+        self.0.store(0, Ordering::SeqCst);
     }
 }
 
@@ -50,6 +57,7 @@ impl Drop for MaintenanceClaim {
 
 #[derive(Clone)]
 pub struct MaintenanceAgent {
+    prompt: Arc<str>,
     pub conversations: Conversations,
     /// The collection backing `conversations`. `Conversations` wraps document
     /// access only, so the maintenance watermarks — collection extensions —
@@ -57,11 +65,14 @@ pub struct MaintenanceAgent {
     pub conversations_collection: Arc<Collection>,
     memory: Arc<MemoryManagement>,
     processing: Arc<AtomicBool>,
+    active_conversation: Arc<AtomicU64>,
     /// True while a [`MaintenanceClaim`] holds `processing` on behalf of
     /// `Space::maintenance` and the claim has not been consumed by `run`.
     external_claim: Arc<AtomicBool>,
     hook: Arc<dyn BrainHook>,
     history: Arc<RwLock<VecDeque<Document>>>,
+    clock: Arc<crate::runtime::BusinessClock>,
+    tasks: crate::runtime::RuntimeTasks,
 }
 
 impl MaintenanceAgent {
@@ -73,10 +84,14 @@ impl MaintenanceAgent {
         hook: Arc<dyn BrainHook>,
     ) -> Self {
         Self {
+            prompt: super::prompts::active_prompt(super::prompts::PromptTarget::Maintenance),
+            clock: Arc::new(crate::runtime::BusinessClock::default()),
+            tasks: crate::runtime::RuntimeTasks::default(),
             memory,
             conversations,
             conversations_collection,
             processing: Arc::new(AtomicBool::new(false)),
+            active_conversation: Arc::new(AtomicU64::new(0)),
             external_claim: Arc::new(AtomicBool::new(false)),
             hook,
             history: Arc::new(RwLock::new(VecDeque::new())),
@@ -105,6 +120,26 @@ impl MaintenanceAgent {
         })
     }
 
+    pub(crate) fn with_prompt(mut self, prompt: Arc<str>) -> Self {
+        self.prompt = prompt;
+        self
+    }
+
+    pub(crate) fn with_clock(mut self, clock: Arc<crate::runtime::BusinessClock>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    pub(crate) fn with_tasks(mut self, tasks: crate::runtime::RuntimeTasks) -> Self {
+        self.tasks = tasks;
+        self
+    }
+
+    #[cfg(feature = "experiments")]
+    pub(crate) fn clear_history(&self) {
+        self.history.write().clear();
+    }
+
     pub async fn init(&self) -> Result<(), BoxError> {
         let (conversations, _) = self
             .conversations
@@ -116,7 +151,14 @@ impl MaintenanceAgent {
         // otherwise the next push_back would evict the newest entry first.
         *self.history.write() = conversations
             .into_iter()
-            .filter(|c| c.status == ConversationStatus::Completed)
+            .filter(|c| {
+                c.status == ConversationStatus::Completed
+                    && c._id
+                        > self
+                            .conversations_collection
+                            .get_extension_as::<u64>("history_boundary")
+                            .unwrap_or(0)
+            })
             .rev()
             .map(Document::from)
             .collect();
@@ -125,6 +167,10 @@ impl MaintenanceAgent {
 
     pub fn is_processing(&self) -> bool {
         self.processing.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn processing_id(&self) -> u64 {
+        self.active_conversation.load(Ordering::SeqCst)
     }
 
     pub fn get_processed(&self) -> Option<DocumentId> {
@@ -191,7 +237,12 @@ impl Agent<AgentCtx> for MaintenanceAgent {
     }
 
     fn tool_dependencies(&self) -> Vec<String> {
-        vec!["execute_kip".to_string(), NoteTool::NAME.to_string()]
+        vec![
+            "execute_kip".to_string(),
+            NoteTool::NAME.to_string(),
+            crate::vocabulary::DeclareSymbolsTool::NAME.to_string(),
+            crate::cognitive::MemoryRuntimeTool::NAME.to_string(),
+        ]
     }
 
     /// Receives a trigger envelope (MaintenanceInput JSON), creates a conversation to track the
@@ -227,7 +278,7 @@ impl Agent<AgentCtx> for MaintenanceAgent {
         let caller = ctx.caller();
         let now_ms = unix_ms();
         // Persistence failure must not block the maintenance cycle itself.
-        if let Err(err) = self.set_start_at(now_ms).await {
+        if let Err(err) = self.set_start_at(self.clock.now_ms()).await {
             log::warn!(
                 target: "brain",
                 "failed to persist maintenance start_at: {err:?}"
@@ -254,13 +305,16 @@ impl Agent<AgentCtx> for MaintenanceAgent {
             .add_conversation(ConversationRef::from(&conversation))
             .await?;
         conversation._id = id;
+        self.active_conversation.store(id, Ordering::SeqCst);
+        let conversation_guard = ConversationGuard(self.active_conversation.clone());
 
         let agent = self.clone();
         let ctx_clone = ctx.clone();
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             {
                 // Guard resets processing to false when the task completes or panics.
                 let _guard = guard;
+                let _conversation_guard = conversation_guard;
                 agent.process_one(&ctx_clone, &mut conversation).await;
                 if conversation.status == ConversationStatus::Completed
                     && let Err(err) = agent
@@ -297,42 +351,25 @@ use super::RUNNER_MAX_MODEL_TURNS as MAINTENANCE_MAX_MODEL_TURNS;
 
 impl MaintenanceAgent {
     async fn mark_conversation_failed(&self, conversation: &mut Conversation, reason: String) {
-        log::error!(
-            target: "brain",
-            "Maintenance conversation {} failed: {}",
-            conversation._id,
-            reason
-        );
-        conversation.failed_reason = Some(reason);
-        conversation.status = ConversationStatus::Failed;
-        conversation.updated_at = unix_ms();
-        if let Ok(changes) = conversation.to_changes() {
-            let _ = self
-                .conversations
-                .update_conversation(conversation._id, changes)
-                .await;
-        }
+        super::mark_conversation_failed(
+            |id, changes| self.conversations.update_conversation(id, changes),
+            "maintenance",
+            conversation,
+            reason,
+        )
+        .await;
     }
 
-    /// Persists the current full conversation snapshot; `to_changes` failures
-    /// are logged and must not interrupt the processing loop.
+    /// Persists the current full conversation snapshot. A maintenance cycle
+    /// is not retried, so its `failed_reason` is left as it was written.
     async fn persist_conversation_snapshot(&self, conversation: &Conversation) {
-        match conversation.to_changes() {
-            Ok(changes) => {
-                let _ = self
-                    .conversations
-                    .update_conversation(conversation._id, changes)
-                    .await;
-            }
-            Err(err) => {
-                log::error!(
-                    target: "brain",
-                    "Failed to serialize maintenance conversation {} changes: {:?}",
-                    conversation._id,
-                    err
-                );
-            }
-        }
+        super::persist_conversation_snapshot(
+            |id, changes| self.conversations.update_conversation(id, changes),
+            "maintenance",
+            conversation,
+            false,
+        )
+        .await;
     }
 
     async fn process_one(&self, ctx: &AgentCtx, conversation: &mut Conversation) {
@@ -382,11 +419,12 @@ impl MaintenanceAgent {
         let mut runner = ctx.clone().completion_iter(
             CompletionRequest {
                 instructions: format!(
-                    "{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Your Notes:\n{}\n\n# Current Datetime: {}",
-                    super::prompts::active_prompt(super::prompts::PromptTarget::Maintenance),
+                    "{}\n\n---\n\n{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Your Notes:\n{}\n\n# Current Datetime: {}",
+                    super::prompts::mode_reference(super::prompts::PromptTarget::Maintenance),
+                    self.prompt,
                     primer,
                     serde_json::to_string(&notes.items).unwrap_or_default(),
-                    local_date_hour(now_ms).unwrap_or_default()
+                    local_date_hour(self.clock.now_ms()).unwrap_or_default()
                 ),
                 prompt,
                 chat_history,
@@ -586,7 +624,7 @@ mod tests {
                 Ok(AgentOutput {
                     tool_calls: vec![ToolCall {
                         name: "execute_kip".to_string(),
-                        args: serde_json::json!({"commands": []}),
+                        args: serde_json::json!({"command": "DESCRIBE PRIMER"}),
                         result: None,
                         call_id: Some("over-threshold".to_string()),
                         remote_id: None,
@@ -633,7 +671,7 @@ mod tests {
                 Ok(AgentOutput {
                     tool_calls: vec![ToolCall {
                         name: "execute_kip".to_string(),
-                        args: serde_json::json!({"commands": []}),
+                        args: serde_json::json!({"command": "DESCRIBE PRIMER"}),
                         result: None,
                         call_id: Some("loop".to_string()),
                         remote_id: None,

@@ -7,10 +7,7 @@ use axum::extract::OriginalUri;
 use rmcp::{
     ErrorData, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{
-        CallToolResult, ContentBlock, Implementation, InitializeResult, ServerCapabilities,
-        ServerInfo,
-    },
+    model::{CallToolResult, ContentBlock, Implementation, InitializeResult, ServerCapabilities},
     schemars::JsonSchema,
     service::RequestContext,
     tool, tool_handler, tool_router,
@@ -163,6 +160,7 @@ impl RememberConversationInput {
 pub struct RecallMemoryInput {
     pub query: String,
     pub context: Option<InputContext>,
+    pub budget: Option<crate::recall_budget::RecallBudget>,
 }
 
 impl From<RecallMemoryInput> for RecallInput {
@@ -170,6 +168,7 @@ impl From<RecallMemoryInput> for RecallInput {
         Self {
             query: input.query,
             context: input.context,
+            budget: input.budget,
         }
     }
 }
@@ -193,6 +192,8 @@ impl From<RunMaintenanceInput> for MaintenanceInput {
             timestamp: input.timestamp,
             parameters: input.parameters,
             formation_id: 0,
+            // Runtime-filled by `Space::maintenance`, like `formation_id`.
+            assessment: None,
         }
     }
 }
@@ -205,6 +206,10 @@ pub struct GetOrInitUserToolInput {
     pub name: Option<String>,
 }
 
+/// One entry of [`ExecuteKipReadonlyInput::commands`].
+///
+/// A bare string or a command with its own parameter bindings, so a caller
+/// batching three reads does not have to spell out three objects to do it.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum McpKipCommandItem {
@@ -216,17 +221,14 @@ pub enum McpKipCommandItem {
     },
 }
 
-impl From<McpKipCommandItem> for anda_kip::CommandItem {
+impl From<McpKipCommandItem> for anda_kip::Operation {
     fn from(command: McpKipCommandItem) -> Self {
         match command {
-            McpKipCommandItem::Simple(command) => Self::Simple(command),
+            McpKipCommandItem::Simple(command) => anda_kip::Operation::new(command),
             McpKipCommandItem::WithParams {
                 command,
                 parameters,
-            } => Self::WithParams(anda_kip::ParameterizedCommand {
-                command,
-                parameters,
-            }),
+            } => anda_kip::Operation::new(command).with_parameters(parameters),
         }
     }
 }
@@ -248,19 +250,43 @@ pub struct ExecuteKipReadonlyInput {
 
 impl ExecuteKipReadonlyInput {
     fn into_request(self) -> Result<anda_kip::Request, ErrorData> {
-        if self.command.is_some() && !self.commands.is_empty() {
-            return Err(ErrorData::invalid_params(
-                "pass either command or commands, not both",
-                None,
-            ));
-        }
+        let operations: Vec<anda_kip::Operation> = match (self.command, self.commands) {
+            (Some(command), commands) if commands.is_empty() => {
+                vec![anda_kip::Operation::new(command)]
+            }
+            (None, commands) if !commands.is_empty() => {
+                commands.into_iter().map(Into::into).collect()
+            }
+            (Some(_), _) => {
+                return Err(ErrorData::invalid_params(
+                    "pass either command or commands, not both",
+                    None,
+                ));
+            }
+            (None, _) => {
+                return Err(ErrorData::invalid_params(
+                    "pass a command or a commands batch",
+                    None,
+                ));
+            }
+        };
+
+        // A KIP 2.0 request with more than one operation must say how they
+        // relate; these are reads, so they are independent of each other.
+        // There is no `readonly` flag to set: the read-only path decides by
+        // what each command parses to, which no envelope field can talk past.
+        let execution = (operations.len() > 1)
+            .then(|| anda_kip::Execution::new(anda_kip::ExecutionMode::Independent));
 
         Ok(anda_kip::Request {
-            command: self.command.unwrap_or_default(),
-            commands: self.commands.into_iter().map(Into::into).collect(),
-            parameters: self.parameters,
-            dry_run: self.dry_run,
-            readonly: true,
+            operations,
+            execution,
+            parameters: (!self.parameters.is_empty()).then_some(self.parameters),
+            options: self.dry_run.then(|| anda_kip::RequestOptions {
+                dry_run: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
         })
     }
 }
@@ -1210,7 +1236,7 @@ impl AndaBrainMcpServer {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for AndaBrainMcpServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> InitializeResult {
         InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(
                 Implementation::new("anda-brain-mcp", env!("CARGO_PKG_VERSION"))
@@ -1396,13 +1422,11 @@ fn space_id_from_mcp_path(path: &str, prefix: &str) -> Result<String, ErrorData>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testkit::{app_state_core, models_with_completer};
+    use crate::testkit::{app_state_core, models_with_completer, signed_token, signing_key};
     use anda_core::{AgentOutput, BoxPinFut, CompletionRequest};
     use anda_engine::model::{CompletionFeaturesDyn, reqwest};
-    use cose2::{CoseMap, Label, Sign1Message, Value as CoseValue, cwt::Claims, iana};
     use http::{HeaderMap, header};
-    use ic_auth_types::ByteBufB64;
-    use ic_cose_types::cose::ed25519::{SigningKey, VerifyingKey, ed25519_sign};
+    use ic_cose_types::cose::ed25519::VerifyingKey;
 
     #[derive(Debug)]
     struct FinalCompleter;
@@ -1462,40 +1486,6 @@ mod tests {
             auth_token: String::new(),
             sharding: None,
         }
-    }
-
-    fn test_signing_key() -> SigningKey {
-        SigningKey::from_bytes(&[9u8; 32])
-    }
-
-    fn signed_token(
-        signing_key: &SigningKey,
-        user: Principal,
-        audience: &str,
-        scope: &str,
-    ) -> String {
-        let claims = Claims {
-            subject: Some(user.to_string()),
-            audience: Some(audience.to_string()),
-            extra: CoseMap::from_iter([(
-                Label::Int(iana::CWTClaimScope),
-                CoseValue::Text(scope.to_string()),
-            )]),
-            ..Default::default()
-        };
-        let payload = claims.to_vec().unwrap();
-        let mut sign1 = Sign1Message::new(Some(payload));
-        let tbs_data = sign1
-            .prepare_signature(Some(Label::Int(iana::AlgorithmEdDSA)), None, None)
-            .unwrap();
-        sign1
-            .set_signature(
-                ed25519_sign(signing_key.as_bytes(), &tbs_data)
-                    .to_bytes()
-                    .to_vec(),
-            )
-            .unwrap();
-        ByteBufB64(sign1.to_vec().unwrap()).to_string()
     }
 
     #[test]
@@ -1757,7 +1747,7 @@ mod tests {
 
         // Auth enabled: an empty bearer is an anonymous caller, not the
         // synthetic dev CWT.
-        let signing_key = test_signing_key();
+        let signing_key = signing_key(9);
         let app = test_app_state("mcp_wiki_acl", vec![signing_key.verifying_key()]);
         let space_id = "mcp_wiki_acl_space";
         app.admin_create_space(
@@ -1905,6 +1895,7 @@ mod tests {
                 RecallMemoryInput {
                     query: "机密内容是什么?".to_string(),
                     context: None,
+                    budget: None,
                 },
             )
             .await
@@ -1998,7 +1989,7 @@ mod tests {
 
     #[tokio::test]
     async fn remote_auto_create_requires_write_cwt_before_creating_space() {
-        let signing_key = test_signing_key();
+        let signing_key = signing_key(9);
         let app = test_app_state("mcp_auto_create_auth", vec![signing_key.verifying_key()]);
         let server = AndaBrainMcpServer::new(
             app.clone(),

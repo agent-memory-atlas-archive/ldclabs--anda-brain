@@ -4,7 +4,6 @@ use anda_core::{
 };
 use anda_db::{
     collection::Collection,
-    query::Fv,
     schema::{DocumentId, Json, Map},
 };
 use anda_engine::{
@@ -12,7 +11,7 @@ use anda_engine::{
     extension::note::{NoteTool, load_notes, load_notes_from_legacy},
     local_date_hour,
     memory::{Conversation, ConversationRef, ConversationStatus, MemoryManagement},
-    unix_ms,
+    rfc3339_datetime, rfc3339_datetime_now, unix_ms,
 };
 use parking_lot::RwLock;
 use serde_json::json;
@@ -24,7 +23,7 @@ use std::{
     },
 };
 
-use super::{BrainHook, RunnerFlow, RunnerHost, drive_runner_loop};
+use super::{BrainHook, PERSON_BY_KEY, RunnerFlow, RunnerHost, drive_runner_loop, first_row};
 use crate::types::FormationInput;
 
 const REVIEW_INSTRUCTIONS: &str = include_str!("../../assets/BrainFormationReview.md");
@@ -35,15 +34,23 @@ const REVIEW_INSTRUCTIONS: &str = include_str!("../../assets/BrainFormationRevie
 use super::RUNNER_MAX_MODEL_TURNS as FORMATION_MAX_MODEL_TURNS;
 
 /// Resets the AtomicU64 to 0 on drop (panic guard for processing_conversation).
-struct ProcessingGuard(Arc<AtomicU64>);
+struct ProcessingGuard(Option<Arc<AtomicU64>>);
+impl ProcessingGuard {
+    fn disarm(mut self) {
+        self.0.take();
+    }
+}
 impl Drop for ProcessingGuard {
     fn drop(&mut self) {
-        self.0.store(0, Ordering::SeqCst);
+        if let Some(value) = &self.0 {
+            value.store(0, Ordering::SeqCst);
+        }
     }
 }
 
 #[derive(Clone)]
 pub struct FormationAgent {
+    prompt: Arc<str>,
     memory: Arc<MemoryManagement>,
     /// The collection backing `memory`'s conversations. `MemoryManagement`
     /// wraps document access only, so the `brain_processed` watermark — a
@@ -53,6 +60,8 @@ pub struct FormationAgent {
     hook: Arc<dyn BrainHook>,
     history: Arc<RwLock<VecDeque<Document>>>,
     max_input_tokens: usize,
+    clock: Arc<crate::runtime::BusinessClock>,
+    tasks: crate::runtime::RuntimeTasks,
 }
 
 impl FormationAgent {
@@ -64,6 +73,9 @@ impl FormationAgent {
         max_input_tokens: usize,
     ) -> Self {
         Self {
+            prompt: super::prompts::active_prompt(super::prompts::PromptTarget::Formation),
+            clock: Arc::new(crate::runtime::BusinessClock::default()),
+            tasks: crate::runtime::RuntimeTasks::default(),
             max_input_tokens,
             memory,
             conversations,
@@ -80,6 +92,26 @@ impl FormationAgent {
     /// user, so there is no single-user list to query; walk backwards from
     /// the newest conversation and keep the latest completed formation ones.
     /// The scan is bounded: this is best-effort context, not recovery state.
+    pub(crate) fn with_prompt(mut self, prompt: Arc<str>) -> Self {
+        self.prompt = prompt;
+        self
+    }
+
+    pub(crate) fn with_clock(mut self, clock: Arc<crate::runtime::BusinessClock>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    pub(crate) fn with_tasks(mut self, tasks: crate::runtime::RuntimeTasks) -> Self {
+        self.tasks = tasks;
+        self
+    }
+
+    #[cfg(feature = "experiments")]
+    pub(crate) fn clear_history(&self) {
+        self.history.write().clear();
+    }
+
     pub async fn init(&self) -> Result<(), BoxError> {
         // Matches the `push_completed_history` cap in `drive_runner_loop`.
         const HISTORY_LEN: usize = 2;
@@ -92,6 +124,11 @@ impl FormationAgent {
         while id > 0 && scanned < SCAN_LIMIT && newest.len() < HISTORY_LEN {
             scanned += 1;
             if let Ok(conv) = self.memory.get_conversation(id).await
+                && conv._id
+                    > self
+                        .conversations
+                        .get_extension_as::<u64>("history_boundary")
+                        .unwrap_or(0)
                 && conv.status == ConversationStatus::Completed
                 && conv
                     .label
@@ -111,32 +148,71 @@ impl FormationAgent {
         self.processing_conversation.load(Ordering::SeqCst) != 0
     }
 
+    pub(crate) fn processing_id(&self) -> u64 {
+        self.processing_conversation.load(Ordering::SeqCst)
+    }
+
     pub fn get_processed(&self) -> Option<DocumentId> {
         self.conversations
             .get_extension_as::<DocumentId>("brain_processed")
     }
 
+    /// Sets the formation watermark without processing anything, so a test can
+    /// stage "this Space has formed memory" without an LLM turn.
+    #[cfg(test)]
+    pub(crate) async fn set_processed_for_test(&self, id: DocumentId) {
+        self.conversations
+            .save_extension("brain_processed".to_string(), id.into())
+            .await
+            .unwrap();
+    }
+
+    /// Resolves the Person Concept for a counterparty, creating it once.
+    ///
+    /// The counterparty handle is the Concept's `key` — immutable Space-local
+    /// identity — while `name` is a mutable display label. Matching on the key
+    /// is what makes this idempotent: a name-only match would mint a second
+    /// Person for anyone who renamed themselves, and a `key` is identity within
+    /// its type, so `type` is not optional decoration here.
+    ///
+    /// A Person is semantic cognition. It is not a Principal and cannot
+    /// authenticate as one — which is why nothing about this write says
+    /// anything about what the counterparty may do.
     pub async fn get_or_init_counterparty(
         &self,
         counterparty: String,
         name: Option<String>,
     ) -> Result<Json, BoxError> {
-        let mut attributes = Map::new();
-        let mut metadata = Map::new();
-        attributes.insert("id".to_string(), counterparty.clone().into());
-        attributes.insert("person_class".to_string(), "Human".into());
-        if let Some(name) = name {
-            attributes.insert("name".to_string(), name.into());
-        }
-        metadata.insert("author".to_string(), "$system".into());
-        metadata.insert("status".to_string(), "active".into());
-        let user = self
-            .memory
-            .nexus()
-            .get_or_init_concept("Person".to_string(), counterparty, attributes, metadata)
+        let parameters = Map::from_iter([
+            ("key".to_string(), Json::from(counterparty.clone())),
+            (
+                "name".to_string(),
+                Json::from(name.unwrap_or_else(|| counterparty.clone())),
+            ),
+        ]);
+        self.memory
+            .execute(
+                r#"UPSERT CONCEPT ?person {
+  MATCH { type: "Person", key: :key }
+  SET FIELDS { name: :name }
+}"#,
+                Some(parameters),
+            )
             .await?;
 
-        Ok(user.to_concept_node())
+        // Read back rather than returning the write receipt: callers want the
+        // Person as it now stands, which on a match is not what this call sent.
+        Ok(first_row(
+            self.memory
+                .query(
+                    PERSON_BY_KEY,
+                    Some(Map::from_iter([(
+                        "key".to_string(),
+                        Json::from(counterparty),
+                    )])),
+                )
+                .await?,
+        ))
     }
 
     pub async fn start_process(
@@ -191,13 +267,13 @@ impl FormationAgent {
 
         let agent = self.clone();
         let pc = self.processing_conversation.clone();
-        tokio::spawn(async move {
-            // Guard resets processing_conversation to 0 if the task panics.
-            let guard = ProcessingGuard(pc);
+        let guard = ProcessingGuard(Some(pc));
+        self.tasks.spawn(async move {
+            // Guard is captured before spawn so cancellation before polling also releases the slot.
             agent.process_loop(ctx, conversation).await;
             // Normal exit: process_loop already manages the atomic properly,
             // so defuse the guard to avoid clobbering a valid value.
-            std::mem::forget(guard);
+            guard.disarm();
         });
     }
 
@@ -313,41 +389,25 @@ impl FormationAgent {
     }
 
     async fn mark_conversation_failed(&self, conversation: &mut Conversation, reason: String) {
-        log::error!(target: "brain", "Conversation {} failed: {}", conversation._id, reason);
-        conversation.failed_reason = Some(reason);
-        conversation.status = ConversationStatus::Failed;
-        conversation.updated_at = unix_ms();
-
-        if let Ok(changes) = conversation.to_changes() {
-            let _ = self
-                .memory
-                .update_conversation(conversation._id, changes)
-                .await;
-        }
+        super::mark_conversation_failed(
+            |id, changes| self.memory.update_conversation(id, changes),
+            "formation",
+            conversation,
+            reason,
+        )
+        .await;
     }
 
-    /// Persists the current full conversation snapshot; `to_changes` failures
-    /// are logged and must not interrupt the processing loop.
+    /// Persists the current full conversation snapshot. A formation is
+    /// retried, so a stale `failed_reason` is cleared on the way through.
     async fn persist_conversation_snapshot(&self, conversation: &Conversation) {
-        match conversation.to_changes() {
-            Ok(mut changes) => {
-                if conversation.failed_reason.is_none() {
-                    changes.insert("failed_reason".to_string(), Fv::Null);
-                }
-                let _ = self
-                    .memory
-                    .update_conversation(conversation._id, changes)
-                    .await;
-            }
-            Err(err) => {
-                log::error!(
-                    target: "brain",
-                    "Failed to serialize formation conversation {} changes: {:?}",
-                    conversation._id,
-                    err
-                );
-            }
-        }
+        super::persist_conversation_snapshot(
+            |id, changes| self.memory.update_conversation(id, changes),
+            "formation",
+            conversation,
+            true,
+        )
+        .await;
     }
 
     async fn process_one(&self, ctx: &AgentCtx, conversation: &mut Conversation) {
@@ -365,10 +425,11 @@ impl FormationAgent {
             }
         };
 
-        let counterparty = serde_json::from_str::<FormationInput>(&prompt)
-            .ok()
-            .and_then(|input| input.context)
-            .and_then(|input_ctx| input_ctx.counterparty);
+        let input = serde_json::from_str::<FormationInput>(&prompt).ok();
+        let counterparty = input
+            .as_ref()
+            .and_then(|input| input.context.as_ref())
+            .and_then(|input_ctx| input_ctx.counterparty.clone());
 
         let now_ms = unix_ms();
         // The context sources are independent; fetch them concurrently (same
@@ -390,6 +451,35 @@ impl FormationAgent {
                 }
             },
         );
+
+        // The observation this pass was called on, for the runtime to mint as
+        // Evidence (Spec §71.1). Set unconditionally — see [`Observation`] —
+        // and before the completion, so every `execute_kip` the model makes
+        // inherits it.
+        //
+        // A thread/channel is provenance, not the identity of an observation.
+        // Each durable conversation has its own key, stable across retries,
+        // so a later submission from the same source cannot cite old bytes.
+        ctx.base.set_state(super::Observation(
+            input
+                .as_ref()
+                .and_then(|input| {
+                    let origin = format!("formation:conversation:{}", conversation._id);
+                    crate::kip::observation_ingest(
+                        &input.messages,
+                        &input.timestamp.clone().unwrap_or_else(|| {
+                            rfc3339_datetime(conversation.created_at)
+                                .unwrap_or_else(rfc3339_datetime_now)
+                        }),
+                        &origin,
+                        counterparty_info
+                            .as_ref()
+                            .and_then(|person| person.get("id"))
+                            .and_then(Json::as_str),
+                    )
+                })
+                .map(Arc::new),
+        ));
 
         // add history conversations to provide more context for recall
         let chat_history: Vec<Document> = { self.history.read().iter().cloned().collect() };
@@ -413,12 +503,13 @@ impl FormationAgent {
         let mut runner = ctx.clone().completion_iter(
             CompletionRequest {
                 instructions: format!(
-                    "{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Your Notes:\n{}\n\n# Counterparty Profile:\n{}\n\n# Current Datetime: {}",
-                    super::prompts::active_prompt(super::prompts::PromptTarget::Formation),
+                    "{}\n\n---\n\n{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Your Notes:\n{}\n\n# Counterparty Profile:\n{}\n\n# Current Datetime: {}",
+                    super::prompts::mode_reference(super::prompts::PromptTarget::Formation),
+                    self.prompt,
                     primer,
                     serde_json::to_string(&notes.items).unwrap_or_default(),
                     serde_json::to_string(&counterparty_info).unwrap_or_default(),
-                    local_date_hour(now_ms).unwrap_or_default()
+                    local_date_hour(self.clock.now_ms()).unwrap_or_default()
                 ),
                 prompt,
                 chat_history,
@@ -502,7 +593,12 @@ impl Agent<AgentCtx> for FormationAgent {
     }
 
     fn tool_dependencies(&self) -> Vec<String> {
-        vec![self.memory.name(), NoteTool::NAME.to_string()]
+        vec![
+            self.memory.name(),
+            NoteTool::NAME.to_string(),
+            crate::vocabulary::DeclareSymbolsTool::NAME.to_string(),
+            crate::cognitive::MemoryRuntimeTool::NAME.to_string(),
+        ]
     }
 
     // 接收来自外部的 FormationInput，创建一个新的 Conversation，并启动处理流程。
@@ -732,7 +828,10 @@ mod tests {
                 Ok(AgentOutput {
                     tool_calls: vec![ToolCall {
                         name: "execute_kip".to_string(),
-                        args: serde_json::json!({"commands": []}),
+                        // A command the engine refuses, so the tool answers with
+                        // an error and the model is asked again: the point of
+                        // this fixture is a loop that never converges.
+                        args: serde_json::json!({"command": "NOT A VALID KIP COMMAND"}),
                         result: None,
                         call_id: Some("loop".to_string()),
                         remote_id: None,
@@ -771,7 +870,7 @@ mod tests {
                     return Ok(AgentOutput {
                         tool_calls: vec![ToolCall {
                             name: "execute_kip".to_string(),
-                            args: serde_json::json!({"commands": []}),
+                            args: serde_json::json!({"command": "DESCRIBE PRIMER"}),
                             result: None,
                             call_id: Some(format!("call-{call}")),
                             remote_id: None,
@@ -969,7 +1068,7 @@ mod tests {
         let processing = Arc::new(AtomicU64::new(42));
 
         {
-            let _guard = ProcessingGuard(processing.clone());
+            let _guard = ProcessingGuard(Some(processing.clone()));
             assert_eq!(processing.load(Ordering::SeqCst), 42);
         }
 
@@ -1413,12 +1512,28 @@ mod tests {
             "failed_reason: {:?}",
             conversation.failed_reason
         );
-        let stored = space
-            .memory
-            .get_conversation(conversation._id)
-            .await
-            .unwrap();
-        assert_eq!(stored.status, ConversationStatus::Failed);
+        assert_eq!(
+            stored_status(&space, conversation._id).await,
+            ConversationStatus::Failed
+        );
+    }
+
+    /// The persisted status of one conversation, allowing the write to become
+    /// visible.
+    ///
+    /// A conversation this long is rewritten on every throttled snapshot, and a
+    /// read issued in the same instant as the final write can still see the
+    /// previous one. The assertion is about what the agent persisted, not about
+    /// how fast the store settles.
+    async fn stored_status(space: &crate::space::Space, id: u64) -> ConversationStatus {
+        for _ in 0..50 {
+            let stored = space.memory.get_conversation(id).await.unwrap();
+            if stored.status != ConversationStatus::Working {
+                return stored.status;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        space.memory.get_conversation(id).await.unwrap().status
     }
 
     #[tokio::test]

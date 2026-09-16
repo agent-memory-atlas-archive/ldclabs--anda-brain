@@ -91,7 +91,13 @@ impl CWToken {
             .parse::<Principal>()
             .map_err(|_| "invalid 'sub' claim")?;
 
-        let audience = claims.audience.unwrap_or_default();
+        let audience = match claims.audience {
+            Some(value) => value
+                .as_str()
+                .ok_or("multiple audiences are not supported")?
+                .to_string(),
+            None => String::new(),
+        };
         Ok(Self {
             user,
             audience,
@@ -481,6 +487,25 @@ pub struct RecallInput {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<InputContext>,
+    /// Opt into a host-packed memory response and bounded model input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<crate::recall_budget::RecallBudget>,
+}
+
+impl RecallInput {
+    /// Structured Recall requests must not silently become unbudgeted prose
+    /// when a malformed or unsupported budget fails deserialization.
+    pub(crate) fn parse_prompt(text: &str) -> Result<Option<Self>, BoxError> {
+        match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(value)
+                if value.is_object()
+                    && (value.get("query").is_some() || value.get("budget").is_some()) =>
+            {
+                Ok(Some(serde_json::from_value(value)?))
+            }
+            _ => Ok(None),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -489,6 +514,8 @@ pub struct RecallInputRef<'a> {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: &'a Option<InputContext>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget: &'a Option<crate::recall_budget::RecallBudget>,
 }
 
 impl<'a> From<&'a RecallInput> for RecallInputRef<'a> {
@@ -496,6 +523,7 @@ impl<'a> From<&'a RecallInput> for RecallInputRef<'a> {
         Self {
             query: &input.query,
             context: &input.context,
+            budget: &input.budget,
         }
     }
 }
@@ -602,10 +630,191 @@ pub struct MaintenanceInput {
     /// The ID of the formation conversation that processed.
     #[serde(default)]
     pub formation_id: u64,
+
+    /// What the deterministic settlement measured, for the cycle's assessment
+    /// phase (reference policy §6).
+    ///
+    /// Runtime-filled: [`crate::space::Space::maintenance`] overwrites whatever
+    /// a caller sent, exactly like `formation_id`. A request body deciding what
+    /// the Brain believes about its own graph would be cognitive content
+    /// choosing its own evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assessment: Option<MaintenanceAssessment>,
 }
 
 fn default_trigger() -> String {
     "on_demand".to_string()
+}
+
+/// The settlement's measurements, handed to the Maintenance prompt.
+///
+/// Both halves were computed and stored long before they were shown to
+/// anybody: the census fed nothing, and the correction tallies fed nothing,
+/// while `BrainMaintenance.md` §A.1 told the model both were in its input.
+/// Reading them here is what makes that sentence true.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct MaintenanceAssessment {
+    /// Host pass failures. Model completion cannot turn a failed pass into a
+    /// successful no-op or a complete coverage claim.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settlement_errors: Vec<String>,
+
+    /// Registered predicate → number of links using it, from the last
+    /// full-scope census. Vocabulary sprawl is visible here and nowhere else:
+    /// two predicates meaning one thing show up as two thin counts.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub predicates: BTreeMap<String, u64>,
+
+    /// When that census ran, in unix milliseconds. Absent when none has:
+    /// only full cycles take it, so a `quick` cycle reads the previous one's,
+    /// and the model deserves to know how old it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audited_at: Option<u64>,
+
+    /// Semantic actor → how often that actor's own claims needed revising.
+    ///
+    /// A reliability signal about a *source*, never about a Principal's
+    /// authority: an actor who corrects themselves often is one whose fresh
+    /// claims deserve a lower initial confidence, not one who may do less.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub source_reliability: BTreeMap<String, SourceReliability>,
+
+    /// The Space's sequence coordinate as this cycle began.
+    ///
+    /// Current Space head for orientation. It is not a substitute for the real
+    /// ProjectionBasis and dependency pins of a refreshed WorkingState.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_seq: Option<u64>,
+
+    /// The armed Watches, so the cycle's delta evaluation has a set to
+    /// evaluate rather than a type name to go looking for.
+    ///
+    /// A Watch is attention, never authority: this list says what the Brain
+    /// declared it was waiting for, and firing one grants nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub armed_watches: Vec<ArmedWatch>,
+
+    /// Fired attention. A fired Watch grants no external authority and is not
+    /// automatically acknowledged or disarmed by this deployment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fired_watches: Vec<ArmedWatch>,
+
+    /// Legacy response field, no longer populated. Per-Watch consumed_seq is
+    /// protected WatchState; model completion never attests stream coverage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumed_seq: Option<u64>,
+
+    /// Assertions an actor superseded since the last cycle, each with the
+    /// cognition derived from it — the derivation review's input (§57.5).
+    ///
+    /// The runtime walks `LIST DEPENDENTS` so the cycle does not have to
+    /// guess which artifacts a revised root fed. Reachability is topology,
+    /// not judgment: a listed dependent is a candidate for `DerivationState
+    /// {status: "stale"}`, not already stale.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revised_roots: Vec<RevisedRoot>,
+}
+
+/// One Assertion an actor superseded, with what was derived from it.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+pub struct RevisedRoot {
+    /// The superseded Assertion.
+    pub assertion: String,
+
+    /// The Proposition it took a stance on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposition: Option<String>,
+
+    /// The actor whose claim was revised.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+
+    /// The Assertions that superseded it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub superseded_by: Vec<String>,
+
+    /// The coordinate the supersession committed at.
+    pub space_seq: u64,
+
+    /// What `LIST DEPENDENTS` reached from the Assertion, nearest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependents: Vec<Dependent>,
+
+    /// Set when the list is known to be incomplete: the traversal was cut by
+    /// an element this Principal may not discover (§63.5), the page was
+    /// full, or the read failed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+/// One element reached by a derivation walk (§63.5).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+pub struct Dependent {
+    pub id: String,
+    pub kind: String,
+    pub distance: u64,
+    /// The Activity through which it was reached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
+}
+
+/// One armed Watch, as the Maintenance prompt receives it.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+pub struct ArmedWatch {
+    pub id: String,
+
+    /// Exact persisted type. A 2.0 Watch must be replaced rather than being
+    /// presented as eligible for the 2.1 protected runtime.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub schema_ref: String,
+
+    /// Whole-element version used by the protected arm/advance operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+
+    /// `delta` (fire on a matching change) or `silence` (fire when `due_at`
+    /// passes without one). The two need different evidence, so the class is
+    /// not decoration.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub watch_class: String,
+
+    /// What counts as a matching change.
+    ///
+    /// The Profile's baseline form is a structured filter over Change Envelope
+    /// entries — `{element | slot | type, ops, touched, text}` (§5.11) — with a
+    /// plain string as the Brain-interpreted fallback. Carried here as text
+    /// either way: this deployment passes the condition through to the model
+    /// that evaluates it and never interprets it itself, so a structured
+    /// condition travels as its compact JSON rather than as a shape this type
+    /// would have to keep in step with the Profile.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub condition: String,
+
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub summary: String,
+
+    /// When a silence Watch comes due, as written.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub due_at: String,
+}
+
+/// One Watch attribute as text, whatever shape it was written in.
+///
+/// `Watch.condition` is `string | object` since the Profile gave the
+/// structured filter a baseline form (§5.11). A reader that only accepted a
+/// string would render a structured condition as the empty string — which
+/// reads as "this Watch declares no condition", the one thing a Watch always
+/// does. An object comes back as its compact JSON, which is what the model
+/// that evaluates it reads anyway.
+pub fn attribute_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -613,10 +822,16 @@ fn default_trigger() -> String {
 pub struct MaintenanceParameters {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stale_event_threshold_days: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub confidence_decay_factor: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub unsorted_max_backlog: Option<u32>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        alias = "confidence_decay_factor"
+    )]
+    pub memory_strength_decay_factor: Option<f64>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        alias = "unsorted_max_backlog"
+    )]
+    pub unconsolidated_max_backlog: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub orphan_max_count: Option<u32>,
 }
@@ -627,10 +842,12 @@ impl MaintenanceParameters {
     /// maintenance prompt, so an out-of-range value (e.g. a negative decay
     /// factor) must be rejected at the entry point, not trusted downstream.
     pub fn validate(&self) -> Result<(), BoxError> {
-        if let Some(decay) = self.confidence_decay_factor
+        if let Some(decay) = self.memory_strength_decay_factor
             && !(decay.is_finite() && 0.0 < decay && decay <= 1.0)
         {
-            return Err("maintenance parameter `confidence_decay_factor` must be in (0, 1]".into());
+            return Err(
+                "maintenance parameter `memory_strength_decay_factor` must be in (0, 1]".into(),
+            );
         }
         if let Some(days) = self.stale_event_threshold_days
             && !(1..=365).contains(&days)
@@ -639,11 +856,11 @@ impl MaintenanceParameters {
                 "maintenance parameter `stale_event_threshold_days` must be in [1, 365]".into(),
             );
         }
-        if let Some(backlog) = self.unsorted_max_backlog
+        if let Some(backlog) = self.unconsolidated_max_backlog
             && !(1..=10_000).contains(&backlog)
         {
             return Err(
-                "maintenance parameter `unsorted_max_backlog` must be in [1, 10000]".into(),
+                "maintenance parameter `unconsolidated_max_backlog` must be in [1, 10000]".into(),
             );
         }
         if let Some(orphans) = self.orphan_max_count
@@ -671,20 +888,44 @@ pub struct MemoryPolicy {
     #[serde(default = "MemoryPolicy::default_version")]
     pub version: u32,
 
-    /// Confidence multiplier maintenance decay applies per cycle. Matches
-    /// the default documented in BrainMaintenance.md.
-    #[serde(default = "MemoryPolicy::default_confidence_decay_factor")]
-    pub confidence_decay_factor: f64,
+    /// Multiplier disuse metabolism applies to `MnemonicState.memory_strength`
+    /// per cycle. Matches the default documented in BrainMaintenance.md.
+    ///
+    /// KIP 1.x called this `confidence_decay_factor` and applied it to link
+    /// confidence; KIP 2.0 forbids decaying an epistemic stance over time, so
+    /// the same knob now paces accessibility instead. The old name is still
+    /// accepted when reading a persisted policy.
+    #[serde(
+        default = "MemoryPolicy::default_memory_strength_decay_factor",
+        alias = "confidence_decay_factor"
+    )]
+    pub memory_strength_decay_factor: f64,
 
-    /// Stability gain per successful recall use (consumed from P1).
+    /// Retained for stored-policy compatibility; nothing reads it.
+    ///
+    /// This was the `memory_strength` gain a recall used to earn the Concepts
+    /// it surfaced. Reading must not reinforce what it read (reference Recall
+    /// policy §1, §32), so the settlement pass that spent this knob is gone.
+    /// The field stays so an existing `memory_policy` extension still
+    /// deserializes and a caller that still sends it is not rejected — setting
+    /// it simply has no effect.
     #[serde(default = "MemoryPolicy::default_recall_reinforcement")]
     pub recall_reinforcement: f64,
 
-    /// Confidence multiplier applied to corrected memories (consumed from P1).
+    /// Inert, and deliberately never to be consumed.
+    ///
+    /// This was declared as "confidence multiplier applied to corrected
+    /// memories" under KIP 1.x. KIP 2.0 forbids the operation it names: an
+    /// Assertion is immutable and its confidence is one actor's stance, so a
+    /// memory being corrected produces a *new* Assertion plus supersession —
+    /// never a coefficient applied to the old one. It stays declared because
+    /// `MemoryPolicy` is `deny_unknown_fields` and dropping a field would make
+    /// every stored policy that carries it fail to deserialize, silently
+    /// reverting that space to defaults. Nothing should ever wire it up.
     #[serde(default = "MemoryPolicy::default_correction_penalty")]
     pub correction_penalty: f64,
 
-    /// Lower bound decay may not push confidence below (consumed from P1).
+    /// Lower bound disuse metabolism may not push `memory_strength` below.
     #[serde(default = "MemoryPolicy::default_decay_floor")]
     pub decay_floor: f64,
 
@@ -692,9 +933,14 @@ pub struct MemoryPolicy {
     #[serde(default = "MemoryPolicy::default_stale_event_threshold_days")]
     pub stale_event_threshold_days: u32,
 
-    /// Unsorted-inbox size that maintenance should keep the graph under.
-    #[serde(default = "MemoryPolicy::default_unsorted_max_backlog")]
-    pub unsorted_max_backlog: u32,
+    /// Unconsolidated Event/Experience backlog that maintenance should keep
+    /// the graph under. Named `unsorted_max_backlog` before KIP 2.0, when the
+    /// backlog was the `Unsorted` Domain the profile no longer declares.
+    #[serde(
+        default = "MemoryPolicy::default_unconsolidated_max_backlog",
+        alias = "unsorted_max_backlog"
+    )]
+    pub unconsolidated_max_backlog: u32,
 
     /// Orphan-concept count that maintenance should keep the graph under.
     #[serde(default = "MemoryPolicy::default_orphan_max_count")]
@@ -709,14 +955,24 @@ pub struct MemoryPolicy {
     #[serde(default = "MemoryPolicy::default_self_test_token_budget")]
     pub self_test_token_budget: u64,
 
-    /// Semantic search threshold for recall-side probes (consumed from P1).
+    /// Declared ahead of its consumer; nothing reads it yet.
+    ///
+    /// A relevance floor for recall-side probes. `probe_memory` currently
+    /// filters by element type instead, because a `SEARCH` score is BM25
+    /// relevance with no cross-query scale — a fixed threshold needs a
+    /// normalized score to mean anything, and this engine does not publish
+    /// one.
     #[serde(default = "MemoryPolicy::default_recall_search_threshold")]
     pub recall_search_threshold: f64,
 
-    /// Model-turn limit for one recall run (consumed from P1; until then the
-    /// compiled `RECALL_MAX_MODEL_TURNS` applies).
+    /// Model-turn limit for one recall run; `validate` holds it in `[1, 50]`.
+    /// The default equals the compiled fallback the recall agent uses when a
+    /// space has no policy, so an unset policy is not a behavior change.
     #[serde(default = "MemoryPolicy::default_recall_max_rounds")]
     pub recall_max_rounds: u32,
+    /// Optional enforced ceilings. A request may tighten, never raise them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recall_budget: Option<crate::recall_budget::RecallBudget>,
 
     /// Shadow-evolution replay sample size (consumed from P4).
     #[serde(default = "MemoryPolicy::default_shadow_replay_sample")]
@@ -727,71 +983,33 @@ impl Default for MemoryPolicy {
     fn default() -> Self {
         Self {
             version: Self::default_version(),
-            confidence_decay_factor: Self::default_confidence_decay_factor(),
+            memory_strength_decay_factor: Self::default_memory_strength_decay_factor(),
             recall_reinforcement: Self::default_recall_reinforcement(),
             correction_penalty: Self::default_correction_penalty(),
             decay_floor: Self::default_decay_floor(),
             stale_event_threshold_days: Self::default_stale_event_threshold_days(),
-            unsorted_max_backlog: Self::default_unsorted_max_backlog(),
+            unconsolidated_max_backlog: Self::default_unconsolidated_max_backlog(),
             orphan_max_count: Self::default_orphan_max_count(),
             self_test_queries_per_cycle: Self::default_self_test_queries_per_cycle(),
             self_test_token_budget: Self::default_self_test_token_budget(),
             recall_search_threshold: Self::default_recall_search_threshold(),
             recall_max_rounds: Self::default_recall_max_rounds(),
+            recall_budget: None,
             shadow_replay_sample: Self::default_shadow_replay_sample(),
         }
     }
 }
 
-/// Process-wide policy override for optimizer runs (plan M10). Like the
-/// prompt override layer (`agents::prompts`), production never sets it: the
-/// eval CLI installs candidate policies here so run-scoped spaces (which
-/// have no stored policy) pick them up, and clears it when the run ends.
-static EVAL_POLICY_OVERRIDE: std::sync::RwLock<Option<MemoryPolicy>> = std::sync::RwLock::new(None);
-
 impl MemoryPolicy {
-    /// The space extension key the policy is stored under.
+    /// The per-Space extension key used for persisted policy configuration.
     pub const EXTENSION_KEY: &'static str = "memory_policy";
-
-    /// The active eval policy override, when one is installed.
-    pub fn eval_override() -> Option<MemoryPolicy> {
-        EVAL_POLICY_OVERRIDE
-            .read()
-            .expect("policy override lock poisoned")
-            .clone()
-    }
-
-    /// Installs (`Some`) or clears (`None`) the process-wide eval override.
-    pub fn set_eval_override(policy: Option<MemoryPolicy>) {
-        *EVAL_POLICY_OVERRIDE
-            .write()
-            .expect("policy override lock poisoned") = policy;
-    }
-}
-
-/// Arms a drop-time clear of the process-wide eval policy override. The
-/// optimizer holds one for the duration of a policy-genome run, so an early
-/// `?` return or panic can never leak a candidate policy into later evals
-/// (or parallel tests) through the global.
-pub struct EvalPolicyOverrideGuard(());
-
-impl EvalPolicyOverrideGuard {
-    pub fn arm() -> Self {
-        Self(())
-    }
-}
-
-impl Drop for EvalPolicyOverrideGuard {
-    fn drop(&mut self) {
-        MemoryPolicy::set_eval_override(None);
-    }
 }
 
 impl MemoryPolicy {
     fn default_version() -> u32 {
         1
     }
-    fn default_confidence_decay_factor() -> f64 {
+    fn default_memory_strength_decay_factor() -> f64 {
         0.95
     }
     fn default_recall_reinforcement() -> f64 {
@@ -808,7 +1026,7 @@ impl MemoryPolicy {
     fn default_stale_event_threshold_days() -> u32 {
         7
     }
-    fn default_unsorted_max_backlog() -> u32 {
+    fn default_unconsolidated_max_backlog() -> u32 {
         20
     }
     fn default_orphan_max_count() -> u32 {
@@ -839,6 +1057,9 @@ impl MemoryPolicy {
     /// into an unbounded LLM bill. Run before persisting so a bad policy can
     /// never be stored, only rejected.
     pub fn validate(&self) -> Result<(), BoxError> {
+        if let Some(budget) = &self.recall_budget {
+            budget.validate()?;
+        }
         fn in_range(name: &str, value: f64, min_exclusive: f64, max: f64) -> Result<(), BoxError> {
             if value.is_finite() && min_exclusive < value && value <= max {
                 Ok(())
@@ -855,8 +1076,8 @@ impl MemoryPolicy {
         }
 
         in_range(
-            "confidence_decay_factor",
-            self.confidence_decay_factor,
+            "memory_strength_decay_factor",
+            self.memory_strength_decay_factor,
             0.0,
             1.0,
         )?;
@@ -883,8 +1104,8 @@ impl MemoryPolicy {
             365,
         )?;
         int_range(
-            "unsorted_max_backlog",
-            u64::from(self.unsorted_max_backlog),
+            "unconsolidated_max_backlog",
+            u64::from(self.unconsolidated_max_backlog),
             1,
             10_000,
         )?;
@@ -927,8 +1148,8 @@ impl MemoryPolicy {
     pub fn maintenance_parameters(&self) -> MaintenanceParameters {
         MaintenanceParameters {
             stale_event_threshold_days: Some(self.stale_event_threshold_days),
-            confidence_decay_factor: Some(self.confidence_decay_factor),
-            unsorted_max_backlog: Some(self.unsorted_max_backlog),
+            memory_strength_decay_factor: Some(self.memory_strength_decay_factor),
+            unconsolidated_max_backlog: Some(self.unconsolidated_max_backlog),
             orphan_max_count: Some(self.orphan_max_count),
         }
     }
@@ -939,26 +1160,29 @@ impl MemoryPolicy {
 /// tool outputs — never from the model's own claims.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct MemoryCitation {
-    /// Graph entity id: `"C:<id>"` or `"P:<id>:<predicate>"`.
+    /// The Cognitive Element id: `"C-<n>"`, `"P-<n>"` or `"A-<n>"`.
     pub entity: String,
 
-    /// Concept type, or the predicate for propositions.
+    /// The local name of the Concept's type, or of a Proposition's predicate.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub r#type: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 
-    /// `metadata.confidence` when the tool output carried it.
+    /// The Assertion's confidence, when the cited element is one. A Concept
+    /// and a Proposition carry no stance and cite none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f64>,
 
-    /// `metadata.source` when the tool output carried it (first entry for
-    /// multi-source facts).
+    /// The semantic actor whose stance this is (`asserted_by`), when the
+    /// cited element is an Assertion. Never the caller's Principal:
+    /// attribution is cognition, authority is Governance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
 
-    /// `metadata.created_at` (RFC3339) when the tool output carried it.
+    /// `_system.created_at` (RFC3339) — when the engine first wrote the
+    /// element, which is not when the content it records was observed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
 }
@@ -968,11 +1192,12 @@ pub struct MemoryCitation {
 /// assert, hedge, or ask.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RecallOutput {
-    /// The synthesized answer with the self-report footer stripped.
+    /// The synthesized answer, or the complete JSON memory packet in budget mode.
     pub answer: String,
 
     /// Whether the graph held relevant memory. From the model's self-report
     /// when present, otherwise inferred from the retrieval trace.
+    /// In budget mode this only reports delivery of non-primer candidates.
     pub found: bool,
 
     /// Model-reported uncertainty, 0 (certain) ..= 1 (guessing).
@@ -980,6 +1205,7 @@ pub struct RecallOutput {
     pub uncertainty: Option<f64>,
 
     /// Memories the retrieval trace shows were surfaced for this answer.
+    /// Empty in budget mode: all delivered memory data stays inside `answer`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub memories: Vec<MemoryCitation>,
 
@@ -990,12 +1216,70 @@ pub struct RecallOutput {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failed_reason: Option<String>,
+    /// Counts the one semantic packet in `answer`; RPC framing/replicas are
+    /// transport metadata and are not an additional memory channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_budget: Option<RecallBudgetReceipt>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RecallBudgetReceipt {
+    pub tokenizer: String,
+    pub token_limit: u32,
+    pub tokens: usize,
+    pub context_token_limit: u32,
+}
+
+/// What one sweep did.
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct WatchSettlement {
+    /// Delta or silence Watches fired by native advancement.
+    pub fired: u64,
+    /// Refused version, generation or control-basis checks; requires refresh.
+    pub conflicted: u64,
+    /// Legacy field also counting matched silence Watches expired by Nexus.
+    #[serde(default)]
+    pub disarmed: u64,
+    /// Assessed Watches left armed, including unsupported text conditions and
+    /// incomplete change coverage. Counts cover the bounded scheduling window.
+    #[serde(default)]
+    pub deferred: u64,
+    /// Scan/runtime failure or a legacy Watch without an observation basis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// What one Skill lifecycle pass decided.
+///
+/// Counts remain for compatibility; unsupported_reason distinguishes an
+/// unconfigured learning pipeline from a completed evaluation with no changes.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+pub struct SkillSettlement {
+    /// No evaluation ran when the host has no configured learning pipeline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsupported_reason: Option<String>,
+
+    /// Skills whose tallies or standing moved.
+    pub graded: u64,
+
+    /// Lifecycle transitions recorded as `lifecycle_verdict` Activities.
+    pub transitions: u64,
+
+    /// Verdicts refused by `EXPECT VERSION` because the maintenance model
+    /// revised the Skill between the scan and the write. Nothing is lost: the
+    /// cursor did not advance, so the next pass re-reads the same outcomes.
+    pub conflicted: u64,
+
+    /// Set when the Skill scan failed: no Skill was graded this cycle, and
+    /// reporting zero transitions would read as "nothing was due".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Per-source correction statistics (memory evolution plan, module M3),
 /// aggregated at settlement time into the `source_reliability` space
-/// extension. High correction counts mark a source whose facts deserve a
-/// lower initial confidence at encode time.
+/// extension. These are audit statistics, not protected trust weights or an
+/// automatic confidence penalty for subsequent claims.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct SourceReliability {
     pub corrections: u64,
@@ -1009,22 +1293,30 @@ pub struct SourceReliability {
 pub struct MemorySettlementReport {
     pub settled_at: u64,
 
-    /// Propositions whose usage counters were flushed onto graph metadata.
-    pub reinforced: u64,
+    /// The revisions this settlement discovered, with their dependents; the
+    /// assessment hands them to the cycle as `revised_roots`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revised_roots: Vec<RevisedRoot>,
 
-    /// Propositions decayed by the bulk pass (full scope only).
+    /// Concepts whose `MnemonicState.memory_strength` the bulk pass decayed.
+    /// Zero is the ordinary answer: the sweep only touches Concepts last
+    /// metabolized more than `DECAY_MIN_INTERVAL_MS` ago.
     pub decayed: u64,
 
-    /// Whether the decay pass ran this cycle.
+    /// Whether the decay pass ran this cycle. Every scope runs it — the
+    /// interval filter, not the scope, is what paces the metabolism.
     pub decay_ran: bool,
 
     /// Superseded memories newly observed and recorded as corrections.
     pub new_corrections: u64,
 
-    /// Ledger rows whose graph flush failed and stayed dirty for the next
-    /// settlement to retry.
+    /// What the Watch expiry sweep did this cycle.
     #[serde(default)]
-    pub flush_retries: u64,
+    pub watches: WatchSettlement,
+
+    /// What the Skill lifecycle pass did this cycle.
+    #[serde(default)]
+    pub skills: SkillSettlement,
 
     /// Set when the bulk decay pass failed (e.g. the engine's full-scan
     /// solution cap on large graphs) — decay did not complete this cycle.
@@ -1035,6 +1327,55 @@ pub struct MemorySettlementReport {
     /// not recorded this cycle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correction_scan_error: Option<String>,
+    /// The bounded discovery page did not prove the backlog exhausted.
+    #[serde(default)]
+    pub correction_scan_incomplete: bool,
+    /// Largest transaction coordinate completely read by correction discovery.
+    #[serde(default)]
+    pub correction_scan_through_seq: u64,
+
+    /// What the retention pass acted on, and what it left alone.
+    #[serde(default)]
+    pub retention: RetentionSettlement,
+}
+
+/// What one retention pass did, and what it deliberately did not do.
+///
+/// Two different clocks, kept apart because conflating them is how a Space
+/// loses memory it meant to keep. `retention.expires_at` says when the
+/// *record* stops being kept (Spec §19.1); `valid_time.until` says when the
+/// *claim* stops applying (§14.3). A claim that lapsed is still a claim that
+/// was made, so it is marked `expired` and kept; a record whose retention ran
+/// out is archived.
+///
+/// The counts that are not `archived` matter as much as the one that is. A
+/// sweep that reports "archived 4" when 9 had lapsed reads as the whole truth
+/// and is not, which is the shape of a retention failure nobody notices.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct RetentionSettlement {
+    /// Assertions whose validity windows closed, marked `expired` (§14.3).
+    /// Not retraction and not supersession: nobody withdrew these and nothing
+    /// replaced them — their own stated windows ran out.
+    pub expired_assertions: u64,
+
+    /// Elements whose `retention.expires_at` lapsed, archived. Archive rather
+    /// than tombstone or purge: expiry says the record need not stay in
+    /// ordinary recall, not that it should stop having existed.
+    pub archived: u64,
+
+    /// Kept because a legal hold blocks removal for everyone, including a
+    /// sweep the holder authorized (§163). Nothing went wrong.
+    pub held: u64,
+
+    /// Elements this Space's own policy refused to archive.
+    pub refused: u64,
+
+    /// Left for the next cycle by this pass's limit.
+    pub remaining: u64,
+
+    /// Set when the pass failed — nothing expired this cycle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Outcome of one dream self-test pass (memory evolution plan, module M7).
@@ -1074,16 +1415,21 @@ pub struct ProbeInput {
     pub limit: Option<usize>,
 }
 
-/// Result of the metamemory probe: a cheap, LLM-free existence check that
+/// Result of the metamemory probe: a cheap, LLM-free search that
 /// tells an agent whether a full recall is worth its latency and tokens.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ProbeOutput {
-    /// Whether the graph holds anything matching the query.
+    /// Whether this search surfaced a relevant hit, not whether a claim is true.
     pub found: bool,
 
     /// True when answered from the negative-knowledge cache without touching
     /// the graph.
     pub negative_cached: bool,
+
+    /// Coverage of the search candidate window (of the original search for a
+    /// cached miss). None is unknown. Even exhaustive search is not BELIEF.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_exhaustive: Option<bool>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hits: Vec<MemoryCitation>,
@@ -1135,8 +1481,8 @@ pub struct MemoryForgetEntity {
     /// Whether the entity existed at request time.
     pub existed: bool,
 
-    /// Deletion error for this entity, when one occurred (e.g. KIP_3004
-    /// protecting system nodes). Other entities still proceed.
+    /// Purge error for this entity, when one occurred (for example, a protected
+    /// system element). Other entities still proceed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -1174,11 +1520,8 @@ pub struct MemoryMetrics {
     /// Corrections (superseded memories) settlement discovered.
     pub corrections: u64,
 
-    /// Propositions decayed by settlement.
+    /// Concepts decayed by settlement.
     pub decayed: u64,
-
-    /// Propositions whose usage counters were flushed onto the graph.
-    pub reinforced: u64,
 
     /// Structured recalls that carried an uncertainty self-report.
     pub uncertainty_reports: u64,
@@ -1231,6 +1574,12 @@ pub struct MemoryStatus {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_shadow: Option<ShadowReport>,
+
+    /// The last per-predicate census. `graph.predicate_types` says how many
+    /// predicates exist; this says how much each one carries, which is the
+    /// half that tells sprawl from breadth.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_schema_audit: Option<SchemaAudit>,
 }
 
 /// Graph-level counters included in `memory_status`.
@@ -1239,15 +1588,21 @@ pub struct MemoryGraphCounters {
     pub concepts: u64,
     pub propositions: u64,
 
+    /// Events and Experiences maintenance has not consolidated yet — the
+    /// backlog that used to be the `Unsorted` Domain in KIP 1.x.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub unsorted: Option<u64>,
+    pub unconsolidated: Option<u64>,
 
+    /// Concepts no Proposition and no structural edge reaches.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub orphans: Option<u64>,
 
-    /// Registered `$PropositionType` count — the schema-sprawl indicator
-    /// (plan module M8).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Predicates the Space's Schema Environment declares — the vocabulary
+    /// breadth indicator (plan module M8). In KIP 1.x this counted
+    /// `$PropositionType` graph nodes a write could mint; 2.0 resolves
+    /// predicates from immutable Schema Packages, so this grows only when an
+    /// operator activates a package, never because a model invented a link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub predicate_types: Option<u64>,
 
     /// When these counters were censused. They refresh at settlement time
@@ -1389,7 +1744,7 @@ mod tests {
         let user = Principal::from_slice(&[42]);
         let claims = Claims {
             subject: Some(user.to_string()),
-            audience: Some("memory-space".to_string()),
+            audience: Some("memory-space".to_string().into()),
             extra: scope_claim("write"),
             ..Default::default()
         };
@@ -1421,6 +1776,14 @@ mod tests {
             ..Default::default()
         };
         assert!(CWToken::from_claims(invalid_subject).is_err());
+
+        let multiple_audiences = Claims {
+            subject: Some(Principal::from_slice(&[1]).to_string()),
+            audience: Some(vec!["space-a".to_string(), "space-b".to_string()].into()),
+            extra: scope_claim("read"),
+            ..Default::default()
+        };
+        assert!(CWToken::from_claims(multiple_audiences).is_err());
     }
 
     #[test]
@@ -1624,6 +1987,7 @@ mod tests {
     #[test]
     fn input_refs_borrow_request_fields_without_reencoding() {
         let recall = RecallInput {
+            budget: None,
             query: "find user preferences".to_string(),
             context: Some(InputContext {
                 counterparty: Some("alice".to_string()),
@@ -1667,15 +2031,15 @@ mod tests {
         // not a behavior change.
         let policy = MemoryPolicy::default();
         assert_eq!(policy.stale_event_threshold_days, 7);
-        assert_eq!(policy.confidence_decay_factor, 0.95);
-        assert_eq!(policy.unsorted_max_backlog, 20);
+        assert_eq!(policy.memory_strength_decay_factor, 0.95);
+        assert_eq!(policy.unconsolidated_max_backlog, 20);
         assert_eq!(policy.orphan_max_count, 20);
         assert!(policy.validate().is_ok());
 
         let parameters = policy.maintenance_parameters();
         assert_eq!(parameters.stale_event_threshold_days, Some(7));
-        assert_eq!(parameters.confidence_decay_factor, Some(0.95));
-        assert_eq!(parameters.unsorted_max_backlog, Some(20));
+        assert_eq!(parameters.memory_strength_decay_factor, Some(0.95));
+        assert_eq!(parameters.unconsolidated_max_backlog, Some(20));
         assert_eq!(parameters.orphan_max_count, Some(20));
     }
 
@@ -1684,17 +2048,17 @@ mod tests {
         let cases: Vec<(MemoryPolicy, &str)> = vec![
             (
                 MemoryPolicy {
-                    confidence_decay_factor: 0.0,
+                    memory_strength_decay_factor: 0.0,
                     ..Default::default()
                 },
-                "confidence_decay_factor",
+                "memory_strength_decay_factor",
             ),
             (
                 MemoryPolicy {
-                    confidence_decay_factor: f64::NAN,
+                    memory_strength_decay_factor: f64::NAN,
                     ..Default::default()
                 },
-                "confidence_decay_factor",
+                "memory_strength_decay_factor",
             ),
             (
                 MemoryPolicy {
@@ -1743,9 +2107,9 @@ mod tests {
         // Partial JSON fills the rest with defaults, so stored policies stay
         // readable when later phases add fields.
         let policy: MemoryPolicy =
-            serde_json::from_str(r#"{"confidence_decay_factor": 0.9}"#).unwrap();
-        assert_eq!(policy.confidence_decay_factor, 0.9);
-        assert_eq!(policy.unsorted_max_backlog, 20);
+            serde_json::from_str(r#"{"memory_strength_decay_factor": 0.9}"#).unwrap();
+        assert_eq!(policy.memory_strength_decay_factor, 0.9);
+        assert_eq!(policy.unconsolidated_max_backlog, 20);
         assert_eq!(policy.version, 1);
 
         // Typos fail loudly instead of silently configuring nothing.

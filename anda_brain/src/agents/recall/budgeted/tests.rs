@@ -1,0 +1,642 @@
+use super::*;
+use crate::{
+    payload::{ContentType, StringOr},
+    recall_budget::MemoryPacket,
+    space::{AppState, Space},
+    testkit::{app_state_core, create_loaded_space, models_with_completer},
+    types::UpdateSpaceInput,
+};
+use anda_core::{BoxPinFut, ToolCall};
+use anda_engine::model::CompletionFeaturesDyn;
+use axum::response::IntoResponse;
+use parking_lot::Mutex;
+
+const LEAK: &str = "provider-private-data-must-not-escape";
+
+#[tokio::test]
+async fn readonly_model_batches_use_the_schema_without_an_execution_field() {
+    let args = json!({"operations":[
+        "FIND(?c.id) WHERE {?c CONCEPT {type:\"Person\"}} LIMIT 1",
+        "FIND(?c.id) WHERE {?c CONCEPT {type:\"Preference\"}} LIMIT 1"
+    ]});
+    let (_, space, _) = setup(
+        "readonly_batch_contract",
+        Behavior::ReadThenSelect(vec![ToolCall {
+            name: "execute_kip_readonly".into(),
+            args: args.clone(),
+            ..Default::default()
+        }]),
+    )
+    .await;
+    let ctx = space.ctx_for_test(SELF_USER_ID, RecallAgent::NAME).unwrap();
+    let ordinary = anda_core::Tool::call(
+        &TimedMemoryReadonly::new(space.memory.clone()),
+        ctx.base,
+        serde_json::from_value(args).unwrap(),
+        vec![],
+    )
+    .await
+    .unwrap();
+    assert_eq!(ordinary.output.status, anda_kip::TopLevelStatus::Succeeded);
+    assert_eq!(ordinary.output.results.len(), 2);
+    let output = space
+        .query(
+            SELF_USER_ID,
+            StringOr::Value(RecallInput {
+                query: "Read both record types".into(),
+                // This contract needs a read pass and a selection pass. Keep
+                // the independent cumulative-context budget large enough for both.
+                budget: Some(RecallBudget {
+                    context_tokens: 131_072,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(output.failed_reason.is_none(), "{output:?}");
+    let packet: MemoryPacket = serde_json::from_str(&output.content).unwrap();
+    let response = packet
+        .items
+        .iter()
+        .find(|item| item.content.get("kip").is_some())
+        .unwrap();
+    assert_eq!(response.content["status"], "succeeded");
+    assert_eq!(response.content["results"].as_array().unwrap().len(), 2);
+    space.close().await.unwrap();
+}
+
+#[test]
+fn query_limits_never_raise_literal_or_parameter_bounds_and_expired_flags_are_removed() {
+    let small = Scalar::Literal(KipValue::Number(1.into()));
+    assert_eq!(capped_limit(Some(&small), None, None).unwrap(), small);
+    let parameter = Scalar::Param("n".into());
+    let global = serde_json::from_value(json!({"n":2})).unwrap();
+    let local = serde_json::from_value(json!({"n":1})).unwrap();
+    assert_eq!(
+        capped_limit(Some(&parameter), Some(&local), Some(&global)).unwrap(),
+        small
+    );
+    assert!(capped_limit(Some(&parameter), None, None).is_err());
+    let mut items = vec![MemoryItem {
+        id: "p".into(),
+        channel: Channel::Procedures,
+        priority: Priority::Required,
+        content: json!({"recommendation_allowed":true,"context_expires_at_ms":0,"review_due_at":"2099-01-01T00:00:00.000Z","reasons":[]}),
+    }];
+    assert!(expire_procedure_checks(&mut items, unix_ms(), false));
+    assert_eq!(items[0].content["recommendation_allowed"], false);
+    assert_eq!(items[0].priority, Priority::Warning);
+}
+
+#[derive(Clone, Debug)]
+enum Behavior {
+    Select,
+    ReadThenSelect(Vec<ToolCall>),
+    LegacyOrSelect,
+}
+
+#[derive(Debug)]
+struct Planner {
+    behavior: Behavior,
+    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
+impl CompletionFeaturesDyn for Planner {
+    fn model_name(&self) -> String {
+        "bounded-recall-contract-fixture".into()
+    }
+
+    fn completion(&self, request: CompletionRequest) -> BoxPinFut<Result<AgentOutput, BoxError>> {
+        let behavior = self.behavior.clone();
+        let requests = self.requests.clone();
+        Box::pin(async move {
+            let call = {
+                let mut seen = requests.lock();
+                let call = seen.len();
+                seen.push(request.clone());
+                call
+            };
+            let prompt: Json = serde_json::from_str(&request.prompt).unwrap_or(Json::Null);
+            let ids = prompt["memory_items"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|item| item["id"].as_str().map(str::to_string))
+                .chain(std::iter::once("model-invented-verified-id".to_string()))
+                .collect::<Vec<_>>();
+            let mut output = AgentOutput {
+                content: json!({"selected_ids":ids}).to_string(),
+                thoughts: Some(LEAK.repeat(1000)),
+                chat_history: vec![Message {
+                    role: "assistant".into(),
+                    content: vec![LEAK.repeat(1000).into()],
+                    ..Default::default()
+                }],
+                raw_history: vec![json!({"provider_state":LEAK.repeat(1000)})],
+                artifacts: vec![Resource {
+                    name: LEAK.into(),
+                    blob: Some(LEAK.as_bytes().to_vec().into()),
+                    ..Default::default()
+                }],
+                session: Some(LEAK.into()),
+                model: Some(LEAK.into()),
+                usage: Usage {
+                    input_tokens: 7,
+                    output_tokens: 3,
+                    requests: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            match behavior {
+                Behavior::ReadThenSelect(tools) if call == 0 => output.tool_calls = tools,
+                Behavior::LegacyOrSelect if prompt.get("memory_items").is_none() => {
+                    output.content = "legacy answer".into();
+                }
+                _ => {}
+            }
+            Ok(output)
+        })
+    }
+}
+
+async fn setup(
+    name: &str,
+    behavior: Behavior,
+) -> (AppState, Arc<Space>, Arc<Mutex<Vec<CompletionRequest>>>) {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let app = app_state_core(
+        name,
+        models_with_completer(Planner {
+            behavior,
+            requests: requests.clone(),
+        }),
+        vec![],
+        "p5-contract-test",
+        0,
+    );
+    let space = create_loaded_space(&app, name).await;
+    (app, space, requests)
+}
+
+fn limits(max_tokens: u32, context_tokens: u32) -> RecallBudget {
+    RecallBudget {
+        max_tokens,
+        context_tokens,
+        ..Default::default()
+    }
+}
+
+fn input(budget: Option<RecallBudget>) -> StringOr<RecallInput> {
+    StringOr::Value(RecallInput {
+        query: "Select the relevant authorized memories and retain constraints.".into(),
+        context: None,
+        budget,
+    })
+}
+
+fn tool(name: &str, command: &str) -> ToolCall {
+    ToolCall {
+        name: name.into(),
+        args: json!({"command":command}),
+        call_id: Some("fixture-call".into()),
+        ..Default::default()
+    }
+}
+
+fn check_output(output: &AgentOutput, max_tokens: u32) -> Option<MemoryPacket> {
+    assert!(budget::count(&output.content).unwrap() <= max_tokens as usize);
+    assert!(output.thoughts.is_none());
+    assert!(output.chat_history.is_empty());
+    assert!(output.raw_history.is_empty());
+    assert!(output.tool_calls.is_empty());
+    assert!(output.artifacts.is_empty());
+    assert!(output.session.is_none());
+    assert!(!serde_json::to_string(output).unwrap().contains(LEAK));
+    assert!(
+        output.failed_reason.is_none()
+            || output
+                .failed_reason
+                .as_deref()
+                .is_some_and(|r| r.starts_with("recall_") && r.len() <= 64)
+    );
+    let packet: Option<MemoryPacket> = serde_json::from_str(&output.content).unwrap();
+    if let Some(packet) = &packet {
+        assert!(!packet.semantic_complete);
+        assert!(!packet.action_ready);
+        assert_eq!(packet.token_limit, max_tokens);
+    } else {
+        assert_eq!(output.content, "null");
+        assert!(output.failed_reason.is_some());
+    }
+    packet
+}
+
+async fn seed(space: &Space, command: &str, parameters: serde_json::Map<String, Json>) -> Json {
+    let result = anda_kip::execute_request(
+        space.memory.nexus().as_ref(),
+        &kip::request_with(command, parameters),
+    )
+    .await;
+    assert!(
+        kip::succeeded(&result),
+        "{}",
+        serde_json::to_string(&result).unwrap()
+    );
+    result.first_result().unwrap().clone()
+}
+
+#[tokio::test]
+async fn tiny_output_or_context_budget_never_calls_provider_or_returns_side_channels() {
+    let (_app, space, requests) = setup("p5_tiny_budget", Behavior::Select).await;
+    space
+        .recall
+        .history
+        .write()
+        .push_back(Document::from_text("old", LEAK));
+    for budget in [limits(1, 131_072), limits(65_536, 1)] {
+        let output = space
+            .query(SELF_USER_ID, input(Some(budget.clone())))
+            .await
+            .unwrap();
+        let packet = check_output(&output, budget.max_tokens);
+        assert!(output.failed_reason.is_some());
+        if let Some(packet) = packet {
+            assert_eq!(packet.status, "budget_insufficient");
+            assert!(packet.items.is_empty());
+        }
+    }
+    assert!(requests.lock().is_empty());
+    space.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn actual_planner_requests_and_final_packets_obey_the_same_pinned_encoding() {
+    let (_app, space, requests) = setup("p5_select_packet", Behavior::Select).await;
+    let budget = RecallBudget::default();
+    let output = space
+        .query(SELF_USER_ID, input(Some(budget.clone())))
+        .await
+        .unwrap();
+    let packet = check_output(&output, budget.max_tokens).unwrap();
+    assert!(output.failed_reason.is_none(), "{}", output.content);
+    let seen = requests.lock().clone();
+    assert_eq!(seen.len(), 1);
+    for request in &seen {
+        assert!(
+            budget::count(&normalized_request(request).unwrap()).unwrap()
+                <= budget.context_tokens as usize
+        );
+        assert!(request.chat_history.is_empty());
+        assert!(request.raw_history.is_empty());
+        assert!(request.documents.is_empty());
+        assert!(request.content.is_empty());
+        assert!(
+            request
+                .tools
+                .iter()
+                .any(|definition| definition.name == SELECT)
+        );
+    }
+    let snapshot: Json = serde_json::from_str(&seen[0].prompt).unwrap();
+    let admitted: Vec<MemoryItem> =
+        serde_json::from_value(snapshot["memory_items"].clone()).unwrap();
+    assert!(!packet.items.is_empty());
+    for item in &packet.items {
+        assert!(
+            admitted.contains(item),
+            "model cannot synthesize or promote an item"
+        );
+    }
+    assert!(!output.content.contains("model-invented-verified-id"));
+    space.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn long_real_evidence_notes_and_history_are_removed_atomically_before_the_next_model_call() {
+    let (_app, space, requests) = setup(
+        "p5_large_channels",
+        Behavior::ReadThenSelect(vec![tool(
+            "execute_kip_readonly",
+            "FIND(?e) WHERE {?e EVIDENCE {}} LIMIT 32",
+        )]),
+    )
+    .await;
+    // Two fresh planner requests share this cumulative context allowance.
+    // Either large source alone exceeds it, while both native stored payloads
+    // remain below the per-item byte cap.
+    let context_limit = 131_072;
+    let long_evidence = "证据原文🧑🏽‍🚀不得截断否定。 ".repeat(12000);
+    assert!(budget::count(&long_evidence).unwrap() > context_limit as usize);
+    seed(
+        &space,
+        r#"CREATE EVIDENCE ?e { SET FIELDS {evidence_class:"agent_statement",payload: :payload} }"#,
+        kip::param("payload", long_evidence.clone()),
+    )
+    .await;
+    let ctx = space.ctx_for_test(SELF_USER_ID, RecallAgent::NAME).unwrap();
+    let notes = "长备注：核实前不可行动。 ".repeat(500);
+    let written = ctx
+        .tool_call(ToolInput {
+            name: "note".into(),
+            args: json!({"op":"set","items":[{"id":"long-note","content":notes}]}),
+            resources: vec![],
+            meta: None,
+        })
+        .await
+        .unwrap()
+        .0;
+    assert_ne!(written.is_error, Some(true));
+    space.recall.history.write().push_back(Document::from_text(
+        "large-history",
+        &"历史不表示当前有效。 ".repeat(20_000),
+    ));
+
+    let output = space
+        .query(SELF_USER_ID, input(Some(limits(65_536, context_limit))))
+        .await
+        .unwrap();
+    let packet = check_output(&output, 65_536).unwrap();
+    assert!(output.failed_reason.is_none(), "{}", output.content);
+    let seen = requests.lock().clone();
+    assert_eq!(
+        seen.len(),
+        2,
+        "there is no provider-controlled automatic expansion loop"
+    );
+    for request in &seen {
+        assert!(
+            budget::count(&normalized_request(request).unwrap()).unwrap() <= context_limit as usize
+        );
+    }
+    let cumulative_tokens: usize = seen
+        .iter()
+        .map(|request| budget::count(&normalized_request(request).unwrap()).unwrap())
+        .sum();
+    assert!(cumulative_tokens <= context_limit as usize);
+    assert!(packet.coverage.partial.contains(&Channel::Kip));
+    assert!(packet.coverage.omitted.contains(&Channel::Kip));
+    assert!(
+        packet.coverage.omitted.contains(&Channel::Notes)
+            || packet.coverage.omitted.contains(&Channel::History)
+    );
+    let final_snapshot: Json = serde_json::from_str(&seen[1].prompt).unwrap();
+    let admitted: Vec<MemoryItem> =
+        serde_json::from_value(final_snapshot["memory_items"].clone()).unwrap();
+    for item in &packet.items {
+        assert!(admitted.contains(item));
+    }
+    let prefix: String = long_evidence.chars().take(100).collect();
+    assert!(!output.content.contains(&prefix));
+    // The source itself remains intact: budgeting is a delivery operation.
+    let stored = space
+        .execute_kip_readonly(kip::request("FIND(?e) WHERE {?e EVIDENCE {}} LIMIT 32"))
+        .await
+        .unwrap();
+    assert!(
+        serde_json::to_string(&stored)
+            .unwrap()
+            .contains(&long_evidence)
+    );
+    space.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn model_tool_injection_and_too_many_calls_cannot_execute_a_native_write() {
+    let write = r#"CREATE CONCEPT ?bad {TYPE "Preference" NAME "injected-budget-write"}"#;
+    let scenarios = [
+        ("p5_forbidden_tool", vec![tool("execute_kip", write)], true),
+        (
+            "p5_kml_in_readonly",
+            vec![tool("execute_kip_readonly", write)],
+            false,
+        ),
+        (
+            "p5_too_many_tools",
+            vec![tool("execute_kip_readonly", write); MAX_CALLS_PER_TURN + 1],
+            true,
+        ),
+    ];
+    for (name, calls, must_fail) in scenarios {
+        let (_app, space, requests) = setup(name, Behavior::ReadThenSelect(calls)).await;
+        let output = space
+            .query(SELF_USER_ID, input(Some(limits(65_536, 131_072))))
+            .await
+            .unwrap();
+        let packet = check_output(&output, 65_536).unwrap();
+        let response = space.execute_kip_readonly(kip::request(
+            r#"FIND(?c) WHERE {?c CONCEPT {type:"Preference",name:"injected-budget-write"}} LIMIT 5"#,
+        )).await.unwrap();
+        assert!(kip::succeeded(&response));
+        assert!(
+            response
+                .first_result()
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        if must_fail {
+            assert_eq!(packet.status, "budget_insufficient");
+            assert!(packet.items.is_empty());
+            assert_eq!(requests.lock().len(), 1);
+        } else {
+            // A denied read becomes an explicit host warning, never an empty
+            // successful retrieval. The planner may then select the warning.
+            assert!(packet.coverage.partial.contains(&Channel::Kip));
+            assert!(
+                packet
+                    .items
+                    .iter()
+                    .any(|item| item.channel == Channel::Kip && item.priority == Priority::Warning)
+            );
+            assert_eq!(requests.lock().len(), 2);
+        }
+        space.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn legacy_calls_remain_legacy_until_space_policy_enforces_non_expandable_caps() {
+    let (_app, space, requests) = setup("p5_legacy_policy", Behavior::LegacyOrSelect).await;
+    let legacy = space.query(SELF_USER_ID, input(None)).await.unwrap();
+    assert_eq!(legacy.content, "legacy answer");
+    assert_eq!(requests.lock().len(), 1);
+    space
+        .update(
+            UpdateSpaceInput {
+                memory_policy: Some(MemoryPolicy {
+                    recall_budget: Some(limits(1, 1)),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            unix_ms(),
+        )
+        .await
+        .unwrap();
+    let expanded = space
+        .query(SELF_USER_ID, input(Some(limits(65_536, 131_072))))
+        .await
+        .unwrap();
+    check_output(&expanded, 1);
+    assert_eq!(expanded.content, "null");
+    let omitted = space.query(SELF_USER_ID, input(None)).await.unwrap();
+    check_output(&omitted, 1);
+    assert_eq!(omitted.content, "null");
+    assert_eq!(
+        requests.lock().len(),
+        1,
+        "a request cannot lift or omit the operator cap"
+    );
+
+    let ctx = space.ctx_for_test(SELF_USER_ID, RecallAgent::NAME).unwrap();
+    let error = Agent::<AgentCtx>::run(
+        space.recall.as_ref(),
+        ctx,
+        r#"{"query":"malformed budget must not become prose","budget":{"max_tokens":0}}"#.into(),
+        vec![],
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("max_tokens"));
+    assert_eq!(requests.lock().len(), 1);
+    space.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn structured_and_markdown_surfaces_share_one_budgeted_semantic_packet() {
+    let (_app, space, requests) = setup("p5_structured_packet", Behavior::Select).await;
+    let budget = limits(65_536, 131_072);
+    let output = space
+        .query_structured(SELF_USER_ID, input(Some(budget.clone())))
+        .await
+        .unwrap();
+    assert!(output.failed_reason.is_none(), "{}", output.answer);
+    let packet: MemoryPacket = serde_json::from_str(&output.answer).unwrap();
+    assert!(!packet.semantic_complete && !packet.action_ready);
+    assert!(
+        output.memories.is_empty(),
+        "legacy trace citations must not add another memory channel"
+    );
+    assert!(output.uncertainty.is_none());
+    let receipt = output.memory_budget.as_ref().unwrap();
+    assert_eq!(receipt.tokenizer, budget.tokenizer);
+    assert_eq!(receipt.token_limit, budget.max_tokens);
+    assert_eq!(receipt.context_token_limit, budget.context_tokens);
+    assert_eq!(receipt.tokens, budget::count(&output.answer).unwrap());
+    assert!(receipt.tokens <= budget.max_tokens as usize);
+    assert!(!serde_json::to_string(&output).unwrap().contains(LEAK));
+    let response = ContentType::Markdown(true)
+        .response(output.answer.clone())
+        .into_response();
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * MAX_BYTES)
+        .await
+        .unwrap();
+    assert_eq!(std::str::from_utf8(&bytes).unwrap(), output.answer);
+    assert_eq!(requests.lock().len(), 1);
+
+    let failed = space
+        .query_structured(SELF_USER_ID, input(Some(limits(1, 1))))
+        .await
+        .unwrap();
+    assert_eq!(failed.answer, "null");
+    assert!(!failed.found);
+    assert!(failed.memories.is_empty());
+    assert!(failed.failed_reason.is_some());
+    assert_eq!(failed.memory_budget.unwrap().tokens, 1);
+    assert_eq!(requests.lock().len(), 1);
+    space.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn effective_budget_is_persisted_and_success_updates_the_history_ring() {
+    let (_app, space, _requests) = setup("p5_effective_budget", Behavior::Select).await;
+    let enforced = limits(4096, 131_072);
+    space
+        .update(
+            UpdateSpaceInput {
+                memory_policy: Some(MemoryPolicy {
+                    recall_budget: Some(enforced.clone()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            unix_ms(),
+        )
+        .await
+        .unwrap();
+
+    let ctx = space.ctx_for_test(SELF_USER_ID, RecallAgent::NAME).unwrap();
+    let output = Agent::<AgentCtx>::run(
+        space.recall.as_ref(),
+        ctx,
+        input(Some(limits(65_536, 131_072))).to_string(),
+        vec![],
+    )
+    .await
+    .unwrap();
+    let id = output.conversation.unwrap();
+    assert_eq!(
+        space.recall.conversation_budget(id).await.unwrap(),
+        Some(enforced)
+    );
+    assert_eq!(space.recall.history.read().len(), 1);
+
+    space.recall.history.write().clear();
+    space.recall.init().await.unwrap();
+    assert_eq!(space.recall.history.read().len(), 1);
+    space.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn budgeted_tool_results_reach_the_usage_ledger() {
+    let (_app, space, _requests) = setup(
+        "p5_usage_ledger",
+        Behavior::ReadThenSelect(vec![tool(
+            "execute_kip_readonly",
+            r#"FIND(?c) WHERE {?c CONCEPT {type:"Person",name:"budget-ledger-person"}} LIMIT 1"#,
+        )]),
+    )
+    .await;
+    seed(
+        &space,
+        r#"CREATE CONCEPT ?c {TYPE "Person" NAME "budget-ledger-person"}"#,
+        serde_json::Map::new(),
+    )
+    .await;
+
+    let output = space
+        .query(SELF_USER_ID, input(Some(limits(65_536, 131_072))))
+        .await
+        .unwrap();
+    assert!(output.failed_reason.is_none(), "{output:?}");
+    let metrics: crate::types::MemoryMetrics = space.db.get_extension_as("memory_metrics").unwrap();
+    assert_eq!(metrics.recalls_completed, 1);
+    assert_eq!(metrics.entities_recalled, 1);
+    space.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn real_commitment_that_cannot_fit_prevents_an_ordinary_answer_or_model_call() {
+    let (_app, space, requests) = setup("p5_required_commitment", Behavior::Select).await;
+    let summary = "脑 ".repeat(100_000);
+    assert!(budget::count(&summary).unwrap() > 131_072);
+    seed(&space, r#"CREATE CONCEPT ?c {TYPE "Commitment" SET ATTRIBUTES {summary: :summary,status:"pending"}}"#,
+        kip::param("summary", summary)).await;
+    let output = space
+        .query(SELF_USER_ID, input(Some(limits(65_536, 131_072))))
+        .await
+        .unwrap();
+    let packet = check_output(&output, 65_536).unwrap();
+    assert_eq!(packet.status, "budget_insufficient");
+    assert!(packet.items.is_empty());
+    assert!(output.failed_reason.is_some());
+    assert!(requests.lock().is_empty());
+    // The constraint window was actually queried, not replaced by a model's
+    // assertion that no applicable restrictions were found.
+    assert!(packet.coverage.queried.contains(&Channel::Kip));
+    space.close().await.unwrap();
+}

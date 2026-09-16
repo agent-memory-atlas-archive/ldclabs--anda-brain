@@ -1,4 +1,3 @@
-use anda_cognitive_nexus::ConceptPK;
 use anda_core::{
     Agent, AgentContext, AgentOutput, BoxError, CompletionRequest, Document, Documents,
     FunctionDefinition, Json, Message, ModelEffort, Resource, StateFeatures, Tool, ToolOutput,
@@ -10,13 +9,14 @@ use anda_engine::{
     extension::note::{load_notes, load_notes_from_legacy},
     local_date_hour,
     memory::{
-        Conversation, ConversationRef, ConversationStatus, Conversations, MemoryManagement,
-        MemoryReadonly,
+        Conversation, ConversationRef, ConversationStatus, Conversations, KipArgs,
+        MemoryManagement, MemoryReadonly, READONLY_FUNCTION_DEFINITION,
     },
     unix_ms,
 };
 use parking_lot::RwLock;
 use serde_json::json;
+use std::sync::atomic::AtomicU64;
 use std::{
     collections::VecDeque,
     sync::{Arc, LazyLock},
@@ -24,28 +24,27 @@ use std::{
 };
 use tokio::time::timeout;
 
-use anda_kip::{KipError, KipErrorCode, Request, Response};
+use anda_kip::{KipError, KipErrorCode, Response};
+
+use crate::kip;
 
 use super::{
     BrainHook, SELF_USER_ID, append_runner_history, compact_runner_if_needed,
     push_completed_history,
 };
-use crate::types::RecallInput;
+use crate::types::{MemoryPolicy, RecallInput};
+mod budgeted;
 #[cfg(feature = "wiki")]
 use crate::wiki::{WikiReadTool, WikiSearchTool};
 
 const RECALL_CONTEXT_TIMEOUT: Duration = Duration::from_secs(5);
 const RECALL_TOTAL_TIMEOUT: Duration = Duration::from_secs(180);
-const RECALL_PRIMER_CACHE_TTL_MS: u64 = 300_000;
+/// Fallback model-turn cap, used when the space has no policy of its own.
+/// Equal to `MemoryPolicy::default_recall_max_rounds`, so an unset policy is
+/// not a behavior change.
 const RECALL_MAX_MODEL_TURNS: usize = 7;
 const RECALL_HISTORY_LIMIT: usize = 1;
 pub const READONLY_KIP_TIMEOUT: Duration = Duration::from_secs(15);
-
-#[derive(Clone)]
-struct CachedPrimer {
-    value: Json,
-    fetched_at: u64,
-}
 
 pub static FUNCTION_DEFINITION: LazyLock<FunctionDefinition> = LazyLock::new(|| {
     serde_json::from_value(json!({
@@ -54,6 +53,17 @@ pub static FUNCTION_DEFINITION: LazyLock<FunctionDefinition> = LazyLock::new(|| 
         "parameters": {
             "type": "object",
             "properties": {
+            "budget": {
+                "type": ["object", "null"],
+                "description": "Optional hard-budget memory packet mode. The host returns selected authorized items and coverage, not a free-form answer. A Space policy may enforce tighter limits. Null preserves the policy/default behavior.",
+                "properties": {
+                    "tokenizer": {"type":"string","enum":["o200k_base@tiktoken-rs-0.12.0"]},
+                    "max_tokens": {"type":"integer","minimum":1,"maximum":65536},
+                    "context_tokens": {"type":"integer","minimum":1,"maximum":131072}
+                },
+                "required": ["tokenizer","max_tokens","context_tokens"],
+                "additionalProperties": false
+            },
             "query": {
                 "type": "string",
                 "description": "A natural language question about older or out-of-context memory. Be specific and include the subject, timeframe, and topic when known. Examples: 'What do we know about the current user's communication preferences?', 'What happened in our last discussion about Project Aurora?', 'Who are the members of the engineering team?'"
@@ -103,10 +113,7 @@ pub static FUNCTION_DEFINITION: LazyLock<FunctionDefinition> = LazyLock::new(|| 
                 "additionalProperties": false
             }
             },
-            "required": [
-                "query",
-                "context"
-            ],
+            "required": ["query", "context", "budget"],
             "additionalProperties": false
         },
         "strict": true
@@ -117,6 +124,7 @@ pub static FUNCTION_DEFINITION: LazyLock<FunctionDefinition> = LazyLock::new(|| 
 pub struct TimedMemoryReadonly {
     memory: Arc<MemoryManagement>,
     timeout: Duration,
+    clock: Arc<crate::runtime::BusinessClock>,
 }
 
 impl TimedMemoryReadonly {
@@ -124,12 +132,17 @@ impl TimedMemoryReadonly {
         Self {
             memory,
             timeout: READONLY_KIP_TIMEOUT,
+            clock: Arc::new(crate::runtime::BusinessClock::default()),
         }
+    }
+    pub(crate) fn with_clock(mut self, clock: Arc<crate::runtime::BusinessClock>) -> Self {
+        self.clock = clock;
+        self
     }
 }
 
 impl Tool<BaseCtx> for TimedMemoryReadonly {
-    type Args = Request;
+    type Args = KipArgs;
     type Output = Response;
 
     fn name(&self) -> String {
@@ -137,30 +150,36 @@ impl Tool<BaseCtx> for TimedMemoryReadonly {
     }
 
     fn description(&self) -> String {
-        "Executes one or more KIP (Knowledge Interaction Protocol) commands against the Cognitive Nexus to read from your persistent memory. This tool does not allow any modifications to the memory and is safe to use for retrieval operations.".to_string()
+        READONLY_FUNCTION_DEFINITION.description.clone()
     }
 
     fn definition(&self) -> FunctionDefinition {
-        FunctionDefinition {
-            name: self.name(),
-            description: self.description(),
-            // Mirrors the writable `execute_kip` tool's arguments, which the
-            // space installs from the same definition.
-            parameters: super::KIP_FUNCTION_DEFINITION.parameters.clone(),
-            strict: Some(true),
-        }
+        // The definition `anda_kip` ships with the protocol it describes, so
+        // the tool the model is shown and the envelope the engine executes stay
+        // in step across protocol revisions.
+        READONLY_FUNCTION_DEFINITION.clone()
     }
 
     async fn call(
         &self,
         _ctx: BaseCtx,
-        mut request: Self::Args,
+        args: Self::Args,
         _resources: Vec<Resource>,
     ) -> Result<ToolOutput<Self::Output>, BoxError> {
+        let mut request = match args.into_readonly_request() {
+            Ok(request) => request,
+            Err(err) => return Ok(error_output(Response::from(err))),
+        };
+        self.clock.bind_read(&mut request)?;
         let nexus = self.memory.nexus();
-        let res = match timeout(self.timeout, request.readonly().execute(nexus.as_ref())).await {
-            Ok((_, res)) => res,
-            Err(_) => Response::err(KipError::new(
+        let res = match timeout(
+            self.timeout,
+            kip::execute_readonly_request(nexus.as_ref(), &request),
+        )
+        .await
+        {
+            Ok(res) => res,
+            Err(_) => Response::failed(KipError::new(
                 KipErrorCode::ExecutionTimeout,
                 format!(
                     "read-only KIP execution timed out after {} seconds; memory is busy, retry later",
@@ -169,20 +188,33 @@ impl Tool<BaseCtx> for TimedMemoryReadonly {
             )),
         };
 
-        let is_error = if matches!(res, Response::Err { .. }) {
-            Some(true)
-        } else {
-            None
-        };
-
-        let mut output = ToolOutput::new(res);
-        output.is_error = is_error;
-        Ok(output)
+        Ok(error_output(res))
     }
 }
 
+/// Wraps a KIP response as a tool output.
+///
+/// Anything short of `succeeded` is flagged as an error, `partial` included: a
+/// batch where one operation failed is not a clean result, and the
+/// per-operation detail the model needs to tell which is already in the
+/// payload.
+fn error_output(res: Response) -> ToolOutput<Response> {
+    let is_error = (!kip::succeeded(&res)).then_some(true);
+    let mut output = ToolOutput::new(res);
+    output.is_error = is_error;
+    output
+}
+
+/// Reads the owning space's current [`MemoryPolicy`].
+///
+/// A closure rather than a stored snapshot: `update_space` can change the
+/// policy while the agent is alive, and a cap read once at construction is a
+/// cap that quietly ignores the operator who raised it.
+pub type MemoryPolicyReader = Arc<dyn Fn() -> MemoryPolicy + Send + Sync>;
+
 #[derive(Clone)]
 pub struct RecallAgent {
+    prompt: Arc<str>,
     pub conversations: Conversations,
     /// The collection backing `conversations`. `Conversations` wraps document
     /// access only, so cursor paging in `Space::list_conversations` goes
@@ -191,8 +223,9 @@ pub struct RecallAgent {
     memory: Arc<MemoryManagement>,
     hook: Arc<dyn BrainHook>,
     history: Arc<RwLock<VecDeque<Document>>>,
-    primer_cache: Arc<RwLock<Option<CachedPrimer>>>,
     max_input_tokens: usize,
+    policy: MemoryPolicyReader,
+    clock: Arc<crate::runtime::BusinessClock>,
 }
 
 impl RecallAgent {
@@ -203,16 +236,57 @@ impl RecallAgent {
         conversations_collection: Arc<Collection>,
         hook: Arc<dyn BrainHook>,
         max_input_tokens: usize,
+        policy: MemoryPolicyReader,
     ) -> Self {
         Self {
+            prompt: super::prompts::active_prompt(super::prompts::PromptTarget::Recall),
+            clock: Arc::new(crate::runtime::BusinessClock::default()),
             conversations,
             conversations_collection,
             memory,
             hook,
             history: Arc::new(RwLock::new(VecDeque::new())),
-            primer_cache: Arc::new(RwLock::new(None)),
             max_input_tokens,
+            policy,
         }
+    }
+
+    /// Retained for caller compatibility. Primers are now read fresh because
+    /// trust, identity and authorization can change without a schema publish.
+    pub fn with_schema_generation(self, _generation: Arc<AtomicU64>) -> Self {
+        self
+    }
+
+    /// The model-turn cap for one recall run.
+    ///
+    /// `recall_max_rounds` was declared as a policy knob and read by nothing;
+    /// its default happens to equal the compiled fallback, so the gap was
+    /// invisible until an operator raised it and nothing changed.
+    ///
+    /// `MemoryPolicy::validate` holds the field in `[1, 50]`, so a zero can
+    /// only arrive from a stored policy that predates the check. Treating it
+    /// as unset rather than as "no turns at all" keeps such a space answering
+    /// recalls instead of failing every one of them instantly.
+    fn max_model_turns(&self) -> usize {
+        match (self.policy)().recall_max_rounds as usize {
+            0 => RECALL_MAX_MODEL_TURNS,
+            rounds => rounds,
+        }
+    }
+
+    pub(crate) fn with_prompt(mut self, prompt: Arc<str>) -> Self {
+        self.prompt = prompt;
+        self
+    }
+
+    pub(crate) fn with_clock(mut self, clock: Arc<crate::runtime::BusinessClock>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    #[cfg(feature = "experiments")]
+    pub(crate) fn clear_history(&self) {
+        self.history.write().clear();
     }
 
     pub async fn init(&self) -> Result<(), BoxError> {
@@ -226,7 +300,14 @@ impl RecallAgent {
         // otherwise the next push_back would evict the newest entry first.
         let mut history: Vec<Conversation> = conversations
             .into_iter()
-            .filter(|c| c.status == ConversationStatus::Completed)
+            .filter(|c| {
+                c.status == ConversationStatus::Completed
+                    && c._id
+                        > self
+                            .conversations_collection
+                            .get_extension_as::<u64>("history_boundary")
+                            .unwrap_or(0)
+            })
             .take(RECALL_HISTORY_LIMIT)
             .collect();
         history.reverse();
@@ -234,17 +315,23 @@ impl RecallAgent {
         Ok(())
     }
 
+    /// The Person Concept a counterparty handle keys, or `Json::Null`.
+    ///
+    /// The handle is the Concept's `key` — immutable Space-local identity —
+    /// which is what Formation writes it under. Reading by `name` would resolve
+    /// through a mutable display label and could match more than one Person.
     pub async fn get_counterparty(&self, counterparty: &str) -> Result<Json, BoxError> {
-        let user = self
+        let found = self
             .memory
-            .nexus()
-            .get_concept(&ConceptPK::Object {
-                r#type: "Person".to_string(),
-                name: counterparty.to_string(),
-            })
+            .query(
+                super::PERSON_BY_KEY,
+                Some(serde_json::Map::from_iter([(
+                    "key".to_string(),
+                    Json::from(counterparty),
+                )])),
+            )
             .await?;
-
-        Ok(user.to_concept_node())
+        Ok(super::first_row(found))
     }
 
     async fn get_counterparty_with_timeout(&self, counterparty: Option<String>) -> Option<Json> {
@@ -271,31 +358,20 @@ impl RecallAgent {
         }
     }
 
-    async fn describe_primer_cached(&self) -> Json {
-        let now = unix_ms();
-        if let Some(cached) = self.primer_cache.read().as_ref()
-            && now.saturating_sub(cached.fetched_at) <= RECALL_PRIMER_CACHE_TTL_MS
-        {
-            return cached.value.clone();
-        }
-
-        let primer = match timeout(RECALL_CONTEXT_TIMEOUT, self.memory.describe_primer()).await {
+    async fn describe_primer_fresh(&self) -> Json {
+        // Governance, trust and identity can change without a vocabulary publish.
+        // A fresh primer carries the live control basis; a TTL cannot validate it.
+        match timeout(RECALL_CONTEXT_TIMEOUT, self.memory.describe_primer()).await {
             Ok(Ok(primer)) => primer,
             Ok(Err(err)) => {
                 log::warn!(target: "brain", "recall primer not available: {err:?}");
-                return Json::default();
+                Json::default()
             }
             Err(_) => {
                 log::warn!(target: "brain", "recall primer lookup timed out");
-                return Json::default();
+                Json::default()
             }
-        };
-
-        *self.primer_cache.write() = Some(CachedPrimer {
-            value: primer.clone(),
-            fetched_at: unix_ms(),
-        });
-        primer
+        }
     }
 
     async fn load_recall_notes(ctx: &AgentCtx) -> Json {
@@ -323,6 +399,29 @@ impl RecallAgent {
                 );
             }
         }
+    }
+
+    /// Reads the canonical budget recorded by budget mode. Unbudgeted raw or
+    /// structured prompts return `None`.
+    pub(crate) async fn conversation_budget(
+        &self,
+        conversation: u64,
+    ) -> Result<Option<crate::recall_budget::RecallBudget>, BoxError> {
+        let conversation = self.conversations.get_conversation(conversation).await?;
+        let first = conversation
+            .messages
+            .first()
+            .ok_or("recall conversation has no input message")?;
+        let message: Message = serde_json::from_value(first.clone())?;
+        let prompt = message
+            .content
+            .iter()
+            .find_map(|part| match part {
+                anda_core::ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .ok_or("recall conversation has no text input")?;
+        Ok(RecallInput::parse_prompt(prompt)?.and_then(|input| input.budget))
     }
 
     async fn failed_output(
@@ -382,6 +481,8 @@ impl Agent<AgentCtx> for RecallAgent {
     fn tool_dependencies(&self) -> Vec<String> {
         #[allow(unused_mut)]
         let mut tools = vec![MemoryReadonly::NAME.to_string()];
+        #[cfg(feature = "learning")]
+        tools.push(crate::learning::recall::ProcedureStatusTool::NAME.to_string());
         #[cfg(feature = "wiki")]
         tools.extend([
             WikiSearchTool::NAME.to_string(),
@@ -396,6 +497,15 @@ impl Agent<AgentCtx> for RecallAgent {
         prompt: String, // RecallInput serialized as JSON string
         _resources: Vec<Resource>,
     ) -> Result<AgentOutput, BoxError> {
+        let budget_input = RecallInput::parse_prompt(&prompt)?;
+        if let Some(budget) = crate::recall_budget::RecallBudget::resolve(
+            (self.policy)().recall_budget.as_ref(),
+            budget_input
+                .as_ref()
+                .and_then(|input| input.budget.as_ref()),
+        )? {
+            return self.run_budgeted(ctx, prompt, budget_input, budget).await;
+        }
         let caller = ctx.caller();
         let now_ms = unix_ms();
         let token_count = estimate_tokens(&prompt);
@@ -437,7 +547,7 @@ impl Agent<AgentCtx> for RecallAgent {
 
         let (counterparty_info, primer, notes) = tokio::join!(
             self.get_counterparty_with_timeout(counterparty),
-            self.describe_primer_cached(),
+            self.describe_primer_fresh(),
             Self::load_recall_notes(&ctx),
         );
 
@@ -464,12 +574,13 @@ impl Agent<AgentCtx> for RecallAgent {
         let mut runner = ctx.clone().completion_iter(
             CompletionRequest {
                 instructions: format!(
-                    "{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Your Notes:\n{}\n\n# Counterparty profile:\n{}\n\n# Current Datetime: {}",
-                    super::prompts::active_prompt(super::prompts::PromptTarget::Recall),
+                    "{}\n\n---\n\n{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Your Notes:\n{}\n\n# Counterparty profile:\n{}\n\n# Current Datetime: {}",
+                    super::prompts::mode_reference(super::prompts::PromptTarget::Recall),
+                    self.prompt,
                     primer,
                     serde_json::to_string(&notes).unwrap_or_default(),
                     serde_json::to_string(&counterparty_info).unwrap_or_default(),
-                    local_date_hour(now_ms).unwrap_or_default()
+                    local_date_hour(self.clock.now_ms()).unwrap_or_default()
                 ),
                 prompt,
                 chat_history,
@@ -481,6 +592,7 @@ impl Agent<AgentCtx> for RecallAgent {
             vec![],
         );
 
+        let max_model_turns = self.max_model_turns();
         let started_at = now_ms;
         let mut replace_initial_input = true;
         let mut persisted_runner_history_len = 0;
@@ -492,7 +604,7 @@ impl Agent<AgentCtx> for RecallAgent {
         // the failure handling live at exactly one place below the loop.
         let failure: Option<RecallFailure> = 'run: {
             loop {
-                if total_model_turns >= RECALL_MAX_MODEL_TURNS {
+                if total_model_turns >= max_model_turns {
                     break 'run Some(RecallFailure::TurnLimit);
                 }
 
@@ -589,10 +701,7 @@ impl Agent<AgentCtx> for RecallAgent {
             conversation.usage = runner.total_usage().clone();
             return match failure {
                 RecallFailure::TurnLimit => {
-                    let reason = format!(
-                        "recall exceeded model turn limit of {}",
-                        RECALL_MAX_MODEL_TURNS
-                    );
+                    let reason = format!("recall exceeded model turn limit of {max_model_turns}");
                     Ok(self.failed_output(conversation, reason, last_output).await)
                 }
                 RecallFailure::Timeout => {
@@ -757,7 +866,7 @@ mod tests {
                 Ok(AgentOutput {
                     tool_calls: vec![ToolCall {
                         name: "execute_kip_readonly".to_string(),
-                        args: serde_json::json!({"commands": []}),
+                        args: serde_json::json!({"command": "DESCRIBE PRIMER"}),
                         result: None,
                         call_id: Some("loop".to_string()),
                         remote_id: None,
@@ -790,7 +899,7 @@ mod tests {
                     return Ok(AgentOutput {
                         tool_calls: vec![ToolCall {
                             name: "execute_kip_readonly".to_string(),
-                            args: serde_json::json!({"commands": []}),
+                            args: serde_json::json!({"command": "DESCRIBE PRIMER"}),
                             result: None,
                             call_id: Some("t0".to_string()),
                             remote_id: None,
@@ -850,6 +959,7 @@ mod tests {
 
     fn recall_prompt(query: &str, counterparty: Option<&str>) -> String {
         serde_json::to_string(&RecallInput {
+            budget: None,
             query: query.to_string(),
             context: counterparty.map(|counterparty| InputContext {
                 counterparty: Some(counterparty.to_string()),
@@ -877,7 +987,7 @@ mod tests {
                 .pointer("/required")
                 .and_then(|v| v.as_array())
                 .map(|values| values.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
-            Some(vec!["query", "context"])
+            Some(vec!["query", "context", "budget"])
         );
     }
 
@@ -904,17 +1014,13 @@ mod tests {
             RecallAgent::NAME
         );
         let tools = Agent::<AgentCtx>::tool_dependencies(space.recall.as_ref());
+        #[allow(unused_mut)]
+        let mut expected = vec!["execute_kip_readonly".to_string()];
+        #[cfg(feature = "learning")]
+        expected.push("check_procedure_status".to_string());
         #[cfg(feature = "wiki")]
-        assert_eq!(
-            tools,
-            vec![
-                "execute_kip_readonly".to_string(),
-                "wiki_search".to_string(),
-                "wiki_read".to_string(),
-            ]
-        );
-        #[cfg(not(feature = "wiki"))]
-        assert_eq!(tools, vec!["execute_kip_readonly".to_string()]);
+        expected.extend(["wiki_search".to_string(), "wiki_read".to_string()]);
+        assert_eq!(tools, expected);
     }
 
     #[tokio::test]
@@ -1104,6 +1210,54 @@ mod tests {
         assert_eq!(
             stored.failed_reason.as_deref(),
             Some("recall exceeded model turn limit of 7")
+        );
+    }
+
+    /// `recall_max_rounds` was a declared policy knob nothing read: its
+    /// default equals the compiled fallback, so raising it changed nothing
+    /// and the gap was invisible. Same space, same looping model, one
+    /// `update_space` apart.
+    #[tokio::test]
+    async fn recall_turn_limit_follows_the_space_policy() {
+        use crate::types::{MemoryPolicy, UpdateSpaceInput};
+
+        let app = test_app_state_with_configured_completer(
+            "recall_policy_turn_limit",
+            CompactingToolLoopCompleter,
+            |model| {
+                model.context_window = 1;
+            },
+        );
+        let space = create_loaded_space(&app, "recall_policy_turn_limit").await;
+
+        space
+            .update(
+                UpdateSpaceInput {
+                    memory_policy: Some(MemoryPolicy {
+                        recall_max_rounds: 3,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                anda_engine::unix_ms(),
+            )
+            .await
+            .unwrap();
+
+        let ctx = space.ctx_for_test(SELF_USER_ID, RecallAgent::NAME).unwrap();
+        let output = Agent::<AgentCtx>::run(
+            space.recall.as_ref(),
+            ctx,
+            recall_prompt("loop until the guardrail stops it", None),
+            vec![],
+        )
+        .await
+        .unwrap();
+
+        let failed_reason = output.failed_reason.as_deref().unwrap_or_default();
+        assert!(
+            failed_reason.contains("recall exceeded model turn limit of 3"),
+            "{failed_reason}"
         );
     }
 }

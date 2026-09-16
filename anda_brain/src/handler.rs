@@ -1,4 +1,7 @@
-use anda_engine::{memory::Conversation, unix_ms};
+use anda_engine::{
+    memory::{Conversation, KipArgs},
+    unix_ms,
+};
 use axum::{
     Json,
     extract::State,
@@ -19,7 +22,10 @@ use crate::wiki::{
 };
 use crate::{
     agents::SELF_USER_ID,
-    authz::{AuthzError, AuthzMode, authorize, check_cwt, ensure_sharding, load_space},
+    authz::{
+        AuthzError, check_cwt, credentialed, cwt_only, ensure_sharding, load_space, read_lenient,
+        read_public,
+    },
     payload::{
         Accept, AppBytes, AppError, AppPath, AppQuery, ContentType, HeaderVals, PayloadFormat,
         RpcResponse, StringOr,
@@ -69,16 +75,7 @@ pub async fn get_info(
     Accept(ct, _): Accept,
     HeaderVals(token, sharding): HeaderVals,
 ) -> Result<impl IntoResponse, AppError> {
-    let (space, _caller) = authorize(
-        &app,
-        &space_id,
-        &token,
-        Some(sharding),
-        TokenScope::Read,
-        AuthzMode::PublicReadLenient,
-        unix_ms(),
-    )
-    .await?;
+    let space = read_lenient(&app, &space_id, &token, sharding, unix_ms()).await?;
 
     let rt = space.get_info();
     Ok(ct.response(RpcResponse::success(rt)))
@@ -91,16 +88,7 @@ pub async fn get_formation_status(
     Accept(ct, _): Accept,
     HeaderVals(token, sharding): HeaderVals,
 ) -> Result<impl IntoResponse, AppError> {
-    let (space, _caller) = authorize(
-        &app,
-        &space_id,
-        &token,
-        Some(sharding),
-        TokenScope::Read,
-        AuthzMode::PublicReadLenient,
-        unix_ms(),
-    )
-    .await?;
+    let space = read_lenient(&app, &space_id, &token, sharding, unix_ms()).await?;
 
     let rt = space.formation_status();
     Ok(ct.response(RpcResponse::success(rt)))
@@ -118,13 +106,12 @@ pub async fn post_formation(
 
     let input: StringOr<FormationInput> = ct.parse_body(&body).map_err(AppError::bad_request)?;
 
-    let (space, _caller) = authorize(
+    let (space, _caller) = credentialed(
         &app,
         &space_id,
         &token,
-        Some(sharding),
+        sharding,
         TokenScope::Write,
-        AuthzMode::Credentialed,
         unix_ms(),
     )
     .await?;
@@ -162,16 +149,7 @@ async fn recall_prelude(
 
     let input: StringOr<RecallInput> = ct.parse_body(body).map_err(AppError::bad_request)?;
 
-    let (space, caller) = authorize(
-        app,
-        space_id,
-        token,
-        Some(sharding),
-        TokenScope::Read,
-        AuthzMode::PublicRead,
-        unix_ms(),
-    )
-    .await?;
+    let (space, caller) = read_public(app, space_id, token, sharding, unix_ms()).await?;
     if let Some(reason) = caller.recall_forbidden() {
         return Err(AuthzError::Forbidden(reason).into());
     }
@@ -247,16 +225,7 @@ pub async fn post_probe(
         StringOr::Value(input) => input,
     };
 
-    let (space, _caller) = authorize(
-        &app,
-        &space_id,
-        &token,
-        Some(sharding),
-        TokenScope::Read,
-        AuthzMode::PublicReadLenient,
-        unix_ms(),
-    )
-    .await?;
+    let space = read_lenient(&app, &space_id, &token, sharding, unix_ms()).await?;
 
     let rt = space
         .probe_memory(&input.query, input.limit)
@@ -283,13 +252,12 @@ pub async fn post_memory_pin(
         .value()
         .map_err(|_| AppError::bad_request("expected a JSON object body".to_string()))?;
 
-    let (space, _caller) = authorize(
+    let (space, _caller) = credentialed(
         &app,
         &space_id,
         &token,
-        Some(sharding),
+        sharding,
         TokenScope::Write,
-        AuthzMode::Credentialed,
         unix_ms(),
     )
     .await?;
@@ -323,13 +291,12 @@ pub async fn post_memory_forget(
         .value()
         .map_err(|_| AppError::bad_request("expected a JSON object body".to_string()))?;
 
-    let (space, _caller) = authorize(
+    let (space, _caller) = credentialed(
         &app,
         &space_id,
         &token,
-        Some(sharding),
+        sharding,
         TokenScope::Write,
-        AuthzMode::Credentialed,
         unix_ms(),
     )
     .await?;
@@ -352,16 +319,7 @@ pub async fn get_memory_status(
     Accept(ct, _): Accept,
     HeaderVals(token, sharding): HeaderVals,
 ) -> Result<impl IntoResponse, AppError> {
-    let (space, _caller) = authorize(
-        &app,
-        &space_id,
-        &token,
-        Some(sharding),
-        TokenScope::Read,
-        AuthzMode::PublicReadLenient,
-        unix_ms(),
-    )
-    .await?;
+    let space = read_lenient(&app, &space_id, &token, sharding, unix_ms()).await?;
 
     let rt = space.memory_status().await;
     Ok(ct.response(RpcResponse::success(rt)))
@@ -474,16 +432,8 @@ pub async fn post_wiki_commit(
     };
 
     let now_ms = unix_ms();
-    let (space, caller) = authorize(
-        &app,
-        &space_id,
-        &token,
-        Some(sharding),
-        TokenScope::Write,
-        AuthzMode::Credentialed,
-        now_ms,
-    )
-    .await?;
+    let (space, caller) =
+        credentialed(&app, &space_id, &token, sharding, TokenScope::Write, now_ms).await?;
 
     let actor = caller.actor();
     let rt = space
@@ -503,16 +453,7 @@ pub async fn list_wiki_docs(
     Accept(ct, _): Accept,
     HeaderVals(token, sharding): HeaderVals,
 ) -> Result<impl IntoResponse, AppError> {
-    let (space, caller) = authorize(
-        &app,
-        &space_id,
-        &token,
-        Some(sharding),
-        TokenScope::Read,
-        AuthzMode::PublicRead,
-        unix_ms(),
-    )
-    .await?;
+    let (space, caller) = read_public(&app, &space_id, &token, sharding, unix_ms()).await?;
     let access = caller.wiki_access();
 
     let rt = space
@@ -545,16 +486,7 @@ pub async fn get_wiki_doc(
     HeaderVals(token, sharding): HeaderVals,
 ) -> Result<impl IntoResponse, AppError> {
     let now_ms = unix_ms();
-    let (space, caller) = authorize(
-        &app,
-        &space_id,
-        &token,
-        Some(sharding),
-        TokenScope::Read,
-        AuthzMode::PublicRead,
-        now_ms,
-    )
-    .await?;
+    let (space, caller) = read_public(&app, &space_id, &token, sharding, now_ms).await?;
     let access = caller.wiki_access();
 
     let (doc, toc) = tokio::try_join!(
@@ -589,16 +521,7 @@ pub async fn get_wiki_content(
     HeaderVals(token, sharding): HeaderVals,
 ) -> Result<impl IntoResponse, AppError> {
     let now_ms = unix_ms();
-    let (space, caller) = authorize(
-        &app,
-        &space_id,
-        &token,
-        Some(sharding),
-        TokenScope::Read,
-        AuthzMode::PublicRead,
-        now_ms,
-    )
-    .await?;
+    let (space, caller) = read_public(&app, &space_id, &token, sharding, now_ms).await?;
     let access = caller.wiki_access();
 
     let selector = if let Some(anchor) = q.anchor {
@@ -633,16 +556,7 @@ pub async fn list_wiki_versions(
     Accept(ct, _): Accept,
     HeaderVals(token, sharding): HeaderVals,
 ) -> Result<impl IntoResponse, AppError> {
-    let (space, caller) = authorize(
-        &app,
-        &space_id,
-        &token,
-        Some(sharding),
-        TokenScope::Read,
-        AuthzMode::PublicRead,
-        unix_ms(),
-    )
-    .await?;
+    let (space, caller) = read_public(&app, &space_id, &token, sharding, unix_ms()).await?;
     let access = caller.wiki_access();
 
     let rt = space
@@ -690,16 +604,8 @@ async fn wiki_set_archived(
     archive: bool,
 ) -> Result<Response, AppError> {
     let now_ms = unix_ms();
-    let (space, caller) = authorize(
-        &app,
-        &space_id,
-        &token,
-        Some(sharding),
-        TokenScope::Write,
-        AuthzMode::Credentialed,
-        now_ms,
-    )
-    .await?;
+    let (space, caller) =
+        credentialed(&app, &space_id, &token, sharding, TokenScope::Write, now_ms).await?;
 
     let actor = caller.actor();
     let rt = if archive {
@@ -729,16 +635,7 @@ pub async fn post_wiki_search(
     };
 
     let now_ms = unix_ms();
-    let (space, caller) = authorize(
-        &app,
-        &space_id,
-        &token,
-        Some(sharding),
-        TokenScope::Read,
-        AuthzMode::PublicRead,
-        now_ms,
-    )
-    .await?;
+    let (space, caller) = read_public(&app, &space_id, &token, sharding, now_ms).await?;
     let access = caller.wiki_access();
 
     let rt = space
@@ -770,16 +667,7 @@ pub async fn post_wiki_verify(
     };
 
     let now_ms = unix_ms();
-    let (space, caller) = authorize(
-        &app,
-        &space_id,
-        &token,
-        Some(sharding),
-        TokenScope::Read,
-        AuthzMode::PublicRead,
-        now_ms,
-    )
-    .await?;
+    let (space, caller) = read_public(&app, &space_id, &token, sharding, now_ms).await?;
     let access = caller.wiki_access();
     let rt = space
         .wiki
@@ -798,16 +686,7 @@ pub async fn list_wiki_events(
     Accept(ct, _): Accept,
     HeaderVals(token, sharding): HeaderVals,
 ) -> Result<impl IntoResponse, AppError> {
-    let (space, caller) = authorize(
-        &app,
-        &space_id,
-        &token,
-        Some(sharding),
-        TokenScope::Read,
-        AuthzMode::PublicRead,
-        unix_ms(),
-    )
-    .await?;
+    let (space, caller) = read_public(&app, &space_id, &token, sharding, unix_ms()).await?;
     let access = caller.wiki_access();
     if access.labels.is_some() {
         // The audit log spans all labels; restricted tokens cannot read it.
@@ -851,16 +730,8 @@ pub async fn post_wiki_import(
     };
 
     let now_ms = unix_ms();
-    let (space, caller) = authorize(
-        &app,
-        &space_id,
-        &token,
-        Some(sharding),
-        TokenScope::All,
-        AuthzMode::Credentialed,
-        now_ms,
-    )
-    .await?;
+    let (space, caller) =
+        credentialed(&app, &space_id, &token, sharding, TokenScope::All, now_ms).await?;
 
     let actor = caller.actor();
     let rt = space
@@ -881,16 +752,8 @@ pub async fn get_wiki_export(
     HeaderVals(token, sharding): HeaderVals,
 ) -> Result<impl IntoResponse, AppError> {
     let now_ms = unix_ms();
-    let (space, caller) = authorize(
-        &app,
-        &space_id,
-        &token,
-        Some(sharding),
-        TokenScope::All,
-        AuthzMode::Credentialed,
-        now_ms,
-    )
-    .await?;
+    let (space, caller) =
+        credentialed(&app, &space_id, &token, sharding, TokenScope::All, now_ms).await?;
 
     let actor = caller.actor();
     let rt = space
@@ -910,13 +773,12 @@ pub async fn post_wiki_digest(
     Accept(ct, _): Accept,
     HeaderVals(token, sharding): HeaderVals,
 ) -> Result<impl IntoResponse, AppError> {
-    let (space, _caller) = authorize(
+    let (space, _caller) = credentialed(
         &app,
         &space_id,
         &token,
-        Some(sharding),
+        sharding,
         TokenScope::Write,
-        AuthzMode::Credentialed,
         unix_ms(),
     )
     .await?;
@@ -943,13 +805,12 @@ pub async fn post_maintenance(
         .value()
         .map_err(|_| AppError::bad_request("invalid input"))?;
 
-    let (space, _caller) = authorize(
+    let (space, _caller) = credentialed(
         &app,
         &space_id,
         &token,
-        Some(sharding),
+        sharding,
         TokenScope::Write,
-        AuthzMode::Credentialed,
         unix_ms(),
     )
     .await?;
@@ -978,21 +839,22 @@ pub async fn execute_kip_readonly(
 ) -> Result<impl IntoResponse, AppError> {
     ensure_sharding(&app, sharding)?;
 
-    let input: StringOr<anda_kip::Request> = ct.parse_body(&body).map_err(AppError::bad_request)?;
-    let input = input
-        .value()
-        .map_err(|_| AppError::bad_request("invalid input"))?;
+    // The model-facing argument shape, not the wire envelope: a caller sends
+    // `{"command": "..."}` or an `operations` batch, and the protocol tag,
+    // nested `options.dry_run` and rejection of unknown fields are the
+    // envelope's business rather than every client's. A bare string body is
+    // read as one command.
+    let input: StringOr<KipArgs> = ct.parse_body(&body).map_err(AppError::bad_request)?;
+    let input = match input {
+        StringOr::Value(args) => args,
+        StringOr::String(command) => KipArgs {
+            command: Some(command),
+            ..Default::default()
+        },
+    };
+    let input = input.into_request().map_err(AppError::bad_request)?;
 
-    let (space, _caller) = authorize(
-        &app,
-        &space_id,
-        &token,
-        Some(sharding),
-        TokenScope::Read,
-        AuthzMode::PublicReadLenient,
-        unix_ms(),
-    )
-    .await?;
+    let space = read_lenient(&app, &space_id, &token, sharding, unix_ms()).await?;
 
     let rt = space
         .execute_kip_readonly(input)
@@ -1018,13 +880,12 @@ pub async fn get_or_init_user(
         .value()
         .map_err(|_| AppError::bad_request("invalid input"))?;
 
-    let (space, _caller) = authorize(
+    let (space, _caller) = credentialed(
         &app,
         &space_id,
         &token,
-        Some(sharding),
+        sharding,
         TokenScope::Write,
-        AuthzMode::Credentialed,
         unix_ms(),
     )
     .await?;
@@ -1056,16 +917,7 @@ async fn load_authorized_conversation(
         .parse()
         .map_err(|_| AppError::bad_request("invalid conversation_id"))?;
 
-    let (space, caller) = authorize(
-        app,
-        space_id,
-        token,
-        Some(sharding),
-        TokenScope::Read,
-        AuthzMode::PublicRead,
-        unix_ms(),
-    )
-    .await?;
+    let (space, caller) = read_public(app, space_id, token, sharding, unix_ms()).await?;
     if let Some(reason) = caller.conversation_read_forbidden(collection.as_deref()) {
         return Err(AuthzError::Forbidden(reason).into());
     }
@@ -1127,16 +979,7 @@ pub async fn list_conversations(
     Accept(ct, _): Accept,
     HeaderVals(token, sharding): HeaderVals,
 ) -> Result<impl IntoResponse, AppError> {
-    let (space, caller) = authorize(
-        &app,
-        &space_id,
-        &token,
-        Some(sharding),
-        TokenScope::Read,
-        AuthzMode::PublicRead,
-        unix_ms(),
-    )
-    .await?;
+    let (space, caller) = read_public(&app, &space_id, &token, sharding, unix_ms()).await?;
     // Same guard as get_conversation: listings expose the same
     // unrestricted runner history.
     if let Some(reason) = caller.conversation_read_forbidden(pg.collection.as_deref()) {
@@ -1164,13 +1007,12 @@ pub async fn list_space_tokens(
     Accept(ct, _): Accept,
     HeaderVals(token, sharding): HeaderVals,
 ) -> Result<impl IntoResponse, AppError> {
-    let (space, _caller) = authorize(
+    let (space, _caller) = cwt_only(
         &app,
         &space_id,
         &token,
-        Some(sharding),
+        sharding,
         TokenScope::Write,
-        AuthzMode::CwtOnly,
         unix_ms(),
     )
     .await?;
@@ -1204,16 +1046,7 @@ pub async fn add_space_token(
         TokenScope::Write
     };
     let now_ms = unix_ms();
-    let (space, _caller) = authorize(
-        &app,
-        &space_id,
-        &token,
-        Some(sharding),
-        required,
-        AuthzMode::CwtOnly,
-        now_ms,
-    )
-    .await?;
+    let (space, _caller) = cwt_only(&app, &space_id, &token, sharding, required, now_ms).await?;
 
     let mut data: [u8; 20] = [0; 20];
     rand::rng().fill_bytes(&mut data);
@@ -1324,13 +1157,12 @@ pub async fn get_byok(
     Accept(ct, _): Accept,
     HeaderVals(token, sharding): HeaderVals,
 ) -> Result<impl IntoResponse, AppError> {
-    let (space, _caller) = authorize(
+    let (space, _caller) = cwt_only(
         &app,
         &space_id,
         &token,
-        Some(sharding),
+        sharding,
         TokenScope::Write,
-        AuthzMode::CwtOnly,
         unix_ms(),
     )
     .await?;
@@ -1441,13 +1273,13 @@ mod tests {
         post_recall, post_recall_structured, post_shadow_eval, restart_formation,
         revoke_space_token, update_byok, update_space, update_space_tier,
     };
-    #[cfg(feature = "wiki")]
-    use crate::authz::wiki_read_access;
     use crate::{
         agents::SELF_USER_ID,
         payload::{Accept, AppBytes, AppError, AppPath, AppQuery, HeaderVals, PayloadFormat},
         space::AppState,
-        testkit::{app_state_core, create_loaded_space, models_with_completer},
+        testkit::{
+            app_state_core, create_loaded_space, models_with_completer, signed_token, signing_key,
+        },
         types::{
             AddSpaceTokenInput, ConversationDeltaQuery, CreateOrUpdateSpaceInput, FormationInput,
             FormationRestartInput, GetOrInitUserInput, InputContext, MaintenanceInput,
@@ -1467,9 +1299,7 @@ mod tests {
         http::{HeaderMap, StatusCode, header},
         response::{IntoResponse, Response},
     };
-    use cose2::{CoseMap, Label, Sign1Message, Value as CoseValue, cwt::Claims, iana};
-    use ic_auth_types::ByteBufB64;
-    use ic_cose_types::cose::ed25519::{SigningKey, VerifyingKey, ed25519_sign};
+    use ic_cose_types::cose::ed25519::{SigningKey, VerifyingKey};
     use serde::Serialize;
     use serde_json::{Value, json};
 
@@ -1507,46 +1337,12 @@ mod tests {
         test_app_state_with_pubkeys(name, sharding, vec![key])
     }
 
-    fn test_signing_key() -> SigningKey {
-        SigningKey::from_bytes(&[7u8; 32])
-    }
-
     fn test_app_state_with_signing_key(
         name: &str,
         sharding: u32,
         signing_key: &SigningKey,
     ) -> AppState {
         test_app_state_with_pubkeys(name, sharding, vec![signing_key.verifying_key()])
-    }
-
-    fn signed_token(
-        signing_key: &SigningKey,
-        user: Principal,
-        audience: &str,
-        scope: &str,
-    ) -> String {
-        let claims = Claims {
-            subject: Some(user.to_string()),
-            audience: Some(audience.to_string()),
-            extra: CoseMap::from_iter([(
-                Label::Int(iana::CWTClaimScope),
-                CoseValue::Text(scope.to_string()),
-            )]),
-            ..Default::default()
-        };
-        let payload = claims.to_vec().unwrap();
-        let mut sign1 = Sign1Message::new(Some(payload));
-        let tbs_data = sign1
-            .prepare_signature(Some(Label::Int(iana::AlgorithmEdDSA)), None, None)
-            .unwrap();
-        sign1
-            .set_signature(
-                ed25519_sign(signing_key.as_bytes(), &tbs_data)
-                    .to_bytes()
-                    .to_vec(),
-            )
-            .unwrap();
-        ByteBufB64(sign1.to_vec().unwrap()).to_string()
     }
 
     fn test_app_state_with_pubkeys(
@@ -1632,37 +1428,45 @@ mod tests {
     #[cfg(feature = "wiki")]
     #[test]
     fn wiki_read_access_resolves_the_three_caller_states() {
+        use crate::authz::Caller;
         use crate::types::{CWToken, SpaceToken};
 
+        let caller = |cwt, st| Caller { cwt, st };
+
         // CWT holder: unrestricted, actor is the user principal.
-        let cwt = Some(CWToken {
-            user: SELF_USER_ID,
-            audience: "sp".to_string(),
-            scope: TokenScope::Read,
-        });
-        let access = wiki_read_access(&cwt, None);
+        let access = caller(
+            Some(CWToken {
+                user: SELF_USER_ID,
+                audience: "sp".to_string(),
+                scope: TokenScope::Read,
+            }),
+            None,
+        )
+        .wiki_access();
         assert!(access.labels.is_none());
         assert_eq!(access.actor, SELF_USER_ID.to_string());
 
         // Labeled space token: restricted to unlabeled + granted labels.
-        let st = SpaceToken {
-            name: "auditor".to_string(),
-            labels: Some(vec!["hr".to_string()]),
-            ..Default::default()
-        };
-        let access = wiki_read_access(&None, Some(&st));
+        let access = caller(
+            None,
+            Some(SpaceToken {
+                name: "auditor".to_string(),
+                labels: Some(vec!["hr".to_string()]),
+                ..Default::default()
+            }),
+        )
+        .wiki_access();
         assert_eq!(access.labels, Some(vec!["hr".to_string()]));
         assert_eq!(access.actor, "st:auditor");
 
         // Label-less space token: unrestricted, stable audit identity even
         // without a name.
-        let unnamed = SpaceToken::default();
-        let access = wiki_read_access(&None, Some(&unnamed));
+        let access = caller(None, Some(SpaceToken::default())).wiki_access();
         assert!(access.labels.is_none());
         assert_eq!(access.actor, "st:unnamed");
 
         // Anonymous public-space reader: unlabeled content only (P0-1).
-        let access = wiki_read_access(&None, None);
+        let access = caller(None, None).wiki_access();
         assert_eq!(access.labels, Some(Vec::new()));
     }
 
@@ -1921,7 +1725,7 @@ mod tests {
 
     #[tokio::test]
     async fn management_secret_handlers_require_write_cwt() {
-        let signing_key = test_signing_key();
+        let signing_key = signing_key(7);
         let app = test_app_state_with_signing_key("handler_secret_scope", 0, &signing_key);
         let space_id = "handler_secret_scope_space";
         let space = create_loaded_space(&app, space_id).await;
@@ -2490,6 +2294,7 @@ mod tests {
                 accept_json(),
                 headers(&app),
                 json_bytes(&RecallInput {
+                    budget: None,
                     query: "What did the handler remember?".to_string(),
                     context: Some(InputContext {
                         counterparty: Some("handler-user".to_string()),
@@ -2605,92 +2410,98 @@ mod tests {
             .await,
         )
         .await;
-        assert_eq!(user["result"]["type"], "Person");
-        assert!(user["result"].to_string().contains("external-user-1"));
+        assert_eq!(
+            user["result"]["schema_ref"],
+            "kip://profiles/cognitive-memory@2.1.0/Person"
+        );
+        assert_eq!(user["result"]["key"], "external-user-1");
     }
 
     #[tokio::test]
+    // Each handler future is awaited on the heap: this test drives fifteen of
+    // them in one frame, and a KIP 2.0 envelope is a larger value than the 1.x
+    // one it replaced — enough to push the frame past a test thread's stack.
     async fn memory_evolution_endpoints_enforce_auth_matrix() {
-        let signing_key = test_signing_key();
+        let signing_key = signing_key(7);
         let app = test_app_state_with_signing_key("mem_auth", 0, &signing_key);
         let space_id = "mem_auth_space";
         let space = create_loaded_space(&app, space_id).await;
 
         let probe_body = || json_bytes(&json!({"query": "anything"}));
         let recall_body = || json_bytes(&json!({"query": "anything"}));
-        let pin_body = || json_bytes(&json!({"entity": "C:999", "pinned": true}));
-        let forget_body = || json_bytes(&json!({"entities": ["C:999"], "dry_run": true}));
+        let pin_body = || json_bytes(&json!({"entity": "C-999", "pinned": true}));
+        let forget_body = || json_bytes(&json!({"entities": ["C-999"], "dry_run": true}));
         let shadow_body = || json_bytes(&json!({"policy": crate::types::MemoryPolicy::default()}));
         let no_token = || HeaderVals(String::new(), 0);
 
         // Private space, no token: every evolution endpoint rejects.
         err_json(
-            post_probe(
+            Box::pin(post_probe(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 no_token(),
                 probe_body(),
-            )
+            ))
             .await,
             StatusCode::UNAUTHORIZED,
         )
         .await;
         err_json(
-            post_recall_structured(
+            Box::pin(post_recall_structured(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 no_token(),
                 recall_body(),
-            )
+            ))
             .await,
             StatusCode::UNAUTHORIZED,
         )
         .await;
         err_json(
-            get_memory_status(
+            Box::pin(get_memory_status(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 no_token(),
-            )
+            ))
             .await,
             StatusCode::UNAUTHORIZED,
         )
         .await;
         err_json(
-            post_memory_pin(
+            Box::pin(post_memory_pin(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 no_token(),
                 pin_body(),
-            )
+            ))
             .await,
             StatusCode::UNAUTHORIZED,
         )
         .await;
         err_json(
-            post_memory_forget(
+            Box::pin(post_memory_forget(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 no_token(),
                 forget_body(),
-            )
+            ))
             .await,
             StatusCode::UNAUTHORIZED,
         )
         .await;
         err_json(
-            post_shadow_eval(
+            Box::pin(post_shadow_eval(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 no_token(),
                 shadow_body(),
-            )
+            ))
             .await,
             StatusCode::UNAUTHORIZED,
         )
@@ -2708,69 +2519,69 @@ mod tests {
             .await
             .unwrap();
         ok_json(
-            post_probe(
+            Box::pin(post_probe(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 no_token(),
                 probe_body(),
-            )
+            ))
             .await,
         )
         .await;
         ok_json(
-            get_memory_status(
+            Box::pin(get_memory_status(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 no_token(),
-            )
+            ))
             .await,
         )
         .await;
         ok_json(
-            post_recall_structured(
+            Box::pin(post_recall_structured(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 no_token(),
                 recall_body(),
-            )
+            ))
             .await,
         )
         .await;
         err_json(
-            post_memory_pin(
+            Box::pin(post_memory_pin(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 no_token(),
                 pin_body(),
-            )
+            ))
             .await,
             StatusCode::UNAUTHORIZED,
         )
         .await;
         err_json(
-            post_memory_forget(
+            Box::pin(post_memory_forget(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 no_token(),
                 forget_body(),
-            )
+            ))
             .await,
             StatusCode::UNAUTHORIZED,
         )
         .await;
         err_json(
-            post_shadow_eval(
+            Box::pin(post_shadow_eval(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 no_token(),
                 shadow_body(),
-            )
+            ))
             .await,
             StatusCode::UNAUTHORIZED,
         )
@@ -2784,13 +2595,13 @@ mod tests {
         // The nonexistent entity draws a KIP domain error — not 401: the
         // request got through the gate and reached the graph.
         let pin_err = err_json(
-            post_memory_pin(
+            Box::pin(post_memory_pin(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 with_token(),
                 pin_body(),
-            )
+            ))
             .await,
             StatusCode::BAD_REQUEST,
         )
@@ -2803,13 +2614,13 @@ mod tests {
             "{pin_err}"
         );
         let forget_ok = ok_json(
-            post_memory_forget(
+            Box::pin(post_memory_forget(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 with_token(),
                 forget_body(),
-            )
+            ))
             .await,
         )
         .await;
@@ -2817,13 +2628,13 @@ mod tests {
         // The recall_structured call above left a completed recall to
         // replay, so an authorized shadow evaluation runs end to end.
         let shadow_ok = ok_json(
-            post_shadow_eval(
+            Box::pin(post_shadow_eval(
                 State(app.clone()),
                 AppPath(space_id.to_string()),
                 accept_json(),
                 with_token(),
                 shadow_body(),
-            )
+            ))
             .await,
         )
         .await;
@@ -3118,6 +2929,7 @@ mod tests {
                 accept_json(),
                 HeaderVals(read_token.clone(), 0),
                 json_bytes(&RecallInput {
+                    budget: None,
                     query: "Space token recall?".to_string(),
                     context: None,
                 }),
