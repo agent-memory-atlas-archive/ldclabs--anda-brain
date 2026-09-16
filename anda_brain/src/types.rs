@@ -91,7 +91,13 @@ impl CWToken {
             .parse::<Principal>()
             .map_err(|_| "invalid 'sub' claim")?;
 
-        let audience = claims.audience.unwrap_or_default();
+        let audience = match claims.audience {
+            Some(value) => value
+                .as_str()
+                .ok_or("multiple audiences are not supported")?
+                .to_string(),
+            None => String::new(),
+        };
         Ok(Self {
             user,
             audience,
@@ -1475,8 +1481,8 @@ pub struct MemoryForgetEntity {
     /// Whether the entity existed at request time.
     pub existed: bool,
 
-    /// Deletion error for this entity, when one occurred (e.g. KIP_3004
-    /// protecting system nodes). Other entities still proceed.
+    /// Purge error for this entity, when one occurred (for example, a protected
+    /// system element). Other entities still proceed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -1738,7 +1744,7 @@ mod tests {
         let user = Principal::from_slice(&[42]);
         let claims = Claims {
             subject: Some(user.to_string()),
-            audience: Some("memory-space".to_string()),
+            audience: Some("memory-space".to_string().into()),
             extra: scope_claim("write"),
             ..Default::default()
         };
@@ -1770,6 +1776,14 @@ mod tests {
             ..Default::default()
         };
         assert!(CWToken::from_claims(invalid_subject).is_err());
+
+        let multiple_audiences = Claims {
+            subject: Some(Principal::from_slice(&[1]).to_string()),
+            audience: Some(vec!["space-a".to_string(), "space-b".to_string()].into()),
+            extra: scope_claim("read"),
+            ..Default::default()
+        };
+        assert!(CWToken::from_claims(multiple_audiences).is_err());
     }
 
     #[test]

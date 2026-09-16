@@ -16,7 +16,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@ldclabs/kip-do": "link:../../anda-db/ts/kip-do"
+    "@ldclabs/kip-do": "^0.13.0"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.20.2",

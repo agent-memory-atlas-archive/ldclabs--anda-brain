@@ -8,5 +8,8 @@ allowBuilds:
   protobufjs: true
   sharp: true
   workerd: true
+minimumReleaseAgeExclude:
+  # This coordinated KIP 2.0 release is newer than pnpm's release-age gate.
+  - '@ldclabs/kip-do@0.13.0'
 onlyBuiltDependencies:
   - esbuild

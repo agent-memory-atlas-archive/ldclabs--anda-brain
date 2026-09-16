@@ -2,8 +2,9 @@
 
 This isolated generator uses the published `anda_cognitive_nexus` / `anda_kip`
 0.11.0 and `anda_db` 0.11.1 releases selected by Anda Brain v0.11.0's lockfile.
-It does not inherit the main workspace's KIP v2 path patches. Its lockfile was
-seeded from the v0.11.0 tag, then reduced to the generator's dependencies.
+It remains isolated from the main workspace's published KIP v2 dependencies.
+Its lockfile was seeded from the v0.11.0 tag, then reduced to the generator's
+dependencies.
 
 `seed.kip` contains only synthetic memory. The runtime also creates its actual
 bundled v1 ontology and the Brain's `$self` / `$system` bootstrap. The resulting

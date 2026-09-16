@@ -12,7 +12,8 @@ assessment.settlement_errors.
 
 ## KIP 2.0 / CognitiveMemory 2.1 update
 
-Rust and Worker track KIP `d6e3a45` and AndaDB `bcd01d4`. Skill behavior is an
+Rust uses published `anda_kip`, Cognitive Nexus and AndaDB 0.13 packages;
+the Worker uses published `@ldclabs/kip-do` 0.13. Skill behavior is an
 immutable `SkillRevision`; Watch progress and task leases use protected Nexus
 operations. The former family-rate Skill promotion rule has been removed. Without
 configured independent observers, frozen trials and replayable evaluations,
@@ -871,9 +872,10 @@ anda_brain = "0.12"
 anda_brain = { version = "0.12", features = ["mcp", "wiki"] }
 ```
 
-These development APIs require the local 0.12 checkout and the sibling
-`patch.crates-io` overrides in [Cargo.toml](../Cargo.toml). Trusted experiment
-hosts add `experiments`; it is independent of the `learning` feature.
+To use development APIs before a crate release, build this checkout. Its KIP
+2.0 dependencies resolve from published crates, so no sibling checkout is
+needed. Trusted experiment hosts add `experiments`; it is independent of the
+`learning` feature.
 
 The `anda_brain` **binary** is the full product and declares
 `required-features = ["mcp", "wiki"]`, so every command below passes

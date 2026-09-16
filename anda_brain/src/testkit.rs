@@ -119,7 +119,7 @@ pub(crate) fn signed_token(
 ) -> String {
     let claims = Claims {
         subject: Some(user.to_string()),
-        audience: Some(audience.to_string()),
+        audience: Some(audience.to_string().into()),
         extra: CoseMap::from_iter([(
             Label::Int(iana::CWTClaimScope),
             Value::Text(scope.to_string()),

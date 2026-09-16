@@ -33,18 +33,18 @@ axum = { version = "0.8", features = [
   "tokio",
   "query",
 ], default-features = true }
-anda_core = { version = "0.15" }
-anda_engine = { version = "0.15" }
-anda_engine_server = { version = "0.15" }
-anda_web3_client = { version = "0.15" }
-anda_object_store = "0.11"
-anda_db = { version = "0.11", features = ["full"] }
-anda_db_tfs = { version = "0.11", features = ["full"] }
+anda_core = { version = "0.16" }
+anda_engine = { version = "0.16" }
+anda_engine_server = { version = "0.16" }
+anda_web3_client = { version = "0.16" }
+anda_object_store = "0.13"
+anda_db = { version = "0.13", features = ["full"] }
+anda_db_tfs = { version = "0.13", features = ["full"] }
 anda_cognitive_nexus = "0.13"
 anda_kip = "0.13"
 base64 = "0.23"
 cbor2 = "1"
-cose2 = "0.4"
+cose2 = "0.5"
 dotenv = "0.15"
 futures = "0.3"
 futures-util = "0.3"
@@ -55,7 +55,7 @@ serde_json = { version = "1" }
 sha3 = "0.12"
 sha2 = "0.11"
 unicode-normalization = "0.1"
-ic_cose_types = "0.10"
+ic_cose_types = "0.11"
 ic_auth_types = "0.10"
 ic-ed25519 = "0.6"
 object_store = { version = "0.14" }
@@ -77,20 +77,6 @@ rmcp = { version = "3", features = [
   "transport-streamable-http-server",
 ], default-features = false }
 schemars = "1"
-
-[patch.crates-io]
-# KIP 2.0 landed in anda-db and anda, but neither is published yet; build against the
-# working trees until anda_kip / anda_cognitive_nexus 0.13 and anda_engine 0.15.1 are on
-# crates.io. The anda_db* crates are patched too so this workspace, the nexus and the
-# engine share one instance of each type rather than linking a crates.io copy alongside
-# the path copy the nexus pulls in.
-anda_kip = { path = "../anda-db/rs/anda_kip" }
-anda_cognitive_nexus = { path = "../anda-db/rs/anda_cognitive_nexus" }
-anda_db = { path = "../anda-db/rs/anda_db" }
-anda_db_schema = { path = "../anda-db/rs/anda_db_schema" }
-anda_db_tfs = { path = "../anda-db/rs/anda_db_tfs" }
-anda_core = { path = "../anda/anda_core" }
-anda_engine = { path = "../anda/anda_engine" }
 
 [profile.release]
 debug = false

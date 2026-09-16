@@ -2034,11 +2034,11 @@ impl Space {
         Ok(kip::changed(&response, "retention"))
     }
 
-    /// Privacy-grade deletion (plan M6): physically removes entities from
-    /// the graph (concepts detach and take their propositions with them) and
-    /// their usage-ledger rows. Archive does not satisfy forget. Run with
-    /// `dry_run` first; per-entity errors (e.g. KIP_3004 protecting system
-    /// nodes) do not abort the batch.
+    /// Privacy-grade deletion (plan M6): purges content and graph links,
+    /// cascades through attached propositions, and removes usage-ledger rows.
+    /// KIP retains an erased identity stub. Archive does not satisfy forget.
+    /// Run with `dry_run` first; per-entity errors, such as a protected system
+    /// element, do not abort the batch.
     pub async fn forget_memory(
         &self,
         input: MemoryForgetInput,
@@ -2118,10 +2118,9 @@ impl Space {
                 continue;
             }
 
-            // Deleting a concept DETACH-deletes all its propositions; their
-            // ledger rows must cascade too (entity ids embed predicate names
-            // like `P:7:has_allergy` — usage traces of a forgotten memory).
-            // Enumerate them before the DELETE destroys the links.
+            // Purging a concept cascades to its propositions; their ledger
+            // rows must be removed too. Enumerate ids before PURGE removes
+            // their graph links.
             let mut cascade: Vec<String> = vec![entity.clone()];
             if assess::is_concept_entity_id(&entity) {
                 cascade.extend(self.concept_proposition_ids(&entity).await);
@@ -2174,7 +2173,7 @@ impl Space {
     }
 
     /// Ids of every proposition attached to a concept (either slot); used by
-    /// forget to cascade ledger rows for DETACH-deleted links. Best-effort:
+    /// forget to cascade ledger rows for purged propositions. Best-effort:
     /// an enumeration failure only leaves ledger rows behind, never blocks
     /// the deletion itself.
     async fn concept_proposition_ids(&self, concept_id: &str) -> Vec<String> {

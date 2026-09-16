@@ -7,10 +7,7 @@ use axum::extract::OriginalUri;
 use rmcp::{
     ErrorData, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{
-        CallToolResult, ContentBlock, Implementation, InitializeResult, ServerCapabilities,
-        ServerInfo,
-    },
+    model::{CallToolResult, ContentBlock, Implementation, InitializeResult, ServerCapabilities},
     schemars::JsonSchema,
     service::RequestContext,
     tool, tool_handler, tool_router,
@@ -1239,7 +1236,7 @@ impl AndaBrainMcpServer {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for AndaBrainMcpServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> InitializeResult {
         InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(
                 Implementation::new("anda-brain-mcp", env!("CARGO_PKG_VERSION"))

@@ -20,17 +20,18 @@
  * `MnemonicState.utility`, `LIST DEPENDENTS` and `PURGE PAYLOAD` were in the
  * reference policies and in none of our five copies of them.
  *
- * Needs the sibling `anda-db` checkout; exits with a message when it is absent.
+ * Uses the sibling `anda-db` checkout by default. Set `ANDA_KIP_SOURCE` to an
+ * `anda_kip` crate directory to sync against a published release instead.
  */
 import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const kip = resolve(root, '..', 'anda-db', 'rs', 'anda_kip')
+const kip = resolve(process.env.ANDA_KIP_SOURCE ?? resolve(root, '..', 'anda-db', 'rs', 'anda_kip'))
 
 if (!existsSync(kip)) {
-  console.error(`anda_kip is not checked out at ${kip}; nothing to sync from`)
+  console.error(`anda_kip source not found at ${kip}; nothing to sync from`)
   process.exit(1)
 }
 

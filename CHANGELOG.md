@@ -11,8 +11,22 @@ the rest follows from is that *a Proposition existing is not the Proposition
 being true*. Existing 1.x memory is migrated by the Cognitive Nexus on first
 open; see the KIP migration guide for what that can and cannot preserve.
 
-`anda_kip`, `anda_cognitive_nexus` and `anda_engine` are consumed from local
-path patches (`[patch.crates-io]`) until the matching KIP 2.0 runtimes are published.
+### Changed — published KIP 2.0 dependencies
+
+- Removed the local `[patch.crates-io]` overrides. `anda_kip`,
+  `anda_cognitive_nexus`, `anda_db`, `anda_db_tfs` and `anda_object_store` now
+  resolve on the 0.13 line; `anda_core`, `anda_engine`,
+  `anda_engine_server` and `anda_web3_client` resolve on 0.16.
+- Updated `cose2` to 0.5 and `ic_cose_types` to 0.11. CWT parsing retains the
+  single-audience token contract and explicitly rejects an array of audiences;
+  the MCP server uses the current `rmcp` initialization result type.
+- The Worker installs the published `@ldclabs/kip-do` 0.13 package, with a
+  regenerated pnpm lockfile. Its merge regression expects the engine's current
+  `IdentityMergeConflict` error. CI no longer checks out or builds sibling
+  repositories for either runtime.
+- Re-synced the Worker's vendored syntax card and generated prompts to the
+  published `anda_kip` 0.13 asset, so both deployments give the model the same
+  KIP reference. The sync script can now take an explicit crate source path.
 
 ### Fixed — release migration and memory correctness
 
@@ -129,10 +143,8 @@ learning standing or leases. See the [upgrade guide](anda_brain/README.md#upgrad
 
 ### Changed — anda-brain-worker
 
-The Cloudflare Worker speaks KIP 2.0 too, on `@ldclabs/kip-do` 0.13 (consumed
-from a local `link:` until it is published, mirroring `[patch.crates-io]` on the
-Rust side). It is a second, independent engine, so the port is not a translation
-of the Rust one:
+The Cloudflare Worker speaks KIP 2.0 too, on `@ldclabs/kip-do` 0.13. It is a
+second, independent engine, so the port is not a translation of the Rust one:
 
 - **Operations, not command strings.** `executeKip(command, params)` and
   `executeKipBatch([{command, parameters}])` replace the 1.x string API, and
@@ -153,9 +165,10 @@ of the Rust one:
   declaring them in KML. The object re-activates exactly that set on
   construction: returning only the Profile would narrow the environment on every
   eviction, and every local name the Space had published would stop resolving.
-- **`SEARCH` is back, and is now real full-text search.** `kip-do` 0.13 shipped
-  with no search index at all; it builds one now (see the `anda-db` changelog),
-  so grounding for `recall`, `probe` and the citation list is a bounded
+- **`SEARCH` is back, and is now real full-text search.** An early `kip-do`
+  0.13 development snapshot had no search index; the published package includes
+  one (see the `anda-db` changelog). Grounding for `recall`, `probe` and the
+  citation list is a bounded
   `SEARCH CONCEPT` again, run before the model is asked anything — an answer
   should not depend on a planner having thought to look. A hit is an envelope,
   `{id, kind, score, element}`, and the type and name are read off `element`:

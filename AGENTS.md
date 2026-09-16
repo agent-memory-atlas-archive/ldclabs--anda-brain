@@ -21,9 +21,8 @@ The service stores memory in an AndaDB-backed Cognitive Nexus and uses KIP 2.0
 write KIP directly.
 
 `anda_kip`, `anda_cognitive_nexus`, `anda_db*`, `anda_core` and `anda_engine`
-are consumed through `[patch.crates-io]` path overrides to the sibling
-`anda-db` and `anda` checkouts, because KIP 2.0 is not published yet. A clone
-without those siblings will not build.
+resolve from published crates. A sibling `anda-db` checkout is needed only
+when deliberately refreshing vendored KIP prompt assets.
 
 ## Repository Layout
 
@@ -78,7 +77,7 @@ without those siblings will not build.
   engine has) and `anda-brain-worker/README.md` is the authority on which. Its
   prompts are vendored under `anda-brain-worker/assets/` and inlined by
   `pnpm run codegen:prompts`.
-- `deploy/`, `anda-brain-demo/`, `anda-brain-openclaw/`, `anda-cli/`: deployment
+- `deploy/`, `anda-brain-demo/`, `anda-cli/`: deployment
   and integration material. Do not change these unless the task is explicitly
   about them.
 
@@ -126,9 +125,8 @@ you touch `anda-brain-worker/`:
 pnpm --filter @ldclabs/anda-brain-worker check
 ```
 
-It depends on `../../anda-db/ts/kip-do` through a `link:`, and that package's
-entry point is its `dist/` — build it there first. The `link:` has to go before
-this can ship, for the same reason as the Cargo `[patch.crates-io]` above.
+The Worker resolves `@ldclabs/kip-do` 0.13 from the npm registry; use the
+repository's pnpm lockfile and run `pnpm install --frozen-lockfile` first.
 
 ## Cargo Features
 
@@ -264,5 +262,7 @@ pnpm --filter @ldclabs/anda-brain-worker run codegen:prompts
 
 which re-copies the reference half from `anda_kip` in all six files, copies the
 Worker's verbatim assets (syntax, Profile and the four role/Memory Interface cards),
-and leaves every `# A.` section untouched. Edit section A by hand; that is the
-half that is ours.
+and leaves every `# A.` section untouched. The script uses a sibling `anda-db`
+checkout by default; set `ANDA_KIP_SOURCE` to a downloaded `anda_kip` crate
+directory when syncing to a published version. Edit section A by hand; that is
+the half that is ours.

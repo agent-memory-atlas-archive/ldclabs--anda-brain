@@ -795,8 +795,8 @@ describe('Anda Brain Worker', () => {
     // instead. None of that is available to a gate reading the parse tree.
     expect(response.status).toBe(422)
     const failure = await response.text()
-    expect(failure).toContain('IdentitySelectorRequired')
-    expect(failure).toContain('needs exactly one source and one target')
+    expect(failure).toContain('IdentityMergeConflict')
+    expect(failure).toContain('requires exactly one source and one target')
 
     const info = await get(runtime, space, 'info')
     expect(((await info.json()) as { result: { concepts: number } }).result.concepts).toBe(3)

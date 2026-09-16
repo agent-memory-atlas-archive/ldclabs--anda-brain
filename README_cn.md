@@ -15,7 +15,8 @@
 
 ## KIP 2.0 / CognitiveMemory 2.1 更新
 
-Rust 与 Worker 已对齐 KIP `d6e3a45`、AndaDB `bcd01d4`。Skill 行为保存为不可变的
+Rust 使用已发布的 `anda_kip`、Cognitive Nexus 和 AndaDB 0.13；Worker 使用
+已发布的 `@ldclabs/kip-do` 0.13。Skill 行为保存为不可变的
 `SkillRevision`；Watch 进度和任务租约通过 Nexus 的受保护接口维护。旧的 family
 成功率晋升规则已移除；未配置独立观察者、冻结试验和可重放评估时，程序候选保持未验证，
 `skills.unsupported_reason` 明确报告该边界。现有 Brain API 保持可用；这两个适配器

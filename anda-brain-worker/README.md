@@ -13,7 +13,8 @@
 
 ## KIP 2.0 / CognitiveMemory 2.1 更新
 
-Rust 与 Worker 已对齐 KIP `d6e3a45`、AndaDB `bcd01d4`。Skill 行为保存为不可变的
+Rust 使用已发布的 `anda_kip`、Cognitive Nexus 和 AndaDB 0.13；Worker 使用
+已发布的 `@ldclabs/kip-do` 0.13。Skill 行为保存为不可变的
 `SkillRevision`；Watch 进度和任务租约通过 Nexus 的受保护接口维护。旧的 family
 成功率晋升规则已移除；未配置独立观察者、冻结试验和可重放评估时，程序候选保持未验证，
 `skills.unsupported_reason` 明确报告该边界。现有 Brain API 保持可用；这两个适配器
@@ -29,19 +30,19 @@ Rust 与 Worker 已对齐 KIP `d6e3a45`、AndaDB `bcd01d4`。Skill 行为保存�
 - 元素 id 形如 `C-7`、`P-11`、`A-3`、`E-2`、`X-1`。
 - **Schema 是受保护的控制状态：KML 不能声明类型。** 新词汇经由宿主进入，见下文。
 
-## 依赖：本地的 kip-do 0.13
+## 依赖：已发布的 kip-do 0.13
 
-`@ldclabs/kip-do` 0.13 尚未发布，因此 `package.json` 用 `link:` 指向同级仓库：
-
-```json
-"@ldclabs/kip-do": "link:../../anda-db/ts/kip-do"
-```
-
-这与 Rust 侧的 `[patch.crates-io]` 同构：**发布前必须去掉**，而且缺少 `../../anda-db` 检出的克隆无法安装。`ts/kip-do` 的入口是 `dist/`，先构建：
+`@ldclabs/kip-do` 0.13 从 npm registry 安装，版本由仓库的
+`pnpm-lock.yaml` 固定。无需同级 `anda-db` 检出或构建本地 `kip-do`：
 
 ```bash
-cd ../../anda-db/ts/kip-do && pnpm install && pnpm run build
+pnpm install --frozen-lockfile
+pnpm --filter @ldclabs/anda-brain-worker check
 ```
+
+普通安装、测试和部署不需要同级 `anda-db` 检出。主动刷新 vendored KIP
+提示资产时，`sync:assets` 默认使用同级源码；也可用 `ANDA_KIP_SOURCE` 指向
+已下载的 `anda_kip` crate 目录，按发布版本同步。
 
 ## 与完整版的边界
 
