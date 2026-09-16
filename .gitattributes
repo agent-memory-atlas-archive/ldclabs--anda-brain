@@ -1,0 +1,3 @@
+# These vendored files are hashed byte-for-byte against the pinned anda_kip release.
+# Keep LF in Windows checkouts so include_str! embeds the same bytes on every OS.
+anda_brain/assets/kip-reference/** text eol=lf
