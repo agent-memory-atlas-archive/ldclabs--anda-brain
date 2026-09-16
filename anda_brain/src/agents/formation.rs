@@ -598,6 +598,7 @@ impl Agent<AgentCtx> for FormationAgent {
             NoteTool::NAME.to_string(),
             crate::vocabulary::DeclareSymbolsTool::NAME.to_string(),
             crate::cognitive::MemoryRuntimeTool::NAME.to_string(),
+            crate::kip_reference::KipReferenceTool::NAME.to_string(),
         ]
     }
 
@@ -1094,6 +1095,7 @@ mod tests {
         );
         let tools = Agent::<AgentCtx>::tool_dependencies(space.formation.as_ref());
         assert!(tools.iter().any(|name| name == "execute_kip"));
+        assert!(tools.iter().any(|name| name == "kip_reference"));
         assert!(tools.iter().any(|name| name == "note"));
     }
 

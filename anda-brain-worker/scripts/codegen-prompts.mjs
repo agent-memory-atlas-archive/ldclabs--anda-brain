@@ -15,6 +15,7 @@
  * before this.
  */
 import { readFileSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -79,7 +80,33 @@ const out = `/**
 ${bodies.join('\n')}`
 
 const target = join(root, 'src', 'assets.generated.ts')
-writeFileSync(target, out)
-console.log(
-  `wrote ${target} (${ASSETS.length} assets, ${out.length.toLocaleString()} chars)`,
-)
+const bundle = JSON.parse(readFileSync(join(root, 'assets/kip-reference.json'), 'utf8'))
+const engine = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).dependencies['@ldclabs/kip-do']
+if (bundle.version !== engine) throw new Error('Reference bundle must match the pinned kip-do release')
+const imports = []
+const documents = bundle.documents.map(({ id, source, sha256, content, constant, asset }) => {
+  if (constant) {
+    if (!ASSETS.some(entry => entry.constant === constant && entry.file === asset)) {
+      throw new Error(`Unknown reference asset: ${id}`)
+    }
+    content = readFileSync(join(root, 'assets', asset), 'utf8')
+    imports.push(constant)
+  }
+  if (typeof content !== 'string' || createHash('sha256').update(content).digest('hex') !== sha256) {
+    throw new Error(`Reference asset hash mismatch: ${id}; refresh from the pinned release`)
+  }
+  return `  { id: ${JSON.stringify(id)}, source: ${JSON.stringify(source)}, sha256: ${JSON.stringify(sha256)}, content: ${constant || JSON.stringify(content)} },`
+})
+const references = `// Generated from assets/kip-reference.json and the pinned role/syntax assets. Do not edit.
+import { ${imports.join(', ')} } from './assets.generated.js'
+export const REFERENCE_VERSION = ${JSON.stringify(bundle.version)}
+export const REFERENCE_DOCUMENTS: readonly { id: string; source: string; sha256: string; content: string }[] = [
+${documents.join('\n')}
+]
+`
+for (const [path, text] of [[target, out], [join(root, 'src/references.generated.ts'), references]]) {
+  if (process.argv.includes('--check')) {
+    if (readFileSync(path, 'utf8') !== text) throw new Error(`Generated asset drift: ${path}`)
+  } else writeFileSync(path, text)
+  console.log(`${process.argv.includes('--check') ? 'verified' : 'wrote'} ${path} (${text.length.toLocaleString()} chars)`)
+}

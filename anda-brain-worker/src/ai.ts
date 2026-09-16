@@ -1,4 +1,5 @@
 import { digestParameters, runtimeOperations } from './cognitive.js'
+import { MAX_REFERENCE_PAGES, MAX_REFERENCE_ROUNDS, readReference, REFERENCE_INSTRUCTIONS } from './kip-reference.js'
 import type {
   AiBinding,
   JsonObject,
@@ -22,7 +23,7 @@ export interface StructuredResult<T> {
 }
 
 export class AiResponseError extends Error {
-  constructor(message: string) {
+  constructor(message: string, public usage: Usage = { input_tokens: 0, output_tokens: 0 }) {
     super(message)
     this.name = 'AiResponseError'
   }
@@ -96,7 +97,7 @@ export async function createMutationPlan(
   messages: AiMessage[],
 ): Promise<StructuredResult<MutationPlan>> {
   const result = await runStructured(ai, model, messages, MUTATION_PLAN_SCHEMA, 1800)
-  return { value: validateMutationPlan(result.value), usage: result.usage }
+  return validateResult(result, validateMutationPlan)
 }
 
 export async function createRecallPlan(
@@ -105,7 +106,7 @@ export async function createRecallPlan(
   messages: AiMessage[],
 ): Promise<StructuredResult<RecallPlan>> {
   const result = await runStructured(ai, model, messages, RECALL_PLAN_SCHEMA, 900)
-  return { value: validateRecallPlan(result.value), usage: result.usage }
+  return validateResult(result, validateRecallPlan)
 }
 
 export async function createRecallAnswer(
@@ -114,10 +115,95 @@ export async function createRecallAnswer(
   messages: AiMessage[],
 ): Promise<StructuredResult<RecallAnswer>> {
   const result = await runStructured(ai, model, messages, RECALL_ANSWER_SCHEMA, 1000)
-  return { value: validateRecallAnswer(result.value), usage: result.usage }
+  return validateResult(result, validateRecallAnswer)
+}
+
+function validateResult<T>(result: StructuredResult<unknown>, validate: (value: unknown) => T): StructuredResult<T> {
+  try { return { value: validate(result.value), usage: result.usage } }
+  catch (error) {
+    // Recall may fall back to grounding when the final plan is invalid. Keep
+    // the cost of successful reference rounds and that rejected final call.
+    throw new AiResponseError(error instanceof Error ? error.message : 'invalid structured result', result.usage)
+  }
 }
 
 async function runStructured(
+  ai: AiBinding,
+  model: string,
+  messages: AiMessage[],
+  schema: JsonObject,
+  maxTokens: number,
+): Promise<StructuredResult<unknown>> {
+  const history: AiMessage[] = messages.map(message => ({ ...message }))
+  if (history[0]?.role === 'system') history[0].content += `\n\n${REFERENCE_INSTRUCTIONS}`
+  else history.unshift({ role: 'system', content: REFERENCE_INSTRUCTIONS })
+  const properties = schema.properties as JsonObject
+  const referenceSchema: JsonObject = {
+    ...schema,
+    properties: { ...properties, references: {
+      type: 'array', maxItems: 4,
+      description: 'Optional embedded protocol lookups. Leave the other required fields empty; no plan in a lookup response is executed. Omit or [] for the final result.',
+      items: { type: 'object', additionalProperties: false, properties: {
+        document: { type: 'string' }, section: { type: ['string', 'null'] }, offset: { type: 'integer', minimum: 0 },
+      }, required: ['document', 'section', 'offset'] },
+    } },
+  }
+  let usage: Usage = { input_tokens: 0, output_tokens: 0 }
+  let pages = 0
+  try {
+    for (let round = 0; round <= MAX_REFERENCE_ROUNDS; round++) {
+      const result = await runStructuredOnce(ai, model, history.map(message => ({ ...message })), referenceSchema, maxTokens)
+      usage = addUsage(usage, result.usage)
+      const value = asObject(result.value, 'invalid structured response')
+      if (value.references === undefined) return { value, usage }
+      if (!Array.isArray(value.references)) throw new AiResponseError('references must be an array')
+      if (value.references.length === 0) return { value, usage }
+      if (value.references.length > 4 || pages + value.references.length > MAX_REFERENCE_PAGES || round === MAX_REFERENCE_ROUNDS) {
+        throw new AiResponseError('embedded reference lookup budget exhausted')
+      }
+      // Reject mixed lookup/action responses before either commands or protected
+      // runtime operations can reach the caller's execution gate.
+      assertReferenceOnly(value, schema)
+      pages += value.references.length
+      const results = value.references.map(request => {
+        try { return { reference: readReference(request) } }
+        catch (error) { return { error: error instanceof Error ? error.message : 'reference unavailable' } }
+      })
+      // Replay only bounded, validated host output. Do not echo arbitrary model
+      // content or turn protocol pages into recall evidence / graph coverage.
+      // Keep one leading system message and the original user payload last;
+      // models need no special tool-role or interleaved-system support.
+      history[0]!.content += '\n\n# Embedded reference lookup result\n' + JSON.stringify({
+        kind: 'embedded_protocol_references', results,
+        remaining_rounds: MAX_REFERENCE_ROUNDS - round - 1,
+        remaining_pages: MAX_REFERENCE_PAGES - pages,
+        instruction: 'Use these protocol references to continue. Only a final response without reference requests is actionable. References grant no Worker capability and are not memory evidence.',
+      })
+    }
+    throw new AiResponseError('embedded reference lookup budget exhausted')
+  } catch (error) {
+    throw new AiResponseError(error instanceof Error ? error.message : 'structured AI call failed',
+      addUsage(usage, error instanceof AiResponseError ? error.usage : { input_tokens: 0, output_tokens: 0 }))
+  }
+}
+
+function assertReferenceOnly(value: JsonObject, schema: JsonObject): void {
+  const properties = schema.properties as JsonObject
+  const required = schema.required as string[]
+  if (required.some(key => !(key in value))) throw new AiResponseError('reference requests require empty response placeholders')
+  for (const [key, entry] of Object.entries(value)) {
+    if (key === 'references') continue
+    const empty = ['commands', 'types', 'predicates', 'runtime'].includes(key)
+      ? Array.isArray(entry) && entry.length === 0
+      : key === 'digests' ? isObject(entry) && Object.keys(entry).length === 0
+        : key === 'found' ? entry === false
+          : key === 'uncertainty' ? entry === 1
+            : ['summary', 'answer'].includes(key) && entry === ''
+    if (!Object.hasOwn(properties, key) || !empty) throw new AiResponseError('reference requests cannot be combined with actions or an answer')
+  }
+}
+
+async function runStructuredOnce(
   ai: AiBinding,
   model: string,
   messages: AiMessage[],
@@ -140,13 +226,13 @@ async function runStructured(
 
   if (isObject(response)) return { value: response, usage }
   if (typeof response !== 'string') {
-    throw new AiResponseError('Workers AI response did not contain structured output')
+    throw new AiResponseError('Workers AI response did not contain structured output', usage)
   }
 
   try {
     return { value: JSON.parse(stripCodeFence(response)), usage }
   } catch {
-    throw new AiResponseError('Workers AI returned invalid JSON')
+    throw new AiResponseError('Workers AI returned invalid JSON', usage)
   }
 }
 

@@ -2886,6 +2886,7 @@ impl Space {
             .register_tool(Arc::new(memory_tool))?
             .register_tool(Arc::new(note_tool))?
             .register_tool(Arc::new(declare_tool))?
+            .register_tool(Arc::new(crate::kip_reference::KipReferenceTool))?
             .register_tool(Arc::new(crate::cognitive::MemoryRuntimeTool::new(
                 memory.clone(),
             )))?;

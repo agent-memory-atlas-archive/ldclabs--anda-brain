@@ -27,8 +27,8 @@ import type { FormationInput, MaintenanceInput, RecallInput } from './types.js'
 
 /**
  * Load the role-specific card with the ontology and actual adapter limits.
- * Planning stages also need the full language card: unlike the Rust agents,
- * this one-completion Worker has no tool round in which to request it later.
+ * Planning stages retain the full syntax card for ordinary single-pass plans.
+ * The structured AI runner can serve bounded reference requests for details.
  */
 const reference = (card: string, syntax = false): string =>
   `${card}\n\n${syntax ? `${KIP_SYNTAX}\n\n` : ''}${COGNITIVE_MEMORY_PROFILE}\n\n` +

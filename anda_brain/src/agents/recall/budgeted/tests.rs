@@ -14,6 +14,76 @@ use parking_lot::Mutex;
 const LEAK: &str = "provider-private-data-must-not-escape";
 
 #[tokio::test]
+async fn references_are_budgeted_planning_context_never_memory_or_coverage() {
+    let reference_call = ToolCall {
+        name: "kip_reference".into(),
+        args: json!({"document":"syntax","section":"kql","offset":0}),
+        ..Default::default()
+    };
+    let (_, space, seen) = setup(
+        "reference_planning_context",
+        Behavior::ReadThenSelect(vec![reference_call.clone()]),
+    )
+    .await;
+    let output = space
+        .query(SELF_USER_ID, input(Some(limits(8192, 131_072))))
+        .await
+        .unwrap();
+    assert!(output.failed_reason.is_none(), "{output:?}");
+    let requests = seen.lock().clone();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[0]
+            .tools
+            .iter()
+            .any(|tool| tool.name == "kip_reference")
+    );
+    assert!(
+        !requests[0]
+            .tools
+            .iter()
+            .any(|tool| tool.name == "memory_runtime")
+    );
+    let prompt: Json = serde_json::from_str(&requests[1].prompt).unwrap();
+    assert_eq!(prompt["observations"][0]["reference"]["document"], "syntax");
+    assert!(
+        prompt["observations"][0]["reference"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("KQL")
+    );
+    let packet: MemoryPacket = serde_json::from_str(&output.content).unwrap();
+    assert!(
+        packet
+            .items
+            .iter()
+            .all(|item| item.content.get("crate_version").is_none())
+    );
+    let initial: Json = serde_json::from_str(&requests[0].prompt).unwrap();
+    assert_eq!(initial["coverage"], prompt["coverage"]);
+    // Leave enough cumulative input budget for the first call, but not even
+    // the fixed second-pass instructions + reference (with all memories evicted).
+    let first = budget::count(&normalized_request(&requests[0]).unwrap()).unwrap();
+    space.close().await.unwrap();
+
+    let (_, space, seen) = setup(
+        "reference_context_exhaustion",
+        Behavior::ReadThenSelect(vec![reference_call]),
+    )
+    .await;
+    let output = space
+        .query(SELF_USER_ID, input(Some(limits(8192, first as u32 + 256))))
+        .await
+        .unwrap();
+    assert_eq!(seen.lock().len(), 1);
+    assert_eq!(
+        output.failed_reason.as_deref(),
+        Some("recall_context_budget_exhausted")
+    );
+    space.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn readonly_model_batches_use_the_schema_without_an_execution_field() {
     let args = json!({"operations":[
         "FIND(?c.id) WHERE {?c CONCEPT {type:\"Person\"}} LIMIT 1",

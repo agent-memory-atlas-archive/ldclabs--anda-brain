@@ -242,6 +242,7 @@ impl Agent<AgentCtx> for MaintenanceAgent {
             NoteTool::NAME.to_string(),
             crate::vocabulary::DeclareSymbolsTool::NAME.to_string(),
             crate::cognitive::MemoryRuntimeTool::NAME.to_string(),
+            crate::kip_reference::KipReferenceTool::NAME.to_string(),
         ]
     }
 
@@ -752,6 +753,7 @@ mod tests {
         assert!(Agent::<AgentCtx>::description(maintenance.as_ref()).contains("Sleep Mode"));
         let tools = Agent::<AgentCtx>::tool_dependencies(maintenance.as_ref());
         assert!(tools.iter().any(|name| name == "execute_kip"));
+        assert!(tools.iter().any(|name| name == "kip_reference"));
         assert!(tools.iter().any(|name| name == "note"));
         assert_eq!(maintenance.get_processed(), None);
 

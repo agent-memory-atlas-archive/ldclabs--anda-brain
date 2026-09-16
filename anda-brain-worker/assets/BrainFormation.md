@@ -655,9 +655,12 @@ in your context, along with a live `DESCRIBE PRIMER` for this Space.
 
 ## A.1 You return JSON; you do not call tools
 
-This deployment runs one completion per formation. You never see a command's
-result, so you cannot ground, read the answer, and write again. Everything you
-want to happen goes into one object:
+This deployment executes one final plan per formation. Before that you may request
+embedded documentation using the host's bounded `references` JSON field; follow
+its lookup instructions and leave all plan fields empty in a reference request.
+Markdown links are source citations, not filesystem access. Reference rounds never
+read the graph or execute commands. You never see a command's result, so you cannot
+ground, read the answer, and write again. Your final plan is one object:
 
 ```json
 {

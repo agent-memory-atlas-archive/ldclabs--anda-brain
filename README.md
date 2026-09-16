@@ -254,6 +254,15 @@ For complex businesses, Vector RAG is insufficient. Enterprises have structured 
 
 KIP 2.0 separates what 1.x kept in one graph — meaning, belief, evidence, provenance, mnemonic state, retention, governance and schema. The single distinction the rest follows from is that **a statement existing is not the statement being true**: a Proposition is truth-neutral, an Assertion is one actor's stance about it with its evidence, and what is currently believed is projected from those rather than stored. That is what lets Brain tell you "Alice said X, and Bob disagrees" instead of quietly picking a winner — and why it never answers "no" when the truthful answer is "I have no basis for that".
 
+The Rust service embeds the protocol references needed by its agents. Formation,
+Recall and Maintenance use an internal read-only `kip_reference` tool to load
+version-pinned documentation by document/section, in pages of at most 8 KiB.
+No source files or network access are needed at runtime. Budgeted Recall counts
+reference pages as planning input, never as retrieved memories or coverage.
+The Worker embeds the same reference release and supports bounded documentation
+lookups through its structured JSON `references` field before returning a final
+plan or answer; see [the Worker guide](./anda-brain-worker/README.md#内嵌参考查阅).
+
 #### Upgrading a running KIP 1.x deployment
 
 Stop the old writer, back up the object store, and rehearse the upgrade on a copy. Each space migrates on its first access, using durable extraction and vocabulary checkpoints. Migration is one-way: rollback needs the original backup. Source rows remain in `kip_legacy_v1`; native fields, valid time, lifecycle and mnemonic/retention state are mapped conservatively. Unproven legacy learning/runtime records remain distinct Legacy types. Old-id usage and derived caches reset once; conversations, policies, tokens and wiki records remain. See [the upgrade guide](./anda_brain/README.md#upgrading-a-space-written-by-a-kip-1x-build) for the mapping and verification steps.

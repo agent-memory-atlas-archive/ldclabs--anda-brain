@@ -385,6 +385,36 @@ impl RecallAgent {
                     failed = true;
                     break;
                 }
+                if tool.name == crate::kip_reference::KipReferenceTool::NAME {
+                    // Protocol text is planning context, never a retrieved memory
+                    // item or evidence that a memory channel was covered. These
+                    // observations pass through the cumulative token admission
+                    // check before the next model call, and count as tool calls.
+                    let response = self
+                        .budget_tool_before_deadline(&ctx, &tool.name, tool.args, now)
+                        .await;
+                    let (value, is_error) = match response {
+                        Ok((value, measured, is_error)) => {
+                            usage.accumulate(&measured);
+                            tool_usage.entry(tool.name.clone()).or_insert_with(Usage::default).accumulate(&measured);
+                            (value, is_error)
+                        }
+                        Err(_) => (json!({"status":"unavailable","hint":"Use document=index, or section=index for exact headings, with offset=0."}), true),
+                    };
+                    observations.push(json!({"tool":tool.name,"reference":value,"is_error":is_error}));
+                    conversation.messages.push(json!(Message {
+                        role: "tool".into(),
+                        content: vec![ContentPart::ToolOutput {
+                            name: tool.name,
+                            output: value,
+                            is_error: is_error.then_some(true),
+                            call_id: tool.call_id,
+                            remote_id: None,
+                        }],
+                        ..Default::default()
+                    }));
+                    continue;
+                }
                 let channel = match tool.name.as_str() {
                     "execute_kip_readonly" => Channel::Kip,
                     "wiki_read" | "wiki_search" => Channel::Wiki,

@@ -321,9 +321,27 @@ calling the protected operation.
 identity can change independently of vocabulary. A stored WorkingState/DerivationState
 or bare `basis_seq` cannot override computed dependency validity. Derived refreshes
 must retain their actual read pins, context and ProjectionBasis; incomplete coverage
-or unavailable replay material remains explicit. Full KIP syntax is available to
-writing agents through `memory_runtime` operation `syntax`; routine context uses
-the upstream role cards and ontology.
+or unavailable replay material remains explicit. Routine context uses the upstream
+role cards and ontology. All three agents can read additional compiled-in KIP
+documentation through the internal, read-only `kip_reference` tool. Markdown paths
+are source citations; they do not require files beside the executable or network
+access. `document=index` lists document IDs, `section=index` lists exact Markdown
+headings, and `section=null` reads a document. Syntax topics also accept `kql`,
+`kml`, `meta`, and `envelope`. Start at `offset=0`, then follow `next_offset` with
+the same document/section; each page contains at most 8 KiB of UTF-8 text. The
+catalogue includes the specification, consistency contracts, invariants, learning
+architecture, grammars and wire schemas; unlisted background/translation links
+are citations only. Reading a reference grants no host capability. Budgeted Recall
+counts these calls and their planning input against its existing limits; reference
+pages never become memory packet items or attest retrieval coverage. The legacy
+`memory_runtime` syntax operation remains available to writing agents.
+
+The reference supplement is pinned to `anda_kip =0.13.0`; public crate constants
+are reused instead of copied. To refresh the supplementary files, set
+`ANDA_KIP_SOURCE` to the matching published crate directory and run
+`node scripts/sync-kip-reference.mjs` (or `--check` to verify without writing).
+The generated manifest records source hashes, and tests check both the supplement
+and exported crate documents against it. Do not hand-edit these reference assets.
 
 **Retention expiry:** a full settlement also acts on the two clocks that say
 when something should stop being kept, which are not the same clock. An

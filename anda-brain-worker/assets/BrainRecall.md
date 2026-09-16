@@ -386,8 +386,11 @@ answer; Formation is a separate channel.
 
 ## A.2 Two stages, one JSON object each
 
-This deployment runs one completion per stage and never lets you loop. The user
-payload names the stage.
+This deployment accepts one final result per stage. The user payload names the
+stage. Before the final result, the host permits bounded `references` JSON requests
+for embedded protocol documentation only; follow its lookup instructions and use
+empty plan/answer placeholders. Markdown links are source citations, not file access.
+Reference pages are never memory evidence and cannot trigger additional graph reads.
 
 **`stage: "plan"`** — you are choosing what to read.
 

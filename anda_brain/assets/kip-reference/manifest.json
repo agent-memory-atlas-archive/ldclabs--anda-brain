@@ -1,0 +1,27 @@
+{
+  "source": "anda_kip",
+  "version": "0.13.0",
+  "sha256": {
+    "SPECIFICATION.md": "c12488c4233e62f62f5d73750b5806705d4d66b3451a01e6debe7c3195885ef0",
+    "Invariants.md": "93aec36789dabc4945cc1a2e42838dc88bcee26a84a8f5ddf75800c80bf5cd12",
+    "brain/ExperienceLearningArchitecture.md": "0b78898d385b73b6719f2ff9395c14d57c1a68391ab2e3c39baf5c8a4d3df4ed",
+    "grammar/KQL.ebnf": "45b427b48faffb109e94eaec98aa4cd88e02679bbcc2e9cb7e29b44802f4951a",
+    "grammar/KML.ebnf": "6ace730bc8516ffbf8573c3e70d2fe1a7fffe2a86b0c979f36cbc9e490d1a6e1",
+    "grammar/META.ebnf": "720a9ddf85aea2fcd7dbfc7c383e7d35315952002bcc32459b8e4fccdb1b66b2",
+    "schemas/kip-request.schema.json": "01e38639cc38604a4a1ee71edafe645e6170c581c65e2739842454d22439c960",
+    "schemas/kip-response.schema.json": "9420aec28ddb1d91ff9e857b97bec9d7a34aef4e691d89eb4edba4c9eac6b042",
+    "KIPSyntax.md": "90045b4fd98a3717894bdc9b54ac085700a7af4cd5ad848b485802449f527830",
+    "profiles/CognitiveMemoryProfile-2.0.md": "b7ff933686579e82cd46584deaaf397c6c2402c5c7d9ad2ef3127933c8bdd2c9",
+    "brain/KIPRecall.md": "1921403a050723315cdf12fbf5b82261eb1375ff5a8382f680a4e084e28098c7",
+    "brain/KIPFormation.md": "4339b69b21ff4203561f7c45e366edcc4bb3e35c919d5ebddc4ffcd9fdb67a4d",
+    "brain/KIPMaintenance.md": "0e854ab5b549e4ae8e37fbfe66a11bf633f6a2d18a2499963b66ad41ae958432",
+    "Cognitive-Consistency.md": "c086377cf84ccecc9d628705fb50e1c849e7501793303685851704be61d8144d",
+    "Memory-Interface.md": "a9bf65b5a89bf5689c865df0c4a77dc9d19ccb5c8cea642b231d3dad9992f3aa",
+    "brain/MemoryInterface.md": "f62bc1c74420b1b00b9cf3a67637e9ae8373d7801efcc6b4c815897560344ecc",
+    "schemas/kip-projection.schema.json": "64fec7d806de1c18a34db69b373d774aeb8788f165e2726853886a9aa5541f2f",
+    "schemas/kip-memory.schema.json": "20032a0b6dfd66d1c432e881adf673bb3f49f9cfdd8fe9c1cae644afc13510c8",
+    "schemas/kip-cognitive-records.schema.json": "f58c18b56b14b76b27bae8c446b5144b5fd699cb92afec021bc2fe8138cd9158",
+    "schemas/kip-element.schema.json": "752a51a43bf15347bc288b71e93818dff1ddd6c3d6c0bed8bb5d353601f73e90",
+    "schemas/kip-schema-package.schema.json": "7ee90d832b467445d4e34e51383ee6ed71680c1d56502566ffeee814a96a7955"
+  }
+}

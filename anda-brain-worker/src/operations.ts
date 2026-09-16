@@ -1,6 +1,7 @@
 import type { KipResult } from '@ldclabs/kip-do'
 import {
   DEFAULT_AI_MODEL,
+  AiResponseError,
   addUsage,
   createMutationPlan,
   createRecallAnswer,
@@ -40,8 +41,8 @@ const EMPTY_USAGE: Usage = { input_tokens: 0, output_tokens: 0 }
 /**
  * What Maintenance is shown before it plans.
  *
- * Three bounded reads rather than a free look: the model gets one completion,
- * so what it does not see here it cannot go and fetch. Recent Events are the
+ * Bounded reads rather than a free look: reference rounds can fetch protocol
+ * documentation only, never additional graph data. Recent Events are the
  * consolidation backlog, open SleepTasks are the work it left itself, and the
  * longest-untouched Concepts are where consolidation and re-encoding have
  * something to say.
@@ -205,6 +206,7 @@ export async function recallMemory(
     usage = addUsage(usage, plan.usage)
     planned = keepReadonlyOperations(plan.value.commands.map((command) => ({ command })))
   } catch (error) {
+    if (error instanceof AiResponseError) usage = addUsage(usage, error.usage)
     plannerWarning = error instanceof Error ? error.message : String(error)
   }
 

@@ -22,7 +22,7 @@ pub const RECALL_DEFAULT: &str = include_str!("../../assets/BrainRecall.md");
 pub const MAINTENANCE_DEFAULT: &str = include_str!("../../assets/BrainMaintenance.md");
 
 /// The complete reference for callers that need it. Routine agent context uses
-/// mode_reference; writing agents can request full syntax on demand.
+/// mode_reference; all agents can request bounded reference pages on demand.
 pub fn language_reference() -> &'static str {
     static REFERENCE: OnceLock<String> = OnceLock::new();
     REFERENCE.get_or_init(|| {
@@ -47,10 +47,11 @@ pub fn mode_reference(target: PromptTarget) -> String {
         ),
     };
     format!(
-        "{}\n\n{}\n\n{}",
+        "{}\n\n{}\n\n{}\n\n{}",
         cards,
         anda_kip::COGNITIVE_MEMORY_PROFILE,
-        crate::cognitive::CAPABILITIES
+        crate::cognitive::CAPABILITIES,
+        crate::kip_reference::INSTRUCTIONS
     )
 }
 
@@ -143,6 +144,20 @@ impl AgentPrompts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_modes_explain_the_embedded_reference_entry_point() {
+        for target in [
+            PromptTarget::Recall,
+            PromptTarget::Formation,
+            PromptTarget::Maintenance,
+        ] {
+            let reference = mode_reference(target);
+            assert!(reference.contains(crate::kip_reference::INSTRUCTIONS));
+            assert!(reference.contains(anda_kip::COGNITIVE_MEMORY_PROFILE));
+            assert!(reference.contains(crate::cognitive::CAPABILITIES));
+        }
+    }
 
     #[test]
     fn instance_prompt_edits_preserve_compiled_reference_and_other_instances() {

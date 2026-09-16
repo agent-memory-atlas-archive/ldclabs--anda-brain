@@ -5,8 +5,9 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "check": "pnpm run typecheck && pnpm run test && pnpm run deploy:dry-run",
+    "check": "pnpm run codegen:check && pnpm run typecheck && pnpm run test && pnpm run deploy:dry-run",
     "codegen:prompts": "node scripts/codegen-prompts.mjs",
+    "codegen:check": "node scripts/codegen-prompts.mjs --check",
     "deploy": "wrangler deploy",
     "deploy:dry-run": "wrangler deploy --dry-run",
     "dev": "wrangler dev",
@@ -16,7 +17,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@ldclabs/kip-do": "^0.13.0"
+    "@ldclabs/kip-do": "0.13.0"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.20.2",

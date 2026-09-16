@@ -176,6 +176,42 @@ Rust 服务不需要 codegen：`anda_kip` 随协议发出语法卡和 Profile，
 
 提示词包含角色策略和完整 ontology；实际 token 成本应按部署模型的 tokenizer 测量。`AI_MODEL` 默认 `@cf/meta/llama-4-scout-17b-16e-instruct`；生产环境可换成上下文更大、同样支持结构化 JSON 输出的模型。
 
+### 内嵌参考查阅
+
+提示词中的 Markdown 相对链接只表示出处，不是运行时可打开的文件。Worker
+内嵌 21 份版本锁定的协议参考，包括规范、语法、角色卡、Profile、EBNF 和 JSON
+Schema；部署后读取它们无需源码目录或网络。参考说明不代表 Worker 支持协议的全部能力。
+
+Worker 使用结构化 JSON 中的可选 `references` 字段完成只读查阅，不要求模型支持
+原生工具调用。例如 Recall 规划阶段可以先返回：
+
+```json
+{"commands": [], "references": [{"document": "syntax", "section": "kql", "offset": 0}]}
+```
+
+`document="index"` 列出文档 ID；`section="index"` 列出精确章节名，`section=null`
+读取全文；语法卡另有 `kql/kml/meta/envelope` 别名。正文每页最多 8 KiB UTF-8 字节，
+使用返回的 `next_offset` 续读同一文档/章节。未知 ID、章节和非法偏移会返回错误。
+每阶段最多 3 轮查阅、8 页，每轮最多 4 页；达到限制后必须提交最终结果。
+不查阅时保留原来的单次调用路径，查阅产生的所有模型调用计入 `usage`。
+
+Formation、Maintenance、Recall 规划及回答阶段均支持查阅。查阅响应中其他必填字段
+必须使用空占位值：计划的 `types/predicates/commands` 为 `[]`、`summary` 为 `""`；
+回答的 `answer=""`、`found=false`、`uncertainty=1`。禁止夹带执行计划、词汇声明、
+digest 或运行时动作。最终结果省略 `references` 或使用 `[]`，才会进入原有校验及执行流程。
+查阅不会读取图谱、更新快照、扩展权限，也不构成记忆证据或变更覆盖。
+
+`@ldclabs/kip-do` 和参考资源锁定为 `0.13.0`。从仓库根目录刷新资源：
+
+```bash
+ANDA_KIP_SOURCE=/path/to/published/anda_kip-0.13.0 node scripts/sync-kip-reference.mjs --worker
+pnpm --filter @ldclabs/anda-brain-worker run codegen:prompts
+```
+
+`assets/kip-reference.json` 保存补充正文与 SHA-256 清单，已有角色卡、语法和 Profile
+复用原来的资产。codegen 校验版本和哈希后生成 `src/references.generated.ts`。
+`pnpm check` 同时检查生成文件漂移、类型、测试和部署打包；上游参考正文不得手改。
+
 ## 快速开始
 
 从仓库根目录安装并启动：

@@ -72,5 +72,6 @@ sha3 = { workspace = true, optional = true }
 unicode-normalization = { workspace = true, optional = true }
 
 [dev-dependencies]
+sha2 = { workspace = true }
 cose2 = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

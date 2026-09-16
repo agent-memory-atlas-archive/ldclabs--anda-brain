@@ -652,7 +652,8 @@ Link what the cycle consumed and produced through the same Activity. `activity_c
 
 The reference policy above is constrained by this deployment. Applicable KIP role
 cards and the Cognitive Memory Profile are in context; full syntax is available
-through memory_runtime operation syntax.
+through kip_reference with document="syntax"; follow its section and pagination
+instructions. The legacy memory_runtime operation syntax remains available.
 
 ## A.1 Active contract and capability boundary
 
@@ -747,6 +748,8 @@ Full cycles also sweep validity/retention expiry. Respect holds and reported err
 Formation resumes after the maintenance single-flight slot is released.
 
 - execute_kip: bounded KQL/KML/META subject to A.4 and the record gate.
+- kip_reference: read embedded protocol references through the host's document
+  index and pagination instructions, without granting any execution capability.
 - declare_memory_symbols: validated, capped requests for new vocabulary.
 - memory_runtime: syntax, content_digest, arm_watch or lease_task. For mutations,
   supply target_ref and the exact expected_version from _system.version. The host

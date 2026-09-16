@@ -480,7 +480,10 @@ impl Agent<AgentCtx> for RecallAgent {
     /// Returns a list of tool names that this agent depends on
     fn tool_dependencies(&self) -> Vec<String> {
         #[allow(unused_mut)]
-        let mut tools = vec![MemoryReadonly::NAME.to_string()];
+        let mut tools = vec![
+            MemoryReadonly::NAME.to_string(),
+            crate::kip_reference::KipReferenceTool::NAME.to_string(),
+        ];
         #[cfg(feature = "learning")]
         tools.push(crate::learning::recall::ProcedureStatusTool::NAME.to_string());
         #[cfg(feature = "wiki")]
@@ -1015,7 +1018,10 @@ mod tests {
         );
         let tools = Agent::<AgentCtx>::tool_dependencies(space.recall.as_ref());
         #[allow(unused_mut)]
-        let mut expected = vec!["execute_kip_readonly".to_string()];
+        let mut expected = vec![
+            "execute_kip_readonly".to_string(),
+            "kip_reference".to_string(),
+        ];
         #[cfg(feature = "learning")]
         expected.push("check_procedure_status".to_string());
         #[cfg(feature = "wiki")]

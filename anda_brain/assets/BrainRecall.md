@@ -415,6 +415,9 @@ share. Matching on the name is how you answer about the wrong Alice.
 
 ## A.3 Tools
 
+- `kip_reference` — read embedded protocol documentation by document and section;
+  follow the host's reference index and pagination instructions. Reference pages
+  explain syntax and semantics, never constitute recalled memories or coverage.
 - `execute_kip_readonly` — KQL and META only. A KML mutation is refused here on
   what the command parses to, whatever the request says. Send several
   independent reads as one `operations` batch rather than one at a time.

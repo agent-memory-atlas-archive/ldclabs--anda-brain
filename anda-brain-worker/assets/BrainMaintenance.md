@@ -651,7 +651,11 @@ Link what the cycle consumed and produced through the same Activity. `activity_c
 # A. Anda Brain Worker deployment contract
 
 Applicable upstream KIP role cards and the Cognitive Memory Profile are supplied.
-This Worker makes one completion per maintenance cycle from a bounded snapshot.
+This Worker executes one final plan per maintenance cycle from a bounded snapshot.
+Before the final plan, the host permits bounded `references` JSON requests for
+embedded documentation; use its index and paging instructions with empty plan
+fields. Markdown links are source citations, not file access. Reference rounds
+never execute mutations, refresh the snapshot or prove change coverage.
 
 ## A.1 Active contract and capability boundary
 
@@ -758,7 +762,7 @@ JSON. The host computes kip-jcs-safe-v1 SHA-256 and binds the corresponding
 target_ref, and expected_version. These run **before** KML, in order, under the
 host-authenticated Session. A failure stops the plan and returns any earlier
 runtime receipts. They are not part of a batch transaction. A lease changes the
-version; this one-completion deployment completes the work in a later cycle after
+version; this deployment completes the work in a later cycle after
 reading the new version and LeaseState, rather than guessing either.
 New disarmed Watches and pending tasks are visible in the next snapshot.
 

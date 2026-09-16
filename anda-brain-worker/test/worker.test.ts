@@ -55,6 +55,25 @@ const FORMATION_PLAN = `MUTATE {
 }`
 
 describe('Anda Brain Worker', () => {
+  it('looks up embedded references before executing the final formation plan', async () => {
+    const space = uniqueSpace('formation_reference')
+    const ai = new FakeAi([
+      { types: [], predicates: [], commands: [], summary: '', references: [{ document: 'syntax', section: 'kml', offset: 0 }] },
+      { types: [], predicates: [], commands: [FORMATION_PLAN], summary: 'Stored after checking syntax.' },
+    ])
+    const response = await post(testEnv(ai), space, 'formation', {
+      messages: [{ role: 'user', content: 'Please keep your answers concise.' }],
+    })
+    expect(response.status).toBe(200)
+    const body = await response.json<Record<string, any>>()
+    expect(body.result.commands).toBe(1)
+    expect(body.result.usage).toEqual({ input_tokens: 20, output_tokens: 10 })
+    expect(ai.calls).toHaveLength(2)
+    const receipt = JSON.parse(ai.calls[1]![0]!.content.split('\n\n# Embedded reference lookup result\n').at(-1)!)
+    expect(receipt.kind).toBe('embedded_protocol_references')
+    expect(receipt.results[0].reference.document).toBe('syntax')
+  })
+
   it('forms durable memory and retrieves it with read-only KIP', async () => {
     const space = uniqueSpace('formation')
     const runtime = testEnv(

@@ -9,6 +9,7 @@ pub(crate) mod authz;
 pub(crate) mod cognitive;
 pub mod handler;
 pub(crate) mod kip;
+pub(crate) mod kip_reference;
 #[cfg(feature = "learning")]
 pub mod learning;
 
