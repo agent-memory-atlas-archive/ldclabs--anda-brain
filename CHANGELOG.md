@@ -2,685 +2,158 @@
 
 All notable changes to the Anda Brain project.
 
-## [Unreleased] — KIP 2.0
+## [0.12.0] — 2026-09-16
 
-Anda Brain now speaks **KIP 2.0**. This is a protocol break, not an upgrade: 2.0
-separates what 1.x kept in one graph — meaning, belief, evidence, provenance,
-mnemonic state, retention, Governance and Schema — and the single distinction
-the rest follows from is that *a Proposition existing is not the Proposition
-being true*. Existing 1.x memory is migrated by the Cognitive Nexus on first
-open; see the KIP migration guide for what that can and cannot preserve.
-
-### Changed — published KIP 2.0 dependencies
-
-- Removed the local `[patch.crates-io]` overrides. `anda_kip`,
-  `anda_cognitive_nexus`, `anda_db`, `anda_db_tfs` and `anda_object_store` now
-  resolve on the 0.13 line; `anda_core`, `anda_engine`,
-  `anda_engine_server` and `anda_web3_client` resolve on 0.16.
-- Updated `cose2` to 0.5 and `ic_cose_types` to 0.11. CWT parsing retains the
-  single-audience token contract and explicitly rejects an array of audiences;
-  the MCP server uses the current `rmcp` initialization result type.
-- The Worker installs the published `@ldclabs/kip-do` 0.13 package, with a
-  regenerated pnpm lockfile. Its merge regression expects the engine's current
-  `IdentityMergeConflict` error. CI no longer checks out or builds sibling
-  repositories for either runtime.
-- Re-synced the Worker's vendored syntax card and generated prompts to the
-  published `anda_kip` 0.13 asset, so both deployments give the model the same
-  KIP reference. The sync script can now take an explicit crate source path.
-
-### Fixed — release migration and memory correctness
-
-- The v1 upgrade reads the published `a` / `m` property layout, normalizes
-  standard Brain types, preserves source records in `LegacyRecord`, and maps
-  valid time, retention, pinning and mnemonic values without decaying belief.
-  Retractions and reconstructible same-actor/same-Proposition supersession stay
-  excluded; ambiguous or cross-Proposition old corrections are archived with
-  their annotations. Unsupported learning/runtime types retain Legacy identities.
-- Extraction and vocabulary checkpoints survive either collection deletion and
-  partial loading; the generated legacy package is fixed for each migration.
-  Old-id usage, derived metrics and misses reset once while conversations,
-  policies, tokens, wiki data and existing v2 usage remain.
-- Captured Evidence uses submission/message identity rather than a shared
-  source thread. Both engines reject conflicting ingest-key reuse and dedupe
-  identical entries in one transaction. Worker counterparty resolution precedes
-  planning and preserves existing names.
-- Wiki withdrawal checks document ownership in the host and transitions exact
-  Assertion ids under CAS. Restored facts get a new assertion generation,
-  including restoration of the same document version; actual retries remain
-  idempotent. Failed reads/retractions do not advance the digest ledger.
-- Request-level decay overrides reach deterministic settlement and the model.
-  Correction discovery uses a durable transaction/id cursor and reports
-  incomplete pages instead of discarding the rest of a large transaction.
-- Both upstream engines reuse a Proposition already staged by another
-  ENSURE/ASSERT in the same transaction.
+**KIP 2.0 / CognitiveMemory 2.1 is a breaking release.** Anda Brain and its
+Cloudflare Worker now use the 2.0 memory model. Existing natural-language Brain
+endpoints remain, but direct KIP clients, response readers and persisted 1.x
+spaces must follow the changes below. A Proposition records meaning; an
+Assertion records an actor's stance and Evidence. Existence is not belief.
 
 ### Upgrading a KIP 1.x space
 
-Stop the old writer, take a consistent backup and rehearse on a copy first.
-Migration happens on each space's first access and replaces the v1 graph
-collections in place. It is one-way: rollback requires the original backup.
-The source remains inspectable in `kip_legacy_v1`; malformed identifiers or
-unresolvable graph references still require operator repair. The generated
-compatibility package is `kip://legacy/nexus@1.1.0`.
+- Stop the 1.x writer, take a consistent backup and rehearse on a copy. Each
+  space migrates on **first access**, replacing its 1.x graph collections in
+  place. The migration is one-way; rollback requires the original backup.
+  It checkpoints extraction and vocabulary so interrupted runs can resume.
+- The migration preserves original rows in `kip_legacy_v1` and `LegacyRecord`,
+  maps recorded claims, valid time, retention, pinning and mnemonic values,
+  and retains conversations, policies, tokens and wiki data. Reconstructible
+  same-actor corrections become native supersession; ambiguous old corrections
+  remain auditable rather than becoming current belief. Unsupported learning
+  and operational artifacts keep Legacy identities without acquiring standing
+  or leases. It does not invent Evidence, verified identity, trust or authority.
+  Malformed identifiers and unresolved references can still require repair.
+- Stored 1.x element ids such as `C:7` and `P:11:has_allergy` must be
+  re-resolved; 2.0 uses ids such as `C-7`, `P-11` and `A-3`. Old-id usage,
+  derived metrics and miss caches reset once. The migration is tested against
+  an object-store snapshot produced by the published 0.11 packages. See the
+  [upgrade guide](anda_brain/README.md#upgrading-a-space-written-by-a-kip-1x-build).
+- Pre-release 2.0 development spaces with an older same-version Cognitive
+  Memory Profile may need recreation if package installation reports
+  `DigestMismatch`. The Worker has no 1.x Durable Object migration and starts
+  with a clean KIP 2.0 store.
 
-Regression coverage includes real object-store bytes generated with the
-published Nexus/KIP 0.11.0 and AndaDB 0.11.1 packages from Brain v0.11.0's
-lockfile. The migration does not fabricate Evidence, verified identity, trust,
-learning standing or leases. See the [upgrade guide](anda_brain/README.md#upgrading-a-space-written-by-a-kip-1x-build).
+### Breaking KIP and API contracts
 
-### Changed — memory model
+- Belief questions use `BELIEF` projection; raw `FIND` remains for audit.
+  `insufficient` is not "no". Corrections create a new Assertion and
+  supersede the old one instead of rewriting a claim. Assertion confidence
+  does not decay with time.
+- Schema is protected, versioned control state rather than graph content.
+  Each space activates the Cognitive Memory Profile and its own
+  `kip://anda-brain/memory` package. Formation and Maintenance can propose
+  types and predicates through the host's `declare_memory_symbols` tool;
+  Recall cannot publish vocabulary, and KML cannot declare it.
+- `POST /v1/{space_id}/execute_kip_readonly` accepts the KIP 2.0
+  `{command}` or `{operations}` envelope (also a bare JSON command string).
+  Responses have top-level `status`, per-operation `results[]` and optional
+  request-level errors. Callers must check per-operation status, including
+  `no_effect` and `skipped`, and the top-level `outcome_unknown`; the absence
+  of an error does not prove a commit. Error codes are named registry values
+  such as `NotFoundOrNotVisible`, which does not distinguish absence from
+  invisibility, with `retry.class` rather than `KIP_` numbers.
+  Read-only and model write gates inspect parsed commands, not labels.
+- `Concept` now uses `schema_ref`, immutable `key`, `facets` and `_system`
+  instead of 1.x `type`/`metadata`; `name` remains a mutable label.
+  `get_or_init_user` matches on `key`. The `unsorted` graph counter becomes
+  `unconsolidated`; orphan and predicate-type counters follow the 2.0 model.
+  Maintenance settings become `memory_strength_decay_factor` and
+  `unconsolidated_max_backlog`; their old names still deserialize for stored
+  policy compatibility.
 
-- **A fact is now a Proposition plus an Assertion.** Formation records who
-  claimed something, in what mode, with what confidence and on what Evidence.
-  Recall answers belief questions through `BELIEF` projection and keeps raw
-  `FIND` for audit, so `insufficient` is never reported as "no".
-- **Corrections supersede instead of overwriting.** A revision is a new
-  Assertion plus a supersession link; nothing rewrites what was said.
-- **Confidence is no longer decayed by time.** The maintenance settlement now
-  metabolizes `MnemonicState.memory_strength` on Concepts — how *available* a
-  memory should be — and never touches an epistemic stance. A fact nobody has
-  asked about in a month is no less credible.
-- **Reinforcement targets Concepts, not links.** Recall usage raises
-  `memory_strength` and stamps `last_metabolized_at`; repetition is
-  accessibility, not evidence.
-- **Pinning is a retention class.** `metadata.pinned` is gone; a pinned element
-  carries `retention.retention_class: "pinned"` and is exempt from metabolism.
-- **Forgetting purges.** `POST /v1/{space_id}/memory/forget` issues `PURGE` with
-  an authorized cascade, which erases content and leaves an identity stub —
-  archive and tombstone do not satisfy a forget request.
-- **Element ids changed shape.** `C:7` and `P:11:has_allergy` are now `C-7`,
-  `P-11`, `A-3`. Anything holding a stored 1.x id must re-resolve it.
+### Formation, recall and maintenance
 
-### Added — vocabulary is a host decision
+- Formation captures one Evidence record per input message from the received
+  bytes, with a stable ingestion key and a bound `:msg1`…`:msg16` reference.
+  Replays deduplicate instead of retyping, truncating or duplicating what a
+  speaker said. Attribution remains separate from the authenticated caller.
+- Disuse settlement changes `MnemonicState.memory_strength` on Concepts,
+  never Assertion confidence. Recall reinforcement affects accessibility,
+  not truth. Pinning uses a retention class. Full Rust maintenance cycles
+  expire lapsed Assertions and archive records past `retention.expires_at`,
+  respecting legal holds. `POST /v1/{space_id}/memory/forget` performs an
+  authorized `PURGE` and leaves an erased identity stub; archive and
+  tombstone do not fulfill erasure.
+- Correction discovery has a durable transaction/id cursor, reports incomplete
+  pages and supplies revised roots with bounded `LIST DEPENDENTS` results to
+  Maintenance. Vocabulary publication invalidates Recall's cached primer.
+  Wiki withdrawal transitions exact document-owned Assertions under version
+  checks; restoring even the same document version creates a new Assertion
+  generation.
+- Watch arming and advancement use protected Nexus state, generations,
+  authorization coverage and version checks. Structured conditions advance
+  from the Change Stream; a silence Watch fires only after complete coverage
+  through its deadline. Text and mixed conditions remain deferred without a
+  semantic evaluator. Completing a model call does not prove stream coverage.
+  SleepTask completion likewise requires a live lease and guarded commit.
+  Older 2.0 operational records need explicit 2.1 replacements before native
+  arming or leasing.
+- Optional Recall budgets return a host-packed memory packet using the pinned
+  `o200k_base@tiktoken-rs-0.12.0` counter. Required constraints and warnings
+  precede optional content; packet and cumulative planning-input limits are
+  enforced without claiming semantic completeness or execution permission.
+  Requests without a budget policy retain ordinary Recall behavior.
 
-- **Schema is no longer graph state.** Types and predicates resolve from
-  immutable, versioned Schema Packages, so a write can no longer change what a
-  type means. Each space activates the standard Cognitive Memory Profile plus a
-  `kip://anda-brain/memory` package of its own.
-- **New agent tool `declare_memory_symbols { types, predicates }`** lets
-  Formation and Maintenance ask the *host* to publish a symbol the profile
-  lacks. The host validates the name's shape, caps how many a space may hold,
-  versions the result, and can refuse — a model proposes the word, it does not
-  administer the schema. Recall does not get the tool.
-- The wiki digest uses the same package instead of minting `$ConceptType` /
-  `$PropositionType` nodes, and no longer redeclares a symbol another active
-  package already defines.
+### Learning, experiments and removed interfaces
 
-### Changed — wire contracts
+- Skill behavior now lives in immutable `SkillRevision` records. Family
+  membership discovers comparison candidates; it neither picks a baseline nor
+  grants standing. Model plans cannot write trial, outcome, evaluation,
+  grading or lease control state. Unproven candidates remain unproven.
+- The opt-in Rust `learning` feature adds trusted frozen paired-trial
+  contracts, native record adapters, a Nexus evaluator, persistent host trial
+  runtime, fixed-cutoff settlement, review and safety revocation, and a
+  read-only Recall applicability check. Actual executor and independent
+  observer bindings are required; compiling the feature does not enable
+  production dispatch or automatic adoption. The optional Memory Interface
+  and its bundles are not advertised by either deployment.
+- The opt-in `experiments` feature adds isolated stores, snapshots, business
+  time, cost receipts, forced Recall budgets and bounded evaluator-only
+  procedure audits. The Rust `anda_brain::eval` API, `eval` CLI, global
+  prompt/policy overrides and bundled offline product fixtures are retired;
+  [MIB](anda_brain/README.md#offline-regression-and-instance-configuration)
+  owns product regressions. Online diagnostics, usage/correction ledgers,
+  shadow reports and the independent wiki retrieval corpus remain. The
+  `anda-brain-openclaw` package was removed.
 
-- **`POST /v1/{space_id}/execute_kip_readonly` speaks the KIP 2.0 envelope.**
-  The body is now `{command}` or `{operations}` (a bare JSON string is read as
-  one command), and the response carries `status`, `results[]` with
-  per-operation errors, and an optional request-level `error`. Read-only is
-  enforced on what each command *parses to*, so no envelope field can talk a
-  mutation past it. `outcome_unknown` is neither success nor failure.
-- **Error codes are registry names, not numbers.** `KIP_3002` is now
-  `NotFoundOrNotVisible`, which deliberately does not distinguish "absent" from
-  "not visible to you". Each error carries a `retry.class`.
-- **`Concept` gained `schema_ref`, `key`, `facets` and `_system`** and lost
-  `type`/`metadata`. A `key` is immutable identity; `name` is a mutable label.
-  `get_or_init_user` matches on the key.
-- **Maintenance parameters renamed**: `confidence_decay_factor` →
-  `memory_strength_decay_factor`, `unsorted_max_backlog` →
-  `unconsolidated_max_backlog`. Both old names still deserialize, so a persisted
-  policy keeps loading.
-- **Graph counters follow the 2.0 model**: `unsorted` (the `Unsorted` Domain,
-  which the profile no longer declares) became `unconsolidated` — Events and
-  Experiences with no `consolidated_to` lineage; `orphans` counts Concepts no
-  Proposition mentions; `predicate_types` counts what the Schema Environment
-  declares rather than what a write minted.
+### Cloudflare Worker
 
-### Changed — prompts
+- The Worker runs an independent KIP 2.0 engine on `@ldclabs/kip-do` 0.13,
+  with one SQLite Durable Object per space. Direct KIP accepts structured
+  operations, parameters, `op_id` and `execution` modes `independent` or
+  `sequence` with stop-on-error; `atomic` is refused because no transaction
+  spans operations. Mutation outcomes live in
+  `extensions["kip-do/outcome"]`.
+- The Worker has host-owned vocabulary, keyword `SEARCH`, deterministic
+  mnemonic settlement, correction discovery, protected structured Watches,
+  task leases and `SET RETENTION`. It has no semantic/hybrid search, atomic
+  operation batch or retention-expiry sweep. It does not provide the Rust
+  service's wiki, MCP, CBOR/Markdown negotiation or asynchronous Formation
+  queue. Model maintenance cannot `PURGE`, `PURGE PAYLOAD` or set a legal hold.
 
-- **The three mode prompts are the KIP 2.0 reference Brain policies** from the
-  specification repository, each followed by an Anda Brain deployment contract
-  covering this service's request shape, tools and output contract.
-- **The syntax card is no longer copied into the prompts.** `anda_kip` ships
-  `KIPSyntax.md` and the Cognitive Memory Profile with the protocol they
-  describe, and the runtime puts both in the model's context at completion time
-  — three hand-maintained copies of a protocol drift, and the copy that drifts
-  silently is the one a model then writes against.
+### Known limit
 
-### Changed — anda-brain-worker
+- Rust bulk decay, correction discovery and self-test sampling still use
+  full-scan KQL capped at 65,536 solutions. On larger graphs these passes can
+  stop and report incomplete work; see the
+  [maintenance notes](anda_brain/README.md).
 
-The Cloudflare Worker speaks KIP 2.0 too, on `@ldclabs/kip-do` 0.13. It is a
-second, independent engine, so the port is not a translation of the Rust one:
+### Fixes and release engineering
 
-- **Operations, not command strings.** `executeKip(command, params)` and
-  `executeKipBatch([{command, parameters}])` replace the 1.x string API, and
-  `execute_kip` / `execute_kip_readonly` now accept `{command}` or
-  `{operations}` exactly as the Rust service does. An `execution.mode: "atomic"`
-  request is refused rather than run as a sequence that looks like one — this
-  engine has no transaction spanning several operations.
-- **The gates are on what a command parses to, per clause.** Formation may write
-  cognition (`CREATE` / `UPSERT` / `ENSURE` / `ASSERT`) and correct it
-  (`SUPERSEDE` / `RETRACT` / `CORRECT`); `UPDATE`, `ARCHIVE`, `TOMBSTONE`,
-  `PURGE` and `MERGE` are refused there. Maintenance has all of them except
-  `PURGE`. The `LIMIT 20` bound moved from `UPDATE` by name to *any clause that
-  selects with `WHERE`* — `ARCHIVE ?e WHERE { ?e CONCEPT {} }` was the same
-  hazard wearing a different verb.
-- **New vocabulary enters through the host.** Each Durable Object publishes one
-  `kip://anda-brain/memory` Schema Package beside the Cognitive Memory Profile,
-  and a plan proposes symbols in its `types` / `predicates` fields rather than
-  declaring them in KML. The object re-activates exactly that set on
-  construction: returning only the Profile would narrow the environment on every
-  eviction, and every local name the Space had published would stop resolving.
-- **`SEARCH` is back, and is now real full-text search.** An early `kip-do`
-  0.13 development snapshot had no search index; the published package includes
-  one (see the `anda-db` changelog). Grounding for `recall`, `probe` and the
-  citation list is a bounded
-  `SEARCH CONCEPT` again, run before the model is asked anything — an answer
-  should not depend on a planner having thought to look. A hit is an envelope,
-  `{id, kind, score, element}`, and the type and name are read off `element`:
-  reading them off the wrapper is the bug that made every citation on the Rust
-  side come back with no type and no name. Semantic and hybrid modes,
-  `AS OF SEQ`, and `SEARCH ASSERTION` / `ACTIVITY` are refused by that engine,
-  and the three mode contracts say so. The `TOKENIZER` service binding is gone.
-- **Citations from a model-planned read are bare element ids.** KIP 2.0 shapes a
-  KQL answer by its projection and never as objects, so nothing can tell which
-  column of a planned query holds a name — an id alone is a usable citation, and
-  a guessed type would not be.
-- **The prompts are the reference Brain policies**, vendored into
-  `anda-brain-worker/assets/` with a Worker deployment contract appended, and
-  inlined by `pnpm run codegen:prompts`. `kip-do` ships neither the syntax card
-  nor the Profile, so unlike the Rust service the Worker keeps copies;
-  `pnpm run sync:assets` refreshes the two verbatim ones. A mode prompt is now
-  about 20k tokens, so `AI_MODEL` defaults to a long-context model.
-- **`$system` is gone.** Authority is Governance and is held by a Principal;
-  writing it into cognitive content as a Person made "the system says so" look
-  like a claim somebody made. `$self` remains, keyed rather than named.
-- No data migration: `kip-do` never reached production, so no Durable Object
-  holds 1.x data and the Worker starts clean.
-
-### Changed — `space.rs` is three files shorter, and the agents share their persistence
-
-No behaviour changes.
-
-- **`space.rs` keeps the Space; its side quests moved out.** The shadow
-  evaluation (`run_shadow_eval`, the fork primitive) is `space/shadow.rs`, the
-  dream self-test is `space/self_test.rs`, and the 3,700 lines of tests are
-  `space/tests.rs`. `space.rs` goes from 7,500 lines to 3,150, and a reader
-  looking for how a Space is opened, settled or forgotten no longer scrolls
-  past the self-test's prompt to find it.
-- **One `mark_conversation_failed`, one `persist_conversation_snapshot`.**
-  Formation and Maintenance each carried a copy over their own conversation
-  store; the copies are two functions in `agents.rs` that take the store's
-  `update_conversation`, with the one real difference — Formation clears a
-  stale `failed_reason` because it retries, Maintenance does not — as a
-  parameter rather than as a divergence to rediscover.
-
-### Added — the runtime evaluates Watches, and silence waits for the stream (Profile §5.11)
-
-The reference README's Maintenance duties had two halves this service left to
-the model without giving it what the halves need. Both deployments now do the
-arithmetic in the deterministic settlement and hand the cycle the rest.
-
-- **Structured Watch conditions are the runtime's.** A `condition` written as
-  the Profile's baseline filter — `element`, `slot` or `type`, narrowed by
-  `ops` and `touched` — is evaluated against `CHANGES AFTER SEQ`, from where
-  each Watch was last evaluated (`evaluated_seq`, or its arming as the stream
-  shows it) through the head, in pages of 200 and at most five per sweep. A
-  `delta` Watch fires on the first matching change (`matched_seq`); a
-  `silence` Watch whose awaited change arrived is `disarmed` rather than fired;
-  a `silence` Watch past its deadline with nothing matched fires. A `slot`
-  selector is resolved to the slot's Propositions first, because an Assertion
-  entry carries only `refs.proposition`. A condition with a member this
-  runtime cannot read is left whole to the model rather than half-evaluated.
-- **A prose silence Watch no longer fires on the clock.** §5.11 requires the
-  evaluator to have consumed the Change Stream through the coordinate current
-  at `due_at` before it may conclude silence. The sweep now records the head
-  at which it first saw the deadline passed (`due_seen_seq`) and fires only
-  once a completed maintenance cycle has consumed the stream past it — the
-  `assessment.space_seq` that cycle was handed, recorded as
-  `delta_consumed_seq` when the cycle completes and handed to the next one as
-  `assessment.consumed_seq`. The settlement report says how many were held
-  (`deferred`) and how many stood down (`disarmed`).
-- **Revised roots come with their dependents.** Correction discovery used to
-  feed only the `source_reliability` tally; the cycle was told to walk
-  `LIST DEPENDENTS` after a revision without being told what was revised.
-  Each newly superseded Assertion now reaches the cycle as
-  `assessment.revised_roots` — the Proposition, the actor, what superseded it,
-  and what `LIST DEPENDENTS :root DEPTH 2 LIMIT 20` reached, with `truncated`
-  set when the walk was cut short. Nothing is flagged: reachability is
-  topology, staleness is the cycle's judgment. The Worker, which had no
-  correction discovery, gains the same scan with its cursor in the Durable
-  Object's own storage.
-- **Recall's cached primer is invalidated by a vocabulary publish.** The five-
-  minute TTL meant that after Formation declared `works_on`, Recall could read
-  a primer that did not list it. `declare_memory_symbols` and the wiki digest
-  now bump a schema generation the cache keys on, so the next recall refetches.
-- Both mode contracts (`BrainMaintenance.md` §A) say what the runtime did and
-  what is now the model's: the prose half of Watch evaluation, read from
-  `consumed_seq`, and the derivation review over `revised_roots`. The one
-  `FIND` shape for Watch rows serves the sweep and the assessment on both
-  engines, where the Rust side used to read them twice.
-
-### Changed — re-synced to KIP 2.0 `22b72b5` (`anda-db` `f425fb3`…`ae321de`)
-
-Upstream made what an engine may leave out a capability rather than a profile,
-and both engines closed four gaps a line-by-line review found neither
-declaring. Nothing this service relied on moved, so the sync itself is a
-re-vendored syntax card and a regenerated prompt bundle; the rest of this entry
-is what the two deployments now answer.
-
-- **Nine profiles; the rest are capabilities (§89, §67.4).** `KIP-Capsule`,
-  `KIP-Historical`, `KIP-High-Assurance` and `KIP-1-Migration` are gone as
-  profiles; `capsule_export` / `capsule_import`, `historical_reads`,
-  `signed_receipts` / `capsule_signatures` and `kip1_migration` say the same
-  thing per engine. The 1.x auto-upgrade this service runs on first open is the
-  reference engine's `kip1_migration: true`; the Worker answers `false` and has
-  nothing to migrate.
-- **`atomic` is the `atomic_batch` capability (§75.3), and both engines answer
-  `false`.** A request asking for it is refused with `UnsupportedCapability`
-  rather than run as a sequence that looks like one: `anda_kip::execute_request`
-  already declined to fake it, and the Worker refuses it at validation. One
-  `MUTATE` block is the transaction — which both Formation contracts asked for
-  and now say outright. The syntax card's envelope example used to spell
-  `"mode": "atomic"` — a model copying it paid a refused round trip on every
-  formation — and now asks for a `sequence` and says what `atomic` needs
-  (`KIPSyntax.md` §5, fixed upstream and vendored through `anda_kip`).
-- **`VERIFY` takes `CAPSULE`, `SCHEMA PACKAGE` or `RECEIPT` (§69.1).** `BLOB`
-  and `CHECKPOINT` left the grammar; the Worker's vendored `KIPSyntax.md`
-  follows (`scripts/sync-kip-assets.mjs`, then `codegen:prompts`).
-  `VERIFY RECEIPT` and `VERIFY SCHEMA PACKAGE` now run on both engines; they
-  are reads, so `execute_kip_readonly` admits them without a change.
-- **What both engines now do underneath, with nothing to change here:** an
-  idempotency key is journalled under the Principal that used it (§34.2) —
-  every agent in this service runs as one Principal, so no key changes hands; a
-  page cursor continues only the traversal that issued it (§44.8) — the
-  settlement pages by `space_seq` watermark, never by cursor; a `critical`
-  request extension fails the request — neither deployment sends one;
-  quarantine holds only an active element; a `SEARCH` hit carries a `snippet`
-  beside `element`, which the recall trace reader already skips by shape.
-- **`anda_kip` narrowed its public surface (277 → 217 items).** This crate used
-  none of the removed items and `cargo check` is clean. The two helpers only the
-  `wiki` feature calls (`kip::transitioned`, `Vocabulary::covers`) are marked as
-  such instead of warning in a default build.
-- **The Cognitive Memory Profile is resealed** under JCS number formatting
-  (`sha256:7f32a27a…`). Both engines ship the new digest and a Space activates
-  the Profile by reference, so no stored Space changes.
-
-
-### Changed — re-synced to KIP 2.0 `793af73` (`anda-db` `d092cae`…`bb27dc0`)
-
-Upstream collapsed six lifecycle statements into one, gave the Change Envelope
-its own schema, and — the change with the most reach here — rebuilt how a Skill
-is graded. Both deployments move together; the rule identity is shared, so a
-Skill adopted on one engine and revoked on the other would make `VERDICT_RULE`
-a lie.
-
-- **One `TRANSITION`, and the Formation gate now splits on state.** `RETRACT
-  ASSERTION`, `SUPERSEDE ASSERTION`, `CORRECT EVIDENCE`, `TRANSITION ACTIVITY`,
-  `ARCHIVE` and `TOMBSTONE` are one statement: `TRANSITION target TO "state"`
-  (§52.5). Formation used to be separated from custody by which verbs it could
-  name, and one statement now carries both — so the gate reads the state
-  instead. `retracted`, `superseded`, `corrected` and the four Activity statuses
-  pass; `archived` and `tombstoned` do not. A state written as a `:parameter` is
-  resolved against the request's own bindings and **refused when it cannot be**,
-  because otherwise the collapse would have handed an untrusted conversation a
-  binding-shaped way to tombstone. `EXPECT STATE` is gone — a move from the
-  wrong state fails `InvalidLifecycleTransition` — and `EXPECT VERSION` is now
-  the trailing guard, which the settlement writes as `OF ATTRIBUTES` so a
-  `MnemonicState` sweep over the same Concept cannot spoil a Watch fire or a
-  Skill verdict it never touched.
-- **An outcome grades a Skill only if something links it to one.** Profile §14
-  rule 7 — *attribution before counting*: the treatment set is the Outcome
-  Evidence reachable through an `outcome_observation` Activity that names an
-  `action_gate` decision, where that gate names the Skill among its `inputs`. An
-  outcome that merely shares the `task_family` is now the **baseline**, never a
-  grade, so two Skills in one family are judged by their own runs rather than by
-  each other's. The verdict reads the linked window and one grouped aggregate
-  over the family (§44.6, which both engines gained in this range), and the
-  difference is the baseline it records.
-- **`SkillUtility` split into three facets.** `GradingState` holds the tallies,
-  `TrialState` the recorded basis of an open trial — the coordinate it opened
-  at, the family's tallies excluding this Skill, the quota of linked outcomes,
-  and the rule that will decide — and `MnemonicState.utility` the admission bet,
-  revised by verdicts. One facet holding all three is how a record of what
-  happened starts reading as a forecast. The basis moved off two deployment-local
-  attributes (`trial_basis`, `trial_basis_n`) onto `TrialState`, so a verdict is
-  recomputable from state alone; `verdict_cursor` stays, because no Profile
-  facet has a slot for "how far I have counted". `VERDICT_RULE` is
-  `anda-brain/skill-verdict@2` in both deployments.
-- **A Change Envelope entry is `{op, kind, id, state, refs, touched, planes}`**
-  (§36.1). `TRANSITION` reports `op: "lifecycle"` for all nine states, so
-  counting the op no longer says what happened: `kip::transitioned(response,
-  "retracted")` reads `state.to`, and the Worker's `retired` count does the
-  same. `set_retention` is spelled `retention`. `snapshot_seq` and `status`
-  moved into the namespaced extension the schema leaves room for.
-- **`ingest.evidence[].source_actor` is an element reference**, `{id}` or
-  `{type, key}`, never a name (§71.1). The Worker's own ingest types are now
-  aliases of the engine's rather than local restatements — a local copy would
-  have gone on compiling while meaning something the engine refuses.
-- **A silence Watch fires idempotently.** The `watch_fire` Activity carries
-  `CLIENT KEY watch_fire:<watch id>:silence:<due_at>` (§5.11), so two evaluators
-  that saw the same passed deadline resolve to one firing. `Watch.condition` is
-  `string | object` now that §5.11 gave the structured filter a baseline form;
-  both deployments carry an object condition through as compact JSON rather than
-  rendering it as the empty string, which would have read as "this Watch
-  declares no condition".
-- **`declare_memory_symbols` refuses a Core element kind as a Concept type.**
-  §20.13 forbids a package from shadowing one, and Core exports no Concept types
-  at all — so `LIST TYPES` never reports `Assertion`, the borrowed set could not
-  catch it, and a model proposing it would have been refused at *package
-  installation*, taking the whole publish down and leaving the Space unable to
-  grow its vocabulary again. Refused at the tool now, where the answer is one
-  rejected name.
-- **A KIP 1.x space still migrates itself, and this sync does not touch that
-  path.** The element collections a migration creates are new, so the
-  `plane_versions` column added here is in them from the start, and the
-  Cognitive Memory Profile installs against a store that has never held one.
-  Pinned by `legacy_upgrade::a_kip_1x_space_migrates_onto_the_vocabulary_this_service_activates`.
-  Worth restating for an operator, because none of it happens at startup: the
-  migration runs per space on first access, so the service comes up before
-  anything has moved and the first request touching a space is what pays for it.
-  Back up the object store first — the 1.x collections are dropped in place and
-  the migration is one-way.
-- **What did not change, and why it is worth saying.** The silence sweep still
-  does not prove it has consumed the Change Stream through the coordinate
-  current at `due_at`, which §5.11 now asks of an evaluator before it may
-  conclude silence. The delta half of Watch evaluation belongs to the
-  maintenance model here, and nothing records how far that has read — so the
-  guard would need runtime delta matching against the new structured condition,
-  which is a feature rather than a sync. The window it leaves is a silence
-  Watch firing while a matching change waits for the next maintenance cycle.
-
-### Changed — re-synced to KIP 2.0 `40e655f`
-
-`anda-db` moved the two engines onto the Specification below the syntax and
-then onto upstream `40e655f`. Four of those changes reach this service, and the
-first two were quietly wrong here rather than loudly broken.
-
-- **The Core elements use the field names the Specification gives them.**
-  `Assertion.evidence_refs` is `Assertion.evidence`, and a citation is
-  `{"id": "E-1", "role": "support"}` rather than `{"evidence_id": …}`. The
-  correction miner read the old path, so `fetch_source_excerpts` resolved no
-  citations on any correction and every mined eval case reached the miner's
-  model with `(none available)` where the conversation that produced the
-  correction should have been — the one piece of context that says *why* the
-  memory needed revising. The Recall policy's own worked example read the old
-  path too, which is worse: a prompt teaching a model a query shape the engine
-  no longer answers.
-- **A probe miss is cached only when the search was exhaustive.** §66.6 cuts a
-  `SEARCH` page from a bounded candidate window that spans the database while
-  the search is Space-scoped, so a narrow Space's page can fill with hits it
-  may not see. The engine now reports `search_context.exhaustive`, and the
-  negative-knowledge cache reads it: an empty page the engine will not vouch
-  for is answered as a miss and not remembered as one. Caching it turned a
-  single truncated search into a window of confident wrong answers.
-- **Retention expiry is now honoured** (full maintenance cycles). The engine
-  gained `sweep_expired` and `expire_lapsed_assertions`; the settlement pass
-  calls both, so an Assertion whose `valid_time.until` has passed becomes
-  `expired` (§14.3) and an element whose `retention.expires_at` has passed is
-  archived. Both were writable before and read by nothing — a space could set a
-  90-day expiry and be kept forever with nothing saying it would not be
-  honoured. Archived rather than tombstoned or purged: an expiry date asks for
-  a record to leave ordinary recall, not to stop having existed. A legal hold
-  stops the sweep that authorized it (§163), and `MemorySettlementReport`
-  carries what was held, refused and left over — "archived 4" when 9 lapsed is
-  the shape of a retention failure nobody notices. Purge stays unreachable from
-  here: erasure over a set nobody enumerated is the largest irreversible action
-  this service can take, and a scheduled cycle is not where it belongs. The
-  Worker's engine has no `SET RETENTION` at all, so it has neither half, and
-  its Maintenance contract says so.
-- **A Space designates its `$self`** (§5.6) where it has one. `DESCRIBE PRIMER`
-  now reports the authenticated Principal and the semantic `$self` as the two
-  different things §64.2 requires it to distinguish — and this service puts
-  that primer in front of every agent, beside a Recall policy that opens "you
-  operate on behalf of `$self`". Leaving it undesignated would have put a
-  primer saying this Space has no `$self` next to a policy saying it has one,
-  in one context window. It is designated where the wiki digest minted the
-  `$self` Person and left alone where it did not: a Space with no such Concept
-  gets an honest "none designated", because inventing one to fill the slot
-  would be the host writing the Brain's own identity into the graph.
-- **`PURGE PAYLOAD` is refused in a Worker maintenance plan**, on the same
-  grounds as `PURGE` and not lesser ones. §60.6 destroys an Evidence record's
-  bytes while its record, digest and citations survive — a narrower blast
-  radius, not a reversible one, and it leaves an Assertion pointing at an
-  observation whose content is gone.
-
-### Added — the runtime mints the observation (Spec §71.1)
-
-Both engines shipped the ingestion context in the upstream round this project's
-audit asked for, and neither deployment used it. The reference Formation policy
-had been telling the model to prefer it since §7 was written, while both `# A.`
-contracts said the opposite back: there is no ingestion context here, so write
-the payload yourself. That is the fidelity risk §88.12 names, sitting in the hot
-path — a model retyping an observation truncates it, normalizes its whitespace,
-fixes its spelling or paraphrases it, and the record then says the source said
-something they did not, with a confidence and an actor attached.
-
-- **One Evidence per message, bound as `:msg1`…`:msg16`.** Minted before the
-  first command runs, from the bytes the runtime received, on every request a
-  formation pass makes. `evidence_class` comes from the speaker's role: a
-  transcript is not one observation, and flattening four turns into one payload
-  would leave a reader unable to tell the user's words from the assistant's.
-  Both contracts now say so, and keep `CREATE EVIDENCE` for what is genuinely
-  not one of these messages — something quoted inside one, a measurement, an
-  attached document.
-- **`client_key` is what makes it safe to attach everywhere.** The first mint
-  wins and the rest resolve to it, so four commands citing `:msg1` cite one
-  record and a resend does not double the observation. Its origin is
-  `context.source` when the caller sends one, and otherwise the best stable
-  identity each deployment has: the durable conversation row in the Rust
-  service, a digest of the envelope in the Worker, which is stateless and has
-  nothing better.
-- **Fixed: `AndaBrain.executeKip` was dropping every argument past `read`.**
-  Written to add `ensureInitialized`, it inherited a signature that stopped
-  where its author's attention did — the failure the comment above
-  `executeKipBatch` already warned about, in the same file. Besides `ingest`, it
-  was swallowing `idempotencyKey`: §26's "a timeout is not an abort", so a
-  resend of a lost write was writing a second time instead of returning the
-  first one's receipt.
-
-The two deployments differ on the first conversation with a new person. The Rust
-service upserts the counterparty's Person before the pass and can name it as the
-Evidence `source`; the Worker leaves that write to the model's own plan and has
-nothing to point at yet, so the source is omitted rather than filled with the
-handle — it must resolve to something a reader can follow. Attribution does not
-depend on it either way: who said the thing is `asserted_by` on the Assertion.
-
-### Changed — the two deployments run one maintenance policy
-
-The Rust service gated Formation by name and let every other agent fall through
-to the raw tool. That default-open `else` was the whole gap: its Maintenance
-kept `PURGE`, `PURGE PAYLOAD`, `legal_hold` and unbounded selections that the
-Worker's maintenance gate has refused since it was written. Two runtimes running
-one policy cannot differ on which verbs a model may reach, so
-`execute_maintenance_request` is the wider half of the same gate now, and
-`GuardedMemory` dispatches to one of two gates rather than to one or nothing.
-
-Erasure does not leave the deployment with it: the right-to-be-forgotten path
-already issues `PURGE` deterministically, from a request a person made. That is
-the distinction — who decided, not which verb.
-
-In the other direction, **the Worker was refusing every `MERGE CONCEPT` that
-carried a `WHERE`.** That rule read merge's missing `LIMIT` slot as a hole. It is
-not one: the block is a guard, and both engines resolve each operand separately
-and refuse one that binds more than one Concept — with a registry code, the
-counts found, and what to write instead. The gate was costing the legitimate
-one-pair case to duplicate a check that answers better.
-
-Both maintenance contracts now state what their gate holds back, and the Rust
-one picks up the `STRUCTURAL` note the Worker already had.
-
-### Changed — re-synced to `anda-db` `87f7ab0`…`168be6f`
-
-Upstream closed the six engine gaps this project's own audit had reported, so
-three statements this service was making about `@ldclabs/kip-do` stopped being
-true, one gate it was holding stopped being necessary, and one wire shape moved
-under two readers that did not notice.
-
-- **`SET RETENTION` reaches Maintenance.** The Worker was refusing the clause at
-  its own gate because the engine parsed it and then failed at execution — and
-  because a batch is not a transaction, the commands before it had already
-  committed. The engine implements it now, so the gate comes down and §20
-  Retention Review and §25 Retention Expiry have a mechanism here for the first
-  time.
-
-  What replaces it is narrower and is not about the engine: **a maintenance plan
-  may not place or lift a `legal_hold`.** A hold blocks erasure for everyone, so
-  a plan that could place one could make its own cognition undeletable, and one
-  that could clear it could unblock an erasure somebody placed a hold to stop. Neither is a decision to reach from a
-  graph snapshot; both go through the administrative `execute_kip` endpoint.
-  Refused on the member name, which the grammar fixes, so `{legal_hold:
-  :whatever}` does not smuggle it past.
-
-- **A `LIST TYPES` / `LIST PREDICATES` row is a row.** Both engines now answer
-  `{ref, local_name, package_ref, status}`; `@ldclabs/kip-do` used to answer
-  bare reference strings. Two readers here were written against the string
-  shape and **came back empty** rather than failing — which is the whole reason
-  the shape was unified upstream, and it landed here first:
-
-  - `MemoryVocabulary.load` read no existing symbols, so it re-declared `Person`
-    and `prefers` — symbols the Cognitive Memory Profile already provides — and
-    versioned the memory package forward to do it. Three tests caught it.
-  - `predicateCensus` carried a compatibility branch for both shapes and so kept
-    working; the branch is gone, because tolerating two shapes is what made the
-    divergence survivable and therefore permanent.
-
-  An empty result is the worst shape mismatch there is: it reads as an empty
-  Space rather than as a wrong path, with no error and no clue.
-
-- **Idempotency replays.** A resend under a committed key returns the original
-  receipt rather than failing, so the sentence saying otherwise is gone from
-  the Formation and Maintenance contracts. The Worker sends no key today, so
-  nothing changes for a model — the statement was simply false.
-
-- **`STRUCTURAL` reaches the Core reference fields.** An Assertion's `evidence`
-  and `context`, an Evidence record's `source` and `generated_by`, an
-  Activity's `inputs`, `outputs` and `associated_actors`, each by that plain
-  name. *Which Assertions cite this Evidence* is now a selection block
-  Maintenance can write — `ARCHIVE ?a WHERE { STRUCTURAL (?a, "evidence", :e) }
-  LIMIT 20` — which is what §16 Contradiction Review and §26 Evidence
-  Correction needed and had been guessing at. Added to the Maintenance and
-  Recall contracts.
-
-- **Formation's `SET RETENTION` refusal is restated as what it is.** The
-  contract said the engine had not built it. The engine has; Formation may not
-  write it, because Formation writes cognition and does not administer memory,
-  and a pass reading an untrusted conversation is the last thing that should
-  decide how long anything is kept. Same refusal, honest reason.
-
-The divergence this left — the Rust service gating only its Formation agent —
-is closed in the section above.
-
-### Changed — re-synced to KIP 2.0 `12cfd4d` (`anda-db` `0f92200`…`86777c0`)
-
-Upstream added the consequence channel and then spent two commits holding both
-engines to declarations they had been carrying and not reading. The Rust
-service inherits all of the second half without a line changing — it goes
-through `anda_cognitive_nexus`, and every write it builds already conformed —
-so what follows is the vocabulary this service teaches its models, and the
-Worker's own seam onto `@ldclabs/kip-do`.
-
-- **A Skill is now graded by what happened, not by who vouched for it.** The
-  Cognitive Memory Profile gained `OutcomeRecord` — a Facet on Outcome Evidence
-  (`evidence_class: "outcome"`) carrying `task_family` and `outcome_status`,
-  required and immutable — and rebuilt `Skill` around it: `task_family` is
-  required, the lifecycle is `proposed | trialed | adopted | revoked`, and every
-  transition is a deterministic `lifecycle_verdict` Activity over graded
-  outcomes rather than an author's assertion. `SkillUtility` traded
-  `last_validated_at` for `graded_count` + `last_verdict_at`. The separation
-  that makes it worth anything is the one this service has to teach: an actor's
-  report about its own result is `agent_statement`, re-typed instrument output
-  is `derived_result`, and neither is Outcome Evidence. All five `Brain*.md`
-  carry the new policy — Formation forms it, Maintenance schedules the verdict,
-  Recall ranks `adopted` above `trialed` and shows `revoked` only as a warning.
-- **A development Space that installed the previous `@2.0.0` Profile must be
-  recreated.** The Profile's content changed and its version did not — KIP 2.0
-  is unreleased, and a draft that moved a version per revision would spend the
-  version space it exists to protect. `install_package` refuses a same-version
-  replacement (`DigestMismatch`), which is the §20.11 defence working rather
-  than a bug: every element already bound to that reference would otherwise
-  change meaning with nothing recording it. Spaces created from this build are
-  unaffected.
-- **The Worker reads a §81 operation result.** `receipt` is gone from
-  `KipResult`; the full transaction outcome — handles, per-element changes, the
-  governance decision — is under `extensions["kip-do/outcome"]`, because the
-  normative schema closes `OperationResult` and puts one `receipt` on the
-  envelope. Every result now carries a required `status`, and the service
-  decides on it rather than on the absence of an error: `no_effect` has neither
-  an error nor a commit, and reading "no error" as "written" would count a
-  mutation that never happened.
-- **A change record spells its Core kind lowercase**, as `?c.kind` always did.
-  The Worker's `countWrites` compared `"Concept"`, so every formation answer
-  reported `{concepts: 0, propositions: 0, assertions: 0}` while writing the
-  graph correctly — a wrong count with no failure anywhere to notice it. The
-  Rust settlement already read lowercase.
-- **`execution` and `op_id` reach the engine.** `@ldclabs/kip-do` gained §75
-  sequencing, and the Worker was dropping both halves: `AndaBrain` overrode
-  `executeKipBatch` without the `execution` argument the base class passes down,
-  so a batch asking for `sequence` + `on_error: stop` ran as `independent` and
-  committed the writes it asked to have skipped — while the envelope reported
-  the mode it had requested. `POST /v1/{space}/execute_kip` now accepts
-  `execution` (`independent` | `sequence`, with `on_error`; `atomic` stays
-  refused) and per-operation `op_id`, echoed on the answer so a batch whose
-  operations did not all run is readable without counting positions.
-
-### Changed — the reference half of a mode prompt is generated
-
-`scripts/sync-kip-assets.mjs` re-copies the KIP 2.0 reference policy into all
-five `Brain*.md` (three in `anda_brain/assets/`, three in
-`anda-brain-worker/assets/`), splitting each on its `# A.` heading so the
-deployment contract below it survives untouched, and re-copies the Worker's two
-verbatim assets. `pnpm --filter @ldclabs/anda-brain-worker run sync:assets` is
-the same script.
-
-The note it replaces said to diff the policies by hand when upstream changed
-them. Between `40e655f` landing and this script, `Watch`, `WorkingState`,
-`DerivationState`, `MnemonicState.utility`, `LIST DEPENDENTS`, `PURGE PAYLOAD`
-and the `action_gate` Activity class were in the reference policies and in none
-of the five copies — which is the failure mode of hand-maintained copies, and
-the reason the syntax card was taken out of the prompts in the first place.
-
-### Changed — four seams, so the rules can be read without their hosts
-
-Nothing here changes behaviour; every one of these was a place where the rule
-and the machinery that ran it were the same code, and the rule could only be
-exercised by standing the machinery up.
-
-- **The settlement takes a `RunKip` port**, the way the Worker's did in
-  `e3a79fb`. Disuse decay, correction discovery, silence-Watch expiry and the
-  Skill lifecycle rule move out of `Space` into `anda_brain/src/settlement/`,
-  behind one command in, one result out, with `readonly` picking the gate.
-  `Space` is one adapter and the module's own tests are the other — which is
-  what lets the batch ceiling, the correction watermark and the degraded-cycle
-  paths be tested without building a graph that produces the outcome stream
-  you want to judge. `skill.rs` and `watch.rs` become its command builders and
-  row readers rather than crate-level modules, and the passes now decide
-  rather than act: `scan_corrections` reads the page and works out the cursor
-  it earned, while the usage ledger and the `source_reliability` aggregate
-  stay with the `Space` that owns them.
-- **Admission rules have names.** `authorize` took the token scope and the
-  admission mode as separate arguments, so every one of its 28 call sites
-  restated a pairing this service only means four of. `authz::read_public`,
-  `read_lenient`, `credentialed` and `cwt_only` name them instead;
-  `read_lenient` returns the space alone, because an endpoint that never
-  verified the caller's token has no ACL view to hand back. The MCP channel
-  still reaches `authorize`, whose mode is genuinely a variable there.
-- **Eval reporting is a module, not a binary.** `EvalCommandReport` and the
-  summary rendering move to `anda_brain::eval::report` — pure functions from a
-  report to a string, previously reachable only by running an eval.
-- **`WikiService`'s unscoped reads are private.** `read`, `verify`,
-  `list_versions` and `acl_defaults` apply no label check and existed beside
-  their `_scoped` counterparts, where picking the wrong one is an ACL bypass
-  rather than a bug. The CWT test fixture, hand-copied into three test
-  modules, moves to `testkit`.
-
-### Fixed
-
-- **`IS_NULL` over a dot path now works** (`anda_cognitive_nexus`). Reading an
-  absent member yields a null *literal*, which the filter did not recognise as
-  null, so `IS_NULL(?c.facets["MnemonicState"].last_metabolized_at)` — "never
-  metabolized" — was permanently false and the metabolism sweep selected
-  nothing.
-- **A bare `{"id": …}` reference is no longer metered as a recall.** Usage
-  reinforcement counted an Assertion's `asserted_by` pointer as a retrieved
-  memory; only rendered elements count now.
-- **Search hits are read through their envelope.** A `SEARCH` result wraps the
-  element in `{id, kind, score, element}`, and citations were being built from
-  the wrapper — every hit came back with no type and no name.
+- Search citations read the hit's nested `element`; probe misses are cached
+  only after exhaustive search. `IS_NULL` on absent paths works, and bare
+  `{"id": ...}` references no longer count as recalled memories. Both
+  engines reuse Propositions staged earlier in the same transaction.
+- Published Rust dependencies replace sibling `[patch.crates-io]` paths:
+  `anda_kip`, `anda_cognitive_nexus`, AndaDB and `anda_object_store` use 0.13;
+  `anda_core` and Anda Engine use 0.16; `cose2` uses 0.5 and
+  `ic_cose_types` 0.11. The Worker installs published `@ldclabs/kip-do`
+  0.13 from the pnpm lockfile. CI no longer checks out sibling runtimes.
+- KIP 2.0 reference policies and role cards are synchronized with the
+  published runtime; the Worker vendors and generates its prompt assets.
+  Deployment-specific `# A.` sections remain separate. The Rust runtime
+  supplies the syntax card and Profile from `anda_kip`.
 
 ## [0.11.0] — 2026-08-07
 
