@@ -58,7 +58,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ldclabs/MIB
-          ref: ${{ vars.MIB_REF || '9425e33b43377c02111ea0bab3ba042f10dc7811' }}
+          # Follow MIB's maintained regression runner; MIB_REF can pin a replay.
+          ref: ${{ vars.MIB_REF || 'main' }}
           path: mib
       - uses: actions/setup-python@v5
         with:
