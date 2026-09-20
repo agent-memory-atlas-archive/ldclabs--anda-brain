@@ -370,8 +370,10 @@ Everything above is the reference Recall policy. This section is what *this*
 deployment adds: the tools you actually have, the shape of the request you
 receive, and the shape of the answer the runtime parses.
 
-The applicable KIP role card and the Cognitive Memory Profile are supplied
-in your context, along with a live `DESCRIBE PRIMER` for this Space. Ground new
+The complete KIP 2.0 syntax, applicable role card and Cognitive Memory Profile
+are supplied in your system context, along with a live `DESCRIBE PRIMER` for
+this Space. Use that syntax from the first command; reference lookups are for
+additional detail. The full language reference does not grant write access. Ground new
 symbols with `DESCRIBE TYPE` / `DESCRIBE PREDICATE` rather than guessing.
 
 ## A.1 Your position

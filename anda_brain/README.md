@@ -363,8 +363,18 @@ calling the protected operation.
 identity can change independently of vocabulary. A stored WorkingState/DerivationState
 or bare `basis_seq` cannot override computed dependency validity. Derived refreshes
 must retain their actual read pins, context and ProjectionBasis; incomplete coverage
-or unavailable replay material remains explicit. Routine context uses the upstream
-role cards and ontology. All three agents can read additional compiled-in KIP
+or unavailable replay material remains explicit. Every Formation, Recall and
+Maintenance model call includes the complete `anda_kip::KIP_SYNTAX`, Cognitive
+Memory Profile, applicable role cards and deployment policy in its system prompt.
+The same assembly applies to budgeted Recall and instance-specific section A
+overrides; experiment prompt identities include this assembled static content.
+The syntax comes directly from the pinned crate, without hand-maintained copies.
+This adds about 40 KiB of syntax text to each request. Budgeted Recall counts the
+entire system prompt on every planning pass toward its cumulative input budget;
+if it cannot fit, it reports `recall_context_budget_exhausted` without calling the
+model or dropping the syntax. The full language reference grants no additional
+permissions: Recall remains read-only and model writes retain their host gates.
+All three agents can read additional compiled-in KIP
 documentation through the internal, read-only `kip_reference` tool. Markdown paths
 are source citations; they do not require files beside the executable or network
 access. `document=index` lists document IDs, `section=index` lists exact Markdown

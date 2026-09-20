@@ -294,11 +294,16 @@ For complex businesses, Vector RAG is insufficient. Enterprises have structured 
 
 KIP 2.0 separates what 1.x kept in one graph — meaning, belief, evidence, provenance, mnemonic state, retention, governance and schema. The single distinction the rest follows from is that **a statement existing is not the statement being true**: a Proposition is truth-neutral, an Assertion is one actor's stance about it with its evidence, and what is currently believed is projected from those rather than stored. That is what lets Brain tell you "Alice said X, and Bob disagrees" instead of quietly picking a winner — and why it never answers "no" when the truthful answer is "I have no basis for that".
 
-The Rust service embeds the protocol references needed by its agents. Formation,
-Recall and Maintenance use an internal read-only `kip_reference` tool to load
-version-pinned documentation by document/section, in pages of at most 8 KiB.
-No source files or network access are needed at runtime. Budgeted Recall counts
-reference pages as planning input, never as retrieved memories or coverage.
+The Rust service includes the complete, version-pinned KIP 2.0 syntax, Cognitive
+Memory Profile and applicable role cards in every Formation, Recall and Maintenance
+system prompt, including budgeted Recall and custom deployment policies. Syntax
+adds about 40 KiB per request and does not expand tool permissions. Budgeted Recall
+counts the full system prompt on each planning pass; an insufficient input budget
+returns `recall_context_budget_exhausted` without calling the model or omitting syntax.
+The internal read-only `kip_reference` tool supplies additional documentation by
+document/section, in pages of at most 8 KiB. No source files or network access are
+needed at runtime. Reference pages count as planning input, never as retrieved
+memories or coverage.
 The Worker embeds the same reference release and supports bounded documentation
 lookups through its structured JSON `references` field before returning a final
 plan or answer; see [the Worker guide](./anda-brain-worker/README.md#内嵌参考查阅).

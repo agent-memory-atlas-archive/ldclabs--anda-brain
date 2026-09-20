@@ -10,7 +10,10 @@ const VERSION: &str = "0.13.1";
 const PAGE_BYTES: usize = 8192;
 
 pub(crate) const INSTRUCTIONS: &str = "# Embedded KIP references\n\
-The role cards, Cognitive Memory Profile and this deployment's policy are already in context. \
+The complete KIP 2.0 syntax, role cards, Cognitive Memory Profile and this deployment's policy \
+are already in system context. This host preloads the full syntax for every call, including \
+routine operations; no reference-tool call is needed before writing your first command. \
+Construct commands using the supplied KIP 2.0 syntax, not SQL, Cypher or legacy KIP syntax. \
 Markdown links and bare document paths in these texts are source citations, not readable files. \
 Use kip_reference for additional protocol details; it requires no filesystem or network access. \
 Call with document=\"index\", section=null, offset=0 to discover available documents. \

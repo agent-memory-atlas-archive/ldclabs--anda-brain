@@ -147,21 +147,16 @@ async fn fresh_space(app: &AppState) -> Result<Arc<Space>, BoxError> {
 }
 
 fn prompts_digest(app: &AppState) -> Result<String, BoxError> {
-    use crate::agents::prompts::{PromptTarget, mode_reference};
-    Ok(anda_cognitive_nexus::content_digest(&serde_json::json!([
-        [
-            mode_reference(PromptTarget::Formation),
-            app.prompts.prompt(PromptTarget::Formation)
-        ],
-        [
-            mode_reference(PromptTarget::Recall),
-            app.prompts.prompt(PromptTarget::Recall)
-        ],
-        [
-            mode_reference(PromptTarget::Maintenance),
-            app.prompts.prompt(PromptTarget::Maintenance)
-        ]
-    ]))?)
+    use crate::agents::prompts::{PromptTarget, system_prompt};
+    let prompts = [
+        PromptTarget::Formation,
+        PromptTarget::Recall,
+        PromptTarget::Maintenance,
+    ]
+    .map(|target| system_prompt(target, &app.prompts.prompt(target)));
+    Ok(anda_cognitive_nexus::content_digest(&serde_json::json!(
+        prompts
+    ))?)
 }
 
 async fn quiescent(run: &Run) -> Result<(), BoxError> {

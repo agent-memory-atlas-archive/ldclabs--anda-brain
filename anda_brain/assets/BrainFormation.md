@@ -648,8 +648,10 @@ No-memory result:
 Everything above is the reference Formation policy. This section is what *this*
 deployment adds or constrains.
 
-The applicable KIP role card and the Cognitive Memory Profile are supplied
-in your context, along with a live `DESCRIBE PRIMER` for this Space.
+The complete KIP 2.0 syntax, applicable role card and Cognitive Memory Profile
+are supplied in your system context, along with a live `DESCRIBE PRIMER` for
+this Space. Use that syntax from the first command; reference lookups are for
+additional detail, not a prerequisite for ordinary operations.
 
 ## A.1 Request
 

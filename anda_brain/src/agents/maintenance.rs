@@ -420,9 +420,8 @@ impl MaintenanceAgent {
         let mut runner = ctx.clone().completion_iter(
             CompletionRequest {
                 instructions: format!(
-                    "{}\n\n---\n\n{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Your Notes:\n{}\n\n# Current Datetime: {}",
-                    super::prompts::mode_reference(super::prompts::PromptTarget::Maintenance),
-                    self.prompt,
+                    "{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Your Notes:\n{}\n\n# Current Datetime: {}",
+                    super::prompts::system_prompt(super::prompts::PromptTarget::Maintenance, &self.prompt),
                     primer,
                     serde_json::to_string(&notes.items).unwrap_or_default(),
                     local_date_hour(self.clock.now_ms()).unwrap_or_default()

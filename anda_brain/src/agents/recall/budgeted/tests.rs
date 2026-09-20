@@ -32,6 +32,16 @@ async fn references_are_budgeted_planning_context_never_memory_or_coverage() {
     assert!(output.failed_reason.is_none(), "{output:?}");
     let requests = seen.lock().clone();
     assert_eq!(requests.len(), 2);
+    for request in &requests {
+        assert_eq!(
+            request.instructions.matches(anda_kip::KIP_SYNTAX).count(),
+            1
+        );
+        assert!(
+            request.instructions.find("# Host budget mode").unwrap()
+                > request.instructions.find(anda_kip::KIP_SYNTAX).unwrap()
+        );
+    }
     assert!(
         requests[0]
             .tools
@@ -381,6 +391,36 @@ async fn actual_planner_requests_and_final_packets_obey_the_same_pinned_encoding
         );
     }
     assert!(!output.content.contains("model-invented-verified-id"));
+
+    // A budget that could hold this request without syntax must still fail
+    // before the provider if it cannot hold even the full fixed instructions.
+    let mut without_syntax = seen[0].clone();
+    assert_eq!(
+        without_syntax
+            .instructions
+            .matches(anda_kip::KIP_SYNTAX)
+            .count(),
+        1
+    );
+    without_syntax.instructions = without_syntax
+        .instructions
+        .replace(anda_kip::KIP_SYNTAX, "");
+    let smaller_budget = budget::count(&normalized_request(&without_syntax).unwrap()).unwrap();
+    let mut fixed_only = seen[0].clone();
+    fixed_only.prompt.clear();
+    assert!(smaller_budget < budget::count(&normalized_request(&fixed_only).unwrap()).unwrap());
+    let rejected = space
+        .query(
+            SELF_USER_ID,
+            input(Some(limits(budget.max_tokens, smaller_budget as u32))),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rejected.failed_reason.as_deref(),
+        Some("recall_context_budget_exhausted")
+    );
+    assert_eq!(requests.lock().len(), seen.len());
     space.close().await.unwrap();
 }
 

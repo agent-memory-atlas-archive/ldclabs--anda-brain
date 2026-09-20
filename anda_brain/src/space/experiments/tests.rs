@@ -17,6 +17,19 @@ impl CompletionFeaturesDyn for PromptRecorder {
         "p7-prompt-fixture".into()
     }
     fn completion(&self, request: CompletionRequest) -> BoxPinFut<Result<AgentOutput, BoxError>> {
+        // Inspect what actually reaches the model, including custom deployment
+        // policies and the separate budgeted Recall path after snapshot restore.
+        assert_eq!(
+            request.instructions.matches(anda_kip::KIP_SYNTAX).count(),
+            1
+        );
+        assert_eq!(
+            request
+                .instructions
+                .matches(anda_kip::COGNITIVE_MEMORY_PROFILE)
+                .count(),
+            1
+        );
         let budgeted = request
             .tools
             .iter()
@@ -130,6 +143,7 @@ async fn p7_instance_prompts_reach_all_agents_and_are_pinned_across_snapshots() 
     );
     let fork = snapshot.fork(&a, &identity()).await.unwrap();
     fork.session_boundary().await.unwrap();
+    let before_budgeted = a_requests.lock().len();
     let answer = fork
         .recall(RecallInput {
             budget: Some(Default::default()),
@@ -138,6 +152,7 @@ async fn p7_instance_prompts_reach_all_agents_and_are_pinned_across_snapshots() 
         .await
         .unwrap();
     assert!(answer.failed_reason.is_none(), "{answer:?}");
+    assert_eq!(a_requests.lock().len(), before_budgeted + 1);
     assert!(
         a_requests
             .lock()

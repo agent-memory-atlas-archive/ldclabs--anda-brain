@@ -40,8 +40,8 @@ Keep normal restart, eviction and unresolved-write recovery fully tested.
 - `anda_brain/src/types.rs`: API input/output and persisted config types.
 - `anda_brain/assets/`: agent prompts and tool definitions. The KIP syntax card
   and the Cognitive Memory Profile are **not** copied here — `anda_kip` ships
-  them with the protocol, and `agents::prompts::mode_reference()` puts the role cards and Profile
-  in the model's context at completion time.
+  them with the protocol, and `agents::prompts::system_prompt()` includes the full
+  syntax, role cards and Profile in every model call, including budgeted Recall.
 - `anda_brain/src/kip_reference.rs` and `assets/kip-reference/`: bounded reference
   discovery and the generated specification/schema supplement. Its manifest pins
   the published KIP source; do not hand-edit generated reference material.

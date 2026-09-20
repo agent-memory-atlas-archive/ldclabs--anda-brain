@@ -265,9 +265,8 @@ impl RecallAgent {
         let mut tools = ctx.tool_definitions(Some(&names));
         tools.push(selector());
         let instructions = format!(
-            "{}\n\n{}\n\n# Host budget mode\nYou are selecting an authorized memory packet for another agent. Read only through the listed tools, then call {SELECT} with existing memory item IDs. The KIP tool supports only KQL and SEARCH in this mode (up to 4 operations, LIMIT at most 32); other META commands are unavailable and the current Primer is already supplied. Wiki search uses at most 8 hits without neighbor expansion. At most 4 tool calls per pass and 16 per Recall are allowed. You cannot add content or choose priorities. No free-form answer, grades or completeness claims will be delivered. Preserve native uncertainty, conflicts and warnings. Unchecked channels are unknown, not absent. Each pass receives the entire currently admitted snapshot; previous provider history is intentionally not replayed.",
-            super::super::prompts::mode_reference(super::super::prompts::PromptTarget::Recall),
-            self.prompt
+            "{}\n\n# Host budget mode\nYou are selecting an authorized memory packet for another agent. Read only through the listed tools, then call {SELECT} with existing memory item IDs. The KIP tool supports only KQL and SEARCH in this mode (up to 4 operations, LIMIT at most 32); other META commands are unavailable and the current Primer is already supplied. Wiki search uses at most 8 hits without neighbor expansion. At most 4 tool calls per pass and 16 per Recall are allowed. You cannot add content or choose priorities. No free-form answer, grades or completeness claims will be delivered. Preserve native uncertainty, conflicts and warnings. Unchecked channels are unknown, not absent. Each pass receives the entire currently admitted snapshot; previous provider history is intentionally not replayed.",
+            super::super::prompts::system_prompt(super::super::prompts::PromptTarget::Recall, &self.prompt)
         );
         let template = CompletionRequest {
             instructions,

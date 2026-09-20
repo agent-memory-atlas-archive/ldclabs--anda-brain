@@ -271,10 +271,13 @@ Anda Brain 旨在成为下一代 AI 应用的“记忆引擎”，从超个性�
 
 KIP 2.0 把 1.x 混在一张图里的东西拆开了：语义、信念、证据、来源、记忆强度、留存、治理与 Schema。其余一切都源自同一个区分——**一条陈述存在，不等于这条陈述为真**：Proposition 是中立的三元组，Assertion 是某个行动者对它的立场与证据，而“当前相信什么”是从这些 Assertion 投影出来的，而非存储下来的。正因如此，Brain 能告诉你“Alice 这样说，而 Bob 不同意”，而不是悄悄选一边；也正因如此，当真实答案是“我没有依据”时，它不会回答“没有”。
 
-Rust 服务已内嵌智能体所需的协议参考。Formation、Recall 和 Maintenance
-通过内部只读工具 `kip_reference`，按文档和章节读取版本锁定的参考内容，每页正文最多
-8 KiB。运行时不需要源码文件或网络访问。预算 Recall 将参考页计入规划输入预算，
-不会把它们当作检索到的记忆或覆盖证据。
+Rust 服务在 Formation、Recall 和 Maintenance 的每次系统提示词中默认包含版本锁定的
+完整 KIP 2.0 语法、Cognitive Memory Profile 和相应角色卡，预算 Recall 与自定义部署
+策略也使用同一组装逻辑。语法文本每次请求增加约 40 KiB，不扩大工具权限。预算 Recall
+将每轮完整系统提示词计入累计规划输入预算；输入预算不足时返回
+`recall_context_budget_exhausted`，不会调用模型或省略语法。
+内部只读工具 `kip_reference` 提供补充文档的按文档、章节查阅，每页正文最多 8 KiB。
+运行时不需要源码文件或网络访问。参考页计入规划输入预算，不作为检索到的记忆或覆盖证据。
 Worker 同样内嵌该版本的参考，通过结构化 JSON 的 `references` 字段进行有界查阅，
 再返回最终计划或答案；详见 [Worker 说明](./anda-brain-worker/README.md#内嵌参考查阅)。
 

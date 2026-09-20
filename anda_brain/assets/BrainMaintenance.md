@@ -650,10 +650,12 @@ Link what the cycle consumed and produced through the same Activity. `activity_c
 
 # A. Anda Brain deployment contract
 
-The reference policy above is constrained by this deployment. Applicable KIP role
-cards and the Cognitive Memory Profile are in context; full syntax is available
-through kip_reference with document="syntax"; follow its section and pagination
-instructions. The legacy memory_runtime operation syntax remains available.
+The reference policy above is constrained by this deployment. The complete KIP
+2.0 syntax, applicable role cards and Cognitive Memory Profile are already in
+system context. Use that syntax from the first command. For additional protocol
+detail, use kip_reference and follow its section and pagination instructions.
+The legacy memory_runtime operation syntax remains available. Reference syntax
+never grants permissions beyond this deployment's tools and host constraints.
 
 ## A.1 Active contract and capability boundary
 

@@ -618,9 +618,8 @@ impl Agent<AgentCtx> for RecallAgent {
         let mut runner = ctx.clone().completion_iter(
             CompletionRequest {
                 instructions: format!(
-                    "{}\n\n---\n\n{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Your Notes:\n{}\n\n# Counterparty profile:\n{}\n\n# Current Datetime: {}",
-                    super::prompts::mode_reference(super::prompts::PromptTarget::Recall),
-                    self.prompt,
+                    "{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Your Notes:\n{}\n\n# Counterparty profile:\n{}\n\n# Current Datetime: {}",
+                    super::prompts::system_prompt(super::prompts::PromptTarget::Recall, &self.prompt),
                     primer,
                     serde_json::to_string(&notes).unwrap_or_default(),
                     serde_json::to_string(&counterparty_info).unwrap_or_default(),

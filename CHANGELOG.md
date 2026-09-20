@@ -64,6 +64,14 @@ Assertion records an actor's stance and Evidence. Existence is not belief.
 
 ### Formation, recall and maintenance
 
+- Every Rust agent system prompt now includes the full version-pinned KIP 2.0
+  syntax from `anda_kip`, alongside its Profile, role cards and deployment policy.
+  A shared assembler covers ordinary and budgeted Recall, Formation, Maintenance
+  and experiment prompt identities, including instance-specific section A edits.
+  Reference tools remain available for supplemental details. Syntax adds about
+  40 KiB per request, counts toward cumulative Recall input budgets and does not
+  expand host permissions. Regression fixtures check actual model requests and
+  parse executable syntax/card examples; they do not establish real-model accuracy.
 - Formation captures one Evidence record per input message from the received
   bytes, with a stable ingestion key and a bound `:msg1`…`:msg16` reference.
   Replays deduplicate instead of retyping, truncating or duplicating what a

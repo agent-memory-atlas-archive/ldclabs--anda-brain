@@ -8,12 +8,13 @@ use anda_core::BoxError;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 
-/// Compiled-in default prompts.
+/// Compiled-in default policies and deployment contracts, not complete system prompts.
 ///
 /// Each is one mode's policy and this deployment's contract — the KIP language
 /// itself is not in here. `anda_kip` ships the syntax card and the Cognitive
-/// Memory Profile alongside the protocol they describe, and
-/// [`mode_reference`] loads the applicable role cards and Profile at completion time.
+/// Memory Profile alongside the protocol they describe. The system prompt assembler
+/// adds the full syntax, Profile, applicable role cards and host constraints before
+/// every completion, including budgeted Recall and instance-specific contracts.
 /// KIP 1.x taught the language from a copy pasted into each of these files;
 /// three hand-maintained copies of a protocol drift, and the one that drifts
 /// silently is the one a model then writes against.
@@ -21,8 +22,8 @@ pub const FORMATION_DEFAULT: &str = include_str!("../../assets/BrainFormation.md
 pub const RECALL_DEFAULT: &str = include_str!("../../assets/BrainRecall.md");
 pub const MAINTENANCE_DEFAULT: &str = include_str!("../../assets/BrainMaintenance.md");
 
-/// The complete reference for callers that need it. Routine agent context uses
-/// mode_reference; all agents can request bounded reference pages on demand.
+/// The shared language and ontology, included in every agent's system context.
+/// Normative specification details remain available through `kip_reference`.
 pub fn language_reference() -> &'static str {
     static REFERENCE: OnceLock<String> = OnceLock::new();
     REFERENCE.get_or_init(|| {
@@ -34,24 +35,45 @@ pub fn language_reference() -> &'static str {
     })
 }
 
-/// The applicable role cards and ontology; complete syntax is loaded on demand.
+/// Complete syntax, ontology, applicable role cards and host constraints.
+/// Kept separate from the deployment policy for existing Rust integrations.
 pub fn mode_reference(target: PromptTarget) -> String {
-    let cards = match target {
-        PromptTarget::Formation => anda_kip::KIP_FORMATION_CARD.to_string(),
-        PromptTarget::Recall => anda_kip::KIP_RECALL_CARD.to_string(),
-        PromptTarget::Maintenance => format!(
-            "{}\n\n{}\n\n{}",
-            anda_kip::KIP_RECALL_CARD,
-            anda_kip::KIP_FORMATION_CARD,
-            anda_kip::KIP_MAINTENANCE_CARD
-        ),
-    };
+    compiled_mode_reference(target).to_owned()
+}
+
+fn compiled_mode_reference(target: PromptTarget) -> &'static str {
+    // Only immutable protocol/host text is shared. Deployment overrides remain
+    // instance-owned, and live Primer/notes/time are appended by each caller.
+    static REFERENCES: [OnceLock<String>; 3] = [OnceLock::new(), OnceLock::new(), OnceLock::new()];
+    REFERENCES[slot(target)].get_or_init(|| {
+        let cards = match target {
+            PromptTarget::Formation => anda_kip::KIP_FORMATION_CARD.to_string(),
+            PromptTarget::Recall => anda_kip::KIP_RECALL_CARD.to_string(),
+            PromptTarget::Maintenance => format!(
+                "{}\n\n{}\n\n{}",
+                anda_kip::KIP_RECALL_CARD,
+                anda_kip::KIP_FORMATION_CARD,
+                anda_kip::KIP_MAINTENANCE_CARD
+            ),
+        };
+        format!(
+            "{}\n\n---\n\n{}\n\n---\n\n{}\n\n{}",
+            language_reference(),
+            cards,
+            crate::cognitive::CAPABILITIES,
+            crate::kip_reference::INSTRUCTIONS
+        )
+    })
+}
+
+/// The static system prefix used by all agent completion paths and experiment
+/// identities. Full syntax is unconditional; a deployment override only replaces
+/// section A of `deployment_policy`. Append live context and mode limits after it.
+pub(crate) fn system_prompt(target: PromptTarget, deployment_policy: &str) -> String {
     format!(
-        "{}\n\n{}\n\n{}\n\n{}",
-        cards,
-        anda_kip::COGNITIVE_MEMORY_PROFILE,
-        crate::cognitive::CAPABILITIES,
-        crate::kip_reference::INSTRUCTIONS
+        "{}\n\n---\n\n{}",
+        compiled_mode_reference(target),
+        deployment_policy
     )
 }
 
@@ -146,16 +168,85 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_modes_explain_the_embedded_reference_entry_point() {
+    fn all_modes_include_complete_versioned_syntax_and_only_their_role_cards() {
         for target in [
             PromptTarget::Recall,
             PromptTarget::Formation,
             PromptTarget::Maintenance,
         ] {
             let reference = mode_reference(target);
+            assert_eq!(reference.matches(anda_kip::KIP_SYNTAX).count(), 1);
+            assert_eq!(
+                reference
+                    .matches(anda_kip::COGNITIVE_MEMORY_PROFILE)
+                    .count(),
+                1
+            );
             assert!(reference.contains(crate::kip_reference::INSTRUCTIONS));
-            assert!(reference.contains(anda_kip::COGNITIVE_MEMORY_PROFILE));
             assert!(reference.contains(crate::cognitive::CAPABILITIES));
+            for (card, expected) in [
+                (anda_kip::KIP_RECALL_CARD, target != PromptTarget::Formation),
+                (anda_kip::KIP_FORMATION_CARD, target != PromptTarget::Recall),
+                (
+                    anda_kip::KIP_MAINTENANCE_CARD,
+                    target == PromptTarget::Maintenance,
+                ),
+            ] {
+                assert_eq!(reference.matches(card).count(), usize::from(expected));
+            }
+        }
+    }
+
+    #[test]
+    fn every_system_prompt_preserves_language_and_policy_across_deployment_overrides() {
+        for target in [
+            PromptTarget::Formation,
+            PromptTarget::Recall,
+            PromptTarget::Maintenance,
+        ] {
+            let defaults = AgentPrompts::default();
+            let changed = defaults
+                .clone()
+                .with_deployment_section(target, "# A. Test deployment\nCUSTOM_CONTRACT")
+                .unwrap();
+            for prompts in [&defaults, &changed] {
+                let policy = prompts.prompt(target);
+                let system = system_prompt(target, &policy);
+                assert!(system.starts_with(language_reference()));
+                assert_eq!(system.matches(anda_kip::KIP_SYNTAX).count(), 1);
+                assert_eq!(
+                    system.matches(anda_kip::COGNITIVE_MEMORY_PROFILE).count(),
+                    1
+                );
+                assert!(system.ends_with(policy.as_ref()));
+                let compiled_policy = target.default_prompt().split_once("\n# A.").unwrap().0;
+                assert!(system.contains(compiled_policy));
+                assert!(
+                    system.find(crate::cognitive::CAPABILITIES).unwrap()
+                        > system.find(anda_kip::KIP_SYNTAX).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn executable_syntax_and_role_card_examples_parse_with_the_pinned_engine() {
+        // `text` fences contain metasyntax. Only `kip` fences promise complete
+        // executable commands; parameters and permissions are resolved at runtime.
+        for document in [
+            anda_kip::KIP_SYNTAX,
+            anda_kip::KIP_RECALL_CARD,
+            anda_kip::KIP_FORMATION_CARD,
+            anda_kip::KIP_MAINTENANCE_CARD,
+        ] {
+            let mut examples = 0;
+            for block in document.split("```kip\n").skip(1) {
+                let (command, _) = block.split_once("```").unwrap();
+                anda_kip::parse_kip(command)
+                    .unwrap_or_else(|error| panic!("invalid KIP example: {error}\n{command}"));
+                examples += 1;
+            }
+            assert!(examples > 0);
         }
     }
 
