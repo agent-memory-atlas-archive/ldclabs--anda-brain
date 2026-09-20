@@ -201,10 +201,10 @@ Formation、Maintenance、Recall 规划及回答阶段均支持查阅。查阅�
 digest 或运行时动作。最终结果省略 `references` 或使用 `[]`，才会进入原有校验及执行流程。
 查阅不会读取图谱、更新快照、扩展权限，也不构成记忆证据或变更覆盖。
 
-`@ldclabs/kip-do` 和参考资源锁定为 `0.13.0`。从仓库根目录刷新资源：
+`@ldclabs/kip-do` 和参考资源锁定为 `0.13.1`。从仓库根目录刷新资源：
 
 ```bash
-ANDA_KIP_SOURCE=/path/to/published/anda_kip-0.13.0 node scripts/sync-kip-reference.mjs --worker
+ANDA_KIP_SOURCE=/path/to/published/anda_kip-0.13.1 node scripts/sync-kip-reference.mjs --worker
 pnpm --filter @ldclabs/anda-brain-worker run codegen:prompts
 ```
 
@@ -249,9 +249,11 @@ curl http://localhost:8787/v1/alice/formation \
       {"role": "user", "content": "以后回答尽量简洁，并优先给结论。"}
     ],
     "context": {"counterparty": "alice", "source": "chat-42"},
-    "timestamp": "2026-08-20T12:00:00Z"
+    "timestamp": "2026-08-20T12:00:00.000Z"
   }'
 ```
+
+`timestamp` 若提供，必须使用规范 UTC 格式 `YYYY-MM-DDTHH:mm:ss.SSSZ`。
 
 `context.counterparty` 是 Concept 的 **key**（不可变身份），不是 name（可变标签）。宿主会在规划前确保该 Person 存在，并保留已有显示名称。
 

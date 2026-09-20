@@ -535,6 +535,7 @@ pub struct FormationInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<InputContext>,
 
+    /// Canonical UTC timestamp (`YYYY-MM-DDTHH:mm:ss.SSSZ`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
 }
@@ -621,6 +622,7 @@ pub struct MaintenanceInput {
     #[serde(default)]
     pub scope: MaintenanceScope,
 
+    /// Canonical UTC timestamp (`YYYY-MM-DDTHH:mm:ss.SSSZ`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
 
@@ -1181,8 +1183,9 @@ pub struct MemoryCitation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
 
-    /// `_system.created_at` (RFC3339) — when the engine first wrote the
-    /// element, which is not when the content it records was observed.
+    /// `_system.created_at` (canonical UTC `YYYY-MM-DDTHH:mm:ss.SSSZ`) — when
+    /// the engine first wrote the element, which is not when the content it
+    /// records was observed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
 }
@@ -1192,6 +1195,8 @@ pub struct MemoryCitation {
 /// assert, hedge, or ask.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RecallOutput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recall_receipt: Option<crate::recall_receipt::RecallReceiptRef>,
     /// The synthesized answer, or the complete JSON memory packet in budget mode.
     pub answer: String,
 
@@ -1255,6 +1260,10 @@ pub struct WatchSettlement {
 /// unconfigured learning pipeline from a completed evaluation with no changes.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 pub struct SkillSettlement {
+    /// Current independent scheduler status. This maintenance call does not
+    /// count past scheduler verdicts as work performed by maintenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<serde_json::Value>,
     /// No evaluation ran when the host has no configured learning pipeline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unsupported_reason: Option<String>,
@@ -2002,7 +2011,7 @@ mod tests {
         let formation = FormationInput {
             messages: Vec::new(),
             context: recall.context.clone(),
-            timestamp: Some("2026-06-05T00:00:00Z".to_string()),
+            timestamp: Some("2026-06-05T00:00:00.000Z".to_string()),
         };
         let formation_ref = FormationInputRef::from(&formation);
 

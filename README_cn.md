@@ -6,11 +6,11 @@
 
 **[English](./README.md) | [中文](./README_cn.md)**
 
-非默认 `experiments` feature 已提供宿主隔离运行、一致快照、完成等待和业务时间，Agent Notes 也随 Space 持久化。详见 [P1 控制接缝](anda_brain/README.md#isolated-experiments)；Bot 的可选 MIB 宿主与 MIB 记忆后端见 [P2 接入](anda_brain/README.md#mib-integration)；跨系统完整成本计量和真实模型实证仍须单独验收。
+非默认 `experiments` feature 已提供宿主隔离运行、一致快照、完成等待和业务时间，Agent Notes 也随 Space 持久化。详见 [隔离实验控制](anda_brain/README.md#isolated-experiments)；Bot 的可选 MIB 宿主与 MIB 记忆后端见 [MIB 接入](anda_brain/README.md#mib-integration)；跨系统完整成本计量和真实模型实证仍须单独验收。
 
-[P6 长期验证](anda_brain/README.md#mib-integration) 增加有界原生程序审计和隔离运行的强制 Recall 预算。MIB 检查三组的真实能力；当前 Bot 持久记忆模式不声明已绑定比较采纳或无门槛执行。
+[长期验证](anda_brain/README.md#mib-integration) 增加有界原生程序审计和隔离运行的强制 Recall 预算。MIB 检查三组的真实能力；当前 Bot 持久记忆模式不声明已绑定比较采纳或无门槛执行。
 
-[P7 已退役离线 Eval API 和 CLI](anda_brain/README.md#offline-regression-and-instance-configuration)，迁移后的产品回归由 MIB 负责。运行策略归各 Space 所有；部署提示使用不可变宿主配置，并保留编译的 KIP 参考段。
+[已退役离线 Eval API 和 CLI](anda_brain/README.md#offline-regression-and-instance-configuration)，迁移后的产品回归由 MIB 负责。运行策略归各 Space 所有；部署提示使用不可变宿主配置，并保留编译的 KIP 参考段。
 
 
 ## KIP 2.0 / CognitiveMemory 2.1 更新
@@ -22,17 +22,38 @@ Rust 使用已发布的 `anda_kip`、Cognitive Nexus 和 AndaDB 0.13；Worker �
 `skills.unsupported_reason` 明确报告该边界。现有 Brain API 保持可用；这两个适配器
 **未声明支持**可选的五意图 Memory Interface 或 `memory_*` 能力包。
 
+Rust 现要求 Cognitive Nexus 0.13.1：Watch 触发会原子记录状态变化、`watch_fire`
+活动及受保护 wake，并提供可重放回执和原生租约。服务现会独立于 Full Maintenance
+调度结构化 Watch，从持久化目录发现已驱逐的注册 Space，并在重启后恢复有界扫描。
+四分支 gate 与原生租约分派已接通，受信任 Rust 宿主须显式安装回调；默认不安装生产
+执行器。Space fork 不能复制原生运行身份。详见[运行时接入与恢复](anda_brain/RUNTIME_cn.md)。
+
+运行时 API 已增加有身份的待办/回答/后果接口及对应 MCP 读取、回答工具。
+`BRAIN_RUNTIME_CONFIG` 可安装持久化 inbox 适配器与明确的身份映射。独立后果必须
+使用验签的观察者凭据，普通 write token 不能自评。详见[运行接口与启动装配](anda_brain/RUNTIME_cn.md)。
+
 Rust 可选的 `learning` feature 提供冻结配对合同、可信 Nexus 规则和持久化宿主运行时。
 必须显式注册配置，并接入实际 executor 和独立认证的 observer 测量；派发经过原生
 lease、可执行权限和依赖检查，收齐 cohort 不等于采纳 Skill。详见
-[实现与迁移说明](anda_brain/README.md#offline-regression-and-instance-configuration)、[P0 合同](anda_brain/README.md#native-learning-contracts)
-和 [P3 运行时](anda_brain/README.md#native-learning-contracts)。宿主现可在固定 cutoff 后结算，持久安排
-复核、接收独立安全撤销信号并检查当前推荐条件，见 [P4 比较采纳](anda_brain/README.md#native-learning-contracts)。
-生产绑定与真实模型校准仍须分别验收。
+[实现与迁移说明](anda_brain/README.md#offline-regression-and-instance-configuration)和[原生学习合同与运行时](anda_brain/README.md#native-learning-contracts)。宿主现可在固定 cutoff 后结算，持久安排
+复核、接收独立安全撤销信号并检查当前推荐条件，见 [比较采纳](anda_brain/README.md#native-learning-contracts)。
+学习运行时已补齐有界后台推进、终态归档和持续复审。`BRAIN_RUNTIME_CONFIG` 可通过
+`workflow_http_v1` 装配实际业务、独立观察者与注册计划来源；自动试验需经过审查的
+校准材料及显式开关。`maximum_jobs` 只限制热工作集，历史仍可重放。详见
+[学习运行时指南](anda_brain/LEARNING_RUNTIME_cn.md)。真实 MIB 效果验收仍是独立发布门槛。
 
 Recall 已支持可选硬 `budget`，也可由 Space 记忆策略强制开启。宿主返回按固定 codec
 计数的记忆包，优先保留必要约束/警告，并限制规划输入的累计展开。没有策略启用时，
-旧请求行为保持不变。详见 [P5 Recall 预算](anda_brain/API.md#recall-budget-contract)。
+旧请求行为保持不变。详见 [Recall 预算](anda_brain/API.md#recall-budget-contract)。
+
+语义 Watch 运行时已接通显式配置的文本/混合 Watch 求值，使用不可变原生页面和完整逐项回执。
+模型运行在 Nexus 锁和结构化扫描之外；unknown、漏项、超时、截断不能推进覆盖。
+evaluator pin 固定模型、endpoint、提示词、tokenizer 和预算，配置变化需显式迁移并审查
+重新布防。详见[文本 Watch 配置与恢复](anda_brain/SEMANTIC_WATCH_RUNTIME_cn.md)。
+
+信任校准运行时已增加基于独立事实核验的上下文来源 trust 提案，保留全局及其他限定域的设置，
+对证据根与重复声明去重。应用必须经过当前 `manage_trust` 权限、原生原子审计与重放；
+默认不自动变更。详见[上下文 trust 配置与恢复](anda_brain/TRUST_RUNTIME_cn.md)。
 
 ## 不会睡觉的记忆，终将被自己淹没
 
@@ -312,7 +333,7 @@ curl -sX POST https://your-brain-host/v1/my_space_001/formation \
       {"role": "assistant", "content": "Nice to meet you! Noted that you are a senior engineer at Acme Corp."}
     ],
     "context": {"counterparty": "user_123", "agent": "onboarding_bot"},
-    "timestamp": "2026-03-09T10:30:00Z"
+    "timestamp": "2026-03-09T10:30:00.000Z"
   }'
 ```
 
@@ -371,3 +392,7 @@ echo '来自 stdin 的纯文本记忆' | \
 版权所有 © LDC Labs
 
 基于 Apache-2.0 许可证授权。
+
+效用校准运行时已增加图外 Recall 交付收据、独立贡献归因、Concept utility 原子有界校准及同优先级
+可选排序。检索频率和模型自述不会加分；方法须显式配置参数并经校准审查，更正会
+停用相关排序信号而不改写历史收据。详见[记忆效用](anda_brain/UTILITY_RUNTIME_cn.md)。

@@ -157,6 +157,24 @@ pub fn pack(
     selected_ids: &[String],
     coverage: Coverage,
 ) -> Result<SerializedPacket, BoxError> {
+    pack_ranked(
+        budget,
+        items,
+        selected_ids,
+        coverage,
+        &std::collections::BTreeMap::new(),
+    )
+}
+
+/// Optional host-verified utility: signalled items sort first inside their
+/// existing priority, then by utility. Required/warning admission is unchanged.
+pub fn pack_ranked(
+    budget: &RecallBudget,
+    items: &[MemoryItem],
+    selected_ids: &[String],
+    coverage: Coverage,
+    utility: &std::collections::BTreeMap<String, f64>,
+) -> Result<SerializedPacket, BoxError> {
     budget.validate()?;
     validate_items(items)?;
 
@@ -164,6 +182,17 @@ pub fn pack(
     ordered.sort_by(|left, right| {
         left.priority
             .cmp(&right.priority)
+            .then_with(|| {
+                let score = |id: &str| {
+                    utility
+                        .get(id)
+                        .copied()
+                        .filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
+                };
+                score(&right.id)
+                    .partial_cmp(&score(&left.id))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| left.id.cmp(&right.id))
     });
     let mut kept: Vec<MemoryItem> = ordered

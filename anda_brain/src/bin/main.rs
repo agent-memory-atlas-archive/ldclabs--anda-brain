@@ -43,6 +43,9 @@ const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 #[derive(Parser, Clone)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
+    /// Path to a versioned JSON runtime configuration; selects compiled adapters.
+    #[arg(long, env = "BRAIN_RUNTIME_CONFIG")]
+    runtime_config: Option<std::path::PathBuf>,
     /// Port to listen on
     #[clap(long, env = "LISTEN_ADDR", default_value = "127.0.0.1:8042")]
     addr: String,
@@ -406,6 +409,16 @@ fn build_router(
         .route("/SKILL.md", routing::get(get_skill))
         .route("/v1/{space_id}/info", routing::get(get_info))
         .route("/v1/{space_id}/status", routing::get(get_info))
+        .route("/v1/{space_id}/attention", routing::get(get_attention))
+        .route(
+            "/v1/{space_id}/attention/{id}/responses",
+            routing::post(post_attention_response),
+        )
+        .route("/v1/{space_id}/outcomes", routing::post(post_outcome))
+        .route(
+            "/v1/{space_id}/runtime/status",
+            routing::get(get_runtime_status),
+        )
         .route(
             "/v1/{space_id}/formation_status",
             routing::get(get_formation_status),
@@ -646,6 +659,21 @@ fn build_app_state(cli: &Cli) -> Result<(AppState, String), BoxError> {
     // LLM tools (HTTP and stdio alike) drain this same semaphore.
     .with_llm_concurrency(cli.llm_max_concurrency);
 
+    let app_state = if let Some(path) = &cli.runtime_config {
+        let metadata = std::fs::metadata(path)?;
+        if metadata.len() > 1_048_576 {
+            return Err("BRAIN_RUNTIME_CONFIG exceeds 1 MiB".into());
+        }
+        let config: anda_brain::runtime_api::config::RuntimeConfig =
+            serde_json::from_slice(&std::fs::read(path)?)?;
+        if cli.ed25519_pubkeys.trim().is_empty() {
+            log::warn!(target:"brain","Runtime configuration loaded without a signed CWT verifier: independent HTTP outcome ingestion is disabled; verified Space tokens can only read/respond through explicit mappings");
+        }
+        app_state.with_runtime_config(config, |name| std::env::var(name).ok())?
+    } else {
+        app_state
+    };
+
     Ok((app_state, db_type))
 }
 
@@ -885,6 +913,7 @@ mod tests {
 
     fn test_cli() -> Cli {
         Cli {
+            runtime_config: None,
             addr: "127.0.0.1:0".to_string(),
             ed25519_pubkeys: String::new(),
             model_family: "openai".to_string(),
@@ -989,6 +1018,59 @@ mod tests {
         let mut invalid_addr = cli;
         invalid_addr.addr = "not an address".to_string();
         assert!(build_service_runtime(&invalid_addr, CancellationToken::new()).is_err());
+    }
+
+    #[tokio::test]
+    async fn r4_startup_configuration_installs_the_compiled_adapter_and_rejects_unknowns() {
+        let path =
+            std::env::temp_dir().join(format!("brain-r4-config-{}.json", rand::random::<u64>()));
+        let mut cli = test_cli();
+        cli.runtime_config = Some(path.clone());
+        let mut config = serde_json::json!({"format":"anda-brain:runtime-api-v1","spaces":{"r4_startup":{
+            "bootstrap":true,"subjects":[{"credential":{"kind":"cwt_subject","subject":SELF_USER_ID.to_string()},"principal":"kip:principal:startup-reader","observer":false,"audit_recipients":false}],
+            "audience":["kip:principal:startup-reader"],"observers":[],
+            "adapter":{"id":"attention_inbox_v1","controller_principal":"kip:principal:startup-controller","recipient_principal":"kip:principal:startup-reader","message":"Memory attention","question":null,"reply_timeout_ms":60000,"context":null,"limits":anda_brain::action::ActionLimits::default()}
+        }}});
+        std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+        let runtime = build_service_runtime(&cli, CancellationToken::new()).unwrap();
+        runtime
+            .app_state
+            .admin_create_space(
+                SELF_USER_ID,
+                SELF_USER_ID,
+                "r4_startup".into(),
+                1,
+                anda_engine::unix_ms(),
+            )
+            .await
+            .unwrap();
+        let space = runtime
+            .app_state
+            .load_space("r4_startup", false)
+            .await
+            .unwrap();
+        assert!(space.memory_runtime().is_some());
+        assert!(space.attention().actions().is_some());
+        space.close().await.unwrap();
+        config["spaces"]["r4_startup"]["adapter"]["id"] = serde_json::json!("unknown-adapter");
+        std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+        let error = match build_service_runtime(&cli, CancellationToken::new()) {
+            Ok(_) => panic!("unknown adapter accepted"),
+            Err(e) => e,
+        };
+        assert!(error.to_string().contains("unknown runtime adapter"));
+        config["spaces"]["r4_startup"]["adapter"]["id"] = serde_json::json!("attention_inbox_v1");
+        config["spaces"]["r4_startup"]["subjects"][0]["credential"] = serde_json::json!({"kind":"space_token_env","variable":format!("BRAIN_R4_MISSING_{}",rand::random::<u64>())});
+        std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+        let error = match build_service_runtime(&cli, CancellationToken::new()) {
+            Ok(_) => panic!("missing secret accepted"),
+            Err(e) => e,
+        };
+        assert!(
+            error.to_string().contains("runtime secret")
+                && error.to_string().contains("unavailable")
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

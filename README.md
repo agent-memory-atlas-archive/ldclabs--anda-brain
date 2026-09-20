@@ -6,11 +6,11 @@
 
 **[English](./README.md) | [中文](./README_cn.md)**
 
-The opt-in `experiments` feature adds isolated host runs, consistent snapshots, completion waits and business time. Agent Notes now persist with their Space. See [P1 controls](anda_brain/README.md#isolated-experiments); The optional Bot MIB host and MIB memory backend are described in [P2 integration](anda_brain/README.md#mib-integration); complete cross-system cost accounting and empirical model validation remain explicit gates.
+The opt-in `experiments` feature adds isolated host runs, consistent snapshots, completion waits and business time. Agent Notes now persist with their Space. See [isolated experiment controls](anda_brain/README.md#isolated-experiments); the optional Bot MIB host and MIB memory backend are described in [MIB integration](anda_brain/README.md#mib-integration); complete cross-system cost accounting and empirical model validation remain explicit gates.
 
-[P6 longitudinal validation](anda_brain/README.md#mib-integration) adds bounded native procedure audits and forced Recall budgets for isolated runs. MIB checks actual three-condition capabilities; the current Bot persistent mode does not claim comparison/adoption or ungated execution bindings.
+[Longitudinal validation](anda_brain/README.md#mib-integration) adds bounded native procedure audits and forced Recall budgets for isolated runs. MIB checks actual three-condition capabilities; the current Bot persistent mode does not claim comparison/adoption or ungated execution bindings.
 
-[P7 retires the offline Eval API and CLI](anda_brain/README.md#offline-regression-and-instance-configuration). MIB now owns the migrated product regressions. Runtime policies belong to each Space; deployment prompts use immutable host configuration with the compiled KIP reference preserved.
+The [offline Eval API and CLI have been retired](anda_brain/README.md#offline-regression-and-instance-configuration). MIB now owns the migrated product regressions. Runtime policies belong to each Space; deployment prompts use immutable host configuration with the compiled KIP reference preserved.
 
 
 ## KIP 2.0 / CognitiveMemory 2.1 update
@@ -24,22 +24,55 @@ procedures remain unproven and `skills.unsupported_reason` reports the limitatio
 Existing Brain endpoints remain available. The optional five-intent Memory Interface
 and its `memory_*` bundles are **not advertised** by these adapters.
 
+Rust now requires Cognitive Nexus 0.13.1: Watch firing atomically records the
+transition, `watch_fire` Activity and a protected wake, with replayable receipts
+and native fenced leases. The service now schedules structured Watches independently
+of Full Maintenance, including registered Spaces evicted from memory. Its durable
+catalog resumes bounded scans after restart. The four-way action gate and fenced
+dispatch run when trusted Rust hosts install explicit callbacks; no production
+adapter is installed by default. Spaces cannot fork native attention identities.
+See [runtime setup and recovery](anda_brain/RUNTIME.md).
+
+The runtime API provides authenticated attention/response/outcome endpoints and the matching MCP
+read/response tools. `BRAIN_RUNTIME_CONFIG` installs a compiled persistent inbox
+adapter and explicit identity mappings. Independent outcomes require signed
+observer credentials; ordinary write tokens cannot self-grade. See the
+[runtime API and startup guide](anda_brain/RUNTIME.md).
+
 The opt-in Rust `learning` feature provides frozen paired-trial contracts,
 a trusted Nexus evaluator and a persistent host runtime. Explicit registration,
 an actual executor and separately authenticated observer measurements are required.
 Native leases, executable authority and dependency checks gate dispatch; finishing
 a cohort does not adopt a Skill. See the [implementation guide](anda_brain/README.md#offline-regression-and-instance-configuration),
-[P0 contracts](anda_brain/README.md#native-learning-contracts) and [P3 runtime](anda_brain/README.md#native-learning-contracts).
+[native learning contracts and runtime](anda_brain/README.md#native-learning-contracts).
 The host can now settle after the fixed cutoff, persist review schedules, withdraw
 on independent safety signals, and check current recommendation eligibility.
-See [P4 comparative adoption](anda_brain/README.md#native-learning-contracts).
-Production bindings and calibrated real-model runs remain separate gates.
+See [comparative adoption](anda_brain/README.md#native-learning-contracts).
+The learning runtime provides bounded background advancement, terminal archival and persistent review
+with a registered `workflow_http_v1` adapter. `BRAIN_RUNTIME_CONFIG` selects the
+actual business, observer and plan-source services; automatic trials require
+reviewed calibration material and explicit switches. `maximum_jobs` bounds the
+hot set, while history remains replayable. See the [learning runtime guide](anda_brain/LEARNING_RUNTIME.md).
+Calibrated MIB runs remain the empirical improvement gate.
 
 Recall now accepts an optional hard `budget`, also enforceable through the Space
 memory policy. The host returns a counted memory packet, preserves required
 constraints/warnings, and bounds cumulative planner input using a pinned codec.
 Existing requests stay unchanged unless a policy enables the mode. See
-[P5 Recall budgets](anda_brain/API.md#recall-budget-contract).
+[Recall budgets](anda_brain/API.md#recall-budget-contract).
+
+The semantic Watch runtime provides explicitly configured text/mixed Watch evaluation through immutable native
+pages and complete per-item receipts. Model work runs outside Nexus locks and the
+structured scan; unknown, omitted, timed-out or truncated judgments cannot advance
+coverage. The evaluator pin covers the model, endpoint, prompt, tokenizer and limits.
+Configuration changes require explicit migration and reviewed re-arm. See
+[semantic Watch setup and recovery](anda_brain/SEMANTIC_WATCH_RUNTIME.md).
+
+The trust runtime provides optional contextual source-trust proposals from independently verified facts.
+It preserves global/neighboring trust settings, deduplicates evidence roots and
+repeated claims, and applies only through current `manage_trust` authority with
+native atomic audit and replay. Default configuration makes no automatic changes.
+See [contextual trust setup and recovery](anda_brain/TRUST_RUNTIME.md).
 
 ## Memories That Never Sleep Will Eventually Drown Themselves
 
@@ -323,7 +356,7 @@ curl -sX POST https://your-brain-host/v1/my_space_001/formation \
       {"role": "assistant", "content": "Nice to meet you! Noted that you are a senior engineer at Acme Corp."}
     ],
     "context": {"counterparty": "user_123", "agent": "onboarding_bot"},
-    "timestamp": "2026-03-09T10:30:00Z"
+    "timestamp": "2026-03-09T10:30:00.000Z"
   }'
 ```
 
@@ -382,3 +415,9 @@ Behind this is a **Data Flywheel**: Business Agents generate conversations durin
 Copyright © LDC Labs
 
 Licensed under the Apache License, Version 2.0.
+
+The utility runtime provides verifiable off-graph Recall receipts, independent contribution attribution,
+atomic bounded Concept utility calibration, and optional ranking within existing
+Recall priorities. Retrieval frequency and model self-reports never earn credit.
+Methods require explicit parameters and reviewed calibration; corrections suspend
+ranking without rewriting historical receipts. See [memory utility](anda_brain/UTILITY_RUNTIME.md).

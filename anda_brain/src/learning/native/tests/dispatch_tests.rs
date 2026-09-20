@@ -361,7 +361,7 @@ async fn changing_current_revision_blocks_the_old_frozen_revision() {
 }
 
 #[tokio::test]
-async fn expired_lease_does_not_forge_task_completion_after_outbox_reconciliation() {
+async fn expired_lease_requires_new_fence_before_terminal_bookkeeping() {
     let (db, nexus, native, plan, _, _) = setup().await;
     let frozen = install(&native, &plan).await;
     let pair = plan.pairs.keys().next().unwrap();
@@ -385,6 +385,19 @@ async fn expired_lease_does_not_forge_task_completion_after_outbox_reconciliatio
         remaining.to_std().unwrap_or_default() + std::time::Duration::from_millis(5),
     )
     .await;
+    let stale = anda_kip::execute_request(
+        nexus.as_ref(),
+        &anda_kip::Request::single(format!(
+            "UPDATE {} SET ATTRIBUTES {{status:\"completed\"}}",
+            literal(&input.task_ref)
+        )),
+    )
+    .await;
+    assert_ne!(
+        stale.status,
+        anda_kip::TopLevelStatus::Succeeded,
+        "expired fence cannot complete directly"
+    );
     let outcome = native
         .execute(
             &outcome_request(&plan, &frozen, pair, NativeArm::Baseline, &receipt),
@@ -401,16 +414,25 @@ async fn expired_lease_does_not_forge_task_completion_after_outbox_reconciliatio
         .await
         .unwrap();
     assert_eq!(result.state, "completed");
-    assert!(!result.task_completed);
-    assert!(result.task_completion_pending.is_some());
+    assert!(result.task_completed);
+    assert!(result.task_completion_pending.is_none());
     let task = nexus
         .store
         .get_element(input.task_ref.parse().unwrap())
         .await
         .unwrap();
+    let task = anda_cognitive_nexus::view::render(&task);
+    assert_eq!(task["attributes"]["status"], "completed");
     assert_eq!(
-        anda_cognitive_nexus::view::render(&task)["attributes"]["status"],
-        "running"
+        task["facets"][format!("{PROFILE}LeaseState")]["fencing_token"],
+        admission.fencing_token + 1
+    );
+    assert!(
+        native
+            .revalidate_dispatch(&input, &admission)
+            .await
+            .is_err(),
+        "completion recovery cannot revive the expired execution permit"
     );
     db.close().await.unwrap();
 }

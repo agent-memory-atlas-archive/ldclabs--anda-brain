@@ -27,9 +27,15 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 const FORMAT: &str = "anda-brain:learning-runtime-v1";
 
 mod applicability;
+mod catalog;
+mod scheduler;
+mod utility;
+pub use catalog::{ArchiveStamp, JobPage, LearningCapacity, LearningStoragePolicy};
+mod observation;
 pub use applicability::{
-    ApplicationContext, ProcedureStatus, ReviewReason, ReviewSchedule, ReviewStatus,
+    ApplicationContext, ProcedureStatus, ReviewPage, ReviewReason, ReviewSchedule, ReviewStatus,
 };
+pub(crate) use observation::{LateOutcome, ObservationRoute};
 mod settlement;
 use settlement::{PendingSafety, PendingVerdict};
 pub use settlement::{SafetyReport, SafetySubmission};
@@ -82,6 +88,8 @@ pub struct DispatchTicket {
     pub plan: PairedTrialPlan,
     pub revision: Option<Json>,
     pub deadline_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<super::EnrollmentOrigin>,
 }
 
 /// Compact durable locator. The plan and revision live once in Job rather
@@ -120,6 +128,7 @@ impl StoredTicket {
             deadline_ms: self.deadline_ms,
             plan: job.plan.clone(),
             revision,
+            origin: job.origin.clone(),
         }
     }
 }
@@ -132,6 +141,8 @@ struct Attempt {
     receipt_digest: Option<String>,
     dispatch_reconciled: bool,
     task_completed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replay_key: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Pending {
@@ -171,6 +182,10 @@ struct Job {
     verdict_generation: u64,
     #[serde(default)]
     safety: Option<PendingSafety>,
+    #[serde(default)]
+    archive: Option<ArchiveStamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    origin: Option<super::EnrollmentOrigin>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct JobReport {
@@ -188,6 +203,10 @@ pub struct JobReport {
     pub evaluation_ref: Option<String>,
     pub review: Option<ReviewSchedule>,
     pub safety: Option<SafetyReport>,
+    #[serde(default)]
+    pub archive: Option<ArchiveStamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<super::EnrollmentOrigin>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AttemptReport {
@@ -201,6 +220,8 @@ pub struct AttemptReport {
     pub native_dispatch_version: Option<u64>,
     pub task_completed: bool,
     pub dispatch_reconciled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_key: Option<String>,
 }
 impl Job {
     fn report(&self) -> JobReport {
@@ -217,6 +238,8 @@ impl Job {
             evaluation_ref: self.evaluation_ref.clone(),
             review: self.review.clone(),
             safety: self.safety.as_ref().map(PendingSafety::report),
+            archive: self.archive.clone(),
+            origin: self.origin.clone(),
             attempts: self
                 .attempts
                 .values()
@@ -234,6 +257,7 @@ impl Job {
                         .map(|v| v.native_dispatch_version),
                     task_completed: a.task_completed,
                     dispatch_reconciled: a.dispatch_reconciled,
+                    replay_key: a.replay_key.clone(),
                 })
                 .collect(),
         }
@@ -257,6 +281,12 @@ pub enum ReconcileResult {
 /// Neither dispatch acknowledgement nor lookup creates an OutcomeRecord.
 pub trait LearningExecutor: Send + Sync {
     fn identity(&self) -> ExecutorIdentity;
+    fn preflight(&self, _cancel: CancellationToken) -> BoxPinFut<Result<(), BoxError>> {
+        Box::pin(async { Err("executor has no automatic readiness probe".into()) })
+    }
+    fn cancel(&self, _ticket: DispatchTicket) -> BoxPinFut<Result<(), BoxError>> {
+        Box::pin(async { Ok(()) })
+    }
     fn dispatch(
         &self,
         ticket: DispatchTicket,
@@ -361,6 +391,7 @@ pub struct OutcomeSubmission {
 /// One owner per Space. Public mutations spawn tracked work before awaiting it,
 /// so dropped HTTP/API waiters cannot interrupt a native or journal write.
 pub struct LearningRuntime {
+    attention: parking_lot::RwLock<Option<std::sync::Weak<crate::attention::AttentionRuntime>>>,
     journal: Journal,
     nexus: Arc<CognitiveNexus>,
     clock: Arc<crate::runtime::BusinessClock>,
@@ -377,6 +408,9 @@ pub struct LearningRuntime {
     /// serialized journal gate. Dispatch registers its cancellation token and
     /// checks this map as one handshake, closing the pre-callback race.
     safety_barriers: parking_lot::RwLock<BTreeMap<String, String>>,
+    bindings: parking_lot::RwLock<Option<Arc<super::LearningBindings>>>,
+    scheduler_gate: Mutex<()>,
+    scheduler_running: AtomicBool,
 }
 impl LearningRuntime {
     pub(crate) async fn connect(
@@ -386,6 +420,7 @@ impl LearningRuntime {
         clock: Arc<crate::runtime::BusinessClock>,
     ) -> Result<Arc<Self>, BoxError> {
         let this = Arc::new(Self {
+            attention: Default::default(),
             journal: Journal::new(store, prefix),
             nexus,
             clock,
@@ -399,16 +434,85 @@ impl LearningRuntime {
             application_context: parking_lot::RwLock::new(None),
             active_dispatch: parking_lot::RwLock::new(None),
             safety_barriers: parking_lot::RwLock::new(BTreeMap::new()),
+            bindings: Default::default(),
+            scheduler_gate: Mutex::new(()),
+            scheduler_running: AtomicBool::new(false),
         });
         if let Some(reg) = this.journal.read::<Registration>("registration").await? {
             this.validate_registration(&reg.value)?;
             this.native_for(&reg.value.config).await?;
             this.configured.store(true, Ordering::SeqCst);
+            this.recover_catalog().await?;
         }
         Ok(this)
     }
     pub fn is_configured(&self) -> bool {
         self.configured.load(Ordering::SeqCst)
+    }
+    pub(crate) fn bind_attention(
+        &self,
+        attention: std::sync::Weak<crate::attention::AttentionRuntime>,
+    ) {
+        *self.attention.write() = Some(attention);
+    }
+    pub(crate) async fn attention_reviews(
+        &self,
+    ) -> Result<Vec<crate::attention::Recheck>, BoxError> {
+        if !self.is_configured() || !self.registration(false).await?.enabled {
+            return Ok(vec![]);
+        }
+        let Ok(_g) = self.gate.try_lock() else {
+            return Ok(vec![]);
+        };
+        let old = self.journal.read::<u64>("scheduler/hint-cursor").await?;
+        let after = old.as_ref().map_or(0, |r| r.value);
+        let (ids, next, complete) = self.archived_review_ids(after, 8).await?;
+        let reg = self.registration(false).await?;
+        let mut jobs = self.jobs().await?;
+        for id in ids {
+            if !jobs.iter().any(|r| r.job_id == id) {
+                jobs.push(self.load_job(&reg, &id).await?.value.report());
+            }
+        }
+        let mut result = vec![];
+        for job in jobs {
+            if let Some(review) = job.review {
+                if let Some(next) = &review.next_job_id {
+                    let child = self.load_job(&reg, next).await?.value;
+                    if child.stage != JobStage::Expired || child.activation_complete {
+                        let attention = self.attention.read().as_ref().and_then(|a| a.upgrade());
+                        if let Some(attention) = attention {
+                            let key = format!("skill-review:{}", job.job_id);
+                            let due = time_ms(&review.due_at)?;
+                            if attention.status().await?.is_some_and(|s| {
+                                s.rechecks
+                                    .iter()
+                                    .any(|r| r.key == key && r.due_at_ms == due)
+                            }) {
+                                attention.acknowledge_recheck(key, due).await?;
+                            }
+                        }
+                        continue;
+                    }
+                }
+                result.push(crate::attention::Recheck {
+                    key: format!("skill-review:{}", job.job_id),
+                    source: crate::attention::RecheckSource::SkillReview,
+                    due_at_ms: time_ms(&review.due_at)?,
+                    notified: false,
+                });
+            }
+        }
+        let cursor = if complete { 0 } else { next };
+        if let Some(mut old) = old {
+            old.value = cursor;
+            self.journal.save("scheduler/hint-cursor", &old).await?;
+        } else {
+            self.journal
+                .create("scheduler/hint-cursor", &cursor)
+                .await?;
+        }
+        Ok(result)
     }
     pub fn is_busy(&self) -> bool {
         !self.tasks.is_empty()
@@ -472,6 +576,8 @@ impl LearningRuntime {
             .map_err(|_| "learning operation queue is full")?;
         self.tasks.spawn(async move {
             let _permit=permit;
+            let attention = this.attention.read().as_ref().and_then(|a| a.upgrade());
+            if let Some(attention) = attention { attention.register_work().await?; }
             let result=std::panic::AssertUnwindSafe(work(this)).catch_unwind().await;
             match result {
                 Ok(result)=>result,
@@ -509,6 +615,8 @@ impl LearningRuntime {
             if content_digest(&json!(old.value.config))? != content_digest(&json!(config))? {
                 return Err("registration cannot be replaced while records exist".into());
             }
+            this.configured.store(true, Ordering::SeqCst);
+            this.recover_catalog().await?;
             return Ok(old.value.instance);
         }
         this.native_for(&config).await?;
@@ -527,6 +635,7 @@ impl LearningRuntime {
             )
             .await?;
         this.configured.store(true, Ordering::SeqCst);
+        this.recover_catalog().await?;
         Ok(instance)
     }
     pub async fn set_enabled(
@@ -581,6 +690,7 @@ impl LearningRuntime {
             return Err("learning job belongs to a different Space/registration".into());
         }
         reg.config.validate_plan(&j.plan)?;
+        self.validate_archive(j).await?;
         Ok(state)
     }
     async fn read_one(&self, command: String) -> Result<Json, BoxError> {
@@ -623,8 +733,11 @@ impl LearningRuntime {
     ) -> Result<JobReport, BoxError> {
         self.ensure_open()?;
         let reg = self.registration(true).await?;
-        let prepared = self
+        self.recover_catalog().await?;
+        let mut prepared = self
             .prepare_enrollment(&reg, &job_id, plan, basis_proposition)
+            .await?;
+        self.bind_enrollment_origin(&reg, &job_id, &mut prepared, None)
             .await?;
         self.commit_enrollment(&reg, &job_id, prepared).await
     }
@@ -649,9 +762,17 @@ impl LearningRuntime {
             this.load_job(reg, job_id).await?;
             return Ok(None);
         }
-        if this.journal.jobs().await?.len() >= reg.config.maximum_jobs {
-            return Err("learning job capacity reached".into());
+        if let Some(old) = this
+            .journal
+            .read::<Job>(&format!("enrollments/{}", &key[5..]))
+            .await?
+        {
+            if old.value.plan != plan || old.value.basis_proposition != basis_proposition {
+                return Err("job ID conflicts with reserved frozen plan".into());
+            }
+            return Ok(Some(old.value));
         }
+        this.check_capacity(reg.config.maximum_jobs).await?;
         for other in this.jobs().await? {
             if other.stage != JobStage::Settled
                 && !(other.stage == JobStage::Expired && !other.activation_complete)
@@ -742,6 +863,8 @@ impl LearningRuntime {
             verdict_pending: None,
             verdict_generation: 0,
             safety: None,
+            archive: None,
+            origin: None,
         };
         Ok(Some(job))
     }
@@ -753,7 +876,7 @@ impl LearningRuntime {
         prepared: Option<Job>,
     ) -> Result<JobReport, BoxError> {
         if let Some(job) = prepared {
-            self.journal.create(&Self::key(job_id)?, &job).await?;
+            self.create_job(&job).await?;
             self.resume_native(reg, job_id, None).await?;
         }
         Ok(self.load_job(reg, job_id).await?.value.report())
@@ -869,7 +992,9 @@ impl LearningRuntime {
             .value
             .attempts
             .iter()
-            .filter(|(_, a)| a.state == DispatchState::Observed && !a.dispatch_reconciled)
+            .filter(|(_, a)| {
+                a.state == DispatchState::Observed && (!a.dispatch_reconciled || !a.task_completed)
+            })
             .map(|(key, a)| (key.clone(), a.clone()))
             .collect::<Vec<_>>();
         for (key, attempt) in work {
@@ -906,13 +1031,13 @@ impl LearningRuntime {
         }
         Ok(())
     }
-    /// Rediscover persisted work after a process restart; the host need not
-    /// retain a second list of job IDs. This is a bounded metadata read.
+    /// Read the bounded hot working set. Use jobs_page for retained history;
+    /// report(job_id) resolves both hot and archived identities.
     pub async fn jobs(&self) -> Result<Vec<JobReport>, BoxError> {
         self.ensure_open()?;
         let reg = self.registration(false).await?;
         let mut jobs = Vec::new();
-        for key in self.journal.jobs().await? {
+        for key in self.hot_keys().await? {
             let row = self
                 .journal
                 .read::<Job>(&key)
@@ -989,6 +1114,12 @@ impl LearningRuntime {
             }
             if state.value.stage == JobStage::Settled {
                 return Ok(DriveResult::Ready(state.value.report()));
+            }
+            if this
+                .pending_safety(&state.value.plan.candidate_revision)
+                .await?
+            {
+                return Err("independent safety signal requires revocation recovery before further dispatch".into());
             }
             for report in this.jobs().await? {
                 let other = this.load_job(&reg, &report.job_id).await?.value;
@@ -1172,6 +1303,11 @@ impl LearningRuntime {
                 *this.active_dispatch.write() = None;
                 if result.is_err() {
                     dispatch_cancel.cancel();
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_millis(reg.config.reconcile_timeout_ms),
+                        executor.cancel(ticket.clone()),
+                    )
+                    .await;
                 }
                 let mut state = this.load_job(&reg, &job_id).await?;
                 state.value.attempts.get_mut(&key).unwrap().state = if result.is_ok() {
@@ -1288,6 +1424,7 @@ impl LearningRuntime {
                             arm,
                             basis: state.value.basis.clone(),
                             context_pin: state.value.context_pin.clone(),
+                            origin: state.value.origin.clone(),
                             applied_revision_version: if matches!(ticket.arm, NativeArm::Baseline) {
                                 None
                             } else {
@@ -1311,6 +1448,7 @@ impl LearningRuntime {
                     receipt_digest: None,
                     dispatch_reconciled: false,
                     task_completed: false,
+                    replay_key: None,
                 },
             );
             this.journal.save(&Self::key(&job_id)?, &state).await?;
@@ -1414,7 +1552,7 @@ impl LearningRuntime {
             || observed > time_ms(&state.value.plan.execution.cutoff)?
             || state.value.stage == JobStage::Expired
         {
-            return Err("late outcome is not eligible; original attempt remains unobserved".into());
+            return Err(LateOutcome.into());
         }
         if !submission.measurements.finished {
             return Err("nonterminal progress cannot close a learning attempt".into());

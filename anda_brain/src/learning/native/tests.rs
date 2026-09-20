@@ -163,6 +163,7 @@ pub(super) fn attempt_request(
                 plan: plan.clone(),
                 pair_id: pair.into(),
                 applied_revision_version: matches!(arm, NativeArm::Treatment { .. }).then_some(1),
+                origin: None,
                 arm,
                 basis: basis.clone(),
                 context_pin: NativeContextPin {

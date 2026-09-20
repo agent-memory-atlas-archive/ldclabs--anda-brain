@@ -1,0 +1,31 @@
+{
+  "format": "anda-brain:attention-v1",
+  "scope": {
+    "space_id": "r0-space",
+    "space_instance": "instance-original"
+  },
+  "wake_ref": "wake/v1/382e394322e1d47c4265671e00fe8b487e0bd89446842a7dee91a2f3cb189873",
+  "fire": {
+    "watch_ref": "C-7",
+    "arm_generation": 3,
+    "trigger": {
+      "kind": "delta",
+      "matched_seq": 99
+    }
+  },
+  "fire_activity_ref": "X-9",
+  "pins": {
+    "policy": {
+      "id": "gate-policy-v1",
+      "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "evaluator": null,
+    "binding": null
+  },
+  "version": 1,
+  "fence": 0,
+  "state": {
+    "stage": "pending",
+    "not_before_ms": 100
+  }
+}

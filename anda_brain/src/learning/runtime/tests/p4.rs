@@ -1,6 +1,6 @@
 use super::*;
 
-async fn fixture(
+pub(super) async fn fixture(
     store: Arc<dyn ObjectStore>,
 ) -> (
     Arc<crate::space::Space>,
@@ -31,7 +31,7 @@ async fn fixture(
     (space, rt, clock, cfg, plan, basis)
 }
 
-async fn cohort(
+pub(super) async fn cohort(
     rt: &Arc<LearningRuntime>,
     id: &str,
     executor: Arc<Executor>,
@@ -57,7 +57,7 @@ async fn cohort(
     }
 }
 
-async fn skill(nexus: &CognitiveNexus) -> String {
+pub(super) async fn skill(nexus: &CognitiveNexus) -> String {
     command(
         nexus,
         "FIND(?s.id) WHERE {?s CONCEPT {type:\"Skill\"}} LIMIT 1",
@@ -269,6 +269,14 @@ async fn rejected_review_preflight_and_interrupted_child_creation_preserve_the_o
     clock
         .advance_to(time_ms(&review.execution.cutoff).unwrap())
         .unwrap();
+    // R5 retains the reserved child's full replay identity across restart.
+    // Close and archive this expired, never-dispatched enrollment before
+    // assigning a fresh cohort; its ID remains permanently unavailable.
+    recovered.settle("interrupted".into()).await.unwrap();
+    recovered.archive("interrupted".into()).await.unwrap();
+    for case in review.pairs.values_mut() {
+        case.seed = format!("replacement:{}", case.seed);
+    }
     review.execution.cutoff = crate::kip::timestamp(clock.now_ms() + 60_000);
     review.execution.review_due_at = crate::kip::timestamp(clock.now_ms() + 120_000);
     store.fail_missing_job_read.store(true, Ordering::SeqCst);

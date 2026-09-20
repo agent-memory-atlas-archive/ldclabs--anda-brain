@@ -750,7 +750,7 @@ Any clause that selects with `WHERE` must carry `LIMIT 20` or less.
     "source": "chat_thread_123",
     "topic": "settings"
   },
-  "timestamp": "2026-08-20T10:00:00Z"
+  "timestamp": "2026-08-20T10:00:00.000Z"
 }
 ```
 

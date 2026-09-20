@@ -29,7 +29,7 @@ it('preserves distinct messages from the same source thread', async () => {
   for (const content of ['My old preference', 'My corrected preference']) {
     const r = await post(e, space, 'formation', {
       context: {source: 'same-thread'}, messages: [{role:'user',content}],
-      timestamp: '2026-09-07T00:00:00Z',
+      timestamp: '2026-09-07T00:00:00.000Z',
     })
     expect(r.status, await r.text()).toBe(200)
   }

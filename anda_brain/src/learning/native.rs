@@ -104,6 +104,8 @@ pub struct DecisionInput {
     /// Exact revision version read at basis.snapshot_seq. Baseline has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applied_revision_version: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<super::EnrollmentOrigin>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -602,8 +604,12 @@ impl NativeLearning {
         let revisions = input.arm.revisions(&input.plan);
         let mut retrieved = revisions.clone();
         retrieved.push(input.context_pin.id.clone());
-        let decision = json!({"decision":"act","retrieved_refs":retrieved,"used_refs":revisions,
+        let mut decision = json!({"decision":"act","retrieved_refs":retrieved,"used_refs":revisions,
             "applied_revisions":revisions,"basis":input.basis});
+        if let Some(origin) = &input.origin {
+            origin.validate().map_err(|e| invalid(e.to_string()))?;
+            decision["rationale"] = json!({"host_enrollment":origin}).to_string().into();
+        }
         // groups:[] is forbidden by the native schema. A context-only group
         // records the actual basis read without pretending it is a prerequisite.
         let mut pins = vec![json!(input.context_pin)];

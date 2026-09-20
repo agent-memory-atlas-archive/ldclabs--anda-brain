@@ -10,23 +10,28 @@
 // boxing only these adapters would require unboxing at every trait boundary.
 #![allow(clippy::result_large_err)]
 
+mod automation;
 mod config;
+pub use automation::*;
 mod execution;
-mod journal;
+use crate::journal;
 pub mod native;
 mod paired;
 mod plan;
 pub(crate) mod recall;
 mod runtime;
+pub mod workflow_http;
+pub(crate) use runtime::{LateOutcome, ObservationRoute};
 
 pub use config::{ExecutorIdentity, LearningConfig};
 pub use execution::{AdoptionBasis, AttemptBudget, ExecutionContract, workflow_contract};
 pub use paired::{PairedRule, paired_rule_artifact, register_paired_rule};
 pub use plan::{PairCase, PairedTrialPlan};
 pub use runtime::{
-    ApplicationContext, AttemptReport, DispatchState, DispatchTicket, DriveResult, JobReport,
-    JobStage, LearningExecutor, LearningRuntime, OutcomeMeasurements, OutcomeSubmission,
-    ProcedureStatus, ReconcileResult, ReviewReason, ReviewSchedule, ReviewStatus, SafetyReport,
+    ApplicationContext, ArchiveStamp, AttemptReport, DispatchState, DispatchTicket, DriveResult,
+    JobPage, JobReport, JobStage, LearningCapacity, LearningExecutor, LearningRuntime,
+    LearningStoragePolicy, OutcomeMeasurements, OutcomeSubmission, ProcedureStatus,
+    ReconcileResult, ReviewPage, ReviewReason, ReviewSchedule, ReviewStatus, SafetyReport,
     SafetySubmission,
 };
 

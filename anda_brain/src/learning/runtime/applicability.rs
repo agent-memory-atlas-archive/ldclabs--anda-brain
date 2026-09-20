@@ -50,6 +50,12 @@ pub struct ReviewStatus {
     pub due: bool,
     pub reasons: Vec<ReviewReason>,
 }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReviewPage {
+    pub items: Vec<ReviewStatus>,
+    pub next_after: u64,
+    pub complete: bool,
+}
 
 /// A bounded current read, not a durable permission or a record of actual use.
 /// `recommendation_allowed` expires at the earliest context/review deadline.
@@ -103,14 +109,34 @@ impl LearningRuntime {
     /// Discover due reviews without changing standing. The host supplies fresh
     /// monitoring manifests through `enroll_review`; no timer invents tasks.
     pub async fn reviews(&self) -> Result<Vec<ReviewStatus>, BoxError> {
+        let page = self.reviews_page(0, 32).await?;
+        if !page.complete {
+            return Err("learning review inventory exceeds one page; use reviews_page".into());
+        }
+        Ok(page.items)
+    }
+    /// Bounded archive-index walk plus the bounded hot set. The cursor reports
+    /// discovery coverage only; enrollment is the separate durable obligation.
+    pub async fn reviews_page(&self, after: u64, limit: usize) -> Result<ReviewPage, BoxError> {
         self.ensure_open()?;
         if !self.is_configured() {
-            return Ok(vec![]);
+            return Ok(ReviewPage {
+                items: vec![],
+                next_after: 0,
+                complete: true,
+            });
         }
         let reg = self.registration(false).await?;
         let context = self.application_context.read().clone();
         let mut result = vec![];
-        for row in self.jobs().await? {
+        let (ids, next_after, complete) = self.archived_review_ids(after, limit).await?;
+        let mut rows = self.jobs().await?;
+        for id in ids {
+            if !rows.iter().any(|r| r.job_id == id) {
+                rows.push(self.load_job(&reg, &id).await?.value.report());
+            }
+        }
+        for row in rows {
             let Some(schedule) = row.review else { continue };
             // A linked follow-up owns its new schedule; old acquisition rows
             // remain immutable history, not repeated requests for the same job.
@@ -188,7 +214,11 @@ impl LearningRuntime {
                 reasons,
             });
         }
-        Ok(result)
+        Ok(ReviewPage {
+            items: result,
+            next_after,
+            complete,
+        })
     }
 
     /// Predeclare a new monitoring/re-entry cohort while retaining the original
@@ -201,11 +231,23 @@ impl LearningRuntime {
         plan: PairedTrialPlan,
         basis_proposition: String,
     ) -> Result<JobReport, BoxError> {
+        self.enroll_review_origin(source_job_id, job_id, plan, basis_proposition, None)
+            .await
+    }
+    pub(super) async fn enroll_review_origin(
+        self: &Arc<Self>,
+        source_job_id: String,
+        job_id: String,
+        plan: PairedTrialPlan,
+        basis_proposition: String,
+        origin: Option<super::super::EnrollmentOrigin>,
+    ) -> Result<JobReport, BoxError> {
         self.owned(move |this| {
             Box::pin(async move {
                 let _g = this.gate.lock().await;
                 this.ensure_open()?;
                 let reg = this.registration(true).await?;
+                this.recover_catalog().await?;
                 let mut source = this.load_job(&reg, &source_job_id).await?;
                 if source_job_id == job_id || source.value.stage != JobStage::Settled {
                     return Err("review needs a new job after a settled source".into());
@@ -257,7 +299,8 @@ impl LearningRuntime {
                 // Invalid/expired context and exhausted capacity must not consume
                 // the source's review obligation. The gate remains held through
                 // preparation, the source CAS and the child's conditional create.
-                let prepared = this.prepare_enrollment(&reg, &job_id, plan, basis_proposition).await?;
+                let mut prepared = this.prepare_enrollment(&reg, &job_id, plan, basis_proposition).await?;
+                this.bind_enrollment_origin(&reg, &job_id, &mut prepared, origin).await?;
                 if schedule.next_job_id.is_none() || replace_failed {
                     source.value.review.as_mut().unwrap().next_job_id = Some(job_id.clone());
                     this.journal
@@ -343,7 +386,18 @@ impl LearningRuntime {
                 .push("revision_is_unproven_or_revoked".into());
             return Ok(result);
         }
-        let reports = self.jobs().await?;
+        let mut reports = self.jobs().await?;
+        if let Some(reference) = &result.evaluation_ref
+            && let Some(id) = self.indexed_job("evaluations", reference).await?
+            && !reports.iter().any(|r| r.job_id == id)
+        {
+            reports.push(self.load_job(&reg, &id).await?.value.report());
+        }
+        if self.pending_safety(&revision_ref).await? {
+            result
+                .reasons
+                .push("safety_signal_requires_reconciliation".into());
+        }
         for report in &reports {
             let other = self.load_job(&reg, &report.job_id).await?.value;
             if other.plan.candidate_revision == revision_ref
@@ -505,7 +559,12 @@ impl LearningRuntime {
     pub(super) async fn record(&self, reference: &str, facet: &str) -> Result<Json, BoxError> {
         let row = self
             .read_one(format!(
-                "FIND(?r) WHERE {{?r ACTIVITY {{id:{}}}}} LIMIT 1",
+                "FIND(?r) WHERE {{?r {} {{id:{}}}}} LIMIT 1",
+                if reference.starts_with("E-") {
+                    "EVIDENCE"
+                } else {
+                    "ACTIVITY"
+                },
                 serde_json::to_string(reference)?
             ))
             .await?;
@@ -516,7 +575,7 @@ impl LearningRuntime {
     }
 }
 
-fn edge<'a>(value: &'a Json, name: &str) -> Result<&'a str, BoxError> {
+pub(super) fn edge<'a>(value: &'a Json, name: &str) -> Result<&'a str, BoxError> {
     let refs = value["structural"]
         .get(format!("{PROFILE}{name}"))
         .and_then(Json::as_array)

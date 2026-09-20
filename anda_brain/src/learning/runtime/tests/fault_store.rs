@@ -13,6 +13,10 @@ pub(super) struct CheckpointFault {
     pub fail_verdict_checkpoint: AtomicBool,
     pub fail_enrollment_create: AtomicBool,
     pub fail_missing_job_read: AtomicBool,
+    pub fail_archive_checkpoint: AtomicBool,
+    pub lose_archive_ack: AtomicBool,
+    pub fail_archive_catalog: AtomicBool,
+    pub forbid_learning_list: AtomicBool,
     pub dispatch_checkpoint_delay_ms: std::sync::atomic::AtomicU64,
 }
 impl std::fmt::Display for CheckpointFault {
@@ -33,7 +37,33 @@ impl ObjectStore for CheckpointFault {
             .flat_map(|b| b.iter().copied())
             .collect::<Vec<_>>();
         let value = serde_json::from_slice::<Json>(&bytes).unwrap_or(Json::Null);
+        if path.as_ref().contains("/learning/archives/")
+            && self.lose_archive_ack.swap(false, Ordering::SeqCst)
+        {
+            self.inner.put_opts(path, payload, options).await?;
+            return Err(object_store::Error::Generic {
+                store: "checkpoint-fault",
+                source: "durable archive ACK lost".into(),
+            });
+        }
+        if path.as_ref().ends_with("/learning/catalog/v2")
+            && value["archived"].as_u64().unwrap_or(0) > 0
+            && self.fail_archive_catalog.swap(false, Ordering::SeqCst)
+        {
+            return Err(object_store::Error::Generic {
+                store: "checkpoint-fault",
+                source: "archive hot-slot release interrupted".into(),
+            });
+        }
         if path.as_ref().contains("/learning/jobs/") {
+            if !value["archive"].is_null()
+                && self.fail_archive_checkpoint.swap(false, Ordering::SeqCst)
+            {
+                return Err(object_store::Error::Generic {
+                    store: "checkpoint-fault",
+                    source: "archive snapshot committed but checkpoint failed".into(),
+                });
+            }
             if value["stage"] == "installing"
                 && matches!(options.mode, object_store::PutMode::Create)
                 && self.fail_enrollment_create.swap(false, Ordering::SeqCst)
@@ -107,6 +137,16 @@ impl ObjectStore for CheckpointFault {
         self.inner.delete_stream(paths)
     }
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, StoreResult<ObjectMeta>> {
+        if prefix.is_some_and(|p| p.as_ref().contains("/learning/jobs"))
+            && self.forbid_learning_list.load(Ordering::SeqCst)
+        {
+            return Box::pin(futures::stream::once(async {
+                Err(object_store::Error::Generic {
+                    store: "checkpoint-fault",
+                    source: "post-migration listing forbidden".into(),
+                })
+            }));
+        }
         self.inner.list(prefix)
     }
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> StoreResult<ListResult> {

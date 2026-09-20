@@ -696,10 +696,11 @@ impl RecallAgent {
     ) -> Result<AgentOutput, BoxError> {
         let mut items = material.items.clone();
         expire_procedure_checks(&mut items, self.clock.now_ms(), false);
+        let utilities = self.utility_ranks(&items).await;
         let mut packet = if failed || material.critical_missing {
             budget::insufficient(limits, material.coverage())?
         } else {
-            budget::pack(limits, &items, selected, material.coverage())?
+            budget::pack_ranked(limits, &items, selected, material.coverage(), &utilities)?
         };
         // If any permit expires during serialization, downgrade every positive
         // check and serialize once more; the second packet contains no permits.
@@ -708,7 +709,8 @@ impl RecallAgent {
             && expire_procedure_checks(&mut items, self.clock.now_ms(), false)
         {
             expire_procedure_checks(&mut items, self.clock.now_ms(), true);
-            packet = budget::pack(limits, &items, selected, material.coverage())?;
+            packet =
+                budget::pack_ranked(limits, &items, selected, material.coverage(), &utilities)?;
         }
         conversation.status = if packet.insufficient {
             ConversationStatus::Failed
@@ -734,6 +736,18 @@ impl RecallAgent {
         self.hook
             .on_conversation_end(Self::NAME, conversation)
             .await;
+        if let Some(receipts) = &self.receipts {
+            let reference = receipts
+                .issue_packet(
+                    format!("conversation:{}", conversation._id),
+                    packet.content.clone(),
+                    limits.clone(),
+                )
+                .await?;
+            receipts
+                .bind_conversation(conversation._id, reference)
+                .await?;
+        }
         // This whitelist is the delivery seam, including direct agent calls.
         // No diagnostic conversation, reasoning, tool args, citations or
         // provider artifact can bypass the semantic memory packet budget.
@@ -745,6 +759,37 @@ impl RecallAgent {
             failed_reason: failure,
             ..Default::default()
         })
+    }
+    async fn utility_ranks(&self, items: &[MemoryItem]) -> BTreeMap<String, f64> {
+        let Some(utility) = self.utility.as_ref().and_then(|u| u.upgrade()) else {
+            return BTreeMap::new();
+        };
+        let mut slots = BTreeMap::new();
+        let mut pins = Vec::new();
+        for item in items {
+            let mut found = Vec::new();
+            crate::assess::collect_entity_objects(&item.content, &mut |_, row| {
+                if let Ok(p) = crate::recall_receipt::pin(&json!(row)) {
+                    found.push(p);
+                }
+            });
+            found.sort_by(|a, b| a.id.cmp(&b.id));
+            found.dedup();
+            if found.len() == 1 && found[0].id.starts_with("C-") {
+                slots.insert(item.id.clone(), found[0].id.clone());
+                pins.push(found.remove(0));
+            }
+        }
+        // Optional ranking must not hold up or broaden required Recall reads.
+        let ranks = tokio::time::timeout(Duration::from_millis(500), utility.rank(&pins))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default();
+        slots
+            .into_iter()
+            .filter_map(|(slot, id)| ranks.get(&id).map(|v| (slot, *v)))
+            .collect()
     }
 }
 

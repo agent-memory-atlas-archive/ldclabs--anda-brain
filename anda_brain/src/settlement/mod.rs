@@ -46,6 +46,11 @@ pub(crate) const STANDARD_RETENTION_CLASS: &str = "standard";
 /// already have committed (Spec §80.3), and every settlement command writes
 /// absolute values, so a re-run on the next cycle is the honest recovery.
 pub(crate) trait RunKip: Send + Sync {
+    /// Live Spaces use the same persisted service as the independent scheduler.
+    /// Test/legacy ports may retain the bounded scan adapter below.
+    fn attention_sweep(&self) -> impl Future<Output = Option<WatchSettlement>> + Send {
+        async { None }
+    }
     /// The graph being settled. Log context only; nothing branches on it.
     fn space_id(&self) -> &str;
 
@@ -287,6 +292,9 @@ pub(crate) async fn scan_corrections(
 /// current authorization and deadline coverage. Text conditions stay deferred.
 /// Errors remain visible, and no failed Watch is automatically re-armed.
 pub(crate) async fn sweep_watches(port: &impl RunKip) -> WatchSettlement {
+    if let Some(report) = port.attention_sweep().await {
+        return report;
+    }
     let mut report = WatchSettlement::default();
     let response = match read(port, watch::watches_request("armed")).await {
         Ok(response) => response,

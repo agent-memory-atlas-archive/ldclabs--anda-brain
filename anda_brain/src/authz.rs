@@ -65,6 +65,63 @@ pub struct Caller {
     pub st: Option<SpaceToken>,
 }
 
+/// Product runtime authentication deliberately excludes the legacy local CWT
+/// fallback. A verified Space token can read/respond, but never impersonates an
+/// independent observer. The immutable host mapping supplies the native subject.
+pub(crate) async fn runtime_credentials(
+    app: &AppState,
+    space_id: &str,
+    token: &str,
+    sharding: Option<u32>,
+    scope: TokenScope,
+) -> crate::runtime_api::RuntimeResult<(Arc<Space>, crate::runtime_api::RuntimeCredential)> {
+    use crate::runtime_api::{RuntimeCredential, RuntimeError};
+    if let Some(sharding) = sharding {
+        ensure_sharding(app, sharding)
+            .map_err(|_| RuntimeError::Invalid("runtime shard does not match this host".into()))?;
+    }
+    if token.is_empty() {
+        return Err(RuntimeError::Unauthorized);
+    }
+    let cwt = if app.runtime_cwt_verifier_enabled() && !token.starts_with("ST") {
+        Some(
+            app.check_auth(token, space_id, scope, anda_engine::unix_ms())
+                .map_err(|_| RuntimeError::Unauthorized)?,
+        )
+    } else {
+        None
+    };
+    if cwt.is_none() && !token.starts_with("ST") {
+        return Err(RuntimeError::Unauthorized);
+    }
+    let space = app.load_space(space_id, false).await.map_err(|e| {
+        if matches!(
+            e.downcast_ref::<anda_db::error::DBError>(),
+            Some(anda_db::error::DBError::NotFound { .. })
+        ) {
+            RuntimeError::NotFound
+        } else {
+            RuntimeError::Storage(e)
+        }
+    })?;
+    let credential = if let Some(cwt) = cwt {
+        RuntimeCredential::CwtSubject {
+            subject: cwt.user.to_string(),
+        }
+    } else {
+        let verified = space
+            .verify_space_token(token.into(), scope, anda_engine::unix_ms())
+            .map_err(|_| RuntimeError::Unauthorized)?;
+        if verified.labels.is_some() {
+            return Err(RuntimeError::Forbidden);
+        }
+        RuntimeCredential::SpaceTokenDigest {
+            digest: crate::runtime_api::credential_digest(token),
+        }
+    };
+    Ok((space, credential))
+}
+
 impl Caller {
     /// Resolves the audit actor: the authenticated CWT user, else a stable
     /// space-token identity, else the anonymous marker (public-space readers

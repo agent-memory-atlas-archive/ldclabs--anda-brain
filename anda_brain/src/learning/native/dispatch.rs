@@ -352,16 +352,40 @@ impl NativeLearning {
         fence: u64,
         attempt_id: &str,
     ) -> Result<(), KipError> {
-        let task = self.dispatch_view(session, task_ref, "CONCEPT").await?;
+        let mut task = self.dispatch_view(session, task_ref, "CONCEPT").await?;
+        if task["attributes"]["status"] == "completed" {
+            return Ok(());
+        }
         let lease = &task["facets"][format!("{PROFILE}LeaseState")];
-        if lease["owner"] != self.host.principal_id || lease["fencing_token"] != fence {
+        if lease["owner"] != self.host.principal_id
+            || lease["fencing_token"].as_u64().is_none_or(|n| n < fence)
+        {
             return Err(KipError::version_conflict(
                 "task completion has lost its lease fence",
             ));
         }
-        if task["attributes"]["status"] == "completed" {
-            return Ok(());
+        // The independent terminal Outcome already closed the native outbox.
+        // A fresh lease here permits only completion bookkeeping; no begin or
+        // external execution is called. Unknown outcomes never reach this path.
+        if task["attributes"]["status"] == "running"
+            && lease["expires_at"]
+                .as_str()
+                .is_some_and(|t| t <= anda_cognitive_nexus::time::now().as_str())
+        {
+            let version = task["_system"]["version"]
+                .as_u64()
+                .ok_or_else(|| invalid("task version missing"))?;
+            session
+                .lease_task(
+                    &self.space_id,
+                    task_ref,
+                    version,
+                    &crate::kip::timestamp(anda_engine::unix_ms() + 30_000),
+                )
+                .await?;
+            task = self.dispatch_view(session, task_ref, "CONCEPT").await?;
         }
+        let lease = &task["facets"][format!("{PROFILE}LeaseState")];
         if task["attributes"]["status"] != "running"
             || lease["expires_at"]
                 .as_str()
@@ -378,8 +402,10 @@ impl NativeLearning {
             "UPDATE {} SET ATTRIBUTES {{status:\"completed\"}} EXPECT VERSION {version}",
             literal(task_ref)
         ));
-        request.operations[0].idempotency_key =
-            Some(format!("learning-task-completion:{attempt_id}"));
+        request.operations[0].idempotency_key = Some(format!(
+            "learning-task-completion:{attempt_id}:{}",
+            lease["fencing_token"]
+        ));
         successful(&anda_kip::execute_request(session, &request).await)?;
         Ok(())
     }

@@ -874,7 +874,7 @@ mod tests {
             // observation was resting under.
             r#"TRANSITION ?a TO "archived" WHERE { STRUCTURAL (?a, "evidence", :e) } LIMIT 20"#,
             // Retention without a hold: §20's judgement, which is a model's.
-            r#"SET RETENTION ?e { retention_class: "standard", expires_at: "2027-01-01T00:00:00Z" } WHERE { ?e EVIDENCE {} } LIMIT 20"#,
+            r#"SET RETENTION ?e { retention_class: "standard", expires_at: "2027-01-01T00:00:00.000Z" } WHERE { ?e EVIDENCE {} } LIMIT 20"#,
             // Naming the target outright reaches one element by construction,
             // so there is nothing for a bound to do.
             r#"TRANSITION "C-7" TO "archived""#,
@@ -961,9 +961,13 @@ mod tests {
             said("user", "I always prefer dark mode."),
             said("assistant", "Noted."),
         ];
-        let ingest =
-            observation_ingest(&messages, "2026-08-20T00:00:00Z", "formation:chat-42", None)
-                .expect("two messages produce two entries");
+        let ingest = observation_ingest(
+            &messages,
+            "2026-08-20T00:00:00.000Z",
+            "formation:chat-42",
+            None,
+        )
+        .expect("two messages produce two entries");
 
         let keys: Vec<_> = ingest.evidence.iter().map(|e| e.key.as_str()).collect();
         assert_eq!(keys, ["msg1", "msg2"]);
@@ -988,7 +992,7 @@ mod tests {
             .collect();
         assert_eq!(keys, ["formation:chat-42:1", "formation:chat-42:2"]);
 
-        assert!(observation_ingest(&[], "2026-08-20T00:00:00Z", "x", None).is_none());
+        assert!(observation_ingest(&[], "2026-08-20T00:00:00.000Z", "x", None).is_none());
     }
 
     #[test]
@@ -999,7 +1003,7 @@ mod tests {
         let messages: Vec<_> = (0..MAX_INGESTED_MESSAGES + 4)
             .map(|n| said("user", &format!("turn {n}")))
             .collect();
-        let ingest = observation_ingest(&messages, "2026-08-20T00:00:00Z", "o", None).unwrap();
+        let ingest = observation_ingest(&messages, "2026-08-20T00:00:00.000Z", "o", None).unwrap();
 
         assert_eq!(ingest.evidence.len(), MAX_INGESTED_MESSAGES);
         assert_eq!(ingest.evidence[0].key, "msg1");
@@ -1013,7 +1017,7 @@ mod tests {
     fn a_source_is_named_only_for_what_the_counterparty_said() {
         let messages = [said("user", "hi"), said("assistant", "hello")];
         let ingest =
-            observation_ingest(&messages, "2026-08-20T00:00:00Z", "o", Some("C-7")).unwrap();
+            observation_ingest(&messages, "2026-08-20T00:00:00.000Z", "o", Some("C-7")).unwrap();
 
         // The assistant's turn is not the counterparty's, and an Evidence
         // source that pointed at them anyway would say they said it.
@@ -1027,7 +1031,8 @@ mod tests {
     #[test]
     fn a_model_cannot_shadow_captured_source_handles() {
         let observation =
-            observation_ingest(&[said("user", "hi")], "2026-08-20T00:00:00Z", "o", None).unwrap();
+            observation_ingest(&[said("user", "hi")], "2026-08-20T00:00:00.000Z", "o", None)
+                .unwrap();
 
         let mut plain = request("MUTATE { CREATE ACTIVITY ?a { SET FIELDS {} } }");
         attach_observation(&mut plain, &observation).unwrap();

@@ -2,7 +2,7 @@
 
 All notable changes to the Anda Brain project.
 
-## [0.12.0] — 2026-09-16
+## [0.12.0] — 2026-09-20
 
 **KIP 2.0 / CognitiveMemory 2.1 is a breaking release.** Anda Brain and its
 Cloudflare Worker now use the 2.0 memory model. Existing natural-language Brain
@@ -69,8 +69,9 @@ Assertion records an actor's stance and Evidence. Existence is not belief.
   Replays deduplicate instead of retyping, truncating or duplicating what a
   speaker said. Attribution remains separate from the authenticated caller.
 - Disuse settlement changes `MnemonicState.memory_strength` on Concepts,
-  never Assertion confidence. Recall reinforcement affects accessibility,
-  not truth. Pinning uses a retention class. Full Rust maintenance cycles
+  never Assertion confidence. Recall records diagnostics and delivery provenance;
+  retrieval alone does not reinforce mnemonic values. Pinning uses a retention
+  class. Full Rust maintenance cycles
   expire lapsed Assertions and archive records past `retention.expires_at`,
   respecting legal holds. `POST /v1/{space_id}/memory/forget` performs an
   authorized `PURGE` and leaves an erased identity stub; archive and
@@ -87,13 +88,64 @@ Assertion records an actor's stance and Evidence. Existence is not belief.
   through its deadline. Text and mixed conditions remain deferred without a
   semantic evaluator. Completing a model call does not prove stream coverage.
   SleepTask completion likewise requires a live lease and guarded commit.
-  Older 2.0 operational records need explicit 2.1 replacements before native
-  arming or leasing.
 - Optional Recall budgets return a host-packed memory packet using the pinned
   `o200k_base@tiktoken-rs-0.12.0` counter. Required constraints and warnings
   precede optional content; packet and cumulative planning-input limits are
   enforced without claiming semantic completeness or execution permission.
   Requests without a budget policy retain ordinary Recall behavior.
+
+### Durable attention and authenticated outcomes
+
+- Cognitive Nexus 0.13.1 atomically commits Watch firing, `watch_fire` Activity
+  and protected wake, with replayable receipts and fenced leases. A persistent,
+  bounded directory discovers registered Spaces after eviction/restart and
+  advances structured Watches independently of Full Maintenance. Registration,
+  dirty generations, fair cursors and owned writes preserve recovery and shutdown.
+- Explicit host bindings connect wakes to `act`/`ask`/`defer`/`silence` decisions,
+  immutable Decision/Attempt records and current-authority dispatch. Clarification
+  uses a separate authorized child action; an answer never grants business
+  permission. Unknown delivery keeps the same attempt and requires reconciliation.
+- `BRAIN_RUNTIME_CONFIG` / `--runtime-config` installs compiled per-Space adapters
+  and identity mappings before loading Spaces. The `attention_inbox_v1` adapter
+  provides durable idempotent inbox delivery. Authenticated attention, response,
+  outcome and runtime-status HTTP routes preserve JSON/CBOR/Markdown responses.
+  MCP adds inbox read, response and status tools, with no observer/governance writer.
+- Runtime channels require verified credentials even on public/local Spaces.
+  Independent HTTP outcomes require signed observer credentials and current native
+  `record_outcome`; ordinary Space tokens cannot self-grade. Receipts distinguish
+  persistence, learning eligibility and unresolved safety work. Registered trial
+  attempts retain a single native writer, fixed cutoff and idempotent recovery;
+  late/conflicting/corrected inputs remain separately auditable.
+
+### Optional learning, semantic evaluation and calibration
+
+- Learning adds the compiled `workflow_http_v1` executor/observer/source adapter,
+  bounded independent background advancement, persistent review and safety
+  consumers, and terminal archival. `maximum_jobs` limits the hot working set;
+  retained identities, replay, review and revocation survive archival. Automatic
+  trials/reviews require actual bindings, approved calibration and explicit switches.
+- Bounded Recall retains verifiable off-graph delivery receipts. Actual decisions
+  bind delivered/used references; independent single-contribution witnesses or
+  frozen paired-revision comparisons can calibrate Concept utility through atomic
+  native receipts. Retrieved-only or inseparable bundled use receives no invented
+  individual credit. Corrected evidence suspends ranking, and calibrated utility
+  only orders peers within existing Recall priorities.
+- Optional text/mixed Watch evaluation uses a pinned, bounded Chat Completions
+  adapter or trusted Rust evaluator and native prepare/read/commit pages. Model
+  calls run outside native locks and structured scans. Missing, unknown, truncated
+  or mismatched judgments cannot advance coverage; governed artifacts support
+  replay, erasure and lost-ACK recovery. Evaluator changes require explicit review.
+- Optional contextual trust uses independently verified binary facts and exact
+  actor/predicate/context proposals. Root/claim deduplication, explicit parameters,
+  uncertainty, current `manage_trust` and native atomic proposal/control/audit
+  application prevent unqualified or duplicate changes. Restoration appends a new
+  governed version. Global weights, Assertion confidence and execution authority
+  are preserved; bootstrap never grants trust governance.
+- Runtime status distinguishes configured, enabled and currently authorized
+  capabilities. Semantic/utility/trust automation defaults off; compilation,
+  mechanism tests and calibration attestations do not establish empirical quality.
+  See [runtime integration](anda_brain/RUNTIME.md) or the
+  [Chinese edition](anda_brain/RUNTIME_cn.md).
 
 ### Learning, experiments and removed interfaces
 
@@ -119,7 +171,7 @@ Assertion records an actor's stance and Evidence. Existence is not belief.
 
 ### Cloudflare Worker
 
-- The Worker runs an independent KIP 2.0 engine on `@ldclabs/kip-do` 0.13,
+- The Worker runs an independent KIP 2.0 engine on `@ldclabs/kip-do` 0.13.1,
   with one SQLite Durable Object per space. Direct KIP accepts structured
   operations, parameters, `op_id` and `execution` modes `independent` or
   `sequence` with stop-on-error; `atomic` is refused because no transaction
@@ -131,13 +183,28 @@ Assertion records an actor's stance and Evidence. Existence is not belief.
   operation batch or retention-expiry sweep. It does not provide the Rust
   service's wiki, MCP, CBOR/Markdown negotiation or asynchronous Formation
   queue. Model maintenance cannot `PURGE`, `PURGE PAYLOAD` or set a legal hold.
+- Rust and Worker reference assets track published KIP 0.13.1. KIP timestamps
+  use canonical UTC `YYYY-MM-DDTHH:mm:ss.SSSZ`; Worker input validation and
+  regression fixtures now enforce that form. Bounded reference discovery and
+  generated manifests remain aligned with the shipped protocol.
 
-### Known limit
+### Known limits and validation scope
 
 - Rust bulk decay, correction discovery and self-test sampling still use
   full-scan KQL capped at 65,536 solutions. On larger graphs these passes can
   stop and report incomplete work; see the
   [maintenance notes](anda_brain/README.md).
+- Runtime reports provide bounded counts and recovery reasons; complete aggregated
+  stage latency, backlog age, coverage lag and cost metrics remain planned. Real
+  learning gains, semantic error rates, utility attribution and trust calibration
+  still require independent business-data acceptance. The executable next-work
+  plan is in [English](VALIDATION_PLAN.md) and [Chinese](VALIDATION_PLAN_cn.md).
+- KIP v2 has not been deployed; current acceptance uses fresh v2 Spaces and
+  excludes pre-release old-data migration. Existing KIP 1.x compatibility remains
+  documented above. One live owner per storage shard is still required.
+- Runtime guides now have separate English and Chinese editions. Integration
+  skills and contributor instructions describe actual capabilities without private
+  implementation-stage identifiers.
 
 ### Fixes and release engineering
 

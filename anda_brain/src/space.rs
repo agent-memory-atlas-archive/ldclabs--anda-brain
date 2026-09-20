@@ -32,7 +32,7 @@ use std::{
     str::FromStr,
     sync::{
         Arc, OnceLock, Weak,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -109,6 +109,10 @@ pub struct AppState {
     prompts: crate::agents::prompts::AgentPrompts,
     clock: Arc<crate::runtime::BusinessClock>,
     automatic: bool,
+    attention_directory: Arc<crate::attention::Directory>,
+    attention_policy: crate::attention::AttentionPolicy,
+    action_bindings: Option<Arc<crate::action::ActionBindings>>,
+    memory_runtime_bindings: Arc<crate::runtime_api::MemoryRuntimeBindings>,
     /// Bounds requests that can each drive a full multi-turn LLM round.
     /// One budget for every channel: the HTTP LLM routes and the MCP LLM
     /// tools (recall/maintenance) drain this same semaphore, so neither
@@ -120,16 +124,18 @@ pub struct AppState {
     pub sharding: u32,
 }
 
+mod attention;
 #[cfg(feature = "experiments")]
 pub mod experiments;
 mod processing;
+mod runtime_api;
 mod self_test;
 mod shadow;
 pub use processing::{ProcessingKind, ProcessingReport, ProcessingState, ProcessingWait};
 #[cfg(test)]
 mod close_tests;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use shadow::copy_space_objects;
 
@@ -148,6 +154,10 @@ impl AppState {
     ) -> Self {
         Self {
             spaces: Arc::new(RwLock::new(BTreeMap::new())),
+            attention_directory: crate::attention::Directory::new(object_store.clone(), sharding),
+            attention_policy: Default::default(),
+            action_bindings: None,
+            memory_runtime_bindings: Arc::new(Default::default()),
             object_store,
             db_config,
             management,
@@ -252,6 +262,23 @@ impl AppState {
         // would burn real LLM tokens twice and mutate both forks mid-replay,
         // making the A/B comparison non-reproducible.
         let fork = state.load_space_with(space_id, false, false).await?;
+        // Check the recovered copy, not a racy source preflight. A retained
+        // native instance/fence must never become independently executable.
+        if fork
+            .memory
+            .nexus()
+            .system_session()
+            .read_control(
+                anda_cognitive_nexus::nexus::DEFAULT_SPACE,
+                "attention/config",
+                None,
+            )
+            .await?
+            .is_some()
+        {
+            fork.close().await?;
+            return Err("a Space with native attention state cannot be forked with its wake identity and leases".into());
+        }
         if let Some(policy) = policy {
             fork.db
                 .set_extension_from(MemoryPolicy::EXTENSION_KEY.to_string(), policy);
@@ -377,14 +404,25 @@ impl AppState {
     /// digest — required for shadow forks, which are throwaway copies whose
     /// backlog must not burn LLM tokens or mutate the fork mid-replay.
     ///
-    /// Note: `pinned` and `autostart` take effect only on the load that
-    /// actually initializes the space; a cache hit returns the space as it
-    /// was first opened and ignores both parameters.
+    /// `pinned` takes effect on first initialization. A foreground autostart
+    /// may subsequently resume queues on a Space first opened by attention;
+    /// isolated hosts keep automatic work disabled.
     pub(crate) async fn load_space_with(
         &self,
         space_id: &str,
         pinned: bool,
         autostart: bool,
+    ) -> Result<Arc<Space>, BoxError> {
+        self.load_space_mode(space_id, pinned, autostart, true)
+            .await
+    }
+
+    async fn load_space_mode(
+        &self,
+        space_id: &str,
+        pinned: bool,
+        autostart: bool,
+        touch: bool,
     ) -> Result<Arc<Space>, BoxError> {
         let entry = {
             let spaces = self.spaces.read().await;
@@ -397,7 +435,13 @@ impl AppState {
                 let mut spaces = self.spaces.write().await;
                 spaces
                     .entry(space_id.to_string())
-                    .or_insert_with(|| Arc::new(SpaceEntry::new()))
+                    .or_insert_with(|| {
+                        let entry = Arc::new(SpaceEntry::new());
+                        if !touch {
+                            entry.last_access_ms.store(0, Ordering::Relaxed);
+                        }
+                        entry
+                    })
                     .clone()
             }
         };
@@ -418,6 +462,14 @@ impl AppState {
                     self.clock.clone(),
                     self.automatic,
                     self.prompts.clone(),
+                    self.attention_directory.clone(),
+                    self.attention_policy.clone(),
+                    self.action_bindings.clone(),
+                    self.memory_runtime_bindings
+                        .spaces
+                        .get(space_id)
+                        .cloned()
+                        .map(Arc::new),
                 )
                 .await?;
                 if let Some(judge) = self.judge_model.as_ref()
@@ -434,13 +486,17 @@ impl AppState {
             .await
             .cloned()?;
 
-        entry.touch();
+        if touch {
+            entry.touch();
+        }
+        space.attention.discover_existing().await?;
         // A Space idle for nine minutes is evicted, so the background pass
         // above never sees the quietest ones at all — the next time anybody
         // opens this Space is the only moment its overdue cycle can be
         // noticed. `autostart: false` forks are excluded: a shadow copy must
         // not burn model calls or mutate itself mid-replay.
         if autostart {
+            space.start_background_recovery();
             space.kick_scheduled_maintenance();
         }
         Ok(space)
@@ -453,9 +509,17 @@ impl AppState {
         let flush_interval = Duration::from_secs(5 * 60);
         let idle_timeout_ms: u64 = 9 * 60 * 1000;
 
+        let mut attention_tick =
+            tokio::time::interval(Duration::from_millis(self.attention_policy.tick_ms));
+        attention_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut flush_tick = tokio::time::interval(flush_interval);
+        flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        flush_tick.tick().await;
         loop {
             tokio::select! {
+                biased;
                 _ = cancel_token.cancelled() => {
+                    self.attention_directory.tasks.shutdown().await;
                     // Close all spaces concurrently so shutdown stays fast even
                     // with many loaded spaces.
                     let entries: Vec<(String, Arc<SpaceEntry>)> = {
@@ -475,10 +539,15 @@ impl AppState {
                     while tasks.join_next().await.is_some() {}
                     return;
                 }
-                _ = tokio::time::sleep(flush_interval) => {}
+                _ = attention_tick.tick() => {
+                    if let Err(err) = self.attention_tick().await {
+                        log::error!(target: "brain", "attention scheduling failed: {err}");
+                    }
+                }
+                _ = flush_tick.tick() => {
+                    self.flush_and_evict_once(unix_ms(), idle_timeout_ms).await;
+                }
             }
-
-            self.flush_and_evict_once(unix_ms(), idle_timeout_ms).await;
         }
     }
 
@@ -546,7 +615,7 @@ impl AppState {
                 if space.wiki_digest.is_processing() {
                     return false;
                 }
-                if space.pinned || space.is_processing() {
+                if space.pinned || space.is_busy() {
                     return false;
                 }
                 // Map + background snapshot are the only expected SpaceEntry refs here;
@@ -616,12 +685,18 @@ pub struct Space {
     automatic: bool,
     clock: Arc<crate::runtime::BusinessClock>,
     tasks: crate::runtime::RuntimeTasks,
+    attention: Arc<crate::attention::AttentionRuntime>,
+    memory_runtime: Option<Arc<crate::runtime_api::MemoryRuntime>>,
+    recovery_started: AtomicBool,
     close_state: tokio::sync::Mutex<CloseState>,
     interrupted_conversations: parking_lot::Mutex<BTreeMap<&'static str, BTreeSet<u64>>>,
     #[cfg(feature = "learning")]
     learning: Arc<crate::learning::LearningRuntime>,
     /// Memory usage ledger (plan M1): off-graph recall/correction counters.
     ledger: Arc<UsageLedger>,
+    recall_receipts: Arc<crate::recall_receipt::RecallReceipts>,
+    utility: Arc<crate::consequence::utility::UtilityRuntime>,
+    trust: Arc<crate::consequence::trust::TrustRuntime>,
     /// Negative-knowledge cache (plan M5): probe queries the graph had
     /// nothing for; cleared whenever formation completes.
     miss_cache: Arc<MissCache>,
@@ -665,6 +740,17 @@ impl Space {
         {
             memory_busy
         }
+    }
+
+    /// Includes independent attention operations/leases for eviction decisions,
+    /// without changing Formation/Maintenance's own processing gate.
+    pub fn is_busy(&self) -> bool {
+        self.is_processing()
+            || self.attention.is_busy()
+            || self.recall_receipts.is_busy()
+            || self.utility.is_busy()
+            || self.trust.is_busy()
+            || self.memory_runtime.as_ref().is_some_and(|r| r.is_busy())
     }
 
     /// Trusted host control only. No model tool, HTTP or MCP route exposes
@@ -1158,10 +1244,15 @@ impl Space {
         input: StringOr<RecallInput>,
     ) -> Result<RecallOutput, BoxError> {
         let (output, budget) = self.run_recall(user, input).await?;
+        let recall_receipt = match output.conversation {
+            Some(id) => self.recall_receipts.for_conversation(id).await?,
+            None => None,
+        };
         if let Some(budget) = budget {
             let packet =
                 serde_json::from_str::<crate::recall_budget::MemoryPacket>(&output.content).ok();
             return Ok(RecallOutput {
+                recall_receipt,
                 found: packet.as_ref().is_some_and(|p| {
                     p.items
                         .iter()
@@ -1208,6 +1299,7 @@ impl Space {
             });
         }
         Ok(RecallOutput {
+            recall_receipt,
             answer,
             // The trace is the ground truth when the model does not report.
             found: meta.found.unwrap_or(!memories.is_empty()),
@@ -1797,6 +1889,18 @@ impl Space {
         }
 
         report.skills = settlement::skill_settlement();
+        #[cfg(feature = "learning")]
+        if self.learning.is_configured() {
+            match self.learning.runtime_status(self.automatic, false).await {
+                Ok(status) => {
+                    report.skills.unsupported_reason = Some("learning runs in the independent scheduler; no comparison verdict executed by this maintenance call".into());
+                    report.skills.runtime = Some(serde_json::to_value(status)?);
+                }
+                Err(_) => {
+                    report.skills.error = Some("learning scheduler status unavailable".into())
+                }
+            }
+        }
 
         // Retention expiry, full scope only. Both halves are the host
         // deciding *when* forgetting happens; the engine only ever decided
@@ -2458,7 +2562,10 @@ impl Space {
         )
         .await
         {
-            Ok(res) => Ok(res),
+            Ok(res) => {
+                self.attention.notice_read(&req, &res);
+                Ok(res)
+            }
             Err(_) => Ok(Response::failed(KipError::new(
                 KipErrorCode::ExecutionTimeout,
                 format!(
@@ -2552,8 +2659,15 @@ impl Space {
         if state.closed {
             return Ok(());
         }
+        if let Some(runtime) = &self.memory_runtime {
+            runtime.shutdown().await;
+        }
         #[cfg(feature = "learning")]
         self.learning.shutdown().await;
+        self.trust.shutdown().await;
+        self.attention.shutdown().await;
+        self.recall_receipts.shutdown().await;
+        self.utility.shutdown().await;
         self.capture_interrupted_work();
         self.tasks.cancel();
         self.engine.cancel();
@@ -2721,6 +2835,10 @@ impl Space {
         clock: Arc<crate::runtime::BusinessClock>,
         automatic: bool,
         prompts: crate::agents::prompts::AgentPrompts,
+        attention_directory: Arc<crate::attention::Directory>,
+        attention_policy: crate::attention::AttentionPolicy,
+        action_bindings: Option<Arc<crate::action::ActionBindings>>,
+        memory_runtime_bindings: Option<Arc<crate::runtime_api::SpaceRuntimeBindings>>,
     ) -> Result<Arc<Self>, BoxError> {
         let id = db_config.name.clone();
         let db = Arc::new(AndaDB::open(object_store.clone(), db_config).await?);
@@ -2781,7 +2899,35 @@ impl Space {
         // engine's default), so the schema the model is shown and the envelope
         // the engine executes stay in step across protocol revisions.
         let memory = Arc::new(MemoryManagement::connect(db.clone(), Arc::new(nexus)).await?);
+        let recall_receipts =
+            crate::recall_receipt::RecallReceipts::connect(&id, &db, attention_directory.clone())
+                .await?;
+        let action_bindings = match &memory_runtime_bindings {
+            Some(cfg) if cfg.inbox.is_some() => Some(Arc::new(
+                cfg.inbox
+                    .as_ref()
+                    .unwrap()
+                    .bind(memory.nexus(), attention_directory.clone())?,
+            )),
+            Some(cfg) if cfg.actions.is_some() => cfg.actions.clone().map(Arc::new),
+            _ => action_bindings,
+        };
+        let attention = crate::attention::AttentionRuntime::new(
+            id.clone(),
+            db.clone(),
+            memory.nexus(),
+            attention_directory.clone(),
+            attention_policy,
+            automatic,
+            action_bindings,
+            memory_runtime_bindings
+                .as_ref()
+                .and_then(|c| c.semantic.clone()),
+        );
         let recall_store = Conversations::connect(db.clone(), "recall".to_string()).await?;
+        if let Some(actions) = attention.actions() {
+            actions.bind_receipts(recall_receipts.clone());
+        }
         let maintenance_store =
             Conversations::connect(db.clone(), "maintenance".to_string()).await?;
         #[cfg(feature = "wiki")]
@@ -2820,7 +2966,70 @@ impl Space {
             clock.clone(),
         )
         .await?;
-        let memory_r = TimedMemoryReadonly::new(memory.clone()).with_clock(clock.clone());
+        #[cfg(feature = "learning")]
+        learning.bind_attention(Arc::downgrade(&attention));
+        #[cfg(feature = "learning")]
+        let learning_bindings = memory_runtime_bindings
+            .as_ref()
+            .and_then(|r| r.learning.clone());
+        let trust_config = memory_runtime_bindings
+            .as_ref()
+            .and_then(|r| r.trust.clone());
+        let utility_config = memory_runtime_bindings
+            .as_ref()
+            .and_then(|r| r.utility.clone());
+        let memory_runtime = if let Some(bindings) = memory_runtime_bindings {
+            Some(
+                crate::runtime_api::MemoryRuntime::connect(
+                    memory.nexus(),
+                    db.clone(),
+                    attention_directory,
+                    attention.clone(),
+                    bindings,
+                    automatic,
+                    #[cfg(feature = "learning")]
+                    Some(Arc::downgrade(&learning)),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        #[cfg(feature = "learning")]
+        if let Some(bindings) = learning_bindings {
+            learning
+                .install_bindings(
+                    anda_cognitive_nexus::governance::AuthContext::system(),
+                    bindings,
+                )
+                .await?;
+        }
+        let trust = crate::consequence::trust::TrustRuntime::new(
+            memory.nexus(),
+            object_store.clone(),
+            recall_receipts.clone(),
+            trust_config,
+            automatic,
+        );
+        if let Some(runtime) = &memory_runtime {
+            runtime.bind_trust(Arc::downgrade(&trust));
+        }
+        let utility = crate::consequence::utility::UtilityRuntime::new(
+            memory.nexus(),
+            object_store.clone(),
+            recall_receipts.clone(),
+            utility_config,
+            automatic,
+            #[cfg(feature = "learning")]
+            Some(Arc::downgrade(&learning)),
+        );
+        if let Some(runtime) = &memory_runtime {
+            runtime.bind_utility(Arc::downgrade(&utility));
+            utility.bind_consequences(Arc::downgrade(&runtime.consequences()));
+        }
+        let memory_r = TimedMemoryReadonly::new(memory.clone())
+            .with_clock(clock.clone())
+            .with_attention(attention.clone());
         let tasks = crate::runtime::RuntimeTasks::default();
         let memory_tool = MemoryTool::new(memory.clone());
         let note_tool = NoteTool::new();
@@ -2848,6 +3057,8 @@ impl Space {
                 },
             )
             .with_prompt(prompts.prompt(crate::agents::prompts::PromptTarget::Recall))
+            .with_receipts(recall_receipts.clone())
+            .with_utility(Arc::downgrade(&utility))
             .with_clock(clock.clone()),
         );
         let maintenance = Arc::new(
@@ -2889,6 +3100,7 @@ impl Space {
             .register_tool(Arc::new(crate::kip_reference::KipReferenceTool))?
             .register_tool(Arc::new(crate::cognitive::MemoryRuntimeTool::new(
                 memory.clone(),
+                attention.clone(),
             )))?;
         #[allow(unused_mut)]
         let mut exported_tools = vec![MemoryTool::NAME.to_string()];
@@ -2940,6 +3152,9 @@ impl Space {
             recall,
             maintenance,
             ledger,
+            recall_receipts,
+            utility,
+            trust,
             miss_cache,
             settlement_lock: tokio::sync::Mutex::new(()),
             self_test_lock: tokio::sync::Mutex::new(()),
@@ -2957,12 +3172,16 @@ impl Space {
             automatic,
             clock,
             tasks,
+            attention,
+            memory_runtime,
+            recovery_started: AtomicBool::new(false),
             close_state: tokio::sync::Mutex::new(CloseState::default()),
             interrupted_conversations: parking_lot::Mutex::new(BTreeMap::new()),
             #[cfg(feature = "learning")]
             learning,
         });
         hooks.bind_space(Arc::downgrade(&this));
+        this.trust.bind_space(Arc::downgrade(&this));
         let weak = Arc::downgrade(&this);
         this.tasks.set_cancel_hook(Arc::new(move || {
             if let Some(space) = weak.upgrade() {
@@ -2980,41 +3199,7 @@ impl Space {
         }
 
         if autostart {
-            let this_clone = this.clone();
-            tokio::spawn(async move {
-                if let Err(err) = this_clone.formation.init().await {
-                    log::warn!(target: "brain", space_id = this_clone.id; "formation history init failed: {err:?}");
-                }
-                if let Err(err) = this_clone.maintenance.init().await {
-                    log::warn!(target: "brain", space_id = this_clone.id; "maintenance history init failed: {err:?}");
-                }
-                if let Err(err) = this_clone.recall.init().await {
-                    log::warn!(target: "brain", space_id = this_clone.id; "recall history init failed: {err:?}");
-                }
-                // Startup repair: reclaim wiki commit-crash leftovers before the
-                // space serves queries built on them.
-                #[cfg(feature = "wiki")]
-                {
-                    match this_clone.wiki.orphan_sweep(unix_ms()).await {
-                        Ok(report) if !report.is_empty() => {
-                            log::warn!(target: "brain", space_id = this_clone.id, report:serde = report; "wiki orphan sweep repaired state");
-                        }
-                        Ok(_) => {}
-                        Err(err) => {
-                            log::warn!(target: "brain", space_id = this_clone.id; "wiki orphan sweep failed: {err:?}");
-                        }
-                    }
-                    // Resume any wiki digest backlog left from before the restart.
-                    this_clone.kick_wiki_digest();
-                    this_clone.kick_wiki_housekeeping();
-                }
-                // Resume formation if it was interrupted before. A missing marker
-                // means nothing was processed yet, so resume from the beginning.
-                let conversation = this_clone.formation.get_processed().unwrap_or_default();
-                let _ = this_clone
-                    .restart_formation(SELF_USER_ID, conversation + 1)
-                    .await;
-            });
+            this.start_background_recovery();
         } else {
             // No-autostart open (shadow forks): the agents still need their
             // history cursors, but the inherited formation backlog and wiki
@@ -3031,6 +3216,54 @@ impl Space {
         }
 
         Ok(this)
+    }
+}
+
+impl Space {
+    /// Cold attention loads initialize history without starting model work. A
+    /// later ordinary load must still resume the existing formation/wiki queues.
+    fn start_background_recovery(self: &Arc<Self>) {
+        if !self.automatic
+            || self.engine.is_cancelled()
+            || self.recovery_started.swap(true, Ordering::SeqCst)
+        {
+            return;
+        }
+        let this_clone = self.clone();
+        tokio::spawn(async move {
+            if let Err(err) = this_clone.formation.init().await {
+                log::warn!(target: "brain", space_id = this_clone.id; "formation history init failed: {err:?}");
+            }
+            if let Err(err) = this_clone.maintenance.init().await {
+                log::warn!(target: "brain", space_id = this_clone.id; "maintenance history init failed: {err:?}");
+            }
+            if let Err(err) = this_clone.recall.init().await {
+                log::warn!(target: "brain", space_id = this_clone.id; "recall history init failed: {err:?}");
+            }
+            // Startup repair: reclaim wiki commit-crash leftovers before the
+            // space serves queries built on them.
+            #[cfg(feature = "wiki")]
+            {
+                match this_clone.wiki.orphan_sweep(unix_ms()).await {
+                    Ok(report) if !report.is_empty() => {
+                        log::warn!(target: "brain", space_id = this_clone.id, report:serde = report; "wiki orphan sweep repaired state");
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        log::warn!(target: "brain", space_id = this_clone.id; "wiki orphan sweep failed: {err:?}");
+                    }
+                }
+                // Resume any wiki digest backlog left from before the restart.
+                this_clone.kick_wiki_digest();
+                this_clone.kick_wiki_housekeeping();
+            }
+            // Resume formation if it was interrupted before. A missing marker
+            // means nothing was processed yet, so resume from the beginning.
+            let conversation = this_clone.formation.get_processed().unwrap_or_default();
+            let _ = this_clone
+                .restart_formation(SELF_USER_ID, conversation + 1)
+                .await;
+        });
     }
 }
 
@@ -3068,29 +3301,30 @@ impl Space {
 /// the two executors the Space already has, so a pass cannot reach the write
 /// path by choosing the wrong one.
 impl settlement::RunKip for Space {
+    async fn attention_sweep(&self) -> Option<crate::types::WatchSettlement> {
+        Some(match self.attention.tick().await {
+            Ok(p) => crate::types::WatchSettlement {
+                fired: p.fired as u64,
+                disarmed: p.expired as u64,
+                deferred: (p.blocked.saturating_sub(p.blocked_wakes)
+                    + p.advanced.saturating_sub(p.fired + p.expired))
+                    as u64,
+                conflicted: p.conflicted as u64,
+                error: p.error,
+            },
+            Err(e) => crate::types::WatchSettlement {
+                error: Some(e.to_string()),
+                ..Default::default()
+            },
+        })
+    }
     async fn advance_watch(
         &self,
         id: &str,
         version: u64,
         generation: u64,
     ) -> Result<serde_json::Value, anda_kip::KipError> {
-        let nexus = self.memory.nexus();
-        tokio::time::timeout(
-            crate::agents::READONLY_KIP_TIMEOUT,
-            nexus.system_session().advance_watch(
-                anda_cognitive_nexus::nexus::DEFAULT_SPACE,
-                id,
-                version,
-                generation,
-                settlement::watch::CHANGES_PAGE_LIMIT,
-            ),
-        )
-        .await
-        .map_err(|_| {
-            anda_kip::KipError::outcome_unknown(
-                "Watch advancement timed out; re-read its version and WatchState",
-            )
-        })?
+        self.attention.advance(id.into(), version, generation).await
     }
 
     fn space_id(&self) -> &str {

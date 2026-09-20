@@ -20,7 +20,7 @@ class SequenceAi implements AiBinding {
 
 describe('embedded KIP references', () => {
   it('reassembles every compiled document and verifies release hashes without I/O', async () => {
-    expect(REFERENCE_VERSION).toBe('0.13.0')
+    expect(REFERENCE_VERSION).toBe('0.13.1')
     expect(REFERENCE_DOCUMENTS).toHaveLength(21)
     for (const doc of REFERENCE_DOCUMENTS) {
       let offset: number | null = 0

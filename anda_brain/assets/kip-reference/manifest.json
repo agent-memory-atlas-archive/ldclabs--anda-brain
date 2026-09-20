@@ -1,8 +1,8 @@
 {
   "source": "anda_kip",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "sha256": {
-    "SPECIFICATION.md": "c12488c4233e62f62f5d73750b5806705d4d66b3451a01e6debe7c3195885ef0",
+    "SPECIFICATION.md": "a543205d642a15ce3bda67b3c4f1c9d5ea168c089c2de9112dfdf06aa1584acf",
     "Invariants.md": "93aec36789dabc4945cc1a2e42838dc88bcee26a84a8f5ddf75800c80bf5cd12",
     "brain/ExperienceLearningArchitecture.md": "0b78898d385b73b6719f2ff9395c14d57c1a68391ab2e3c39baf5c8a4d3df4ed",
     "grammar/KQL.ebnf": "45b427b48faffb109e94eaec98aa4cd88e02679bbcc2e9cb7e29b44802f4951a",
@@ -10,7 +10,7 @@
     "grammar/META.ebnf": "720a9ddf85aea2fcd7dbfc7c383e7d35315952002bcc32459b8e4fccdb1b66b2",
     "schemas/kip-request.schema.json": "01e38639cc38604a4a1ee71edafe645e6170c581c65e2739842454d22439c960",
     "schemas/kip-response.schema.json": "9420aec28ddb1d91ff9e857b97bec9d7a34aef4e691d89eb4edba4c9eac6b042",
-    "KIPSyntax.md": "90045b4fd98a3717894bdc9b54ac085700a7af4cd5ad848b485802449f527830",
+    "KIPSyntax.md": "dc9d209702ce4e212ee9b85ca7359032ce2bb59748fd67a95246d3d6c99872ce",
     "profiles/CognitiveMemoryProfile-2.0.md": "b7ff933686579e82cd46584deaaf397c6c2402c5c7d9ad2ef3127933c8bdd2c9",
     "brain/KIPRecall.md": "1921403a050723315cdf12fbf5b82261eb1375ff5a8382f680a4e084e28098c7",
     "brain/KIPFormation.md": "4339b69b21ff4203561f7c45e366edcc4bb3e35c919d5ebddc4ffcd9fdb67a4d",

@@ -327,10 +327,12 @@ function optionalString(value: unknown, name: string, max: number): string | und
 function optionalTimestamp(value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined
   const timestamp = requiredString(value, 'timestamp', 64)
-  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.exec(
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.\d{3}Z$/.exec(
     timestamp,
   )
-  if (!match) throw new ValidationError('`timestamp` must be an ISO 8601 date-time')
+  const invalid = () =>
+    new ValidationError('`timestamp` must be a UTC date-time in YYYY-MM-DDTHH:mm:ss.SSSZ form')
+  if (!match) throw invalid()
 
   const [, yearText, monthText, dayText, hourText, minuteText, secondText] = match
   const year = Number(yearText)
@@ -350,7 +352,7 @@ function optionalTimestamp(value: unknown): string | undefined {
     second > 59 ||
     Number.isNaN(Date.parse(timestamp))
   ) {
-    throw new ValidationError('`timestamp` must be an ISO 8601 date-time')
+    throw invalid()
   }
   return timestamp
 }

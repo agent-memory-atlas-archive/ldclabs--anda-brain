@@ -622,6 +622,71 @@ async fn structured_and_markdown_surfaces_share_one_budgeted_semantic_packet() {
 }
 
 #[tokio::test]
+async fn r6_recall_delivery_receipts_bind_actual_versions_without_graph_writes() {
+    let (_app, space, _) = setup(
+        "r6_recall_receipt",
+        Behavior::ReadThenSelect(vec![tool(
+            "execute_kip_readonly",
+            r#"FIND(?c) WHERE {?c CONCEPT {type:"Person",name:"receipt-person"}} LIMIT 1"#,
+        )]),
+    )
+    .await;
+    seed(
+        &space,
+        r#"CREATE CONCEPT ?c {TYPE "Person" NAME "receipt-person"}"#,
+        serde_json::Map::new(),
+    )
+    .await;
+    let nexus = space.memory.nexus();
+    let seq = nexus
+        .store
+        .get_space(anda_cognitive_nexus::nexus::DEFAULT_SPACE)
+        .await
+        .unwrap()
+        .seq;
+    let output = space
+        .query_structured(SELF_USER_ID, input(Some(limits(65_536, 131_072))))
+        .await
+        .unwrap();
+    let reference = output.recall_receipt.clone().unwrap();
+    let receipt = space.recall_receipts().read(&reference).await.unwrap();
+    assert_eq!(
+        receipt.packet_digest,
+        anda_cognitive_nexus::content_digest(&json!(output.answer)).unwrap()
+    );
+    assert_eq!(receipt.delivery, "bounded_packet");
+    assert!(
+        receipt
+            .pins
+            .iter()
+            .any(|p| p.id.starts_with("C-") && p.version > 0)
+    );
+    assert!(!receipt.semantic_complete && !receipt.action_ready);
+    assert_eq!(
+        nexus
+            .store
+            .get_space(anda_cognitive_nexus::nexus::DEFAULT_SPACE)
+            .await
+            .unwrap()
+            .seq,
+        seq
+    );
+    assert_eq!(
+        space
+            .recall_receipts()
+            .for_conversation(output.conversation.unwrap())
+            .await
+            .unwrap(),
+        Some(reference.clone())
+    );
+    let mut forged = reference;
+    forged.digest =
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000".into();
+    assert!(space.recall_receipts().read(&forged).await.is_err());
+    space.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn effective_budget_is_persisted_and_success_updates_the_history_ring() {
     let (_app, space, _requests) = setup("p5_effective_budget", Behavior::Select).await;
     let enforced = limits(4096, 131_072);

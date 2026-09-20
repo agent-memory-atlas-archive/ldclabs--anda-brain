@@ -1267,9 +1267,13 @@ async fn the_runtime_mints_the_observation_the_model_only_cites() {
         content: vec![said.to_string().into()],
         ..Default::default()
     }];
-    let observation =
-        kip::observation_ingest(&messages, "2026-08-20T00:00:00Z", "formation:chat-42", None)
-            .expect("one message, one entry");
+    let observation = kip::observation_ingest(
+        &messages,
+        "2026-08-20T00:00:00.000Z",
+        "formation:chat-42",
+        None,
+    )
+    .expect("one message, one entry");
 
     let ctx = space
         .ctx_for_test(SELF_USER_ID, FormationAgent::NAME)
@@ -1407,7 +1411,7 @@ async fn element_version(space: &Space, id: &str) -> u64 {
 }
 
 async fn runtime_work(space: &Space, operation: &str, id: &str) -> serde_json::Value {
-    crate::cognitive::MemoryRuntimeTool::new(space.memory.clone())
+    crate::cognitive::MemoryRuntimeTool::new(space.memory.clone(), space.attention())
         .execute(
             crate::cognitive::RuntimeArgs {
                 operation: operation.into(),
@@ -1420,6 +1424,12 @@ async fn runtime_work(space: &Space, operation: &str, id: &str) -> serde_json::V
         .await
         .unwrap()
 }
+
+// Cross-layer regressions cover durable attention, action dispatch and runtime APIs.
+// Watch generations must survive actual eviction and cold reload.
+mod action;
+mod attention;
+pub(crate) mod runtime_api;
 
 #[tokio::test]
 async fn watches_use_nexus_coverage_and_never_infer_text_consumption() {
@@ -1447,7 +1457,7 @@ async fn watches_use_nexus_coverage_and_never_infer_text_consumption() {
             serde_json::json!({"element":target,"text":"no vendor reply"}),
         ),
     ] {
-        let id = created_ref(&space, r#"CREATE CONCEPT ?item { TYPE "Watch" SET ATTRIBUTES {watch_class: :class,summary:"wait",status:"disarmed",condition: :condition,due_at:"2020-01-01T00:00:00Z"} }"#,
+        let id = created_ref(&space, r#"CREATE CONCEPT ?item { TYPE "Watch" SET ATTRIBUTES {watch_class: :class,summary:"wait",status:"disarmed",condition: :condition,due_at:"2020-01-01T00:00:00.000Z"} }"#,
             serde_json::Map::from_iter([("class".into(),serde_json::json!(class)),("condition".into(),condition)])).await;
         runtime_work(&space, "arm_watch", &id).await;
         ids.push(id);
@@ -1474,13 +1484,28 @@ async fn watches_use_nexus_coverage_and_never_infer_text_consumption() {
         watch.schema_ref == "kip://profiles/cognitive-memory@2.1.0/Watch" && watch.version.is_some()
     }));
     let nexus = space.memory.nexus();
-    let error = nexus
+    let committed_version = element_version(&space, &ids[0]).await;
+    let replay = nexus
         .system_session()
         .advance_watch(
             anda_cognitive_nexus::nexus::DEFAULT_SPACE,
             &ids[0],
             stale,
             1,
+            200,
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay["status"], "fired");
+    assert!(replay["wake_ref"].as_str().is_some());
+    assert_eq!(element_version(&space, &ids[0]).await, committed_version);
+    let error = nexus
+        .system_session()
+        .advance_watch(
+            anda_cognitive_nexus::nexus::DEFAULT_SPACE,
+            &ids[0],
+            committed_version,
+            2,
             200,
         )
         .await
@@ -1899,8 +1924,8 @@ async fn settlement_expires_lapsed_records_and_claims() {
         &space,
         kip::request_with(
             r#"MUTATE {
-  SET RETENTION :lapsed { expires_at: "2020-01-01T00:00:00Z" }
-  SET RETENTION :held { expires_at: "2020-01-01T00:00:00Z", legal_hold: true }
+  SET RETENTION :lapsed { expires_at: "2020-01-01T00:00:00.000Z" }
+  SET RETENTION :held { expires_at: "2020-01-01T00:00:00.000Z", legal_hold: true }
 }"#,
             serde_json::Map::from_iter([
                 ("lapsed".to_string(), concepts[0].clone().into()),
@@ -1921,7 +1946,7 @@ async fn settlement_expires_lapsed_records_and_claims() {
   UPSERT CONCEPT ?gamma { MATCH {type: "Person", key: "gamma"} }
   ASSERT ?lapsed (?alpha, "prefers", ?gamma) {
     by: ?alpha, mode: "stated", confidence: 0.8,
-    valid: {from: "2019-01-01T00:00:00Z", until: "2020-01-01T00:00:00Z"}
+    valid: {from: "2019-01-01T00:00:00.000Z", until: "2020-01-01T00:00:00.000Z"}
   }
 }"#,
         ),
@@ -2733,7 +2758,7 @@ async fn space_agent_entrypoints_use_memory_and_model_without_network() {
             source: Some("thread-1".to_string()),
             topic: Some("preferences".to_string()),
         }),
-        timestamp: Some("2026-06-05T00:00:00Z".to_string()),
+        timestamp: Some("2026-06-05T00:00:00.000Z".to_string()),
     };
     let formation_output = space
         .ingest(SELF_USER_ID, StringOr::Value(formation))

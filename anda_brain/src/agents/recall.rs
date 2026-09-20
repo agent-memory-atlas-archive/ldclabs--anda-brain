@@ -125,6 +125,7 @@ pub struct TimedMemoryReadonly {
     memory: Arc<MemoryManagement>,
     timeout: Duration,
     clock: Arc<crate::runtime::BusinessClock>,
+    attention: Option<Arc<crate::attention::AttentionRuntime>>,
 }
 
 impl TimedMemoryReadonly {
@@ -133,10 +134,18 @@ impl TimedMemoryReadonly {
             memory,
             timeout: READONLY_KIP_TIMEOUT,
             clock: Arc::new(crate::runtime::BusinessClock::default()),
+            attention: None,
         }
     }
     pub(crate) fn with_clock(mut self, clock: Arc<crate::runtime::BusinessClock>) -> Self {
         self.clock = clock;
+        self
+    }
+    pub(crate) fn with_attention(
+        mut self,
+        attention: Arc<crate::attention::AttentionRuntime>,
+    ) -> Self {
+        self.attention = Some(attention);
         self
     }
 }
@@ -188,6 +197,9 @@ impl Tool<BaseCtx> for TimedMemoryReadonly {
             )),
         };
 
+        if let Some(attention) = &self.attention {
+            attention.notice_read(&request, &res);
+        }
         Ok(error_output(res))
     }
 }
@@ -214,6 +226,8 @@ pub type MemoryPolicyReader = Arc<dyn Fn() -> MemoryPolicy + Send + Sync>;
 
 #[derive(Clone)]
 pub struct RecallAgent {
+    utility: Option<std::sync::Weak<crate::consequence::utility::UtilityRuntime>>,
+    receipts: Option<Arc<crate::recall_receipt::RecallReceipts>>,
     prompt: Arc<str>,
     pub conversations: Conversations,
     /// The collection backing `conversations`. `Conversations` wraps document
@@ -240,6 +254,8 @@ impl RecallAgent {
     ) -> Self {
         Self {
             prompt: super::prompts::active_prompt(super::prompts::PromptTarget::Recall),
+            receipts: None,
+            utility: None,
             clock: Arc::new(crate::runtime::BusinessClock::default()),
             conversations,
             conversations_collection,
@@ -254,6 +270,20 @@ impl RecallAgent {
     /// Retained for caller compatibility. Primers are now read fresh because
     /// trust, identity and authorization can change without a schema publish.
     pub fn with_schema_generation(self, _generation: Arc<AtomicU64>) -> Self {
+        self
+    }
+    pub(crate) fn with_receipts(
+        mut self,
+        receipts: Arc<crate::recall_receipt::RecallReceipts>,
+    ) -> Self {
+        self.receipts = Some(receipts);
+        self
+    }
+    pub(crate) fn with_utility(
+        mut self,
+        utility: std::sync::Weak<crate::consequence::utility::UtilityRuntime>,
+    ) -> Self {
+        self.utility = Some(utility);
         self
     }
 
@@ -442,6 +472,17 @@ impl RecallAgent {
 
         let mut output = last_output.unwrap_or_default();
         output.conversation = Some(conversation._id);
+        if let Some(receipts) = &self.receipts
+            && let Err(error) = receipts
+                .issue_legacy(
+                    conversation._id,
+                    crate::assess::split_recall_meta(&output.content).0,
+                    &conversation.messages,
+                )
+                .await
+        {
+            log::warn!(target:"brain","failed Recall delivery receipt unavailable: {error}");
+        }
         let doc = Document::from(conversation.clone());
         output.failed_reason = Some(format!("{reason}\n\n{doc}"));
         output
@@ -738,7 +779,17 @@ impl Agent<AgentCtx> for RecallAgent {
         self.hook
             .on_conversation_end(Self::NAME, &conversation)
             .await;
-        last_output.ok_or_else(|| "completion runner returned no output".into())
+        let output = last_output.ok_or("completion runner returned no output")?;
+        if let Some(receipts) = &self.receipts {
+            receipts
+                .issue_legacy(
+                    conversation._id,
+                    crate::assess::split_recall_meta(&output.content).0,
+                    &conversation.messages,
+                )
+                .await?;
+        }
+        Ok(output)
     }
 }
 

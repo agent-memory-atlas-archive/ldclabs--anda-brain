@@ -138,7 +138,8 @@ impl McpMessage {
 pub struct RememberConversationInput {
     pub messages: Vec<McpMessage>,
     pub context: Option<InputContext>,
-    /// Optional ISO 8601 timestamp for the represented conversation.
+    /// Optional canonical UTC timestamp (`YYYY-MM-DDTHH:mm:ss.SSSZ`) for the
+    /// represented conversation.
     pub timestamp: Option<String>,
 }
 
@@ -179,7 +180,7 @@ pub struct RunMaintenanceInput {
     pub trigger: Option<String>,
     /// Maintenance scope. Defaults to "daydream".
     pub scope: Option<MaintenanceScope>,
-    /// Optional ISO 8601 timestamp.
+    /// Optional canonical UTC timestamp (`YYYY-MM-DDTHH:mm:ss.SSSZ`).
     pub timestamp: Option<String>,
     pub parameters: Option<MaintenanceParameters>,
 }
@@ -204,6 +205,13 @@ pub struct GetOrInitUserToolInput {
     pub user: String,
     /// Optional display name to attach when the user is first created.
     pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RespondAttentionToolInput {
+    pub id: String,
+    pub response: crate::runtime_api::AttentionResponse,
 }
 
 /// One entry of [`ExecuteKipReadonlyInput::commands`].
@@ -531,6 +539,86 @@ impl AndaBrainMcpServer {
     async fn get_space_info_for(&self, access: &McpAccess) -> Result<CallToolResult, ErrorData> {
         let space = self.load_lenient_space(access).await?;
         structured_result(space.get_info())
+    }
+
+    async fn runtime_access(
+        &self,
+        access: &McpAccess,
+        scope: TokenScope,
+    ) -> Result<
+        (
+            Arc<crate::runtime_api::MemoryRuntime>,
+            crate::runtime_api::RuntimeCaller,
+        ),
+        ErrorData,
+    > {
+        let (space, credential) = crate::authz::runtime_credentials(
+            &self.app,
+            &access.space_id,
+            &access.auth_token,
+            access.sharding,
+            scope,
+        )
+        .await
+        .map_err(runtime_error_data)?;
+        let runtime = space.memory_runtime().ok_or_else(|| {
+            runtime_error_data(crate::runtime_api::RuntimeError::Unavailable(
+                "runtime bindings are not installed".into(),
+            ))
+        })?;
+        let caller = runtime
+            .map_credential(&credential)
+            .map_err(runtime_error_data)?;
+        Ok((runtime, caller))
+    }
+    async fn attention_for(
+        &self,
+        access: &McpAccess,
+        input: crate::runtime_api::AttentionQuery,
+    ) -> Result<CallToolResult, ErrorData> {
+        let (runtime, caller) = self.runtime_access(access, TokenScope::Read).await?;
+        structured_result(
+            runtime
+                .inbox(&caller, input)
+                .await
+                .map_err(runtime_error_data)?,
+        )
+    }
+    async fn respond_attention_for(
+        &self,
+        access: &McpAccess,
+        input: RespondAttentionToolInput,
+    ) -> Result<CallToolResult, ErrorData> {
+        let (runtime, caller) = self.runtime_access(access, TokenScope::Write).await?;
+        structured_result(
+            runtime
+                .respond(caller, input.id, input.response)
+                .await
+                .map_err(runtime_error_data)?,
+        )
+    }
+    async fn runtime_status_for(&self, access: &McpAccess) -> Result<CallToolResult, ErrorData> {
+        let (space, credential) = crate::authz::runtime_credentials(
+            &self.app,
+            &access.space_id,
+            &access.auth_token,
+            access.sharding,
+            TokenScope::Read,
+        )
+        .await
+        .map_err(runtime_error_data)?;
+        let status = if let Some(runtime) = space.memory_runtime() {
+            let caller = runtime
+                .map_credential(&credential)
+                .map_err(runtime_error_data)?;
+            runtime
+                .status(&caller, self.app.runtime_cwt_verifier_enabled())
+                .await
+                .map_err(runtime_error_data)?
+        } else {
+            crate::runtime_api::RuntimeStatus::unconfigured()
+        };
+        structured_result(status)
     }
 
     async fn get_formation_status_for(
@@ -1049,6 +1137,62 @@ impl AndaBrainMcpServer {
 
 #[tool_router]
 impl AndaBrainMcpServer {
+    /// Read the current caller's durable memory attention inbox. Reading does not claim work.
+    #[tool(
+        name = "anda_brain_get_attention",
+        annotations(
+            title = "Read Memory Attention",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    pub async fn get_attention(
+        &self,
+        Parameters(input): Parameters<crate::runtime_api::AttentionQuery>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let access = self.access_from_context(&context)?;
+        self.attention_for(&access, input).await
+    }
+    /// Answer a clarification or retain an agent statement. An answer is not execution authority; statements are not independent Outcomes.
+    #[tool(
+        name = "anda_brain_respond_attention",
+        annotations(
+            title = "Respond to Memory Attention",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    pub async fn respond_attention(
+        &self,
+        Parameters(input): Parameters<RespondAttentionToolInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let access = self.access_from_context(&context)?;
+        self.respond_attention_for(&access, input).await
+    }
+    /// Read configured runtime capabilities and a bounded, caller-visible inventory.
+    #[tool(
+        name = "anda_brain_get_runtime_status",
+        annotations(
+            title = "Read Memory Runtime Status",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    pub async fn get_runtime_status(
+        &self,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let access = self.access_from_context(&context)?;
+        self.runtime_status_for(&access).await
+    }
     /// Return statistics and metadata for the configured Anda Brain memory space.
     #[tool(
         name = "anda_brain_get_space_info",
@@ -1358,6 +1502,18 @@ fn unauthorized(scope: TokenScope) -> ErrorData {
     )
 }
 
+fn runtime_error_data(error: crate::runtime_api::RuntimeError) -> ErrorData {
+    let error = crate::handler::runtime_error(error);
+    let data = Some(json!({"http_status":error.status.as_u16()}));
+    if error.status == http::StatusCode::BAD_REQUEST {
+        ErrorData::invalid_params(error.message, data)
+    } else if error.status.is_server_error() {
+        ErrorData::internal_error(error.message, data)
+    } else {
+        ErrorData::invalid_request(error.message, data)
+    }
+}
+
 /// Maps a shared authorization failure onto the MCP error surface,
 /// preserving this channel's historical messages (the HTTP mapping lives in
 /// `From<AuthzError> for AppError`).
@@ -1427,6 +1583,73 @@ mod tests {
     use anda_engine::model::{CompletionFeaturesDyn, reqwest};
     use http::{HeaderMap, header};
     use ic_cose_types::cose::ed25519::VerifyingKey;
+
+    #[tokio::test]
+    async fn r4_mcp_shares_runtime_auth_and_response_service_without_observer_tools() {
+        use crate::space::tests::runtime_api::{fixture, token};
+        let name = "r4_mcp";
+        let (app, space, _) = fixture(name, Some("Which date?".into())).await;
+        space.attention().tick().await.unwrap();
+        let server = AndaBrainMcpServer::new(
+            app,
+            McpServerConfig::stdio(name.into(), Some(token(name, 10))),
+        );
+        let access = McpAccess {
+            space_id: name.into(),
+            auth_token: token(name, 10),
+            sharding: None,
+        };
+        let page = server
+            .attention_for(&access, crate::runtime_api::AttentionQuery::default())
+            .await
+            .unwrap();
+        let data = page.structured_content.unwrap();
+        let question = data["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["clarification"].is_object())
+            .unwrap();
+        let response = server
+            .respond_attention_for(
+                &access,
+                RespondAttentionToolInput {
+                    id: question["id"].as_str().unwrap().into(),
+                    response: crate::runtime_api::AttentionResponse::Clarification {
+                        event_key: "mcp-answer".into(),
+                        answer: "Tomorrow".into(),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.structured_content.unwrap()["status"],
+            "answer_received_not_authorization"
+        );
+        let anonymous = McpAccess {
+            space_id: name.into(),
+            auth_token: String::new(),
+            sharding: None,
+        };
+        assert!(
+            server
+                .attention_for(&anonymous, crate::runtime_api::AttentionQuery::default())
+                .await
+                .is_err()
+        );
+        let tools = server.tool_router.list_all();
+        let names: Vec<_> = tools.iter().map(|t| t.name.as_ref()).collect();
+        assert!(names.contains(&"anda_brain_get_attention"));
+        assert!(names.contains(&"anda_brain_respond_attention"));
+        assert!(names.contains(&"anda_brain_get_runtime_status"));
+        assert!(
+            !names
+                .iter()
+                .any(|n| n.contains("outcome") || n.contains("register_executor"))
+        );
+        space.close().await.unwrap();
+    }
 
     #[derive(Debug)]
     struct FinalCompleter;
@@ -1660,7 +1883,7 @@ mod tests {
                         source: Some("mcp-test".to_string()),
                         topic: Some("preferences".to_string()),
                     }),
-                    timestamp: Some("2026-06-25T00:00:00Z".to_string()),
+                    timestamp: Some("2026-06-25T00:00:00.000Z".to_string()),
                 },
             )
             .await

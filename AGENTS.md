@@ -23,6 +23,11 @@ write KIP directly.
 `anda_kip`, `anda_cognitive_nexus`, `anda_db*`, `anda_core` and `anda_engine`
 resolve from published crates. A sibling `anda-db` checkout is needed only
 when deliberately refreshing vendored KIP prompt assets.
+The current 0.12.0 release pins `anda_kip = "=0.13.1"` and requires
+`anda_cognitive_nexus = "0.13.1"`; the Worker pins `@ldclabs/kip-do` 0.13.1.
+KIP v2 has not been deployed. Use fresh v2 Spaces for current acceptance;
+do not add pre-release old-data migration work unless explicitly requested.
+Keep normal restart, eviction and unresolved-write recovery fully tested.
 
 ## Repository Layout
 
@@ -37,6 +42,9 @@ when deliberately refreshing vendored KIP prompt assets.
   and the Cognitive Memory Profile are **not** copied here — `anda_kip` ships
   them with the protocol, and `agents::prompts::mode_reference()` puts the role cards and Profile
   in the model's context at completion time.
+- `anda_brain/src/kip_reference.rs` and `assets/kip-reference/`: bounded reference
+  discovery and the generated specification/schema supplement. Its manifest pins
+  the published KIP source; do not hand-edit generated reference material.
 - `anda_brain/src/kip.rs`: the KIP 2.0 envelope seam (request builders, the
   read-only gate, two-level response reading, and the KIP string/timestamp
   literal helpers).
@@ -44,7 +52,7 @@ when deliberately refreshing vendored KIP prompt assets.
   typed read observations, Recall trace/citations and metadata. Preserve these
   and the usage/correction ledgers; they are not the retired offline evaluator.
 - Offline product regressions live in sibling MIB. `src/eval.rs`, its modules,
-  the `eval` CLI and global prompt/policy overrides were retired in P7. Do not
+  the `eval` CLI and global prompt/policy overrides were retired. Do not
   recreate an equivalent comprehensive evaluator inside Brain. The independent
   wiki corpus under `anda_brain/evals/wiki/` remains in use.
 - `anda_brain/src/settlement/`: bounded decay, correction discovery and Watch
@@ -53,6 +61,16 @@ when deliberately refreshing vendored KIP prompt assets.
   runs without an independent observer/trial/evaluation pipeline.
 - `anda_brain/src/cognitive.rs`: model-facing host mechanics: full syntax,
   canonical content digests, protected Watch arming and bounded task leases.
+- `anda_brain/src/attention/` and `space/attention.rs`: persistent Space discovery,
+  bounded Watch/wake scheduling and optional semantic evaluation. Register direct
+  native work before creation; preserve current native coverage and generation checks.
+- `anda_brain/src/action/`: four-way decisions, clarification and fenced dispatch.
+  Callbacks require explicit host bindings; unknown delivery requires reconciliation.
+- `anda_brain/src/runtime_api/` and `handler/runtime.rs`: startup configuration,
+  authenticated recipient-filtered inboxes, responses and runtime status.
+- `anda_brain/src/consequence/` and `recall_receipt.rs`: independent outcomes,
+  verifiable memory delivery, calibrated utility and scoped trust proposals.
+  Governance application requires current native authority, never a model claim.
 - `anda_brain/src/learning/`: optional trusted paired-trial contracts, Nexus
   evaluator and persistent host runtime (`learning` feature). Native dispatch
   gates require real leases, executable authority and dependency validation.
@@ -69,7 +87,15 @@ when deliberately refreshing vendored KIP prompt assets.
   KML cannot declare a type, so new vocabulary enters through the host here.
 - `anda_brain/API*.md`, `anda_brain/README.md`, `anda_brain/SKILL.md`: public
   API and integration documentation.
-- `skills/anda-brain/`: packaged skill content for external agents.
+- `anda_brain/RUNTIME.md`: host setup, scheduling, action contracts and recovery;
+  the learning, utility, semantic Watch and trust runtime guides hold their specific
+  configuration contracts. Each has a separate `_cn.md` edition. Public docs use
+  capability names, not internal phase IDs, and never depend on private plans.
+- `VALIDATION_PLAN.md` / `VALIDATION_PLAN_cn.md`: proposed observability and MIB
+  validation work. These plans are not evidence that new metrics, real-model gains
+  or deployment calibration have already been implemented or accepted.
+- `skills/anda-brain/`: packaged integration skill for external agents. Keep its
+  `SKILL.md` identical to `anda_brain/SKILL.md`, served by `GET /SKILL.md`.
 - `anda-brain-worker/`: a compact Cloudflare Worker port on `@ldclabs/kip-do`,
   a second and independent KIP 2.0 engine. It shares the invariants below but
   not the code; its capabilities differ (no atomic batch across operations, no
@@ -122,11 +148,13 @@ The Cloudflare Worker is checked separately, and its own checks must pass when
 you touch `anda-brain-worker/`:
 
 ```bash
-pnpm --filter @ldclabs/anda-brain-worker check
+CI=true pnpm --filter @ldclabs/anda-brain-worker check
 ```
 
-The Worker resolves `@ldclabs/kip-do` 0.13 from the npm registry; use the
-repository's pnpm lockfile and run `pnpm install --frozen-lockfile` first.
+The Worker resolves `@ldclabs/kip-do` 0.13.1 from the npm registry; use the
+repository's pnpm lockfile and run `CI=true pnpm install --frozen-lockfile` first.
+The check includes generated-asset verification, TypeScript, tests and a deployment
+dry run; it does not deploy the Worker.
 
 ## Cargo Features
 
@@ -192,7 +220,9 @@ confidently repeat things nobody claimed:
   TrialRecord, revision-bound DecisionRecord/AttemptRecord, authorized independent
   OutcomeRecord and replayable EvaluationRecord. Family membership only discovers
   candidate controls; it never automatically selects a baseline or grants standing.
-  This Brain currently retains unproven candidates and does not advertise learning.
+  Candidates remain unproven without qualifying evidence. Optional learning requires
+  registered executor/observer/source bindings and explicit calibrated automation;
+  mechanism tests do not establish empirical improvement.
 - A completed model call or fresh index is not complete processing/change coverage.
   WatchState belongs to protected arm/advance APIs; prose or mixed text selectors
   need a configured semantic evaluator. LeaseState comes from authenticated host
@@ -216,6 +246,21 @@ confidently repeat things nobody claimed:
   resumption when it finishes.
 - Recall and read-only KIP execution must remain read-only and bounded by the
   configured timeouts.
+- Off-graph Recall receipts attest delivery, not use or benefit. Utility needs
+  independent attribution and only ranks within existing priorities. Trust changes
+  require scoped fact verification and current `manage_trust`; startup bootstrap
+  never grants that permission. Neither score changes execution authority.
+- Runtime inbox/status/responses require verified credentials and explicit native
+  mappings even when legacy local authentication is disabled. HTTP Outcomes need
+  a separately registered signed observer with current `record_outcome`; ordinary
+  Space tokens and MCP model tools cannot supply independent observer authority.
+- Semantic Watch judgments must cover every authorized candidate under the pinned
+  evaluator. Unknown, missing or truncated output cannot advance native coverage;
+  configuration changes require explicit review and never auto-rearm old work.
+- Owned native writes survive cancelled waiters and drain before database close.
+  Keep one live owner per storage shard; CAS does not establish multi-host ownership.
+- Runtime status and mechanism fixtures are not empirical learning/calibration
+  evidence. Missing measurements and provider costs stay unknown, never zero.
 - Space-level token scopes are `read`, `write`, and `*`; keep auth changes
   explicit and test them.
 - Space metadata and database extension updates must be persisted with
@@ -234,6 +279,11 @@ or endpoints:
 - Update `anda_brain/SKILL.md` and `skills/anda-brain/SKILL.md` when integration
   instructions or endpoint usage changes.
 - Keep English and Chinese docs in sync for user-facing API changes.
+- Keep English and Chinese runtime guides in separate files, with language links
+  and matching formulas, limits, API names and examples. Chinese entry points link
+  to `_cn.md`; never remove necessary detail while separating translations.
+- Keep the release at 0.12.0 until explicitly asked to change it. Record completed
+  behavior and known limits in `CHANGELOG.md`; do not list planned work as shipped.
 
 ## Prompt and Asset Changes
 

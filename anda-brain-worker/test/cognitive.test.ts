@@ -20,7 +20,7 @@ async function version(stub: BrainRpc, id: string): Promise<number> {
 }
 async function watch(stub: BrainRpc, condition: unknown, watchClass = 'silence'): Promise<string> {
   const id = await created(stub, `CREATE CONCEPT ?item { TYPE "Watch" SET ATTRIBUTES {
-    watch_class: :class, summary: "wait", status: "disarmed", condition: :condition, due_at: "2020-01-01T00:00:00Z"
+    watch_class: :class, summary: "wait", status: "disarmed", condition: :condition, due_at: "2020-01-01T00:00:00.000Z"
   } }`, {class:watchClass,condition:condition as never})
   const result = await stub.executeMaintenancePlan([], [{operation:'arm_watch', target_ref:id, expected_version:await version(stub,id)}])
   expect(result[0]?.status, JSON.stringify(result)).toBe('succeeded')

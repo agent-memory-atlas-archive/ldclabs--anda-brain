@@ -1,0 +1,31 @@
+{
+  "format": "anda-brain:runtime-api-v1",
+  "spaces": {
+    "your_space_id": {
+      "bootstrap": true,
+      "subjects": [],
+      "audience": [],
+      "observers": [],
+      "adapter": null,
+      "trust": {
+        "version": "binary-fact-accuracy/deployment-v1",
+        "proposer_principal": "kip:principal:trust-proposer",
+        "governor_principal": "kip:principal:trust-governor",
+        "observer": {
+          "principal_id": "kip:principal:fact-verifier",
+          "configuration_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "control_domain": "your-independent-instrument-domain"
+        },
+        "predicate_ref": "kip://profiles/cognitive-memory@2.1.0/prefers",
+        "context_ref": "C-1",
+        "task_family": "your.source-facts.v1",
+        "environment_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "parameters": null,
+        "calibration": null,
+        "automatic": false,
+        "apply": false,
+        "automatic_apply": false
+      }
+    }
+  }
+}

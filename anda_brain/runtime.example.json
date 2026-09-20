@@ -1,0 +1,61 @@
+{
+  "format": "anda-brain:runtime-api-v1",
+  "spaces": {
+    "example_space": {
+      "bootstrap": true,
+      "subjects": [
+        {
+          "credential": {
+            "kind": "cwt_subject",
+            "subject": "gllqn-eyk"
+          },
+          "principal": "kip:principal:inbox-reader",
+          "observer": false,
+          "audit_recipients": false
+        },
+        {
+          "credential": {
+            "kind": "cwt_subject",
+            "subject": "ixidm-bil"
+          },
+          "principal": "kip:principal:inbox-observer",
+          "observer": true,
+          "audit_recipients": true
+        }
+      ],
+      "audience": [
+        "kip:principal:inbox-reader",
+        "kip:principal:inbox-observer"
+      ],
+      "observers": [
+        {
+          "principal_id": "kip:principal:inbox-observer",
+          "configuration_digest": "sha256:5f086b0f60fa949f28d8f9dcd5d6311d66917c42a2259689a813578fea78e300",
+          "control_domain": "independent-inbox-instrument",
+          "task_family": "memory.attention.v1",
+          "metric": "delivery",
+          "window": "durable_inbox_v1",
+          "maximum_delay_ms": 3600000
+        },
+        {
+          "principal_id": "kip:principal:inbox-observer",
+          "configuration_digest": "sha256:5f086b0f60fa949f28d8f9dcd5d6311d66917c42a2259689a813578fea78e300",
+          "control_domain": "independent-inbox-instrument",
+          "task_family": "brain.deliver_clarification",
+          "metric": "delivery",
+          "window": "durable_inbox_v1",
+          "maximum_delay_ms": 3600000
+        }
+      ],
+      "adapter": {
+        "id": "attention_inbox_v1",
+        "controller_principal": "kip:principal:inbox-controller",
+        "recipient_principal": "kip:principal:inbox-reader",
+        "message": "A memory needs your attention.",
+        "question": null,
+        "reply_timeout_ms": 86400000,
+        "context": null
+      }
+    }
+  }
+}

@@ -1,5 +1,14 @@
 # Anda Brain API 文档（含 TypeScript 类型）
 
+Rust 现要求 Cognitive Nexus 0.13.1：Watch 触发会原子记录状态变化、`watch_fire`
+活动及受保护 wake，并提供可重放回执和原生租约。服务现会独立于 Full Maintenance
+调度结构化 Watch，从持久化目录发现已驱逐的注册 Space，并在重启后恢复有界扫描。
+受信任 Rust 宿主现可在加载 Space 前安装 `ActionBindings`：四分支决策、澄清、固定
+Attempt 和原生租约分派接入同一调度器。默认不安装生产执行器；运行时 API 已提供认证后的
+待办/回答/后果接口，`BRAIN_RUNTIME_CONFIG` 可装配持久化 inbox 和明确的身份映射，
+详见[运行时接入与恢复](RUNTIME_cn.md)。Space fork 不能复制原生运行身份。内部 `memory_runtime/status` 只读当前
+配置，不领取任务或授予权限；现有 HTTP payload 和 token scopes 保持兼容。
+
 批量记忆强度代谢跳过 SleepTask/Watch 运行记录；宿主结算错误通过
 assessment.settlement_errors 提供给维护模型。
 
@@ -8,7 +17,7 @@ assessment.settlement_errors 提供给维护模型。
 - Base URL: `http://{host}:{port}`
 - 认证头：`Authorization: Bearer <token>`
 - 分片部署：发送与服务端 `SHARDING_IDX` 相同的 `Shard-Id: <index>`（或 `X-Shard`）；默认值为 `0`。
-- 若 `ED25519_PUBKEYS` 为空或未提供，则鉴权将被关闭。
+- 若 `ED25519_PUBKEYS` 为空或未提供，旧接口鉴权会关闭；新运行时接口仍要求真实凭据及映射，没有 CWT 验签器时独立后果 HTTP 写入不启用。
 - 支持的序列化格式：
   - 请求：`Content-Type: application/json | application/cbor | text/markdown`
   - 响应：`Accept: application/json | application/cbor | text/markdown`
@@ -19,7 +28,7 @@ assessment.settlement_errors 提供给维护模型。
 CognitiveMemory 2.1 对齐说明：现有 JSON/CBOR/Markdown 请求和鉴权保持兼容；没有新增
 五意图 Memory Interface 或标准 after barrier。conversation id 不是处理回执。
 维护报告 `skills` 新增可选 `unsupported_reason`，说明没有配置可信学习管线，旧计数
-保持零。Watch 的 `disarmed` 兼容字段也统计 Nexus 的 expired；文本 Watch 保持 deferred。
+保持零。Watch 的 `disarmed` 兼容字段也统计 Nexus 的 expired；文本 Watch 无已配置的语义求值器时保持 deferred。
 模型生成的 Formation 请求不得覆盖宿主捕获的 ingest 或 msgN 绑定；学习/runtime Facet
 写入返回 UnsupportedCapability。原始管理 KIP 仍接受符合 Nexus 契约的受权写入。
 使用精确 `@2.0.0` schema_ref 的旧 Watch/SleepTask 不能原地改成 2.1，需要显式创建、
@@ -71,7 +80,7 @@ export interface Message {
 export interface FormationInput {
   messages: Message[]; // 至少包含一条非空消息（否则 400）
   context?: InputContext;
-  timestamp?: string; // ISO 8601；建议提供
+  timestamp?: string; // 规范 UTC：YYYY-MM-DDTHH:mm:ss.SSSZ；建议提供
 }
 
 export interface RecallInput {
@@ -284,7 +293,7 @@ export interface MaintenanceParameters {
 export interface MaintenanceInput {
   trigger?: 'scheduled' | 'threshold' | 'on_demand';
   scope?: 'full' | 'quick' | 'daydream'; // 默认 'daydream'
-  timestamp?: string; // ISO 8601
+  timestamp?: string; // 规范 UTC：YYYY-MM-DDTHH:mm:ss.SSSZ
   parameters?: MaintenanceParameters;
 }
 
@@ -1198,20 +1207,20 @@ if (recall.error) {
 相邻 Anda Bot 的 `mib` feature 在本机提供独立的 `/mib-agent/v0.1` 和
 `/mib-memory/v0.1` 协议；它们不属于本生产 Brain API 的路由。宿主使用
 `experiments` 实现隔离状态、完成屏障、单调业务时间和清理，详见
-[P2 接入](README.md#mib-integration)。适配器不声明在线学习能力；
+[接入](README.md#mib-integration)。适配器不声明在线学习能力；
 缺少 provider 或 observer 遥测的成本仍明确标为不完整。
 
 Rust 工厂 `Experiment::create_with_recall_budget` 在运行对外可用前持久化强制
-P5 预算。`audit_procedures()` 返回有界、只读的原生程序清单；截断计数不能证明
+Recall 预算。`audit_procedures()` 返回有界、只读的原生程序清单；截断计数不能证明
 不存在。仅 Bot MIB 的 `learning_audit` 扩展将该清单交给评测侧，不进入业务模型。
-它不启用学习，也不赋予执行权限。详见 [P6 验证](README.md#mib-integration)。
+它不启用学习，也不赋予执行权限。详见 [验证](README.md#mib-integration)。
 
-P7 已退役 Rust `anda_brain::eval` API 与 `eval` CLI（含 optimizer/miner 参数）。
+已退役 Rust `anda_brain::eval` API 与 `eval` CLI（含 optimizer/miner 参数）。
 MIB 提供公开产品回归 profile；自测、shadow 诊断、probe、引用与账本继续作为线上
 工具。运行策略使用各 Space 持久化的 `MemoryPolicy`。可信 Rust 宿主可以在共享或
 打开 Space 前调用 `AppState::with_agent_prompts(AgentPrompts)` 提供不可变的部署
 段：每段以 `# A.` 开头、最多 128 KiB，编译参考前缀保持原样。这不是 HTTP/MCP
-提示操作。详见 [P7 迁移](README.md#offline-regression-and-instance-configuration)。
+提示操作。详见 [迁移](README.md#offline-regression-and-instance-configuration)。
 
 
 ### 可信学习运行时（仅 Rust）
@@ -1225,5 +1234,225 @@ MIB 提供公开产品回归 profile；自测、shadow 诊断、probe、引用�
 `bind_application_context()` 接受短时有效的可信宿主环境观测，`procedure_status()`
 及 Recall 内部的 `check_procedure_status` 工具只读检查当前推荐条件，不授予执行权限。
 条件无法验证或复核到期时停止推荐。已配置 learning 的 Space 不允许通过 fork/snapshot
-复制操作 journal。详见 [P3 运行时](README.md#native-learning-contracts) 和
-[P4 生命周期与恢复](README.md#native-learning-contracts)。
+复制操作 journal。详见 [运行时](README.md#native-learning-contracts) 和
+[生命周期与恢复](README.md#native-learning-contracts)。
+
+
+## 有身份的运行时待办与后果
+
+启动前配置 `BRAIN_RUNTIME_CONFIG`。完整合同、恢复及示例见 [RUNTIME_cn.md](RUNTIME_cn.md)
+和 [runtime.example.json](runtime.example.json)。公共/本地 Space 也必须提供真实凭据。
+
+| 接口 | 授权 | 返回 |
+| --- | --- | --- |
+| `GET /v1/{space_id}/attention?limit=20&cursor=...` | 真实 read/* 凭据、原生主体映射和 audience | `AttentionPage`，读取不领取 |
+| `POST /v1/{space_id}/attention/{id}/responses` | 真实 write/*、当前可见性及正确接收者 | `ResponseReceipt`，body 为 `AttentionResponse` |
+| `POST /v1/{space_id}/outcomes` | 验签的观察者 CWT、当前 record_outcome 及登记合同 | `ObservationReceipt`，body 为 `OutcomeInput` |
+| `GET /v1/{space_id}/runtime/status` | 真实 read/*，配置启用时需映射 | `RuntimeStatus`，计数仅覆盖可见的有限页面 |
+
+URL 中的 id 是返回的 wake 摘要，不是带斜杠的 wake_ref。五分钟有效的游标经加密认证，
+绑定调用者/instance/配置；跨调用者或过期游标被拒绝。公共 Space 和普通 write token
+不能认证独立观察者。MCP 暴露 get_attention、respond_attention、get_runtime_status
+（均带 anda_brain_ 前缀），观察者写入不属于模型工具。
+
+POST 使用结构化 JSON/CBOR，响应保留 JSON/CBOR/Markdown 协商。同事件同文幂等，
+异文 409 并留存审计；未来时间或错误 instance 被拒绝。迟到/更正/安全状态、原生提交
+和 learning 入样分别报告。learning 变体必须符合原有 OutcomeMeasurements 合同，
+包括 baseline 在内均只路由到既有控制器。
+
+```ts
+type RuntimeScope = { space_id: string; space_instance: string };
+type AttentionQuery = { cursor?: string | null; limit?: number | null };
+type AttentionResponse =
+  | { kind: "clarification"; event_key: string; answer: string }
+  | { kind: "agent_statement"; event_key: string; statement: string };
+type ResponseReceipt = {
+  receipt_id: string; status: string; evidence_ref: string | null;
+};
+type AttentionPage = {
+  scope: RuntimeScope; items: AttentionItem[];
+  next_cursor: string | null; complete: boolean;
+};
+type AttentionItem = {
+  id: string; wake_ref: string; parent_id: string | null;
+  watch_ref: string; fire_activity_ref: string; summary: string;
+  state: "pending" | "running" | "blocked" | "completed" | "cancelled";
+  reason: string | null; decision: Record<string, unknown> | null;
+  decision_ref: string | null; attempt_ref: string | null;
+  dispatch_ref: string | null; clarification: Record<string, unknown> | null;
+  delivery: Record<string, unknown> | null;
+};
+type OutcomeStatus = "success" | "partial" | "failure" | "aborted" | "unknown";
+type OutcomeInput = {
+  space_instance: string; attempt_ref: string;
+  observer_configuration_digest: string; event_key: string;
+  observed_at: string; metric: string; window: string;
+  observation:
+    | { kind: "measurement"; terminal: boolean; outcome_status: OutcomeStatus;
+        magnitude?: number | null; payload: unknown }
+    | { kind: "learning"; measurements: Record<string, unknown> };
+  correction_of?: string | null; safety_signal?: string | null;
+  utility?: { witness_ref?: string; witness?: ContributionWitness } | null;
+};
+type ObservationReceipt = {
+  format: "anda-brain:observation-receipt-v1";
+  receipt_id: string; scope: RuntimeScope; event_key: string;
+  body_digest: string; observer: string; received_at_ms: number;
+  observed_at: string; status: string;
+  native_committed: boolean; learning_eligible: boolean;
+  outcome_status: OutcomeStatus | null; outcome_ref: string | null;
+  observation_ref: string | null; reason: string | null; safety_pending: boolean;
+  safety_evaluation_ref?: string; // 解决或覆盖本安全信号的原生撤销记录。
+};
+type RuntimeStatus = {
+  supported: boolean; configured: boolean; scope: RuntimeScope | null;
+  attention_enabled: boolean; actions_enabled: boolean;
+  observation_enabled: boolean; observer_authenticated: boolean;
+  blocked_reasons: string[]; visible_items: number; inventory_complete: boolean;
+  utility?: UtilityStatus;
+  learning?: LearningRuntimeStatus;
+  semantic_attention?: SemanticAttentionStatus;
+  trust?: TrustRuntimeStatus;
+};
+```
+
+### 后果与回答语义
+
+待办页包含 1–50 项、最多 256 KiB 可见输出。`complete` 仅表示本次快照遍历结束，
+不表示任务完成或语义完整；每页重验可见性，包括 gate 记忆包背后的原生证据。
+MCP 回答参数为 `{id, response}`，列表参数为 `{cursor, limit}`。读取和回答均不领取
+任务；澄清回答须对应已提交 ask、正确接收者和有效期限，回答进入新 gate，不授予权限。
+`agent_statement` 只生成带归属 Evidence 和 Activity，不生成独立 OutcomeRecord。例如：
+
+```json
+{"kind":"clarification","event_key":"answer-42","answer":"明天"}
+```
+
+测量请求使用实际保留的身份与摘要：
+
+```json
+{
+  "space_instance":"sha256:INSTANCE_DIGEST",
+  "attempt_ref":"X-42",
+  "observer_configuration_digest":"sha256:REGISTERED_METHOD_DIGEST",
+  "event_key":"instrument-event-42",
+  "observed_at":"2026-09-17T10:00:00.000Z",
+  "metric":"delivery",
+  "window":"durable_inbox_v1",
+  "observation":{
+    "kind":"measurement",
+    "terminal":true,
+    "outcome_status":"success",
+    "magnitude":null,
+    "payload":{"delivery_digest":"sha256:ACTUAL_DELIVERY_REQUEST_DIGEST"}
+  },
+  "correction_of":null,
+  "safety_signal":null
+}
+```
+
+观察合同固定主体、方法/配置摘要、控制域、任务族、指标、窗口及允许延迟。接收层验证
+真实 act/Attempt、原生事务作者、已存在分派和观测时间，拒绝控制器自评。inbox 成功还
+须验证实际持久化投递及匹配的摘要/时间，仅证明 inbox 写入，不代表人已阅读或业务成功。
+其他回调须提供自己的独立测量合同。
+
+普通合格测量原子生成 Outcome Evidence 与 `outcome_observation` Activity；原始材料
+保留在 Evidence payload，不扩展封闭的 OutcomeRecord Facet。非终结/unknown 不完成
+分派，缺失 magnitude/cost 不填零。终结证据对账同一 Attempt，取消后也可保留真实后果。
+原生留证与分派对账是两个可恢复步骤；未确认写入须用相同事件/内容和新鲜认证重试。
+调用方取消不截断已接收写入。
+
+认证后的迟到、冲突及学习非终结材料可审计，不改变旧试验入样资格。更正指向同一
+观察者/Attempt 的较早事件，追加证据，不改写旧 Outcome/Evaluation。迟到或排除的
+安全信号仍可发现；显式启用的学习消费者使用当前观察者权限，在原生撤销完成后才确认
+`safety_pending` 并记录 `safety_evaluation_ref`。
+
+已登记学习 Attempt 使用 `observation:{"kind":"learning", "measurements":{...}}`。
+归属来自保留的 ticket，`trial_ref:null` 的 baseline 也不会落入普通写入器；只有
+`LearningRuntime::submit_outcome` 写原生结果，保持冻结 cutoff、可比性和 ACK 恢复。
+控制器不可用时拒绝，不转普通路径。`learning_eligible:true` 只表示合同接纳，不等于
+正向裁决。输入上限 16 KiB，事件键 256 字节；身份装配和存储上限见[运行时指南](RUNTIME_cn.md)。
+
+### 学习运行状态
+
+既有 status 路由和 MCP 工具新增 learning；模型工具不提供 cohort 报名或观察者
+凭据管理。只有明确映射的 auditor 能看到 capacity / last_pass，其他调用方为 null。
+Maintenance 的可选 skills.runtime 显示独立调度状态，旧 Skill 计数不会重复计入
+此前调度工作。详见[学习指南](LEARNING_RUNTIME_cn.md)。
+
+```typescript
+type LearningRuntimeStatus = {
+  compiled: boolean; registered: boolean; registration_enabled?: boolean;
+  bindings_ready: boolean; automatic_allowed: boolean; running?: boolean;
+  automation?: { trials: boolean; reviews: boolean; archive: boolean; safety: boolean };
+  blocked_reasons?: string[];
+  capacity?: { hot_jobs: number; maximum_hot_jobs: number; archived_jobs: number;
+    retained_identities: number; reserved_bytes: number;
+    storage: { maximum_records: number; maximum_reserved_bytes: number } } | null;
+  last_pass?: { started_at_ms: number; finished_at_ms: number; enrolled: number;
+    driven: number; observed: number; settled: number; archived: number;
+    reviews_checked: number; reviews_enrolled: number; safety_resolved: number;
+    blocked: string[] } | null;
+};
+```
+
+### 交付与效用元数据
+
+结构化 Recall 新增可选 recall_receipt 元数据，answer/语义 packet 保持不变。普通或
+直接 agent 调用可通过 conversation ID 在可信 Rust API 查询收据。观察者在 outcomes
+的 utility 中可选择内联见证或既有原生见证引用，不放宽验签与独立权限检查。
+运行状态新增 utility 的开关、校准状态及恢复原因；模型没有设置分数或新增 MCP
+变更工具。详见 [UTILITY_RUNTIME_cn.md](UTILITY_RUNTIME_cn.md)。
+
+```typescript
+type RecallReceiptRef = {
+  id: string; digest: string; scope: RuntimeScope;
+};
+// RecallOutput.recall_receipt?: RecallReceiptRef
+// OutcomeInput.utility?: { witness_ref?: string; witness?: ContributionWitness }
+// RuntimeStatus.utility?: UtilityStatus
+type UtilityStatus = {
+  configured: boolean; automatic: boolean; apply: boolean;
+  calibrated: boolean; ranking: boolean; running: boolean;
+  reason: string | null;
+};
+```
+
+### 文本注意力状态
+
+Runtime status 新增可选 `semantic_attention`：`configured`、`automatic`、`running`、
+`pin`、`reason` 及可空的 `last_pass`。后者包含单轮有界统计 `scanned`、`calls`、
+`input_tokens`、`advanced`、`fired`、`expired`、`deferred`、`reason`，仅配置为 auditor
+的调用者可读取，其他调用者得到 null。它不是完整清单，也不证明所有文本 Watch
+均已求值。既有 JSON/CBOR/Markdown 和 HTTP/MCP 请求形状保持兼容；不新增模型配置
+或求值写接口。操作员通过每 Space 的 `semantic` 启动绑定安装。预算、pin 迁移、
+unknown/deferred、原生 Artifact 擦除及幂等恢复见
+[SEMANTIC_WATCH_RUNTIME_cn.md](SEMANTIC_WATCH_RUNTIME_cn.md)。
+
+```typescript
+type SemanticAttentionStatus = {
+  configured: boolean; automatic: boolean; running: boolean;
+  pin: { id: string; digest: string } | null; reason: string | null;
+  last_pass: {
+    scanned: number; calls: number; input_tokens: number; advanced: number;
+    fired: number; expired: number; deferred: number; reason: string | null;
+  } | null;
+};
+```
+
+### 上下文 trust 状态与发现提示
+
+既有 HTTP 状态路由和 MCP 状态工具新增可选 `trust` 元数据。`governor_authorized`
+表示配置的治理主体当前是否具有原生权限，不是授予调用者的权限。不新增 HTTP/MCP
+trust 管理或独立事实写工具，既有 JSON/CBOR/Markdown 请求保持兼容。正常认证的
+独立 measurement payload 可选携带 `trust_verification_ref: "E-…"`，用于公告既有原生
+事实核验记录并有界发现，不能把行动成功/失败转成信任得分。可信 Rust 事实接收、
+审查、应用、版本冲突恢复和限定域回退见 [TRUST_RUNTIME_cn.md](TRUST_RUNTIME_cn.md)。
+
+```typescript
+type TrustRuntimeStatus = {
+  configured: boolean; automatic: boolean; apply: boolean; automatic_apply: boolean;
+  calibrated: boolean; governor_authorized: boolean; running: boolean;
+  reason: string | null;
+};
+```

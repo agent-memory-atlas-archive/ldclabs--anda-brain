@@ -663,8 +663,10 @@ advertise this Brain's interfaces. This deployment exposes the existing Brain
 API and raw KIP; it does not advertise the optional five-intent Memory Interface,
 a memory capability bundle, or full CognitiveMemory conformance.
 
-There is no configured independent observer/trial/evaluation scheduler or external
-dispatch adapter. Procedures remain explicitly **unproven** candidates. Do not
+Independent observers, trial/evaluation scheduling and external dispatch require
+explicit host configuration. Read `skills.runtime` in the settlement report and
+`memory_runtime` status for the installed runtime; never infer readiness from
+compiled types. Procedures remain **unproven** until independently qualified. Do not
 create or update TrialRecord, EvaluationRecord, AttemptRecord, OutcomeRecord,
 GradingState or TrialState through a model plan. The runtime rejects those writes.
 Ordinary attributed feedback remains Evidence, including agent_statement for
@@ -684,11 +686,23 @@ self-report; task_family only discovers possible controls and never selects one.
   version and arm_generation. WatchState retains consumed_seq and the authorization
   view. Silence fires only after complete authorized deadline coverage. A matched
   silence Watch expires at its deadline. The historical response field `disarmed`
-  counts this expiry. The native result is the status/coverage/receipt, not a
-  synthesized watch_fire Activity or a model-authored watermark.
-- Prose conditions and mixed structured/text conditions are deferred: this Brain
-  has no semantic Watch evaluator. Completion of a model call proves no change
-  coverage. No legacy `due_seen_seq` or Space `delta_consumed_seq` releases a Watch.
+  counts this expiry. On firing, Nexus atomically commits the Watch transition,
+  a watch_fire Activity and a protected wake. Native retries replay their retained
+  receipt. Do not create a duplicate fire Activity or invent a watermark. These
+  records do not authorize external action. A persistent host scheduler also
+  advances registered structured Watches independently of this maintenance cycle;
+  it resumes bounded scans after eviction/restart. Explicit host bindings can run
+  the four-way action gate and fenced dispatch. Read memory_runtime status for this
+  connection's configuration. Do not duplicate runtime gate/Attempt receipts or
+  infer delivery from firing. A clarification answer is not execution permission;
+  an executor ACK is not an independent Outcome.
+- Prose and mixed structured/text conditions require a host-installed semantic
+  evaluator. Read `memory_runtime` status.semantic_attention; without that binding
+  they remain deferred. The separate host runtime validates complete per-item
+  judgments and commits native coverage. Unknown, missing, timed-out or truncated
+  judgments cannot advance it. Completion of this maintenance model call proves
+  no change coverage. No legacy `due_seen_seq` or Space `delta_consumed_seq` releases
+  a Watch. Configuration changes require reviewed migration, never automatic re-arm.
 - The former family-success-rate Skill rule does not run. The report's
   `skills.unsupported_reason` explains why no validated evaluation was performed.
 
@@ -723,7 +737,8 @@ the required semantic attributes and structural references, verify those links,
 then archive the legacy record. Do not reuse its lineage-scoped key.
 Do not hand-write WatchState, LeaseState, matched, consumed_seq or Watch status.
 Fired Watches are attention, never permission. Read existing decision records before
-recording another; there is no automatic acknowledgement/disarm or external action.
+recording another; do not infer acknowledgement, disarm or external action from a
+fire. Installed host callbacks have separate gate, dispatch and outcome receipts.
 
 ## A.4 Mutation limits
 

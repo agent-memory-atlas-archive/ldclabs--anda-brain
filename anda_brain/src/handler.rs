@@ -34,6 +34,10 @@ use crate::{
     types::*,
 };
 use std::sync::Arc;
+mod runtime;
+#[cfg(feature = "mcp")]
+pub(crate) use runtime::runtime_error;
+pub use runtime::{get_attention, get_runtime_status, post_attention_response, post_outcome};
 
 const SKILL_MARKDOWN: &str = include_str!("../SKILL.md");
 const FAVICON: &[u8] = include_bytes!("../favicon.ico");

@@ -94,7 +94,7 @@ The whole packet and cumulative normalized planning input use the pinned
 `o200k_base@tiktoken-rs-0.12.0` counter. Required commitments/warnings precede
 optional items, failed coverage is explicit, and diagnostic histories/artifacts
 cannot bypass the packet limit. Existing requests without a budget policy keep
-the normal flow below. See [P5 contract](API.md#recall-budget-contract).
+the normal flow below. See [Recall budget contract](API.md#recall-budget-contract).
 
 Translates natural language queries into knowledge graph lookups and returns synthesized answers.
 
@@ -198,11 +198,32 @@ call the internal `memory_runtime` tool with `arm_watch`, its exact id and curre
 bounded authorized change page using the current overall version and generation.
 Silence requires complete coverage through the deadline; a matching silence Watch
 ends as `expired`, counted in the legacy `disarmed` report field. Native advancement
-returns status, coverage and a receipt; it does not synthesize `watch_fire` Activities.
+atomically commits `fired`, a `watch_fire` Activity and a protected wake in Nexus
+0.13.1. Its response retains status/coverage/receipt and identifies the fire and
+wake. Repeated native requests replay the same receipt; silence uses a fixed
+deadline sequence. An independent, bounded scheduler now discovers registered
+Spaces through a persistent directory, resumes after eviction/restart, and uses the
+same service as the maintenance sweep. Explicitly installed `ActionBindings` add
+bounded four-way decisions and fenced dispatch; without bindings there are no
+action model calls or outward sends. Semantic Watch models have a separate explicit binding.
+See [runtime setup, action contracts and recovery](RUNTIME.md).
+The [runtime API](API.md#authenticated-runtime-inbox-and-observations) exposes authenticated inbox/response/outcome
+routes plus MCP read/response tools. `BRAIN_RUNTIME_CONFIG` selects a compiled
+durable inbox adapter; observation intake requires separately mapped signed
+observer credentials and preserves learning's single-writer/cutoff rules.
+Native wake leases and completion are trusted host
+APIs. Spaces containing native attention state cannot be forked with those
+operational identities; eviction/reopening the same Space remains supported.
 Text conditions, including mixed selector/text objects, stay deferred without a
-configured semantic evaluator. A completed maintenance model call never advances a
-Space-wide consumption watermark. Old Watches without WatchState need explicit
-re-arming after their observation gap is reviewed. Firing grants no external authority.
+configured semantic evaluator. The semantic Watch runtime provides a bounded, pinned Chat Completions
+adapter and trusted callback interface using immutable native pages outside the
+Nexus lock. Unknown/omitted/timeout/truncated results retain the original coverage;
+replay and purge follow native Artifact permissions. See
+[SEMANTIC_WATCH_RUNTIME.md](SEMANTIC_WATCH_RUNTIME.md) and
+[semantic.runtime.example.json](semantic.runtime.example.json).
+A completed maintenance model call never advances a
+Space-wide consumption watermark. Old Watches without WatchState need a reviewed
+CognitiveMemory 2.1 replacement; the scheduler never auto-rearms them. Firing grants no external authority.
 
 **Procedural candidates remain unproven.** `Skill.current_revision` selects an
 immutable `SkillRevision` whose `revision_of` points back to the Skill. Both can be
@@ -211,9 +232,24 @@ SHA-256 digest of all revision attributes except `behavior_digest`; Nexus verifi
 No model plan can write TrialRecord, EvaluationRecord, AttemptRecord, OutcomeRecord,
 TrialState or GradingState. Same-family outcomes are merely comparison candidates;
 no automatic baseline or grade is inferred. Settlement preserves the historical
-counter fields at zero and includes `skills.unsupported_reason` until a trusted
-observer/trial/evaluation scheduler is configured. Historic counters or `adopted`
+counter fields at zero because Full Maintenance does not execute business trials.
+`skills.unsupported_reason` explains the boundary, while configured deployments
+also return the independent scheduler's `skills.runtime` status. Historic counters or `adopted`
 labels are not validated learning evidence.
+
+### Contextual source trust
+
+The optional `trust` startup binding uses independently verified, context-tagged
+source Assertions to prepare reviewable calibration proposals. The first method
+measures binary factual accuracy, not operational success or forecast probabilities.
+There are no statistical defaults or implicit governance grants. A qualified governor
+can apply one exact actor/predicate/context rule through the native atomic
+proposal/control/audit API; other settings and Assertion confidence remain intact.
+Duplicate roots/claims, missing material, corrections, revocation and version
+conflicts cannot silently create another trust step. Restoration appends a new
+protected version. See [TRUST_RUNTIME.md](TRUST_RUNTIME.md) and the
+[disabled template](trust.runtime.example.json). Real instrument/method calibration
+remains a separate MIB validation gate.
 
 ### Native learning contracts
 
@@ -251,13 +287,17 @@ The previous v1 evaluator digest is rejected rather than assigned these new sema
 persistent dispatch/recovery and separately authenticated Outcome ingestion.
 It uses native leases and dispatch authority checks; no executable authority or
 Skill standing is assigned automatically. The host supplies the real executor
-and observer, and calls the bounded `drive` step. Compilation does not deploy
-those bindings. The host's `settle` step now performs
+and observer. It can call the bounded `drive` step directly or install explicit
+automatic bindings through runtime startup configuration. Compilation deploys no binding. The host's `settle` step now performs
 fixed-cutoff native comparison and atomic standing updates. Persistent reviews,
 new monitoring trials, independently authenticated safety revocation, and current
 read-time recommendation checks are implemented. Recall's internal read-only
 `check_procedure_status` tool reports these checks and does not grant execution
-authority. The [runtime implementation](src/learning/runtime.rs) exposes the trusted host interfaces.
+authority. The [learning runtime guide](LEARNING_RUNTIME.md) documents the compiled
+HTTP adapter, calibration approval, separate scheduler, 1–32 hot job capacity,
+retained history pages and terminal archival. Archived records remain available
+for applicability, review and safety revocation. The [runtime implementation](src/learning/runtime.rs)
+exposes the trusted host interfaces.
 The native tests use deterministic fixture outcomes to verify KIP transactions,
 not to claim empirical learning. Run them without a model provider:
 
@@ -276,11 +316,11 @@ clocks remain real. No HTTP/MCP clock override or MIB adapter is exposed.
 Notes now persist under each Space's `engine/` object-store prefix and are
 included in experiment snapshots. See the [experiment API](src/space/experiments.rs) and [MIB integration](#mib-integration).
 
-`Experiment::create_with_recall_budget` pins a forced P5 policy before the run
+`Experiment::create_with_recall_budget` pins a forced Recall-budget policy before the run
 is exposed, including across snapshot forks and session boundaries.
 `audit_procedures()` supplies a bounded native inventory for evaluator-side
 before/after checks. It does not establish applicability or execution permission.
-See [P6 validation and remaining bindings](#mib-integration).
+See [validation and remaining bindings](#mib-integration).
 
 ### MIB integration
 
@@ -293,7 +333,7 @@ and current-task tool replies remain available in no-memory mode. See the
 [Bot host contract](https://github.com/ldclabs/anda-bot/blob/main/docs/mib-integration.md)
 and [MIB backend contract](https://github.com/ldclabs/MIB/blob/main/docs/harness/MIB-Memory-Backend.md).
 
-P6's [longitudinal harness](https://github.com/ldclabs/MIB/blob/main/docs/harness/MIB-Learning-Longitudinal.md)
+The [longitudinal harness](https://github.com/ldclabs/MIB/blob/main/docs/harness/MIB-Learning-Longitudinal.md)
 requires explicit normal/no-memory/ungated capabilities, matched business
 identities and fixed budgets. The current Bot provides persistent/no-memory
 modes; native normal/ungated business bindings remain pending. Unknown costs
@@ -307,8 +347,10 @@ acceptance work.
 **Task work requires a lease.** The internal tool's `lease_task` operation acquires
 or renews a five-minute lease under the runtime Principal. After re-reading the
 version, maintenance commits terminal task state and outputs in one guarded MUTATE.
-WatchState and LeaseState cannot be written by model KML. There is no external
-dispatch adapter. Runtime authentication, tool capabilities and evaluator code never
+WatchState and LeaseState cannot be written by model KML. External dispatch uses
+explicit Rust host bindings and the separate action gate; none are installed by
+default. `memory_runtime/status` reports current configuration. Runtime
+authentication, tool capabilities and evaluator code never
 come from model-generated content.
 
 Operational records written against CognitiveMemory 2.0 cannot be armed or leased
@@ -336,7 +378,7 @@ counts these calls and their planning input against its existing limits; referen
 pages never become memory packet items or attest retrieval coverage. The legacy
 `memory_runtime` syntax operation remains available to writing agents.
 
-The reference supplement is pinned to `anda_kip =0.13.0`; public crate constants
+The reference supplement is pinned to `anda_kip =0.13.1`; public crate constants
 are reused instead of copied. To refresh the supplementary files, set
 `ANDA_KIP_SOURCE` to the matching published crate directory and run
 `node scripts/sync-kip-reference.mjs` (or `--check` to verify without writing).
@@ -447,7 +489,7 @@ python -m mib_runner verify-score /tmp/product-real.report.json
 ```
 
 The contract fixture verifies the harness and its oracle, not model quality.
-P6's actual normal/ungated learning bindings and three-arm provider runs remain
+The actual normal/ungated learning bindings and three-arm provider runs remain
 separate pending work. The [MIB migration guide](https://github.com/ldclabs/MIB/blob/main/docs/harness/MIB-Brain-Legacy-Migration.md)
 records the nine product goals, removed Rust APIs and validation evidence.
 
@@ -625,7 +667,7 @@ Submit conversation messages for memory encoding. Processing is asynchronous —
     "source": "source_123",
     "topic": "settings"
   },
-  "timestamp": "2026-03-09T10:30:00Z"
+  "timestamp": "2026-03-09T10:30:00.000Z"
 }
 ```
 
@@ -636,7 +678,7 @@ Submit conversation messages for memory encoding. Processing is asynchronous —
 | `context.agent`        | `string`    | No       | Calling agent identifier                                        |
 | `context.source`       | `string`    | No       | Identifier of the source of the current interaction content     |
 | `context.topic`        | `string`    | No       | Conversation topic                                              |
-| `timestamp`            | `string`    | No (recommended) | ISO 8601 timestamp                                      |
+| `timestamp`            | `string`    | No (recommended) | Canonical UTC timestamp (`YYYY-MM-DDTHH:mm:ss.SSSZ`)    |
 
 **Response:**
 ```json
@@ -689,7 +731,7 @@ Trigger a memory maintenance cycle. Runs asynchronously with single-execution gu
 {
   "trigger": "on_demand",
   "scope": "daydream",
-  "timestamp": "2026-03-10T03:00:00Z",
+  "timestamp": "2026-03-10T03:00:00.000Z",
   "parameters": {
     "stale_event_threshold_days": 7,
     "memory_strength_decay_factor": 0.95,
@@ -703,7 +745,7 @@ Trigger a memory maintenance cycle. Runs asynchronously with single-execution gu
 | --------------------------------------- | -------- | -------- | --------------------------------------------------------- |
 | `trigger`                               | `string` | No       | `scheduled` / `threshold` / `on_demand` (default: `on_demand`) |
 | `scope`                                 | `string` | No       | `full` (all phases) / `quick` (assessment + urgent tasks) / `daydream` (idle-time salience scoring & micro-consolidation, default) |
-| `timestamp`                             | `string` | No       | ISO 8601 timestamp                                        |
+| `timestamp`                             | `string` | No       | Canonical UTC timestamp (`YYYY-MM-DDTHH:mm:ss.SSSZ`)      |
 | `parameters.stale_event_threshold_days` | `u32`    | No       | Days before events are considered stale (default: 7)      |
 | `parameters.memory_strength_decay_factor` | `f64`  | No       | Multiplier disuse metabolism applies to `MnemonicState.memory_strength` (default: 0.95). Never to `confidence`: KIP 2.0 forbids letting time erode a stance. Accepted under its KIP 1.x name `confidence_decay_factor` for stored-policy compatibility. |
 | `parameters.unconsolidated_max_backlog` | `u32`    | No       | Events and Experiences that may sit without `consolidated_to` lineage (default: 20). Accepted as `unsorted_max_backlog`. |
@@ -879,7 +921,7 @@ their HTTP routes. Everything else is opt-in:
 | `wiki`  | The structured wiki (documents, versions, ACL-scoped reads, OKF import/export), the `wiki_search`/`wiki_read`/`wiki_commit` agent tools, WikiDigest graph extraction, and the `/v1/{space_id}/wiki/*` routes. Also adds the `wiki_*` fields of `SpaceInfo` and `UpdateSpaceInput`. |
 | `mcp`   | The MCP channel: the stdio server and the Streamable HTTP service. With `wiki` on as well, the wiki tools join the MCP tool router.                                                        |
 | `experiments` | Isolated Rust host runs, immutable snapshots, business time, session boundaries and cost receipts. Enables Nexus `simulation`, without changing production clocks or enabling learning. |
-| `learning` | Paired contracts/evaluator, native records, persistent host trial/settlement/review runtime, and a read-only Recall applicability tool. Explicit executor/observer/current-context bindings are required; no model standing writes or production scheduler is installed. |
+| `learning` | Paired contracts/evaluator, native records, persistent host trial/settlement/review runtime, and a read-only Recall applicability tool. Explicit executor/observer/source/calibration bindings and automatic switches are required; The learning runtime provides a compiled HTTP adapter and bounded scheduler, without model standing writes. |
 
 ```toml
 # Embedding the library: memory only
@@ -961,3 +1003,15 @@ Key crates from the Anda ecosystem:
 Copyright © LDC Labs
 
 Licensed under the Apache License, Version 2.0.
+
+### Memory utility
+
+`Space::recall_receipts()` retains delivery hashes, actual element versions, basis,
+coverage and budgets outside the cognitive graph. Structured Recall returns a
+`recall_receipt` handle; Action decisions can bind one through `ContextRequest`.
+`Space::utility()` provides trusted attribution/calibration APIs. Startup config
+selects `single_contribution_v1` or the paired-trial-backed `paired_revision_v1` and separate
+automatic/apply/rank switches. Parameters and approval have no empirical defaults.
+Required constraints, native uncertainty, procedure eligibility and execution
+authority retain priority. Read the bilingual [utility guide](UTILITY_RUNTIME.md)
+and disabled [configuration template](utility.runtime.example.json).

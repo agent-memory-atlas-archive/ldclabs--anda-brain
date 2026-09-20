@@ -9,6 +9,60 @@ fn budget(max_tokens: u32) -> RecallBudget {
     }
 }
 
+#[test]
+fn r6_utility_only_orders_peers_and_cannot_drop_constraints_or_native_warnings() {
+    let items = vec![
+        item(
+            "required",
+            Channel::Kip,
+            Priority::Required,
+            json!({"constraint":"never execute without current authority"}),
+        ),
+        item(
+            "warning",
+            Channel::Procedures,
+            Priority::Warning,
+            json!({"status":"revoked","recommendation_allowed":false}),
+        ),
+        item(
+            "a",
+            Channel::Kip,
+            Priority::Relevant,
+            json!({"memory":"unscored"}),
+        ),
+        item(
+            "z",
+            Channel::Kip,
+            Priority::Relevant,
+            json!({"memory":"calibrated"}),
+        ),
+    ];
+    let scores = std::collections::BTreeMap::from([("z".into(), 1.0), ("warning".into(), 0.0)]);
+    let packet = pack_ranked(
+        &budget(4096),
+        &items,
+        &["a".into(), "z".into()],
+        Coverage::default(),
+        &scores,
+    )
+    .unwrap();
+    let full = checked(&packet, 4096).unwrap();
+    assert_eq!(
+        full.items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
+        ["required", "warning", "z", "a"]
+    );
+    let tiny = pack_ranked(
+        &budget(1),
+        &items,
+        &["z".into()],
+        Coverage::default(),
+        &scores,
+    )
+    .unwrap();
+    assert!(tiny.insufficient);
+    checked(&tiny, 1);
+}
+
 fn item(id: &str, channel: Channel, priority: Priority, content: Json) -> MemoryItem {
     MemoryItem {
         id: id.into(),

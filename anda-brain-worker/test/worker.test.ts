@@ -38,7 +38,7 @@ const FORMATION_PLAN = `MUTATE {
     SET FIELDS {
       evidence_class: "user_statement",
       payload: {source: "chat-42", text: "Please keep your answers concise."},
-      observed_at: "2026-08-20T00:00:00Z"
+      observed_at: "2026-08-20T00:00:00.000Z"
     }
     SET STRUCTURAL { ("source", ?alice) }
   }
@@ -90,7 +90,7 @@ describe('Anda Brain Worker', () => {
     const formed = await post(runtime, space, 'formation', {
       messages: [{ role: 'user', content: 'Please keep your answers concise.' }],
       context: { counterparty: 'alice' },
-      timestamp: '2026-08-20T00:00:00Z',
+      timestamp: '2026-08-20T00:00:00.000Z',
     })
     expect(await text(formed)).toBe('')
     const formedBody = await formed.json<Record<string, any>>()
@@ -141,7 +141,7 @@ describe('Anda Brain Worker', () => {
       post(runtime, space, 'formation', {
         messages: [{ role: 'user', content: said }],
         context: { counterparty: 'alice', source: 'chat_thread_123' },
-        timestamp: '2026-08-20T00:00:00Z',
+        timestamp: '2026-08-20T00:00:00.000Z',
       })
 
     expect(await text(await send())).toBe('')
@@ -729,7 +729,7 @@ describe('Anda Brain Worker', () => {
           predicates: [],
           commands: [
             'MUTATE { CREATE CONCEPT ?c { TYPE "Event" NAME "Kept" SET ATTRIBUTES {summary: "an event worth keeping"} } }',
-            'SET RETENTION ?e { retention_class: "standard", expires_at: "2030-01-01T00:00:00Z" } WHERE { ?e CONCEPT {} } LIMIT 5',
+            'SET RETENTION ?e { retention_class: "standard", expires_at: "2030-01-01T00:00:00.000Z" } WHERE { ?e CONCEPT {} } LIMIT 5',
           ],
           summary: 'Scheduled some events to expire.',
         },
@@ -902,7 +902,7 @@ describe('Anda Brain Worker', () => {
     expect(body.result.changed).toMatchObject({ total: 1, updated: 1 })
   })
 
-  it('rejects non-string maintenance enums and non-ISO timestamps', async () => {
+  it('rejects non-string maintenance enums and non-canonical timestamps', async () => {
     const runtime = testEnv(new FakeAi([]))
     const invalidScope = await post(runtime, uniqueSpace('scope'), 'maintenance', {
       scope: ['quick'],
@@ -914,6 +914,17 @@ describe('Anda Brain Worker', () => {
       timestamp: '2026',
     })
     expect(invalidTimestamp.status).toBe(400)
+
+    const missingMilliseconds = await post(
+      runtime,
+      uniqueSpace('timestamp-milliseconds'),
+      'formation',
+      {
+        messages: [{ role: 'user', content: 'Remember this.' }],
+        timestamp: '2026-08-20T00:00:00Z',
+      },
+    )
+    expect(missingMilliseconds.status).toBe(400)
 
     const invalidRole = await post(runtime, uniqueSpace('role'), 'formation', {
       messages: [{ role: ['user'], content: 'Remember this.' }],
@@ -954,7 +965,7 @@ describe('Anda Brain Worker', () => {
     const [system, user] = formationMessages(
       { types: [] },
       { messages: [{ role: 'user', content: 'remember-newest-turn' }] },
-      '2026-08-20T00:00:00Z',
+      '2026-08-20T00:00:00.000Z',
     )
     expect(system?.content).toContain('Reference Anda Brain Formation Policy')
     expect(system?.content).toContain('Anda Brain Worker deployment contract')
@@ -964,7 +975,7 @@ describe('Anda Brain Worker', () => {
     const maintenance = maintenanceMessages(
       { trigger: 'on_demand', scope: 'quick' },
       [],
-      '2026-08-20T00:00:00Z',
+      '2026-08-20T00:00:00.000Z',
     )[0]?.content
     expect(maintenance).toContain('never decay Assertion confidence over time')
     // KIP 1.x taught the language from a hand-written summary in this file.

@@ -1,20 +1,21 @@
 //! Private orchestration state, not a learning-score database. Every update is
 //! conditional and read back before dispatch. Native facts remain in Nexus.
 use anda_core::BoxError;
+#[cfg(feature = "learning")]
 use futures::TryStreamExt;
 use object_store::{ObjectStore, ObjectStoreExt, PutMode, UpdateVersion, path::Path};
 use serde::{Serialize, de::DeserializeOwned};
 use std::sync::Arc;
 
-const MAX_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_BYTES: usize = 8 * 1024 * 1024;
 
-pub(super) struct Journal {
+pub(crate) struct Journal {
     store: Arc<dyn ObjectStore>,
     prefix: Path,
 }
-pub(super) struct Versioned<T> {
+pub(crate) struct Versioned<T> {
     pub value: T,
-    version: UpdateVersion,
+    pub(crate) version: UpdateVersion,
 }
 
 impl Journal {
@@ -63,6 +64,7 @@ impl Journal {
         self.put(key, value, PutMode::Create).await
     }
 
+    #[cfg(feature = "learning")]
     pub async fn save<T: Serialize + DeserializeOwned>(
         &self,
         key: &str,
@@ -72,7 +74,7 @@ impl Journal {
             .await
     }
 
-    async fn put<T: Serialize + DeserializeOwned>(
+    pub(crate) async fn put<T: Serialize + DeserializeOwned>(
         &self,
         key: &str,
         value: &T,
@@ -104,7 +106,10 @@ impl Journal {
         Ok(())
     }
 
-    pub async fn jobs(&self) -> Result<Vec<String>, BoxError> {
+    /// One-time import of the v1 catalog, which admitted at most 32 jobs.
+    /// Overflow is an error, never a claim of complete discovery.
+    #[cfg(feature = "learning")]
+    pub async fn legacy_jobs(&self) -> Result<Vec<String>, BoxError> {
         let prefix = self.path("jobs");
         let mut stream = self.store.list(Some(&prefix));
         let mut names = Vec::new();

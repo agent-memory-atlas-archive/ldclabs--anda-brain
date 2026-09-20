@@ -176,6 +176,13 @@ impl AppState {
     pub fn fork_with_store(&self, object_store: Arc<dyn ObjectStore>) -> AppState {
         AppState {
             spaces: Arc::new(RwLock::new(BTreeMap::new())),
+            attention_directory: crate::attention::Directory::new(
+                object_store.clone(),
+                self.sharding,
+            ),
+            attention_policy: self.attention_policy.clone(),
+            action_bindings: None,
+            memory_runtime_bindings: Arc::new(Default::default()),
             object_store,
             db_config: self.db_config.clone(),
             http_client: self.http_client.clone(),

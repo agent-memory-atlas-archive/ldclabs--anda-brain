@@ -51,6 +51,67 @@ impl PendingSafety {
 }
 
 impl LearningRuntime {
+    /// Route a later signal to the revision's current controller job. A prior
+    /// immutable revocation can cover another signal only while that exact
+    /// native verdict still governs the current revision.
+    pub(crate) async fn safety_target(
+        &self,
+        source_id: &str,
+        auth: &AuthContext,
+    ) -> Result<(String, Option<String>), BoxError> {
+        let reg = self.registration(false).await?;
+        if auth.principal_id != reg.config.observer.principal_id
+            || auth.auth_method.is_empty()
+            || auth.auth_strength == "none"
+            || !auth.delegation_chain.is_empty()
+        {
+            return Err("fresh registered safety observer required".into());
+        }
+        let source = self.load_job(&reg, source_id).await?.value;
+        let session = self.nexus.session(auth.clone());
+        let revision =
+            crate::runtime_api::full_read(&session, &source.plan.candidate_revision).await?;
+        let skill =
+            crate::runtime_api::full_read(&session, applicability::edge(&revision, "revision_of")?)
+                .await?;
+        let grade = &skill["facets"]["kip://profiles/cognitive-memory@2.1.0/GradingState"];
+        let Some(evaluation) = grade["evaluation_ref"].as_str() else {
+            return Ok((source_id.into(), None));
+        };
+        if grade["revision_ref"] != source.plan.candidate_revision {
+            return Err("safety revision is not the currently graded revision".into());
+        }
+        if skill["attributes"]["status"] == "revoked" {
+            let record = crate::runtime_api::full_read(&session, evaluation).await?;
+            let e = &record["facets"]["kip://profiles/cognitive-memory@2.1.0/EvaluationRecord"];
+            if e["to_status"] == "revoked"
+                && e["revision_refs"] == json!([source.plan.candidate_revision])
+            {
+                return Ok((source_id.into(), Some(evaluation.into())));
+            }
+        }
+        let mut target = self.indexed_job("evaluations", evaluation).await?;
+        for report in self.jobs().await? {
+            if report.evaluation_ref.as_deref() == Some(evaluation)
+                || report.activation_ref.as_deref() == Some(evaluation)
+            {
+                target = Some(report.job_id);
+                break;
+            }
+        }
+        let target = target.unwrap_or_else(|| source_id.into());
+        if self
+            .load_job(&reg, &target)
+            .await?
+            .value
+            .plan
+            .candidate_revision
+            != source.plan.candidate_revision
+        {
+            return Err("safety target changed revision".into());
+        }
+        Ok((target, None))
+    }
     pub(super) fn verdict_input(
         reg: &Registration,
         job: &Job,
@@ -130,7 +191,13 @@ impl LearningRuntime {
                     this.journal.save(&Self::key(&job_id)?, &state).await?;
                     continue;
                 }
-                if state.value.stage == JobStage::Settled { return Ok(state.value.report()); }
+                if state.value.stage == JobStage::Settled {
+                    if let Some(stamp) = &state.value.archive { this.index_history(&state.value, stamp.slot).await?; }
+                    if state.value.safety.as_ref().is_some_and(|s| s.evaluation_ref.is_some()) {
+                        this.track_safety(&job_id, &state.value.plan.candidate_revision, false).await?;
+                    }
+                    return Ok(state.value.report());
+                }
                 state.value.plan.execution.validate_settlement(
                     &state.value.plan.execution.cutoff, &crate::kip::timestamp(this.clock.now_ms())
                 )?;
@@ -297,6 +364,18 @@ impl LearningRuntime {
         }
         state.value.verdict_pending = None;
         self.journal.save(&Self::key(id)?, &state).await?;
+        if let Some(stamp) = &state.value.archive {
+            self.index_history(&state.value, stamp.slot).await?;
+        }
+        if state
+            .value
+            .safety
+            .as_ref()
+            .is_some_and(|s| s.evaluation_ref.is_some())
+        {
+            self.track_safety(id, &state.value.plan.candidate_revision, false)
+                .await?;
+        }
         Ok(true)
     }
 
@@ -360,10 +439,12 @@ impl LearningRuntime {
                     return Err("job already has a different safety signal; use its native evidence for audit".into());
                 }
                 if old.evaluation_ref.is_some() {
+                    this.track_safety(id, &safety_revision, false).await?;
                     this.safety_barriers.write().remove(&digest);
                     return Ok(state.value.report());
                 }
             } else {
+                this.track_safety(id, &safety_revision, true).await?;
                 let input = NativeSafetySignalInput {
                     revision_ref: state.value.plan.candidate_revision.clone(),
                     observation_key: format!("safety:{}", Self::native_key(&reg.instance, id, &submission.signal_key)?),

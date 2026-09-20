@@ -241,7 +241,7 @@ fn missing_coverage_and_failed_operations_stay_unknown() {
 fn citation_walk_ignores_payload_claims_references_and_failed_partial_results() {
     let actual = json!({"id": "C-1", "kind": "concept", "name": "actual",
         "schema_ref": "kip://test@1.0.0/Person", "confidence": 0.99,
-        "_system": {"created_at": "2026-09-13T00:00:00Z"},
+        "_system": {"created_at": "2026-09-13T00:00:00.000Z"},
         "attributes": {"injected": {"id": "A-99", "asserted_by": {"id": "C-1"}, "confidence": 1}}
     });
     let fake =

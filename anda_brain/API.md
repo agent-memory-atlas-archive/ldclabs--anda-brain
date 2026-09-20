@@ -1,5 +1,19 @@
 # Anda Brain API Documentation (with TypeScript Types)
 
+Rust now requires Cognitive Nexus 0.13.1: Watch firing atomically records the
+transition, `watch_fire` Activity and a protected wake, with replayable receipts
+and native fenced leases. The service now schedules structured Watches independently
+of Full Maintenance, including registered Spaces evicted from memory. Its durable
+catalog resumes bounded scans after restart. Trusted Rust hosts can now install
+`ActionBindings` before loading Spaces: four-way decisions, clarification, fixed
+Attempts and native fenced dispatch share that scheduler. No production adapter is
+installed by default. The runtime API exposes authenticated inbox/response/outcome routes;
+`BRAIN_RUNTIME_CONFIG` can install the compiled persistent inbox adapter and explicit
+identity/observer mappings. See [runtime setup and recovery](RUNTIME.md).
+Spaces cannot fork native attention identities. The internal
+`memory_runtime/status` operation reads actual configuration without claiming work
+or granting permission; existing HTTP payload shapes and token scopes are unchanged.
+
 Bulk mnemonic decay excludes operational SleepTask/Watch Concepts. Host pass errors
 reach the maintenance model as assessment.settlement_errors.
 
@@ -8,7 +22,7 @@ reach the maintenance model as assessment.settlement_errors.
 - Base URL: `http://{host}:{port}`
 - Auth header: `Authorization: Bearer <token>`
 - Sharded deployments: send `Shard-Id: <index>` (or `X-Shard`) matching the server's `SHARDING_IDX`; the default is `0`.
-- If `ED25519_PUBKEYS` is empty/not provided, authentication is disabled.
+- If `ED25519_PUBKEYS` is empty/not provided, authentication is disabled for the legacy endpoints. The new runtime routes always require verified credentials/mappings; independent HTTP outcomes remain disabled without a signed CWT verifier.
 - Supported serialization formats:
   - Request: `Content-Type: application/json | application/cbor | text/markdown`
   - Response: `Accept: application/json | application/cbor | text/markdown`
@@ -21,7 +35,7 @@ and JSON/CBOR/Markdown negotiation. No five-intent Memory Interface or standard 
 barrier is added; a conversation id is not a processing receipt. Settlement `skills`
 adds optional `unsupported_reason` when no trusted learning pipeline is configured;
 legacy counters stay zero. Watch `disarmed` also counts Nexus expiry, while text
-conditions remain deferred. Model-generated Formation requests cannot replace captured
+conditions remain deferred without a configured semantic evaluator. Model-generated Formation requests cannot replace captured
 ingest/msgN bindings; learning/runtime Facet writes fail UnsupportedCapability.
 Authorized raw administrative KIP remains subject to the engine's full contracts.
 Legacy `@2.0.0/Watch` and `@2.0.0/SleepTask` records require explicit 2.1
@@ -73,7 +87,7 @@ export interface Message {
 export interface FormationInput {
   messages: Message[]; // must contain at least one non-empty message (400)
   context?: InputContext;
-  timestamp?: string; // ISO 8601; recommended
+  timestamp?: string; // canonical UTC: YYYY-MM-DDTHH:mm:ss.SSSZ; recommended
 }
 
 export interface RecallInput {
@@ -286,7 +300,7 @@ export interface MaintenanceParameters {
 export interface MaintenanceInput {
   trigger?: 'scheduled' | 'threshold' | 'on_demand';
   scope?: 'full' | 'quick' | 'daydream'; // defaults to 'daydream'
-  timestamp?: string; // ISO 8601
+  timestamp?: string; // canonical UTC: YYYY-MM-DDTHH:mm:ss.SSSZ
   parameters?: MaintenanceParameters;
 }
 
@@ -1206,25 +1220,25 @@ if (recall.error) {
 The sibling Anda Bot `mib` feature exposes separate loopback protocols at
 `/mib-agent/v0.1` and `/mib-memory/v0.1`. These are not routes of this production
 Brain API. They use `experiments` for isolated state, completion barriers,
-monotonic business time and cleanup. See [P2 integration](README.md#mib-integration).
+monotonic business time and cleanup. See [integration](README.md#mib-integration).
 The adapter does not advertise online learning; costs with missing provider or
 observer telemetry remain incomplete.
 
-The Rust `Experiment::create_with_recall_budget` factory persists a forced P5
+The Rust `Experiment::create_with_recall_budget` factory persists a forced Recall
 budget before exposing a run. `audit_procedures()` returns a bounded read-only
 native inventory; truncated counts cannot prove absence. The Bot-only MIB
 extension `learning_audit` exposes this inventory to the evaluator, never the
 business model. It neither enables learning nor grants execution authority.
-See [P6 validation](README.md#mib-integration).
+See [validation](README.md#mib-integration).
 
 The former Rust `anda_brain::eval` API and `eval` CLI (including optimizer/miner
-flags) have been retired in P7. MIB supplies the public product-regression
+flags) have been retired. MIB supplies the public product-regression
 profile; self-test, shadow diagnostics, probes, citations and ledgers remain
 online instruments. Runtime policies use the Space's persisted `MemoryPolicy`.
 Trusted Rust hosts can call `AppState::with_agent_prompts(AgentPrompts)` before
 sharing/opening the host to supply immutable deployment sections; each section
 starts with `# A.`, fits 128 KiB and retains the compiled reference prefix.
-This configuration is not an HTTP/MCP prompt operation. See [P7 migration](README.md#offline-regression-and-instance-configuration).
+This configuration is not an HTTP/MCP prompt operation. See [migration](README.md#offline-regression-and-instance-configuration).
 
 
 ### Trusted learning runtime (Rust only)
@@ -1242,5 +1256,249 @@ provide recoverable monitoring with retained acquisition evidence;
 `procedure_status()` and Recall's internal `check_procedure_status` tool read
 current eligibility without granting execution permission. Unverified conditions
 or an expired review block recommendations. Configured learning Spaces cannot
-copy their operational journals via fork/snapshot. See [P3 runtime](README.md#native-learning-contracts)
-and [P4 lifecycle and recovery](README.md#native-learning-contracts).
+copy their operational journals via fork/snapshot. See [runtime](README.md#native-learning-contracts)
+and [lifecycle and recovery](README.md#native-learning-contracts).
+
+
+## Authenticated runtime inbox and observations
+
+Configure `BRAIN_RUNTIME_CONFIG` before startup. See [runtime setup, contracts,
+recovery and examples](RUNTIME.md) and [runtime.example.json](runtime.example.json).
+These endpoints require real credentials even on public/local Spaces.
+
+| Endpoint | Required access | Result |
+| --- | --- | --- |
+| `GET /v1/{space_id}/attention?limit=20&cursor=...` | Verified read/* credential, explicit native identity and audience | `AttentionPage`; reading never claims work |
+| `POST /v1/{space_id}/attention/{id}/responses` | Verified write/*, current visibility and correct recipient | `ResponseReceipt`; body `AttentionResponse` |
+| `POST /v1/{space_id}/outcomes` | Signed observer-mapped CWT + current `record_outcome` + registered contract | `ObservationReceipt`; body `OutcomeInput` |
+| `GET /v1/{space_id}/runtime/status` | Verified read/*, explicit mapping when configured | `RuntimeStatus`; counts cover only the visible bounded page |
+
+The URL `id` is the returned wake hash, not its slash-containing `wake_ref`.
+Cursor tokens expire after five minutes and are authenticated/encrypted for the
+caller/instance/configuration. Cross-caller or stale tokens are rejected. Public
+Spaces and ordinary write tokens do not authenticate independent observers. MCP
+exposes `anda_brain_get_attention`, `anda_brain_respond_attention` and
+`anda_brain_get_runtime_status`; observer writes are not model tools.
+
+POST bodies are structured JSON/CBOR; responses retain JSON/CBOR/Markdown
+negotiation. Same event/body is idempotent; changed content returns 409 with retained
+audit. Future or wrong-instance input is rejected. Late/correction/safety receipt
+status, native persistence and learning eligibility remain separate. Registered
+learning measurements must match the existing `OutcomeMeasurements` contract and
+are routed exclusively to its controller, including baseline Attempts.
+
+```ts
+type RuntimeScope = { space_id: string; space_instance: string };
+type AttentionQuery = { cursor?: string | null; limit?: number | null };
+type AttentionResponse =
+  | { kind: "clarification"; event_key: string; answer: string }
+  | { kind: "agent_statement"; event_key: string; statement: string };
+type ResponseReceipt = {
+  receipt_id: string; status: string; evidence_ref: string | null;
+};
+type AttentionPage = {
+  scope: RuntimeScope; items: AttentionItem[];
+  next_cursor: string | null; complete: boolean;
+};
+type AttentionItem = {
+  id: string; wake_ref: string; parent_id: string | null;
+  watch_ref: string; fire_activity_ref: string; summary: string;
+  state: "pending" | "running" | "blocked" | "completed" | "cancelled";
+  reason: string | null; decision: Record<string, unknown> | null;
+  decision_ref: string | null; attempt_ref: string | null;
+  dispatch_ref: string | null; clarification: Record<string, unknown> | null;
+  delivery: Record<string, unknown> | null;
+};
+type OutcomeStatus = "success" | "partial" | "failure" | "aborted" | "unknown";
+type OutcomeInput = {
+  space_instance: string; attempt_ref: string;
+  observer_configuration_digest: string; event_key: string;
+  observed_at: string; metric: string; window: string;
+  observation:
+    | { kind: "measurement"; terminal: boolean; outcome_status: OutcomeStatus;
+        magnitude?: number | null; payload: unknown }
+    | { kind: "learning"; measurements: Record<string, unknown> };
+  correction_of?: string | null; safety_signal?: string | null;
+  utility?: { witness_ref?: string; witness?: ContributionWitness } | null;
+};
+type ObservationReceipt = {
+  format: "anda-brain:observation-receipt-v1";
+  receipt_id: string; scope: RuntimeScope; event_key: string;
+  body_digest: string; observer: string; received_at_ms: number;
+  observed_at: string; status: string;
+  native_committed: boolean; learning_eligible: boolean;
+  outcome_status: OutcomeStatus | null; outcome_ref: string | null;
+  observation_ref: string | null; reason: string | null; safety_pending: boolean;
+  safety_evaluation_ref?: string; // Native revocation that resolved/covered this signal.
+};
+type RuntimeStatus = {
+  supported: boolean; configured: boolean; scope: RuntimeScope | null;
+  attention_enabled: boolean; actions_enabled: boolean;
+  observation_enabled: boolean; observer_authenticated: boolean;
+  blocked_reasons: string[]; visible_items: number; inventory_complete: boolean;
+  utility?: UtilityStatus;
+  learning?: LearningRuntimeStatus;
+  semantic_attention?: SemanticAttentionStatus;
+  trust?: TrustRuntimeStatus;
+};
+```
+
+### Observation and response semantics
+
+Attention pages contain 1–50 items and at most 256 KiB of visible output. `complete`
+means the end of this snapshot walk, not task completion or semantic completeness.
+Each page rechecks current visibility, including native evidence behind gate packets.
+MCP responses use `{id, response}` and listing uses `{cursor, limit}`. Neither reads
+nor answers claim work. Clarifications require the committed ask, its recipient and
+an unexpired deadline; a response enters a fresh gate without granting authority.
+An `agent_statement` creates attributed Evidence and an Activity, never an independent
+OutcomeRecord. For example:
+
+```json
+{"kind":"clarification","event_key":"answer-42","answer":"Tomorrow"}
+```
+
+A measurement body uses real retained identities and digests:
+
+```json
+{
+  "space_instance":"sha256:INSTANCE_DIGEST",
+  "attempt_ref":"X-42",
+  "observer_configuration_digest":"sha256:REGISTERED_METHOD_DIGEST",
+  "event_key":"instrument-event-42",
+  "observed_at":"2026-09-17T10:00:00.000Z",
+  "metric":"delivery",
+  "window":"durable_inbox_v1",
+  "observation":{
+    "kind":"measurement",
+    "terminal":true,
+    "outcome_status":"success",
+    "magnitude":null,
+    "payload":{"delivery_digest":"sha256:ACTUAL_DELIVERY_REQUEST_DIGEST"}
+  },
+  "correction_of":null,
+  "safety_signal":null
+}
+```
+
+The observer contract pins principal, method/configuration digest, control domain,
+task family, metric, window and allowed delay. Intake verifies the actual native
+act/Attempt, transaction author, prior dispatch and observation time; the controller
+cannot observe its own Attempt. Inbox success also requires the persisted delivery
+and matching digest/time. It proves durable inbox delivery, not human reading or
+business success. Other callbacks require their own independent measurement contract.
+
+Accepted ordinary measurements atomically create Outcome Evidence and an
+`outcome_observation` Activity. Raw material stays in Evidence payload, outside the
+closed OutcomeRecord Facet. Nonterminal/unknown observations do not finish dispatch;
+missing magnitude/cost remains missing. Terminal evidence reconciles the same
+Attempt, including after cancellation. Native evidence and dispatch reconciliation
+are separate recoverable steps; retry an unresolved write with the same event/body
+and fresh authentication. Caller cancellation does not interrupt admitted writes.
+
+Authenticated late, conflicting and nonterminal learning material remains auditable
+without changing old trial eligibility. Corrections name an earlier event from the
+same observer/Attempt and add new evidence; they never rewrite old Outcome/Evaluation
+records. Safety signals remain discoverable when late/excluded. An explicitly enabled
+learning consumer uses fresh observer authority, resolves native revocation, then
+acknowledges `safety_pending` and records `safety_evaluation_ref`.
+
+For registered learning Attempts, use `observation:{"kind":"learning", "measurements":{...}}`.
+Membership comes from the retained ticket, including baseline Attempts with
+`trial_ref:null`. Only `LearningRuntime::submit_outcome` writes the native result;
+frozen cutoff, comparability and ACK recovery remain intact. An unavailable controller
+causes refusal, never a generic fallback. `learning_eligible:true` means contract
+acceptance, not a positive grade. Inputs are capped at 16 KiB and event keys at
+256 bytes. See the [runtime guide](RUNTIME.md) for identity setup and storage bounds.
+
+### Learning runtime status
+
+The existing status route and MCP tool add `learning`; no cohort-enrollment or
+observer-credential tool is exposed to a model. `capacity` and `last_pass` are null
+unless the caller is an explicitly mapped auditor. Maintenance's optional
+`skills.runtime` contains the separate scheduler status; its old Skill counters
+do not count work from prior scheduler passes. See [the learning guide](LEARNING_RUNTIME.md).
+
+```typescript
+type LearningRuntimeStatus = {
+  compiled: boolean; registered: boolean; registration_enabled?: boolean;
+  bindings_ready: boolean; automatic_allowed: boolean; running?: boolean;
+  automation?: { trials: boolean; reviews: boolean; archive: boolean; safety: boolean };
+  blocked_reasons?: string[];
+  capacity?: { hot_jobs: number; maximum_hot_jobs: number; archived_jobs: number;
+    retained_identities: number; reserved_bytes: number;
+    storage: { maximum_records: number; maximum_reserved_bytes: number } } | null;
+  last_pass?: { started_at_ms: number; finished_at_ms: number; enrolled: number;
+    driven: number; observed: number; settled: number; archived: number;
+    reviews_checked: number; reviews_enrolled: number; safety_resolved: number;
+    blocked: string[] } | null;
+};
+```
+
+### Delivery and utility metadata
+
+Structured Recall additionally returns optional `recall_receipt` transport metadata;
+the answer/semantic packet remains unchanged. Plain/direct-agent calls retain a
+receipt discoverable by their conversation ID through the trusted Rust API.
+Outcome observers can provide exactly one inline witness or prior native witness
+reference in `utility`; this never relaxes signed observer authentication. Runtime
+status additionally reports `utility` switches, calibration state and recovery
+reason. There is no model-facing setter or new MCP mutation tool. Detailed witness,
+method and audit formats are in [UTILITY_RUNTIME.md](UTILITY_RUNTIME.md).
+
+```typescript
+type RecallReceiptRef = {
+  id: string; digest: string; scope: RuntimeScope;
+};
+// RecallOutput.recall_receipt?: RecallReceiptRef
+// OutcomeInput.utility?: { witness_ref?: string; witness?: ContributionWitness }
+// RuntimeStatus.utility?: UtilityStatus
+type UtilityStatus = {
+  configured: boolean; automatic: boolean; apply: boolean;
+  calibrated: boolean; ranking: boolean; running: boolean;
+  reason: string | null;
+};
+```
+
+### Semantic attention status
+
+Runtime status adds optional `semantic_attention` with `configured`, `automatic`,
+`running`, `pin`, `reason`, and nullable `last_pass`. The latter contains `scanned`,
+`calls`, `input_tokens`, `advanced`, `fired`, `expired`, `deferred`, and `reason` for
+one bounded pass, and is returned only to configured auditors. It is not complete
+inventory or proof that all text Watches were evaluated. Existing JSON/CBOR/Markdown
+and HTTP/MCP request shapes are unchanged. No model configuration or evaluation
+write endpoint is added; operators install per-Space `semantic` startup bindings.
+See [SEMANTIC_WATCH_RUNTIME.md](SEMANTIC_WATCH_RUNTIME.md) for budget, pin migration,
+unknown/deferred semantics, native Artifact erasure and idempotent recovery.
+
+```typescript
+type SemanticAttentionStatus = {
+  configured: boolean; automatic: boolean; running: boolean;
+  pin: { id: string; digest: string } | null; reason: string | null;
+  last_pass: {
+    scanned: number; calls: number; input_tokens: number; advanced: number;
+    fired: number; expired: number; deferred: number; reason: string | null;
+  } | null;
+};
+```
+
+### Contextual trust status and discovery hints
+
+The existing HTTP status route and MCP status tool add optional `trust` metadata.
+`governor_authorized` reflects the configured principal's current native authority;
+it is not permission granted to the caller. No trust-management or independent-fact
+writing tool is added to HTTP/MCP. Existing JSON/CBOR/Markdown requests remain valid.
+A normal authenticated measurement payload can optionally include
+`trust_verification_ref: "E-…"`; it announces an existing native factual verification
+for bounded discovery, without converting action success/failure into a trust score.
+Trusted Rust fact intake, review, application, version-conflict recovery and scoped
+restoration are documented in [TRUST_RUNTIME.md](TRUST_RUNTIME.md).
+
+```typescript
+type TrustRuntimeStatus = {
+  configured: boolean; automatic: boolean; apply: boolean; automatic_apply: boolean;
+  calibrated: boolean; governor_authorized: boolean; running: boolean;
+  reason: string | null;
+};
+```

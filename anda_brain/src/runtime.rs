@@ -73,6 +73,68 @@ impl BusinessClock {
 
 type CancelHook = Arc<dyn Fn() + Send + Sync>;
 
+/// Writes owned by the host survive a dropped API waiter. Shutdown closes
+/// admission first, then drains admitted work without cancelling native commits.
+#[derive(Clone, Default)]
+pub(crate) struct DurableTasks {
+    inner: Arc<DurableInner>,
+}
+struct DurableInner {
+    closing: parking_lot::Mutex<bool>,
+    tasks: TaskTracker,
+    slots: Arc<tokio::sync::Semaphore>,
+}
+impl Default for DurableInner {
+    fn default() -> Self {
+        Self {
+            closing: Default::default(),
+            tasks: TaskTracker::new(),
+            slots: Arc::new(tokio::sync::Semaphore::new(16)),
+        }
+    }
+}
+impl DurableTasks {
+    pub fn is_busy(&self) -> bool {
+        !self.inner.tasks.is_empty()
+    }
+    pub async fn run<T: Send + 'static>(
+        &self,
+        work: impl Future<Output = Result<T, anda_core::BoxError>> + Send + 'static,
+    ) -> Result<T, anda_core::BoxError> {
+        self.start(work)?.await?
+    }
+    pub fn start<T: Send + 'static>(
+        &self,
+        work: impl Future<Output = Result<T, anda_core::BoxError>> + Send + 'static,
+    ) -> Result<tokio::task::JoinHandle<Result<T, anda_core::BoxError>>, anda_core::BoxError> {
+        let handle = {
+            let closing = self.inner.closing.lock();
+            if *closing {
+                return Err("attention runtime is closing".into());
+            }
+            let slot = self
+                .inner
+                .slots
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| "attention operation queue is full")?;
+            self.inner.tasks.spawn(async move {
+                let _slot = slot;
+                work.await
+            })
+        };
+        Ok(handle)
+    }
+    pub async fn shutdown(&self) {
+        {
+            let mut closing = self.inner.closing.lock();
+            *closing = true;
+            self.inner.tasks.close();
+        }
+        self.inner.tasks.wait().await;
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct RuntimeTasks {
     cancel: CancellationToken,

@@ -3,19 +3,25 @@ use ic_auth_types::ByteBufB64;
 use ic_cose_types::cose::{CoseKey, ed25519::VerifyingKey, get_cose_key_public};
 use std::str::FromStr;
 
+pub mod action;
 pub mod agents;
 pub mod assess;
+pub mod attention;
 pub(crate) mod authz;
 pub(crate) mod cognitive;
+pub mod consequence;
 pub mod handler;
 pub(crate) mod kip;
 pub(crate) mod kip_reference;
 #[cfg(feature = "learning")]
 pub mod learning;
+pub mod runtime_api;
 
 mod runtime;
 #[cfg(feature = "experiments")]
 pub use space::experiments;
+#[path = "learning/journal.rs"]
+pub(crate) mod journal;
 pub(crate) mod ledger;
 #[cfg(test)]
 mod legacy_upgrade;
@@ -23,6 +29,7 @@ mod legacy_upgrade;
 pub mod mcp;
 pub mod payload;
 pub mod recall_budget;
+pub mod recall_receipt;
 pub(crate) mod settlement;
 pub mod space;
 #[cfg(test)]

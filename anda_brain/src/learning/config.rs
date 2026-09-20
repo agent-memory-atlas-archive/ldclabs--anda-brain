@@ -38,6 +38,8 @@ pub struct LearningConfig {
     pub maximum_failure_rate: f64,
     pub minimum_pairs: usize,
     pub maximum_pairs: usize,
+    /// Hot orchestration capacity. Archived identities/evidence are retained
+    /// under the separate LearningStoragePolicy and do not consume this quota.
     pub maximum_jobs: usize,
     /// Real-time bound on executor status lookup, independent of business time.
     pub reconcile_timeout_ms: u64,

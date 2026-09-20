@@ -213,7 +213,7 @@ impl Experiment {
         })
     }
 
-    /// Creates an isolated run with a forced P5 Recall budget before exposing
+    /// Creates an isolated run with a forced Recall budget before exposing
     /// it to the caller. The policy survives session boundaries and snapshot
     /// forks; callers can tighten but cannot omit or raise these limits.
     /// Include this budget in the launcher's `ExperimentIdentity` as well.

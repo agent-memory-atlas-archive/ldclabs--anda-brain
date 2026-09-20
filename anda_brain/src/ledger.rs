@@ -1,10 +1,11 @@
 //! Memory usage ledger (memory evolution plan, module M1).
 //!
-//! Off-graph counters of how memories are actually used: which graph
+//! Off-graph retrieval diagnostics: which graph
 //! entities each completed recall surfaced, and which were later corrected
 //! (superseded). The ledger — not the graph — absorbs the high-frequency
-//! writes; maintenance settles it into graph metadata once per cycle
-//! (module M2), so a recall never mutates the graph it reads.
+//! writes. These counters do not reinforce the graph or calibrate utility.
+//! Delivery receipts and independently qualified consequence calibration
+//! live in `recall_receipt` and `consequence::utility` instead.
 
 use anda_db::{
     collection::{Collection, CollectionConfig},

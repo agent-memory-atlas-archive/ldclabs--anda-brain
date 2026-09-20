@@ -40,9 +40,9 @@ anda_web3_client = { version = "0.16" }
 anda_object_store = "0.13"
 anda_db = { version = "0.13", features = ["full"] }
 anda_db_tfs = { version = "0.13", features = ["full"] }
-anda_cognitive_nexus = "0.13"
+anda_cognitive_nexus = "0.13.1"
 # The embedded reference supplement is generated from this exact release.
-anda_kip = "=0.13.0"
+anda_kip = "0.13.1"
 base64 = "0.23"
 cbor2 = "1"
 cose2 = "0.5"
@@ -67,6 +67,7 @@ log = { version = "0.4", features = ["kv_serde"] }
 clap = { version = "4.6", features = ["derive", "env"] }
 tower = { version = "0.5", features = ["limit", "load-shed", "util"] }
 tower-http = { version = "0.7", features = ["compression-gzip", "cors"] }
+tiktoken-rs = "0.12"
 markdown = "1"
 mimalloc = { version = "0.1", features = ["v3"] }
 rand = "0.10"

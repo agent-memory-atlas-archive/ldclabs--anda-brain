@@ -1,5 +1,12 @@
 use super::*;
 use anda_brain_fixture::*;
+mod r4;
+#[cfg(feature = "experiments")]
+mod r5;
+#[cfg(feature = "experiments")]
+mod r5_http;
+#[cfg(feature = "experiments")]
+mod r6;
 
 // Local fixture module keeps genuine Space/Nexus setup separate from the
 // executor instrument. No model, production observer or benchmark oracle runs.

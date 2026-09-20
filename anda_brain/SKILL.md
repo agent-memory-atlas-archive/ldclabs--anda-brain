@@ -1,23 +1,13 @@
 ---
 name: anda-brain
 description: |
-  Long-term memory service for LLM agents.
-  Provides persistent, structured memory (Cognitive Nexus) through three operations:
-  Formation (encode conversations into memory), Recall (query memory with natural language), and Maintenance (consolidate and prune memory).
-
-  Use this service when:
-  - You need to persist facts, preferences, relationships, or events across sessions
-  - You want to recall previous conversations, decisions, or user context
-  - You need structured long-term memory without understanding KIP syntax
-  - You want to trigger memory consolidation or cleanup
-
-  Common trigger phrases:
-  - "remember this", "save this for later", "don't forget"
-  - "what did I say last time?", "recall my preferences"
-  - "what do we know about X?", "who is X?"
-  - "run memory maintenance", "consolidate memory"
+  Use a self-hosted Anda Brain service to remember conversations, recall facts and
+  procedures, maintain structured memory, and read or answer configured attention
+  inboxes. Apply when an agent needs persistent memory across sessions or the user
+  asks to use Anda Brain. Observer ingestion, runtime installation and trust
+  governance require separate trusted-host authority.
 metadata:
-  version: 0.2.0
+  version: 0.12.0
   url: https://github.com/ldclabs/anda-brain/blob/main/skills/anda-brain/SKILL.md
   keywords:
     - long-term memory
@@ -33,26 +23,30 @@ metadata:
 
 # 🧠 Anda Brain
 
-This adapter uses KIP 2.0 / CognitiveMemory 2.1. Keep using the documented
-Formation, Recall, Maintenance and forget endpoints. The optional observe/recall/
-revise/feedback/forget Memory Interface and its bundles are not advertised here;
-conversation ids are not processing receipts and cannot be used as `after` barriers.
-When a fresh correction matters, wait for the documented formation completion before
-recall and disclose unresolved processing. Procedure candidates are unproven without
-retained independent trial/evaluation evidence; self-reported success is not a grade.
-Text Watches require a configured semantic evaluator and remain deferred otherwise.
-A local purge acknowledgement is not a verified complete semantic ErasurePlan across
-all descendants, replays, backups and external exports.
-Operational Watch/SleepTask records written with an exact CognitiveMemory 2.0
-schema_ref require a verified 2.1 replacement; they cannot be upgraded in place.
+This skill targets the Rust **Anda Brain 0.12.0** service with KIP 2.0,
+CognitiveMemory 2.1 and published Nexus/KIP 0.13.1. The Cloudflare Worker uses a
+separate engine and does not acquire these Rust runtime capabilities automatically.
+Check the deployed service and its configuration before choosing an optional path.
 
-本适配器保留现有 API，未声明支持五意图 Memory Interface 或能力包；对话编号不是
-处理回执。涉及刚提交的更正时先确认 Formation 完成，再召回；未完成处理须明确说明。
-程序候选未经过独立试验/评估时保持未验证，自述成功不能作为等级。文本 Watch 无语义
-求值器时保持等待；单个对象的清除结果不能被扩展成整个语义依赖闭包已清除。
-使用 CognitiveMemory 2.0 精确 schema_ref 的 Watch/SleepTask 必须创建并核验 2.1
-替代记录，不能原地升级。
+Use Formation, Recall and Maintenance for ordinary memory work. A Proposition's
+existence is not belief; `insufficient` is not false. Corrections append new claims,
+and reading never increases confidence or utility. A returned conversation ID is
+not proof that Formation finished; inspect its completion before relying on a new
+fact or correction. The optional five-intent Memory Interface, bundles and standard
+`after` barrier are not advertised.
 
+For reminders or business follow-up, read the authenticated runtime status and inbox
+as described under **Attention and independent outcomes** below. A fired Watch is
+attention, not proof of delivery or permission. An answer is data, and an executor
+ACK is not an independently measured outcome. Procedures remain unproven without
+qualifying native trials/evaluations and current applicability checks.
+
+Host bindings, independent observation, learning, semantic evaluation, utility and
+trust have separate configuration and authority requirements. A model message,
+ordinary write token, a reported score or a calibration digest supplies none of
+those permissions. Native attention/learning identities cannot be copied by forks.
+A local purge acknowledgement is not proof that external exports or backups were
+erased. KIP timestamps use `YYYY-MM-DDTHH:mm:ss.SSSZ`.
 
 Persistent long-term memory service for LLM agents, powered by a Knowledge Graph (Cognitive Nexus) and KIP (Knowledge Interaction Protocol). Anda Brain is [open-source software](https://github.com/ldclabs/anda-brain) designed to be **self-hosted** — deploy your own instance with the [Quick Start guide](https://github.com/ldclabs/anda-brain/blob/main/deploy/quick_start.md).
 
@@ -152,7 +146,11 @@ The underlying knowledge graph consists of:
 
 If `ED25519_PUBKEYS` is configured, protected endpoints require a Bearer token in the `Authorization` header.
 
-If `ED25519_PUBKEYS` is empty/not provided, authentication is disabled and requests are accepted without signature verification.
+If `ED25519_PUBKEYS` is empty/not provided, legacy memory endpoints allow local
+unauthenticated access. Runtime inbox/status/responses still require verified
+credentials and explicit native identity/audience mappings. Independent HTTP
+outcomes require a signed observer-mapped CWT; they remain disabled without a
+configured verifier. An ordinary Space token cannot become an observer.
 
 ```
 Authorization: Bearer <base64_encoded_cose_sign1_token>
@@ -288,7 +286,7 @@ Content-Type: application/json
     "source": "source_123",
     "topic": "settings"
   },
-  "timestamp": "2026-03-09T10:30:00Z"
+  "timestamp": "2026-03-09T10:30:00.000Z"
 }
 ```
 
@@ -310,7 +308,7 @@ Content-Type: application/json
 | `context.agent` | `string` | No | Calling agent identifier |
 | `context.source` | `string` | No | Identifier of the source of the current interaction content |
 | `context.topic` | `string` | No | Conversation topic |
-| `timestamp` | `string` | No (recommended) | ISO 8601 timestamp of the conversation |
+| `timestamp` | `string` | No (recommended) | Canonical UTC timestamp (`YYYY-MM-DDTHH:mm:ss.SSSZ`) |
 
 `context.source` identifies a thread/channel for provenance. Reusing it for later
 messages is supported; it is not an idempotency key. Rust retries of a persisted
@@ -535,7 +533,7 @@ curl -sX POST https://your-brain-host/v1/my_space_001/formation \
       {"role": "assistant", "content": "Nice to meet you! Noted that you are a senior engineer at Acme Corp."}
     ],
     "context": {"counterparty": "user_123", "agent": "onboarding_bot"},
-    "timestamp": "2026-03-09T10:30:00Z"
+    "timestamp": "2026-03-09T10:30:00.000Z"
   }'
 ```
 
@@ -582,10 +580,68 @@ Core MCP tools:
 | `anda_brain_get_space_info` | Inspect space statistics and metadata |
 | `anda_brain_get_formation_status` | Check formation/maintenance progress |
 | `anda_brain_execute_kip_readonly` | Run read-only KIP for advanced graph inspection |
+| `anda_brain_get_attention` | Read only the caller-visible bounded inbox page |
+| `anda_brain_respond_attention` | Submit the recipient's clarification or attributed statement |
+| `anda_brain_get_runtime_status` | Inspect current bindings, switches and recovery state |
 
-If `ED25519_PUBKEYS` is empty, local MCP development can omit tokens. Add `--mcp-auto-create-space` for stdio development or `MCP_HTTP_AUTO_CREATE_SPACE=true` for remote development when the target space does not exist yet; remote auto-create requires `ED25519_PUBKEYS` plus a CWT with `write` scope for the target space before creating the missing space. Set `MCP_HTTP_ALLOWED_HOSTS` when remote MCP is exposed behind a company domain or reverse proxy.
+If `ED25519_PUBKEYS` is empty, core local MCP memory tools can omit tokens; runtime tools still require verified credentials and mappings. Add `--mcp-auto-create-space` for stdio development or `MCP_HTTP_AUTO_CREATE_SPACE=true` for remote development when the target space does not exist yet; remote auto-create requires `ED25519_PUBKEYS` plus a CWT with `write` scope for the target space before creating the missing space. Set `MCP_HTTP_ALLOWED_HOSTS` when remote MCP is exposed behind a company domain or reverse proxy.
 
 ---
+
+## Attention and independent outcomes
+
+1. Call `anda_brain_get_runtime_status` or `GET /v1/{space_id}/runtime/status`.
+   Inspect `configured`, `attention_enabled`, `actions_enabled`, observation
+   authentication and `blocked_reasons`. `learning`, `semantic_attention`, `utility`
+   and `trust` report separate optional capabilities. Counts can be partial, and
+   audit-only fields can be null; neither implies an empty queue or completed work.
+2. Read `anda_brain_get_attention` with `{cursor,limit}` or
+   `GET /v1/{space_id}/attention?limit=20`. Follow `next_cursor` until `complete`.
+   Limits are 1–50, visible output is bounded, and cursors expire after five minutes
+   and are bound to caller/instance/configuration. Restart pagination after expiry;
+   reading never claims a lease. Keep the returned `id` and native references.
+3. Reply through `anda_brain_respond_attention` with `{id,response}`, or
+   `POST /v1/{space_id}/attention/{id}/responses` with the response object. Use
+   `id`, not the slash-containing `wake_ref`, in the URL. A clarification response
+   is `{kind:"clarification",event_key,answer}`. It must come from the intended
+   recipient before the committed deadline; a fresh gate still checks permission.
+   A self-report uses `{kind:"agent_statement",event_key,statement}` and produces
+   attributed Evidence, never an independently graded Outcome.
+4. Retry unresolved writes with the same event key/body and fresh authentication.
+   Changed content under the same key conflicts. A deadline timeout is not consent;
+   unknown delivery requires target reconciliation, not blind resending.
+
+These routes use structured JSON/CBOR POST bodies and JSON/CBOR/Markdown responses.
+Runtime credentials are mandatory even on public/local Spaces. Configuration is
+installed before loading Spaces via `BRAIN_RUNTIME_CONFIG` or trusted Rust builders.
+The compiled `attention_inbox_v1` adapter persists a delivery; it does not prove
+that a human read it or that the business task succeeded.
+
+`POST /v1/{space_id}/outcomes` belongs to separately registered, signed observers
+with current native `record_outcome` authority and the exact measurement contract.
+Ordinary agents do not submit self-grades through it; MCP exposes no observer writer.
+Receipts distinguish native persistence, learning eligibility and unresolved safety
+work. Registered learning Attempts use their own controller exclusively, including
+baselines. Late/corrected evidence is additive and does not rewrite prior grades.
+
+Text/mixed Watches require the installed semantic evaluator; missing, unknown,
+timed-out or truncated judgments cannot prove silence. Inspect `semantic_attention`
+for configuration/recovery and leave evaluator changes and reviewed re-arming to
+operators. A maintenance model completion does not advance coverage.
+
+Utility uses actual delivery receipts plus independently qualified use/contribution.
+Trust uses separately verified facts within one exact actor/predicate/context; action
+success/failure, usage and correction counters are not source-reliability samples.
+Trust application additionally requires current `manage_trust`, calibrated parameters
+and an explicit governor. No ordinary token, semantic actor or MCP tool installs
+bindings, sets scores or grants governance. Automatic changes default off.
+
+Read only the relevant reference when integrating a host:
+
+- [Runtime setup, identity mapping and recovery](https://github.com/ldclabs/anda-brain/blob/main/anda_brain/RUNTIME.md)
+- [Exact endpoint and receipt types](https://github.com/ldclabs/anda-brain/blob/main/anda_brain/API.md#authenticated-runtime-inbox-and-observations)
+- [Semantic Watch contracts](https://github.com/ldclabs/anda-brain/blob/main/anda_brain/SEMANTIC_WATCH_RUNTIME.md)
+- [Scoped trust governance](https://github.com/ldclabs/anda-brain/blob/main/anda_brain/TRUST_RUNTIME.md)
 
 ## OpenClaw Integration
 
@@ -771,7 +827,7 @@ Configured learning Spaces cannot be forked with their operational journal;
 prepare the immutable factual baseline before configuring the controller.
 
 Isolated experiment hosts can use `Experiment::create_with_recall_budget` to
-force P5 limits and `audit_procedures()` for evaluator-only native inventories.
+force Recall-budget limits and `audit_procedures()` for evaluator-only native inventories.
 The sibling Bot's `learning_audit` extension must never be fed back through
 Observe or used as an execution permit. Incomplete audits cannot prove absence.
 MIB requires explicit normal/no-memory/ungated capability declarations; Bot's
@@ -786,3 +842,20 @@ per-Space. Trusted Rust hosts may configure immutable `AgentPrompts` before
 sharing an AppState or opening a Space; only section A is replaceable and the
 compiled KIP reference stays intact. This is not a model-facing prompt tool.
 See [public contract](https://github.com/ldclabs/anda-brain/blob/main/anda_brain/README.md#offline-regression-and-instance-configuration) for the migration and removed APIs.
+
+The learning runtime provides explicitly configured background trial/review advancement and terminal
+archival. Read `learning` in the runtime status to distinguish compiled, registered,
+bound and automatic states. A host installs the registered workflow executor,
+independent observer, frozen plan factory and reviewed calibration through
+`BRAIN_RUNTIME_CONFIG`; ordinary agents cannot authorize these through memory text.
+Do not describe a scheduler count, archival receipt or compiled adapter as measured
+learning improvement. See [the learning runtime guide](https://github.com/ldclabs/anda-brain/blob/main/anda_brain/LEARNING_RUNTIME.md).
+
+Structured Recall includes an optional `recall_receipt` handle. Treat it as
+delivery provenance, not proof of actual use, truth or permission. Trusted host
+decisions select actual `used_refs`; only qualified independent contribution
+witnesses or native frozen paired comparisons can support utility calibration.
+Frequency, citations, likes and model self-reports never earn objective credit.
+Configured utility can only order peers inside existing Recall priorities; it
+cannot override constraints, uncertainty or revoked procedure status. See the
+[utility guide](https://github.com/ldclabs/anda-brain/blob/main/anda_brain/UTILITY_RUNTIME.md).
