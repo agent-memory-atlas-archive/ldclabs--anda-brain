@@ -325,14 +325,15 @@ function optionalString(value: unknown, name: string, max: number): string | und
 }
 
 function optionalTimestamp(value: unknown): string | undefined {
-  if (value === undefined || value === null) return undefined
-  const timestamp = requiredString(value, 'timestamp', 64)
-  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.\d{3}Z$/.exec(
-    timestamp,
-  )
-  const invalid = () =>
-    new ValidationError('`timestamp` must be a UTC date-time in YYYY-MM-DDTHH:mm:ss.SSSZ form')
-  if (!match) throw invalid()
+  return optionalString(value, 'timestamp', 64)
+}
+
+/** Adapt external observation time; a malformed spelling must not lose input. */
+export function observationTimestamp(value: string | undefined, receivedAt: number): string {
+  const timestamp = value?.trim() ?? ''
+  const match = /^(\d{4})-(\d{2})-(\d{2})[Tt ](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$/.exec(timestamp)
+  const fallback = () => new Date(receivedAt).toISOString()
+  if (!match) return fallback()
 
   const [, yearText, monthText, dayText, hourText, minuteText, secondText] = match
   const year = Number(yearText)
@@ -341,7 +342,9 @@ function optionalTimestamp(value: unknown): string | undefined {
   const hour = Number(hourText)
   const minute = Number(minuteText)
   const second = Number(secondText)
-  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate()
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
+  const daysInMonth = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1] ?? 0
+  const instant = Date.parse(timestamp)
   if (
     month < 1 ||
     month > 12 ||
@@ -350,11 +353,12 @@ function optionalTimestamp(value: unknown): string | undefined {
     hour > 23 ||
     minute > 59 ||
     second > 59 ||
-    Number.isNaN(Date.parse(timestamp))
+    !Number.isFinite(instant)
   ) {
-    throw invalid()
+    return fallback()
   }
-  return timestamp
+  const normalized = new Date(instant).toISOString()
+  return normalized.length === 24 ? normalized : fallback()
 }
 
 /**

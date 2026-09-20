@@ -1,4 +1,5 @@
 import type { KipResult } from '@ldclabs/kip-do'
+import { observationTimestamp } from './validation.js'
 import {
   DEFAULT_AI_MODEL,
   AiResponseError,
@@ -89,7 +90,7 @@ export async function formMemory(
   brain: BrainRpc,
   input: FormationInput,
 ): Promise<unknown> {
-  const timestamp = input.timestamp ?? new Date().toISOString()
+  const timestamp = observationTimestamp(input.timestamp, Date.now())
   const counterparty = await counterpartyElement(brain, input.context?.counterparty)
   const primer = resultOrThrow(await brain.describePrimer(), 'formation primer failed')
   const model = env.AI_MODEL || DEFAULT_AI_MODEL
@@ -282,7 +283,7 @@ export async function maintainMemory(
   brain: BrainRpc,
   input: MaintenanceInput,
 ): Promise<unknown> {
-  const timestamp = input.timestamp ?? new Date().toISOString()
+  const timestamp = observationTimestamp(input.timestamp, Date.now())
   // Deterministic first, model second — the same order `anda_brain` runs in.
   // Disuse metabolism, silence-Watch expiry and the Skill lifecycle are
   // arithmetic; doing them before the completion means the cycle assesses an

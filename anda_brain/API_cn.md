@@ -80,7 +80,7 @@ export interface Message {
 export interface FormationInput {
   messages: Message[]; // 至少包含一条非空消息（否则 400）
   context?: InputContext;
-  timestamp?: string; // 规范 UTC：YYYY-MM-DDTHH:mm:ss.SSSZ；建议提供
+  timestamp?: string; // RFC 3339；统一为 UTC 毫秒格式，无效或缺省时使用接收时间
 }
 
 export interface RecallInput {
@@ -177,6 +177,9 @@ export interface MemoryForgetReport {
   dry_run: boolean;
   deleted_concepts: number;
   deleted_propositions: number;
+  deleted_assertions: number;
+  deleted_evidence: number;
+  deleted_activities: number;
   entities?: MemoryForgetEntity[];
 }
 
@@ -832,6 +835,7 @@ MCP 只读 KIP 工具使用 `commands`，并为批量读取补上 independent �
 - 作用：提交记忆写入任务
 - 鉴权：SpaceToken/CWT `write`
 - 请求体：`FormationInput`（Markdown 模式下也允许原始字符串）
+- 观察时间接受带时区偏移和不同小数精度的 RFC 3339，统一为 `YYYY-MM-DDTHH:mm:ss.SSSZ`。无效或缺省的时间戳使用已保存的会话创建时间，重试沿用同一回退时间，并保留原始输入。Markdown 原文按一条 user 消息原样捕获，同样提供 `:msg1` Evidence 绑定。
 - 响应（JSON/CBOR）：`RpcResponse<AgentOutput>`
 - 响应（Markdown）：`string`（仅返回 `AgentOutput.content`）
 
@@ -897,6 +901,8 @@ RPC/MCP 传输副本不属于这些范围。不根据模型名猜编码，也不
 - 请求体：`MemoryForgetInput`；`dry_run` 默认 `false`。
 - 响应：`RpcResponse<MemoryForgetReport>`；单个实体的错误位于 `result.entities`。
 
+接受显式的 Concept（`C-*`）、Proposition（`P-*`）、Assertion（`A-*`）、Evidence（`E-*`）和 Activity（`X-*`）ID，包括保存消息原文的 Evidence。原生 legal hold 和引用检查仍然生效，成功清除后保留已擦除身份桩。计数分别报告各类被清除记录，包含级联删除。此操作清除所选图谱记录；已保存的会话、wiki 文档及外部副本各有独立生命周期。
+
 ### GET `/v1/{space_id}/memory_status`
 
 - 用途：读取记忆统计和最近一次维护报告。
@@ -921,6 +927,7 @@ RPC/MCP 传输副本不属于这些范围。不根据模型名猜编码，也不
 - 作用：按给定 principal 获取或初始化用户 Concept 节点
 - 鉴权：SpaceToken/CWT `write`
 - 请求体：`GetOrInitUserInput`
+- 省略 `name` 时保留已有显示名；显式提供 `name` 时更新显示名。首次创建且未提供姓名时，使用 key 作为初始显示名。
 - 响应：`RpcResponse<Concept>`
 
 ### GET `/v1/{space_id}/info`

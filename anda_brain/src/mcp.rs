@@ -138,8 +138,8 @@ impl McpMessage {
 pub struct RememberConversationInput {
     pub messages: Vec<McpMessage>,
     pub context: Option<InputContext>,
-    /// Optional canonical UTC timestamp (`YYYY-MM-DDTHH:mm:ss.SSSZ`) for the
-    /// represented conversation.
+    /// Optional RFC 3339 observation time. Offsets/fractions are normalized;
+    /// an invalid string falls back to the durable conversation receipt time.
     pub timestamp: Option<String>,
 }
 

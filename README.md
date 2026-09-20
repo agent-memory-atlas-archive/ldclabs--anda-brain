@@ -24,6 +24,13 @@ procedures remain unproven and `skills.unsupported_reason` reports the limitatio
 Existing Brain endpoints remain available. The optional five-intent Memory Interface
 and its `memory_*` bundles are **not advertised** by these adapters.
 
+Formation normalizes RFC 3339 observation times and falls back to receipt time
+for invalid strings. Rust Markdown submissions receive the same captured Evidence
+as structured messages, and existing counterparty display names are preserved
+when no name is supplied. The Rust forget endpoint accepts explicit Evidence and
+Activity IDs as well as Concepts, Propositions and Assertions, subject to native
+legal holds and reference checks. See the [API](anda_brain/API.md).
+
 Rust now requires Cognitive Nexus 0.13.1: Watch firing atomically records the
 transition, `watch_fire` Activity and a protected wake, with replayable receipts
 and native fenced leases. The service now schedules structured Watches independently

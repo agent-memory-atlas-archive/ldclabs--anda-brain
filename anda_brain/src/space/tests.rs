@@ -32,6 +32,8 @@ use std::sync::atomic::Ordering;
 use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 
+mod forget;
+
 #[derive(Debug)]
 struct FinalCompleter;
 

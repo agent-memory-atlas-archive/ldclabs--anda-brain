@@ -46,6 +46,7 @@ export function formationMessages(
       content: boundedJson({
         stage: 'formation',
         timestamp,
+        ...(input.timestamp && input.timestamp !== timestamp ? { source_timestamp: input.timestamp } : {}),
         context: input.context ?? {},
         primer,
         messages: input.messages,

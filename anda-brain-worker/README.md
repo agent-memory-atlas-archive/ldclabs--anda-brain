@@ -253,13 +253,15 @@ curl http://localhost:8787/v1/alice/formation \
   }'
 ```
 
-`timestamp` 若提供，必须使用规范 UTC 格式 `YYYY-MM-DDTHH:mm:ss.SSSZ`。
+Formation / Maintenance 的 `timestamp` 接受带时区偏移及不同小数精度的 RFC 3339，
+宿主统一转为 `YYYY-MM-DDTHH:mm:ss.SSSZ`。无法解析或缺省时使用本次请求的接收时间，
+不会因为时间戳格式而拒绝消息；Formation 规划上下文保留原始时间戳文本。
 
 `context.counterparty` 是 Concept 的 **key**（不可变身份），不是 name（可变标签）。宿主会在规划前确保该 Person 存在，并保留已有显示名称。
 
 `context.source` 是线程/渠道来源，不是消息去重键。Evidence 身份由完整输入、上下文和时间戳的摘要确定；
 同一 source 的后续消息不会复用旧消息的 Evidence。要重试同一观察，应保持消息、上下文及显式 `timestamp`
-不变；省略 timestamp 时，每个请求获得新的观察时间。此规则只保证 Evidence 的身份，不表示整份模型写入计划
+不变且可解析；省略或无法解析 timestamp 时，每个请求获得新的观察时间。此规则只保证 Evidence 的身份，不表示整份模型写入计划
 具备请求级 exactly-once 语义。
 
 Formation 只能写认知：`CREATE CONCEPT`、`UPSERT CONCEPT`、`ENSURE PROPOSITION`、`CREATE EVIDENCE / ASSERTION / ACTIVITY`、`ASSERT`，以及用于更正和自身 Activity 的 `TRANSITION`——状态限于 `retracted` / `superseded` / `corrected` / `running` / `completed` / `failed` / `cancelled`。`TRANSITION ... TO "archived"`、`TO "tombstoned"` 以及 `UPDATE`、`PURGE`、`MERGE CONCEPT` 会在 Durable Object 内被拒绝。状态必须写成字面量：闸门读不到的参数化状态一律拒绝，否则「六条语句合并成一条 `TRANSITION`」就等于给 Formation 开了一条以绑定值 tombstone 的路。

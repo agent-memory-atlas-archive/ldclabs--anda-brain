@@ -902,34 +902,50 @@ describe('Anda Brain Worker', () => {
     expect(body.result.changed).toMatchObject({ total: 1, updated: 1 })
   })
 
-  it('rejects non-string maintenance enums and non-canonical timestamps', async () => {
+  it('rejects non-string maintenance enums and invalid message roles', async () => {
     const runtime = testEnv(new FakeAi([]))
     const invalidScope = await post(runtime, uniqueSpace('scope'), 'maintenance', {
       scope: ['quick'],
     })
     expect(invalidScope.status).toBe(400)
 
-    const invalidTimestamp = await post(runtime, uniqueSpace('timestamp'), 'formation', {
-      messages: [{ role: 'user', content: 'Remember this.' }],
-      timestamp: '2026',
-    })
-    expect(invalidTimestamp.status).toBe(400)
-
-    const missingMilliseconds = await post(
-      runtime,
-      uniqueSpace('timestamp-milliseconds'),
-      'formation',
-      {
-        messages: [{ role: 'user', content: 'Remember this.' }],
-        timestamp: '2026-08-20T00:00:00Z',
-      },
-    )
-    expect(missingMilliseconds.status).toBe(400)
-
     const invalidRole = await post(runtime, uniqueSpace('role'), 'formation', {
       messages: [{ role: ['user'], content: 'Remember this.' }],
     })
     expect(invalidRole.status).toBe(400)
+  })
+
+  it('normalizes external timestamps and captures malformed ones at receipt time', async () => {
+    for (const [timestamp, expected] of [
+      ['2026-08-20T00:00:00Z', '2026-08-20T00:00:00.000Z'],
+      [' 2026-08-20T08:00:00.123456+08:00 ', '2026-08-20T00:00:00.123Z'],
+      ['2026', undefined],
+      ['not a timestamp', undefined],
+      ['2026-02-30T00:00:00Z', undefined],
+    ] as const) {
+      const runtime = testEnv(new FakeAi([{
+        types: [], predicates: [], summary: 'captured',
+        commands: ['CREATE ACTIVITY ?a { SET FIELDS {activity_class: "extraction", status: "completed"} SET STRUCTURAL {("inputs", :msg1)} }'],
+      }]))
+      const space = uniqueSpace('timestamp-compatible')
+      const before = Date.now()
+      const written = await post(runtime, space, 'formation', {
+        messages: [{role: 'user', content: 'Original message.'}], timestamp,
+      })
+      expect(written.status, await written.text()).toBe(200)
+      const read = await post(runtime, space, 'execute_kip_readonly', {
+        command: 'FIND(?e.observed_at, ?e.payload) WHERE {?e EVIDENCE {}} LIMIT 10',
+      })
+      const body = await read.json<Record<string, any>>()
+      const rows = body.result[0].result
+      expect(rows).toHaveLength(1)
+      expect(JSON.stringify(rows[0][1])).toContain('Original message.')
+      if (expected) expect(rows[0][0]).toBe(expected)
+      else {
+        expect(Date.parse(rows[0][0])).toBeGreaterThanOrEqual(before)
+        expect(Date.parse(rows[0][0])).toBeLessThanOrEqual(Date.now())
+      }
+    }
   })
 
   it('returns route and internal errors without parsing or leaking details', async () => {

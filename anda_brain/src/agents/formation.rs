@@ -11,7 +11,7 @@ use anda_engine::{
     extension::note::{NoteTool, load_notes, load_notes_from_legacy},
     local_date_hour,
     memory::{Conversation, ConversationRef, ConversationStatus, MemoryManagement},
-    rfc3339_datetime, rfc3339_datetime_now, unix_ms,
+    unix_ms,
 };
 use parking_lot::RwLock;
 use serde_json::json;
@@ -183,6 +183,20 @@ impl FormationAgent {
         counterparty: String,
         name: Option<String>,
     ) -> Result<Json, BoxError> {
+        let preserve_name = name.is_none();
+        if preserve_name {
+            let existing = first_row(
+                self.memory
+                    .query(
+                        PERSON_BY_KEY,
+                        Some(crate::kip::param("key", counterparty.clone())),
+                    )
+                    .await?,
+            );
+            if !existing.is_null() {
+                return Ok(existing);
+            }
+        }
         let parameters = Map::from_iter([
             ("key".to_string(), Json::from(counterparty.clone())),
             (
@@ -190,15 +204,21 @@ impl FormationAgent {
                 Json::from(name.unwrap_or_else(|| counterparty.clone())),
             ),
         ]);
-        self.memory
-            .execute(
-                r#"UPSERT CONCEPT ?person {
+        let command = if preserve_name {
+            // Creation can race another caller. A key collision is read back
+            // below; an UPSERT would overwrite the winner's display name.
+            r#"CREATE CONCEPT ?person { TYPE "Person" NAME :name SET FIELDS { key: :key } }"#
+        } else {
+            r#"UPSERT CONCEPT ?person {
   MATCH { type: "Person", key: :key }
   SET FIELDS { name: :name }
-}"#,
-                Some(parameters),
-            )
-            .await?;
+}"#
+        };
+        if let Err(error) = self.memory.execute(command, Some(parameters)).await
+            && !(preserve_name && error.code == anda_kip::KipErrorCode::IdentityConflict)
+        {
+            return Err(error.into());
+        }
 
         // Read back rather than returning the write receipt: callers want the
         // Person as it now stands, which on a match is not what this call sent.
@@ -425,10 +445,21 @@ impl FormationAgent {
             }
         };
 
-        let input = serde_json::from_str::<FormationInput>(&prompt).ok();
+        // Markdown/raw-text submissions use the same host-owned Evidence path
+        // as structured conversations. Keep their exact text as one message.
+        let input =
+            serde_json::from_str::<FormationInput>(&prompt).unwrap_or_else(|_| FormationInput {
+                messages: vec![Message {
+                    role: "user".into(),
+                    content: vec![prompt.clone().into()],
+                    ..Default::default()
+                }],
+                context: None,
+                timestamp: None,
+            });
         let counterparty = input
+            .context
             .as_ref()
-            .and_then(|input| input.context.as_ref())
             .and_then(|input_ctx| input_ctx.counterparty.clone());
 
         let now_ms = unix_ms();
@@ -461,24 +492,19 @@ impl FormationAgent {
         // Each durable conversation has its own key, stable across retries,
         // so a later submission from the same source cannot cite old bytes.
         ctx.base.set_state(super::Observation(
-            input
-                .as_ref()
-                .and_then(|input| {
-                    let origin = format!("formation:conversation:{}", conversation._id);
-                    crate::kip::observation_ingest(
-                        &input.messages,
-                        &input.timestamp.clone().unwrap_or_else(|| {
-                            rfc3339_datetime(conversation.created_at)
-                                .unwrap_or_else(rfc3339_datetime_now)
-                        }),
-                        &origin,
-                        counterparty_info
-                            .as_ref()
-                            .and_then(|person| person.get("id"))
-                            .and_then(Json::as_str),
-                    )
-                })
-                .map(Arc::new),
+            crate::kip::observation_ingest(
+                &input.messages,
+                &crate::kip::observation_timestamp(
+                    input.timestamp.as_deref(),
+                    conversation.created_at,
+                ),
+                &format!("formation:conversation:{}", conversation._id),
+                counterparty_info
+                    .as_ref()
+                    .and_then(|person| person.get("id"))
+                    .and_then(Json::as_str),
+            )
+            .map(Arc::new),
         ));
 
         // add history conversations to provide more context for recall
@@ -1039,6 +1065,159 @@ mod tests {
             timestamp: None,
         })
         .unwrap()
+    }
+
+    #[derive(Debug, Default)]
+    struct EvidenceCompleter {
+        calls: AtomicU64,
+        results: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+
+    impl CompletionFeaturesDyn for EvidenceCompleter {
+        fn model_name(&self) -> String {
+            "formation-evidence-regression".into()
+        }
+
+        fn completion(&self, req: CompletionRequest) -> BoxPinFut<Result<AgentOutput, BoxError>> {
+            let write = self.calls.fetch_add(1, Ordering::SeqCst).is_multiple_of(2);
+            let results = self.results.clone();
+            Box::pin(async move {
+                if write {
+                    return Ok(AgentOutput {
+                        tool_calls: vec![ToolCall {
+                            name: "execute_kip".into(),
+                            args: json!({"command": r#"CREATE ACTIVITY ?receipt {
+                                SET FIELDS {activity_class: "extraction", status: "completed"}
+                                SET STRUCTURAL {("inputs", :msg1)}
+                            }"#}),
+                            result: None,
+                            call_id: Some("capture".into()),
+                            remote_id: None,
+                        }],
+                        ..Default::default()
+                    });
+                }
+                for part in req.content {
+                    if let ContentPart::ToolOutput { output, .. } = part {
+                        results.lock().unwrap().push(output);
+                    }
+                }
+                Ok(AgentOutput {
+                    content: "captured".into(),
+                    ..Default::default()
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn formation_captures_compatible_timestamps_and_raw_text_with_stable_retry_evidence() {
+        let received_at = 1_789_862_400_123;
+        let said = "  Keep this original text.\n原文不变。  ";
+        for (index, timestamp, expected, raw) in [
+            (
+                0,
+                Some("2026-09-20T00:00:00Z"),
+                "2026-09-20T00:00:00.000Z".to_string(),
+                false,
+            ),
+            (
+                1,
+                Some(" 2026-09-20T08:00:00.123456+08:00 "),
+                "2026-09-20T00:00:00.123Z".to_string(),
+                false,
+            ),
+            (
+                2,
+                Some("not a timestamp"),
+                crate::kip::timestamp(received_at),
+                false,
+            ),
+            (3, None, crate::kip::timestamp(received_at), false),
+            (4, None, crate::kip::timestamp(received_at), true),
+        ] {
+            let model = EvidenceCompleter::default();
+            let results = model.results.clone();
+            let name = format!("formation_capture_{index}");
+            let app = test_app_state_with_completer(&name, model);
+            let space = create_loaded_space(&app, &name).await;
+            let prompt = if raw {
+                said.to_string()
+            } else {
+                serde_json::to_string(&FormationInput {
+                    messages: vec![Message {
+                        role: "user".into(),
+                        content: vec![said.to_string().into()],
+                        ..Default::default()
+                    }],
+                    context: None,
+                    timestamp: timestamp.map(str::to_string),
+                })
+                .unwrap()
+            };
+            let mut original = stored_conversation(
+                &space,
+                vec![json!(Message {
+                    role: "user".into(),
+                    content: vec![prompt.into()],
+                    ..Default::default()
+                })],
+            )
+            .await;
+            original.created_at = received_at;
+            let ctx = space
+                .ctx_for_test(SELF_USER_ID, FormationAgent::NAME)
+                .unwrap();
+            for _ in 0..2 {
+                let mut conversation = original.clone();
+                space.formation.process_one(&ctx, &mut conversation).await;
+                assert_eq!(conversation.status, ConversationStatus::Completed);
+            }
+            let results = results.lock().unwrap().clone();
+            assert_eq!(results.len(), 2);
+            assert!(
+                results.iter().all(|r| r["status"] == "succeeded"),
+                "{results:?}"
+            );
+            let evidence = space
+                .memory
+                .query("FIND(?e) WHERE {?e EVIDENCE {}} LIMIT 10", None)
+                .await
+                .unwrap();
+            let rows = evidence.as_array().unwrap();
+            assert_eq!(rows.len(), 1, "a retry must retain the original Evidence");
+            assert_eq!(rows[0]["observed_at"], expected);
+            assert_eq!(rows[0]["payload"]["inline"]["content"][0]["text"], said);
+            space.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn counterparty_lookup_preserves_display_name_and_explicit_updates_still_work() {
+        let app = test_app_state("counterparty_name");
+        let space = create_loaded_space(&app, "counterparty_name").await;
+        let agent = &space.formation;
+        let initial = agent
+            .get_or_init_counterparty("alice".into(), Some("Alice Smith".into()))
+            .await
+            .unwrap();
+        let found = agent
+            .get_or_init_counterparty("alice".into(), None)
+            .await
+            .unwrap();
+        assert_eq!(found, initial, "lookup must not mutate the existing Person");
+        let renamed = agent
+            .get_or_init_counterparty("alice".into(), Some("Alice Jones".into()))
+            .await
+            .unwrap();
+        assert_eq!(renamed["id"], initial["id"]);
+        assert_eq!(renamed["name"], "Alice Jones");
+        let (a, b) = tokio::join!(
+            agent.get_or_init_counterparty("new_person".into(), None),
+            agent.get_or_init_counterparty("new_person".into(), None),
+        );
+        assert_eq!(a.unwrap()["id"], b.unwrap()["id"]);
+        space.close().await.unwrap();
     }
 
     async fn stored_conversation(

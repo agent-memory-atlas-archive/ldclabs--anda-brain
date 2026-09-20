@@ -22,6 +22,11 @@ Rust 使用已发布的 `anda_kip`、Cognitive Nexus 和 AndaDB 0.13；Worker �
 `skills.unsupported_reason` 明确报告该边界。现有 Brain API 保持可用；这两个适配器
 **未声明支持**可选的五意图 Memory Interface 或 `memory_*` 能力包。
 
+Formation 会规范化 RFC 3339 观察时间，无效字符串回退到接收时间。Rust Markdown
+原文与结构化消息使用相同的 Evidence 捕获机制，未提供姓名时保留已有交互对象的显示名。
+Rust 遗忘接口除 Concept、Proposition、Assertion 外，也接受显式的 Evidence 和 Activity
+ID，并继续遵守原生 legal hold 与引用检查。详见 [API](anda_brain/API_cn.md)。
+
 Rust 现要求 Cognitive Nexus 0.13.1：Watch 触发会原子记录状态变化、`watch_fire`
 活动及受保护 wake，并提供可重放回执和原生租约。服务现会独立于 Full Maintenance
 调度结构化 Watch，从持久化目录发现已驱逐的注册 Space，并在重启后恢复有界扫描。

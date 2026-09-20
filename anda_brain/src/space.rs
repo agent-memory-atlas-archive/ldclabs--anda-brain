@@ -2179,16 +2179,29 @@ impl Space {
                 entity: entity.clone(),
                 ..Default::default()
             };
-            let exists_command = if assess::is_proposition_entity_id(&entity) {
-                "FIND(?link) WHERE { ?link (id: :id) } LIMIT 1"
-            } else if assess::is_concept_entity_id(&entity) {
-                "FIND(?c) WHERE { ?c {id: :id} } LIMIT 1"
-            } else if assess::is_assertion_entity_id(&entity) {
-                "FIND(?a) WHERE { ?a ASSERTION {id: :id} } LIMIT 1"
-            } else {
-                entry.error = Some("not an element id (C-*, P-* or A-*)".to_string());
-                report.entities.push(entry);
-                continue;
+            let exists_command = match entity.parse::<anda_cognitive_nexus::ElementId>() {
+                Ok(id) => match id.kind {
+                    anda_kip::ElementKind::Concept => {
+                        "FIND(?e) WHERE { ?e CONCEPT {id: :id} } LIMIT 1"
+                    }
+                    anda_kip::ElementKind::Proposition => {
+                        "FIND(?e) WHERE { ?e PROPOSITION(id: :id) } LIMIT 1"
+                    }
+                    anda_kip::ElementKind::Assertion => {
+                        "FIND(?e) WHERE { ?e ASSERTION {id: :id} } LIMIT 1"
+                    }
+                    anda_kip::ElementKind::Evidence => {
+                        "FIND(?e) WHERE { ?e EVIDENCE {id: :id} } LIMIT 1"
+                    }
+                    anda_kip::ElementKind::Activity => {
+                        "FIND(?e) WHERE { ?e ACTIVITY {id: :id} } LIMIT 1"
+                    }
+                },
+                Err(error) => {
+                    entry.error = Some(error.to_string());
+                    report.entities.push(entry);
+                    continue;
+                }
             };
 
             let response = self
@@ -2199,9 +2212,12 @@ impl Space {
                 .await?;
             match kip::ok_result(&response) {
                 Some(result) => {
-                    entry.existed = assess::citations_from_json(result)
-                        .iter()
-                        .any(|hit| hit.entity == entity);
+                    // Provenance records are not Recall citations, but are
+                    // still explicitly erasable graph elements.
+                    entry.existed = result.as_array().is_some_and(|rows| {
+                        rows.iter()
+                            .any(|row| row["id"] == entity && row["_system"]["state"] != "erased")
+                    });
                 }
                 None => {
                     // An errored/timed-out existence check means *unknown*,
@@ -2246,6 +2262,9 @@ impl Space {
                 Ok(response) if kip::succeeded(&response) => {
                     report.deleted_concepts += purged_of_kind(&response, "concept");
                     report.deleted_propositions += purged_of_kind(&response, "proposition");
+                    report.deleted_assertions += purged_of_kind(&response, "assertion");
+                    report.deleted_evidence += purged_of_kind(&response, "evidence");
+                    report.deleted_activities += purged_of_kind(&response, "activity");
                     for gone in &cascade {
                         let _ = self.ledger.forget_entity(gone).await;
                     }
@@ -2259,7 +2278,11 @@ impl Space {
             }
             report.entities.push(entry);
         }
-        let removed = report.deleted_concepts + report.deleted_propositions;
+        let removed = report.deleted_concepts
+            + report.deleted_propositions
+            + report.deleted_assertions
+            + report.deleted_evidence
+            + report.deleted_activities;
         if removed > 0 {
             self.bump_metrics(|metrics| metrics.forgotten_entities += removed);
             // Plan M6 cascade: cached probe-miss rows carry raw query text

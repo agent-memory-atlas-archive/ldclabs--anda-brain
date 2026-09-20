@@ -208,6 +208,19 @@ Assertion records an actor's stance and Evidence. Existence is not belief.
 
 ### Fixes and release engineering
 
+- Formation normalizes external RFC 3339 observation times, including offsets
+  and fractional precision. Invalid or missing strings fall back to the durable
+  conversation receipt time; retries retain the same Evidence identity. Markdown
+  input is captured verbatim as one user message. Worker Formation/Maintenance
+  use the same timestamp tolerance, with a per-request fallback.
+- Counterparty lookups without a name preserve the existing Person display name;
+  explicitly supplied names still update it.
+- Rust `memory/forget` accepts explicit Evidence and Activity IDs in addition to
+  Concepts, Propositions and Assertions. Per-kind deletion counts include native
+  cascades; legal holds still prevent erasure. This does not scrub conversation,
+  wiki or external copies.
+- The exact `anda_kip = "=0.13.1"` dependency pin matches the generated reference
+  manifest and restores the reference synchronization/check script.
 - Search citations read the hit's nested `element`; probe misses are cached
   only after exhaustive search. `IS_NULL` on absent paths works, and bare
   `{"id": ...}` references no longer count as recalled memories. Both

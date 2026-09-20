@@ -399,6 +399,11 @@ the `retention` block of the settlement report says how many were held,
 refused and left for the next cycle rather than reporting only what it
 managed to archive.
 
+The explicit forget endpoint accepts all five KIP element kinds (`C-*`, `P-*`,
+`A-*`, `E-*`, `X-*`), including captured message Evidence. Its report counts each
+purged kind and retains per-entity refusals such as legal holds. It erases selected
+graph records; conversation, wiki and external copies retain their own lifecycles.
+
 > **Known scale ceiling:** the bulk decay, correction discovery, and
 > self-test sampling passes use unconstrained full-scan KQL, and the engine
 > caps full-scan solutions at 65,536 regardless of `LIMIT`.
@@ -647,6 +652,12 @@ Create a new isolated memory space. Requires manager principal.
 
 Submit conversation messages for memory encoding. Processing is asynchronous — returns immediately while encoding continues in the background.
 
+RFC 3339 observation times are normalized to UTC milliseconds. Invalid or missing
+timestamp strings use the durable conversation creation time, including on retries;
+the original input is retained. Markdown raw text is captured as one user message
+with the same Evidence binding. Looking up an existing counterparty without a name
+preserves its current display name.
+
 **Request:**
 ```json
 {
@@ -678,7 +689,7 @@ Submit conversation messages for memory encoding. Processing is asynchronous —
 | `context.agent`        | `string`    | No       | Calling agent identifier                                        |
 | `context.source`       | `string`    | No       | Identifier of the source of the current interaction content     |
 | `context.topic`        | `string`    | No       | Conversation topic                                              |
-| `timestamp`            | `string`    | No (recommended) | Canonical UTC timestamp (`YYYY-MM-DDTHH:mm:ss.SSSZ`)    |
+| `timestamp`            | `string`    | No (recommended) | RFC 3339; normalized, or receipt time if invalid/missing |
 
 **Response:**
 ```json

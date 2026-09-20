@@ -93,6 +93,9 @@ type MemoryForgetReport struct {
 	DryRun              bool                 `json:"dry_run"`
 	DeletedConcepts     uint64               `json:"deleted_concepts"`
 	DeletedPropositions uint64               `json:"deleted_propositions"`
+	DeletedAssertions   uint64               `json:"deleted_assertions"`
+	DeletedEvidence     uint64               `json:"deleted_evidence"`
+	DeletedActivities   uint64               `json:"deleted_activities"`
 	Entities            []MemoryForgetEntity `json:"entities,omitempty"`
 }
 

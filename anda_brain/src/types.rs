@@ -535,7 +535,8 @@ pub struct FormationInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<InputContext>,
 
-    /// Canonical UTC timestamp (`YYYY-MM-DDTHH:mm:ss.SSSZ`).
+    /// Caller observation time. RFC 3339 offsets/fractions are normalized;
+    /// missing or invalid strings fall back to the durable conversation receipt time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
 }
@@ -1466,7 +1467,7 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MemoryForgetInput {
     /// Graph element ids to delete: `"C-7"` (purges the concept and its
-    /// propositions), `"P-3"` or `"A-2"`.
+    /// propositions), `"P-3"`, `"A-2"`, `"E-4"` or `"X-5"`.
     pub entities: Vec<String>,
 
     #[serde(default)]
@@ -1478,6 +1479,12 @@ pub struct MemoryForgetReport {
     pub dry_run: bool,
     pub deleted_concepts: u64,
     pub deleted_propositions: u64,
+    #[serde(default)]
+    pub deleted_assertions: u64,
+    #[serde(default)]
+    pub deleted_evidence: u64,
+    #[serde(default)]
+    pub deleted_activities: u64,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entities: Vec<MemoryForgetEntity>,

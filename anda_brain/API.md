@@ -87,7 +87,7 @@ export interface Message {
 export interface FormationInput {
   messages: Message[]; // must contain at least one non-empty message (400)
   context?: InputContext;
-  timestamp?: string; // canonical UTC: YYYY-MM-DDTHH:mm:ss.SSSZ; recommended
+  timestamp?: string; // RFC 3339; normalized to UTC milliseconds, invalid/missing falls back to receipt time
 }
 
 export interface RecallInput {
@@ -184,6 +184,9 @@ export interface MemoryForgetReport {
   dry_run: boolean;
   deleted_concepts: number;
   deleted_propositions: number;
+  deleted_assertions: number;
+  deleted_evidence: number;
+  deleted_activities: number;
   entities?: MemoryForgetEntity[];
 }
 
@@ -841,6 +844,7 @@ When `ED25519_PUBKEYS` is set, configure the remote MCP client with an `Authoriz
 - Purpose: Submit a memory formation task
 - Auth: SpaceToken/CWT `write`
 - Request body: `FormationInput` (raw string is also accepted in Markdown mode)
+- Observation time accepts RFC 3339 offsets and fractional precision, normalized to `YYYY-MM-DDTHH:mm:ss.SSSZ`. An invalid or missing timestamp uses the stored conversation creation time; retries use the same fallback. The original input is retained. Markdown text is captured verbatim as one user message with the same `:msg1` Evidence binding.
 - Response (JSON/CBOR): `RpcResponse<AgentOutput>`
 - Response (Markdown): `string` (returns only `AgentOutput.content`)
 
@@ -913,6 +917,8 @@ Explicit `parameters` override the space policy; omitted members use policy defa
 - Request body: `MemoryForgetInput`; `dry_run` defaults to `false`.
 - Response: `RpcResponse<MemoryForgetReport>`; per-entity errors appear in `result.entities`.
 
+Accepts explicit Concept (`C-*`), Proposition (`P-*`), Assertion (`A-*`), Evidence (`E-*`) and Activity (`X-*`) IDs, including the Evidence containing captured message text. Native legal holds and reference checks still apply; successful purges leave erased identity stubs. Counts report each erased kind, including cascades. This removes the selected graph records; stored conversations, wiki documents and external copies have separate lifecycles.
+
 ### GET `/v1/{space_id}/memory_status`
 
 - Purpose: Read memory statistics and the latest maintenance report.
@@ -937,6 +943,7 @@ Explicit `parameters` override the space policy; omitted members use policy defa
 - Purpose: Get or initialize a user concept node for the given principal
 - Auth: SpaceToken/CWT `write`
 - Request body: `GetOrInitUserInput`
+- Omitting `name` preserves an existing display name. An explicit `name` updates it; new unnamed users use their key as the initial display name.
 - Response: `RpcResponse<Concept>`
 
 ### GET `/v1/{space_id}/info`

@@ -308,7 +308,21 @@ Content-Type: application/json
 | `context.agent` | `string` | No | Calling agent identifier |
 | `context.source` | `string` | No | Identifier of the source of the current interaction content |
 | `context.topic` | `string` | No | Conversation topic |
-| `timestamp` | `string` | No (recommended) | Canonical UTC timestamp (`YYYY-MM-DDTHH:mm:ss.SSSZ`) |
+| `timestamp` | `string` | No (recommended) | RFC 3339; normalized to UTC milliseconds, invalid/missing uses receipt time |
+
+Timestamp spelling never discards a conversation: offsets and fractional precision
+are normalized, and an unusable string falls back to the durable conversation
+creation time. Retries keep that fallback and the original input. In Markdown
+mode, raw text is captured verbatim as one user message with the usual `:msg1`
+Evidence binding. Resolving an existing counterparty without `name` preserves its
+display name; an explicitly supplied name still updates it.
+
+`POST /v1/{space_id}/memory/forget` accepts explicit `C-*`, `P-*`, `A-*`, `E-*`
+and `X-*` IDs with `write` credentials. Use `E-*` to erase captured message
+Evidence. Inspect per-entity errors and the `deleted_concepts`,
+`deleted_propositions`, `deleted_assertions`, `deleted_evidence` and
+`deleted_activities` counts; legal holds and native reference checks still apply.
+Graph erasure does not scrub stored conversations, wiki documents or external copies.
 
 `context.source` identifies a thread/channel for provenance. Reusing it for later
 messages is supported; it is not an idempotency key. Rust retries of a persisted

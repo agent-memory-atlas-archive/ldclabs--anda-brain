@@ -44,6 +44,21 @@ pub fn timestamp(now_ms: u64) -> String {
     rfc3339_datetime(now_ms).unwrap_or_else(rfc3339_datetime_now)
 }
 
+/// Adapt a caller's observation time to the protocol without rejecting their
+/// conversation. Unusable input falls back to its durable receipt time, so a
+/// retry captures the same observation rather than a new wall-clock instant.
+pub(crate) fn observation_timestamp(value: Option<&str>, received_at: u64) -> String {
+    value
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value.trim()).ok())
+        .map(|value| {
+            value
+                .to_utc()
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        })
+        .filter(|value| anda_kip::timestamp::parse(value, "timestamp").is_ok())
+        .unwrap_or_else(|| timestamp(received_at))
+}
+
 /// Builds a single-operation request with its parameter bindings.
 ///
 /// Parameters are bound structurally to complete value positions, never spliced
