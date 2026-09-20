@@ -64,6 +64,17 @@ Assertion records an actor's stance and Evidence. Existence is not belief.
 
 ### Formation, recall and maintenance
 
+- Rust Formation keeps one semantic review for inputs of at least 10,000
+  estimated tokens. Review now retains tool receipts, identifies the current
+  conversation and captured Evidence window across compaction, and checks only
+  material omissions or misrepresentation with targeted reads and minimal
+  repairs. It accepts no changes, preserves uncertain outcomes and actor
+  boundaries, and reports missing source coverage. This is a best-effort check,
+  not an exhaustive-processing guarantee or measured real-model improvement.
+  Formation now attaches ingestion only to requests containing a parsed
+  mutation, so pure KQL/META grounding and review reads no longer fail for
+  lacking an ingestion transaction. Readbacks use committed Evidence ids;
+  `:msgN` remains a write-time binding.
 - Every Rust agent system prompt now includes the full version-pinned KIP 2.0
   syntax from `anda_kip`, alongside its Profile, role cards and deployment policy.
   A shared assembler covers ordinary and budgeted Recall, Formation, Maintenance
@@ -216,6 +227,11 @@ Assertion records an actor's stance and Evidence. Existence is not belief.
 
 ### Fixes and release engineering
 
+- The disk-backed HTTP learning fixture syncs its writable file handle before
+  closing and replacing the snapshot. This fixes Windows reset failures caused
+  by syncing a read-only handle, which previously surfaced as a timeout waiting
+  for a model decision. The fixture now checks disk creation/replacement up front
+  and reports scheduler state if dispatch still fails to reach the decision.
 - Formation normalizes external RFC 3339 observation times, including offsets
   and fractional precision. Invalid or missing strings fall back to the durable
   conversation receipt time; retries retain the same Evidence identity. Markdown

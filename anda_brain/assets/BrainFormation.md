@@ -731,15 +731,19 @@ in `rejected` — reuse an existing symbol rather than renaming around the refus
 
 ## A.4 Evidence is already minted; cite it as `:msg1`
 
-The runtime mints one Evidence record per message in `messages`, before your
-first command runs, from the bytes it received. They are bound on every
-`execute_kip` call you make in this pass:
+The runtime mints Evidence from the received bytes for the final sixteen input
+messages, inside each write transaction before your KML runs. Stable client keys
+deduplicate retries. These references are bound for KML operations in this pass:
 
 ```text
 :msg1   the oldest message in the captured final-16-message window
 :msg2   the next message in that same window
 …       up to :msg16, the newest sixteen when there are more
 ```
+
+Read-only KQL/META requests do not ingest Evidence and do not bind `:msgN`.
+Read back committed records by ids from receipts or Assertion/Activity links;
+no source record exists merely because a read completed.
 
 Cite one. Do not retype what was said into a `payload` of your own — that is the
 whole reason these exist. A model retyping an observation truncates it,

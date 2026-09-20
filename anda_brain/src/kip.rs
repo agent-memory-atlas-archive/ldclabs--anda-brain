@@ -277,8 +277,10 @@ pub fn observation_ingest(
     })
 }
 
-/// Attach captured source bytes. A model may neither replace the ingest block
-/// nor shadow a captured source handle with a parameter at either envelope level.
+/// Attach captured source bytes when a request opens a write transaction.
+/// Read-only requests must not carry ingest: KIP refuses observations that
+/// have no transaction to mint into. A model may neither replace the ingest
+/// block nor shadow a captured source handle at either parameter level.
 pub fn attach_observation(
     request: &mut Request,
     observation: &IngestContext,
@@ -302,7 +304,13 @@ pub fn attach_observation(
     {
         return Err("captured observation bindings cannot be replaced".into());
     }
-    request.ingest = Some(observation.clone());
+    if request
+        .operations
+        .iter()
+        .any(|operation| operation.parse().is_ok_and(|command| command.is_mutation()))
+    {
+        request.ingest = Some(observation.clone());
+    }
     Ok(())
 }
 
@@ -1068,6 +1076,39 @@ mod tests {
         assert!(attach_observation(&mut per_operation, &observation).is_err());
         assert!(per_operation.ingest.is_none());
     }
+
+    #[test]
+    fn observation_ingest_only_attaches_to_requests_containing_a_parsed_mutation() {
+        let observation =
+            observation_ingest(&[said("user", "hi")], "2026-08-20T00:00:00.000Z", "o", None)
+                .unwrap();
+        for command in [
+            "DESCRIBE PRIMER",
+            r#"FIND(?e) WHERE { ?e EVIDENCE {id: "E-1"} } LIMIT 1"#,
+        ] {
+            let mut read = request(command);
+            attach_observation(&mut read, &observation).unwrap();
+            assert!(read.ingest.is_none());
+            read.validate().unwrap();
+        }
+
+        let mut mixed = request("DESCRIBE PRIMER");
+        mixed
+            .operations
+            .extend(request("CREATE ACTIVITY ?a { SET FIELDS {} }").operations);
+        mixed.execution = Some(anda_kip::Execution::new(anda_kip::ExecutionMode::Sequence));
+        attach_observation(&mut mixed, &observation).unwrap();
+        assert!(mixed.ingest.is_some());
+        mixed.validate().unwrap();
+
+        let mut invalid = request("not a KIP command");
+        attach_observation(&mut invalid, &observation).unwrap();
+        assert!(
+            invalid.parse_operations().is_err(),
+            "syntax errors stay visible"
+        );
+    }
+
     #[test]
     fn model_learning_and_runtime_facets_are_rejected_by_ast_position() {
         for facet in [

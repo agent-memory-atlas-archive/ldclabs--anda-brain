@@ -80,6 +80,12 @@ Receives conversation messages and encodes them into structured memory within th
 **Key behaviors:**
 - Sequential processing with automatic queue draining — new conversations are picked up after the current one completes.
 - Atomic single-conversation processing via `processing_conversation` flag.
+- Inputs of at least 10,000 estimated tokens receive one focused semantic
+  review before completion, within the same turn/time budgets. It reuses tool
+  receipts, reads only unresolved records, and repairs demonstrated omissions
+  or misrepresentation. No changes is a valid result; missing source context
+  is reported as a coverage limit. This self-review does not guarantee
+  exhaustive processing or establish measured accuracy gains.
 - New vocabulary enters through the host, never through KML. KIP 2.0 makes
   Schema protected control state, so a command naming an undeclared type or
   predicate is refused with `SchemaSymbolNotFound`; the model asks for one

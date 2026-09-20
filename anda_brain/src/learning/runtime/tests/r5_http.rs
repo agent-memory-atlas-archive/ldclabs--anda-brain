@@ -8,6 +8,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     routing::any,
 };
+use std::io::Write;
 
 struct Host {
     config: LearningConfig,
@@ -40,8 +41,13 @@ impl Host {
     fn save(&self, dispatch: &str, value: &Json) -> Result<(), BoxError> {
         let path = self.path(dispatch);
         let tmp = path.with_extension("pending");
-        std::fs::write(&tmp, serde_json::to_vec(value)?)?;
-        std::fs::File::open(&tmp)?.sync_all()?;
+        {
+            let mut file = std::fs::File::create(&tmp)?;
+            file.write_all(&serde_json::to_vec(value)?)?;
+            // Windows FlushFileBuffers requires a writable handle. Sync the
+            // writer itself, then close it before replacing the prior snapshot.
+            file.sync_all()?;
+        }
         std::fs::rename(tmp, path)?;
         Ok(())
     }
@@ -325,6 +331,23 @@ async fn r5_real_startup_http_adapter_resets_disk_state_observes_independently_a
         decide_entered: Default::default(),
         release_decide: Default::default(),
     });
+    // Surface disk errors directly before exercising background HTTP dispatch;
+    // otherwise a failed reset only appears as a timeout waiting for `decide`.
+    for value in [
+        json!({"state": "initial snapshot"}),
+        json!({"state": "new"}),
+    ] {
+        host.save("storage-preflight", &value)
+            .expect("business host must persist and replace its disk snapshot");
+        assert_eq!(host.read("storage-preflight").unwrap(), Some(value));
+        assert!(
+            !host
+                .path("storage-preflight")
+                .with_extension("pending")
+                .exists()
+        );
+    }
+    std::fs::remove_file(host.path("storage-preflight")).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let service = tokio::spawn(
@@ -410,12 +433,17 @@ async fn r5_real_startup_http_adapter_resets_disk_state_observes_independently_a
         .await
         .unwrap()
         .unwrap();
-    tokio::time::timeout(
+    let entered = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         host.decide_entered.notified(),
     )
-    .await
-    .unwrap();
+    .await;
+    assert!(
+        entered.is_ok(),
+        "executor did not reach decide: resets={}, runtime={:?}",
+        host.resets.load(Ordering::SeqCst),
+        rt.runtime_status(true, true).await
+    );
     assert!(
         rt.scheduler_running.load(Ordering::SeqCst),
         "attention tick returned while business I/O is still running"

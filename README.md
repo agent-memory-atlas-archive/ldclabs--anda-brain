@@ -165,6 +165,13 @@ When a business agent converses with a customer or an internal employee, Brain w
 
 Every memory records **who claimed it, on what evidence, with what confidence, and when**—fully auditable and compliant. The claim and the person making it are separate records, so when two people disagree neither one is silently overwritten.
 
+The Rust service reviews inputs of at least 10,000 estimated tokens once before
+completion, within the same turn/time budgets. It checks material omissions and
+misrepresentation using existing receipts and targeted reads; no changes is a
+valid result. Missing source context remains an explicit coverage limit. This
+self-review does not guarantee exhaustive processing or establish measured
+accuracy gains.
+
 ### Three-Stage Sleep Cycle: Automatic Knowledge Metabolism
 
 This is Anda Brain's most core differentiator—inspired by neuroscience. The human brain consolidates memory during sleep: strengthening important memories, clearing out useless fragments, and building new knowledge associations. Brain regularly initiates the same "sleep cycle" in the background.

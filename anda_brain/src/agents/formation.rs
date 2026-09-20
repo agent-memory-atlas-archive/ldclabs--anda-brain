@@ -27,6 +27,24 @@ use super::{BrainHook, PERSON_BY_KEY, RunnerFlow, RunnerHost, drive_runner_loop,
 use crate::types::FormationInput;
 
 const REVIEW_INSTRUCTIONS: &str = include_str!("../../assets/BrainFormationReview.md");
+// A cost heuristic for one semantic omission check, not a completeness guarantee.
+// KIP validates writes, but cannot tell which source facts the model overlooked.
+const REVIEW_MIN_INPUT_TOKENS: usize = 10_000;
+
+fn review_prompt(conversation_id: DocumentId, message_count: usize) -> String {
+    let captured = message_count.min(crate::kip::MAX_INGESTED_MESSAGES);
+    let bindings = if captured == 0 {
+        "No input-message Evidence bindings are available.".to_string()
+    } else {
+        format!(
+            "Host write-time Evidence bindings :msg1 through :msg{captured} refer to input messages {} through {message_count} (1-based). Earlier messages have no automatic Evidence binding. Read committed Evidence by ids from write receipts or Assertion/Activity links; :msgN is not a read parameter.",
+            message_count - captured + 1
+        )
+    };
+    format!(
+        "{REVIEW_INSTRUCTIONS}\n\nHost review scope: formation conversation {conversation_id}, {message_count} input messages. {bindings}"
+    )
+}
 
 // The runner guardrails are shared with maintenance; see
 // `RUNNER_MAX_MODEL_TURNS` in agents.rs. Tests keep the historical name.
@@ -525,7 +543,8 @@ impl FormationAgent {
                 ..Default::default()
             }]
         };
-        let should_review = estimate_tokens(&prompt) >= 10000;
+        let review_prompt = (estimate_tokens(&prompt) >= REVIEW_MIN_INPUT_TOKENS)
+            .then(|| review_prompt(conversation._id, input.messages.len()));
         let mut runner = ctx.clone().completion_iter(
             CompletionRequest {
                 instructions: format!(
@@ -548,7 +567,7 @@ impl FormationAgent {
 
         let mut host = FormationRunnerHost {
             agent: self,
-            review_pending: should_review,
+            review_prompt,
         };
         drive_runner_loop(&mut host, &mut runner, conversation).await;
     }
@@ -558,9 +577,9 @@ impl FormationAgent {
 /// review pass for large inputs and the Failed-retry `failed_reason` reset.
 struct FormationRunnerHost<'a> {
     agent: &'a FormationAgent,
-    /// Large inputs get a mandatory review pass (REVIEW_INSTRUCTIONS) before
-    /// an idle runner may count as done.
-    review_pending: bool,
+    /// Taken once at the first successful idle boundary. The follow-up shares
+    /// the runner's turn/time budgets and survives a compaction handoff.
+    review_prompt: Option<String>,
 }
 
 impl RunnerHost for FormationRunnerHost<'_> {
@@ -583,7 +602,7 @@ impl RunnerHost for FormationRunnerHost<'_> {
     }
 
     fn turn_is_done(&self, runner: &CompletionRunner) -> bool {
-        runner.is_done() || runner.is_idle() && !self.review_pending
+        runner.is_done() || runner.is_idle() && self.review_prompt.is_none()
     }
 
     fn on_turn_success(&self, conversation: &mut Conversation) {
@@ -593,10 +612,13 @@ impl RunnerHost for FormationRunnerHost<'_> {
     }
 
     fn after_turn(&mut self, runner: &mut CompletionRunner, is_done: bool) -> RunnerFlow {
-        if self.review_pending && runner.is_idle() {
-            runner.prune_req_raw_history();
-            runner.follow_up(REVIEW_INSTRUCTIONS.to_string());
-            self.review_pending = false;
+        if runner.is_idle()
+            && let Some(prompt) = self.review_prompt.take()
+        {
+            // Keep the write receipts, bound ids and readbacks the review needs.
+            // The shared loop compacts when necessary; pruning all tool results
+            // here would discard the very evidence this follow-up must inspect.
+            runner.follow_up(prompt);
             return RunnerFlow::Continue;
         }
 
@@ -937,6 +959,151 @@ mod tests {
                         content: vec![format!("processed: {}", req.prompt).into()],
                         ..Default::default()
                     }],
+                    ..Default::default()
+                })
+            })
+        }
+    }
+
+    /// Models provider history around a real write and a review readback, so
+    /// removing tool receipts cannot silently turn the review into guesswork.
+    #[derive(Debug)]
+    struct ReviewCompleter {
+        requests: Arc<Mutex<Vec<CompletionRequest>>>,
+        fail_on_call: Option<usize>,
+    }
+
+    impl CompletionFeaturesDyn for ReviewCompleter {
+        fn model_name(&self) -> String {
+            "formation-review-test-model".into()
+        }
+
+        fn completion(&self, req: CompletionRequest) -> BoxPinFut<Result<AgentOutput, BoxError>> {
+            let call = {
+                let mut requests = self.requests.lock().unwrap();
+                let call = requests.len();
+                requests.push(req.clone());
+                call
+            };
+            let fail = self.fail_on_call == Some(call);
+            Box::pin(async move {
+                let usage = Usage {
+                    input_tokens: 10,
+                    output_tokens: 1,
+                    requests: 1,
+                    ..Default::default()
+                };
+                if fail {
+                    return Ok(AgentOutput {
+                        failed_reason: Some("review fixture failure".into()),
+                        usage,
+                        ..Default::default()
+                    });
+                }
+
+                let command = if call == 0 {
+                    Some(
+                        r#"CREATE ACTIVITY ?receipt {
+                        SET FIELDS {activity_class: "extraction", status: "completed"}
+                        SET STRUCTURAL {("inputs", :msg1)}
+                    }"#
+                        .to_string(),
+                    )
+                } else if request_text(&req).contains(super::REVIEW_INSTRUCTIONS) {
+                    let evidence_id = req
+                        .raw_history
+                        .iter()
+                        .filter_map(|item| item["content"].as_str())
+                        .filter_map(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+                        .find_map(|receipt| {
+                            receipt["results"][0]["result"]["changes"]
+                                .as_array()?
+                                .iter()
+                                .filter_map(|change| change["id"].as_str())
+                                .find(|id| id.starts_with("E-"))
+                                .map(str::to_string)
+                        })
+                        .expect("review needs the preserved write receipt's Evidence id");
+                    Some(format!(
+                        "FIND(?e) WHERE {{ ?e EVIDENCE {{id: \"{evidence_id}\"}} }} LIMIT 1"
+                    ))
+                } else {
+                    None
+                };
+                let tool_calls: Vec<ToolCall> = command
+                    .map(|command| ToolCall {
+                        name: "execute_kip".into(),
+                        args: json!({"command": command}),
+                        call_id: Some(format!("review-{call}")),
+                        result: None,
+                        remote_id: None,
+                    })
+                    .into_iter()
+                    .collect();
+                let content = if call < 2 {
+                    "formation done"
+                } else {
+                    "review done"
+                };
+                let mut chat_history = Vec::new();
+                let mut raw_history = Vec::new();
+                if !req.prompt.is_empty() {
+                    chat_history.push(Message {
+                        role: "user".into(),
+                        content: vec![req.prompt.clone().into()],
+                        ..Default::default()
+                    });
+                    raw_history.push(json!({"role": "user", "content": req.prompt}));
+                }
+                for part in &req.content {
+                    if let ContentPart::ToolOutput {
+                        output, call_id, ..
+                    } = part
+                    {
+                        raw_history.push(json!({
+                            "role": "tool", "tool_call_id": call_id,
+                            "content": output.to_string()
+                        }));
+                    }
+                }
+                if !req.content.is_empty() {
+                    chat_history.push(Message {
+                        role: req.role.clone().unwrap_or_else(|| "tool".into()),
+                        content: req.content,
+                        ..Default::default()
+                    });
+                }
+                let assistant = Message {
+                    role: "assistant".into(),
+                    content: if tool_calls.is_empty() {
+                        vec![content.to_string().into()]
+                    } else {
+                        tool_calls
+                            .iter()
+                            .map(|tool| ContentPart::ToolCall {
+                                name: tool.name.clone(),
+                                args: tool.args.clone(),
+                                call_id: tool.call_id.clone(),
+                            })
+                            .collect()
+                    },
+                    ..Default::default()
+                };
+                raw_history.push(if let Some(tool) = tool_calls.first() {
+                    json!({"role": "assistant", "tool_calls": [{
+                        "id": tool.call_id, "type": "function",
+                        "function": {"name": tool.name, "arguments": tool.args.to_string()}
+                    }]})
+                } else {
+                    json!({"role": "assistant", "content": content})
+                });
+                chat_history.push(assistant);
+                Ok(AgentOutput {
+                    content: content.into(),
+                    tool_calls,
+                    chat_history,
+                    raw_history,
+                    usage,
                     ..Default::default()
                 })
             })
@@ -1971,28 +2138,165 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_one_reviews_large_prompts_and_appends_follow_up_history() {
-        let app = test_app_state_with_completer("formation_review_large_prompt", SuccessCompleter);
-        let space = create_loaded_space(&app, "formation_review_large_prompt").await;
-        let ctx = space
-            .ctx_for_test(SELF_USER_ID, FormationAgent::NAME)
-            .unwrap();
-        // ~44k chars ≈ 11k estimated tokens, above the 10k-token review threshold
-        let large_text = "x".repeat(44_000);
-        let mut conversation = stored_conversation(
-            &space,
-            vec![json!(Message {
-                role: "user".to_string(),
-                content: vec![formation_prompt_with_text(&large_text, None).into()],
-                ..Default::default()
-            })],
-        )
-        .await;
+    async fn process_one_reviews_once_at_threshold_with_receipts_and_source_bindings() {
+        for tokens in [
+            super::REVIEW_MIN_INPUT_TOKENS - 1,
+            super::REVIEW_MIN_INPUT_TOKENS,
+        ] {
+            let name = format!("formation_review_{tokens}");
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let app = test_app_state_with_completer(
+                &name,
+                ReviewCompleter {
+                    requests: requests.clone(),
+                    fail_on_call: None,
+                },
+            );
+            let space = create_loaded_space(&app, &name).await;
+            let ctx = space
+                .ctx_for_test(SELF_USER_ID, FormationAgent::NAME)
+                .unwrap();
+            let prompt = "x".repeat(tokens * 4);
+            assert_eq!(anda_core::estimate_tokens(&prompt), tokens);
+            let mut conversation = stored_conversation(
+                &space,
+                vec![json!(Message {
+                    role: "user".into(),
+                    content: vec![prompt.clone().into()],
+                    ..Default::default()
+                })],
+            )
+            .await;
 
-        space.formation.process_one(&ctx, &mut conversation).await;
+            space.formation.process_one(&ctx, &mut conversation).await;
 
-        assert_eq!(conversation.status, ConversationStatus::Completed);
-        assert!(conversation.messages.len() >= 2);
+            let expected_calls = if tokens >= super::REVIEW_MIN_INPUT_TOKENS {
+                4
+            } else {
+                2
+            };
+            assert_eq!(conversation.status, ConversationStatus::Completed);
+            assert_eq!(conversation.usage.input_tokens, expected_calls as u64 * 10);
+            assert_eq!(space.formation.history.read().len(), 1);
+            let requests = requests.lock().unwrap().clone();
+            assert_eq!(requests.len(), expected_calls);
+            let receipt = requests[1]
+                .content
+                .iter()
+                .find_map(|part| match part {
+                    ContentPart::ToolOutput { output, .. } => Some(output),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(receipt["status"], "succeeded");
+            assert!(receipt["results"][0]["result"]["handles"]["receipt"].is_string());
+            if expected_calls == 4 {
+                assert_eq!(
+                    request_text(&requests[2])
+                        .matches(super::REVIEW_INSTRUCTIONS)
+                        .count(),
+                    1
+                );
+                assert!(
+                    requests[2].raw_history.iter().any(|item| {
+                        item["role"] == "tool"
+                            && item["content"].as_str() == Some(receipt.to_string().as_str())
+                    }),
+                    "review must retain the actual write receipt"
+                );
+                assert!(
+                    requests[2]
+                        .raw_history
+                        .iter()
+                        .any(|item| item["content"] == prompt)
+                );
+                let readback = requests[3]
+                    .content
+                    .iter()
+                    .find_map(|part| match part {
+                        ContentPart::ToolOutput { output, .. } => Some(output),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(readback["status"], "succeeded", "{readback:#}");
+                assert!(
+                    readback["results"][0]["result"][0]["payload"]["inline"]["content"][0]["text"]
+                        == prompt,
+                    "source readback: {}",
+                    readback.to_string().chars().take(2000).collect::<String>()
+                );
+                assert_eq!(
+                    serde_json::to_string(&conversation.messages)
+                        .unwrap()
+                        .matches("Host review scope:")
+                        .count(),
+                    1
+                );
+            }
+            let stored = space
+                .memory
+                .get_conversation(conversation._id)
+                .await
+                .unwrap();
+            assert_eq!(stored.status, ConversationStatus::Completed);
+            assert_eq!(json!(stored.usage), json!(conversation.usage));
+            space.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn process_one_does_not_complete_a_failed_initial_or_review_pass() {
+        for fail_on_call in [0, 2] {
+            let name = format!("formation_review_failure_{fail_on_call}");
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let app = test_app_state_with_completer(
+                &name,
+                ReviewCompleter {
+                    requests: requests.clone(),
+                    fail_on_call: Some(fail_on_call),
+                },
+            );
+            let space = create_loaded_space(&app, &name).await;
+            let ctx = space
+                .ctx_for_test(SELF_USER_ID, FormationAgent::NAME)
+                .unwrap();
+            let mut conversation = stored_conversation(
+                &space,
+                vec![json!(Message {
+                    role: "user".into(),
+                    content: vec!["x".repeat(40_000).into()],
+                    ..Default::default()
+                })],
+            )
+            .await;
+
+            space.formation.process_one(&ctx, &mut conversation).await;
+
+            assert_eq!(requests.lock().unwrap().len(), fail_on_call + 1);
+            assert_eq!(conversation.status, ConversationStatus::Failed);
+            assert_eq!(
+                conversation.failed_reason.as_deref(),
+                Some("review fixture failure")
+            );
+            assert_eq!(
+                conversation.usage.input_tokens,
+                (fail_on_call as u64 + 1) * 10
+            );
+            assert!(space.formation.history.read().is_empty());
+            assert_eq!(
+                stored_status(&space, conversation._id).await,
+                ConversationStatus::Failed
+            );
+            space.close().await.unwrap();
+        }
+    }
+
+    #[test]
+    fn review_scope_identifies_the_actual_captured_message_window() {
+        let prompt = super::review_prompt(42, 20);
+        assert!(prompt.contains("formation conversation 42, 20 input messages"));
+        assert!(prompt.contains(":msg1 through :msg16 refer to input messages 5 through 20"));
+        assert!(super::review_prompt(43, 0).contains("No input-message Evidence bindings"));
     }
 
     #[tokio::test]
@@ -2034,6 +2338,15 @@ mod tests {
         assert_eq!(requests.len(), 3, "{requests:#?}");
         assert!(requests[1].contains(COMPACTION_PROMPT.trim()));
         assert!(requests[2].contains("handoff summary"));
+        assert!(requests[2].contains(super::REVIEW_INSTRUCTIONS));
+        assert!(requests[2].contains(&format!(
+            "formation conversation {}, 1 input messages",
+            conversation._id
+        )));
+        assert!(
+            !requests[1].contains(super::REVIEW_INSTRUCTIONS),
+            "queued review must survive rather than be folded into the handoff"
+        );
 
         let messages = serde_json::to_string(&conversation.messages).unwrap();
         assert!(messages.contains("draft before compaction"));
