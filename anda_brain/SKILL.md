@@ -388,6 +388,13 @@ the same packet and `memory_budget` reports its count; extra trace citations are
 not copied outside the packet. Treat `budget_insufficient` or literal `null`
 with `failed_reason` as unusable/incomplete. `semantic_complete` and
 `action_ready` remain false; no optional Memory Interface bundle is claimed.
+Each query has host-side concept discovery before selection. Compact views
+carry `recall_detail` references for omitted fields; fetch projected attributes
+when more detail is needed. Pending/blocked commitments and warnings remain
+mandatory. A `bounded` packet can be partial: inspect coverage and warning
+items, including `recall_context_budget_exhausted` when only host-read candidates
+could be delivered. It never establishes semantic completeness or execution
+permission. Required reads/constraints that cannot fit still fail closed.
 See [public contract](https://github.com/ldclabs/anda-brain/blob/main/anda_brain/API.md#recall-budget-contract) for the exact scope and failure codes.
 
 **Query examples:**

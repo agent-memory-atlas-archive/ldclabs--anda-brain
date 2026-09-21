@@ -108,7 +108,11 @@ The whole packet and cumulative normalized planning input use the pinned
 `o200k_base@tiktoken-rs-0.12.0` counter. Required commitments/warnings precede
 optional items, failed coverage is explicit, and diagnostic histories/artifacts
 cannot bypass the packet limit. Existing requests without a budget policy keep
-the normal flow below. See [Recall budget contract](API.md#recall-budget-contract).
+the normal flow below. Question-specific search supplies candidates before
+selection. Compact views keep provenance and detail references; terminal
+commitments no longer consume mandatory space. Small budgets can deliver
+partial candidates with explicit coverage/warnings while preserving required
+constraints. See [Recall budget contract](API.md#recall-budget-contract).
 
 Translates natural language queries into knowledge graph lookups and returns synthesized answers.
 

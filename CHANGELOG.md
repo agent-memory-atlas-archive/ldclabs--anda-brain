@@ -2,6 +2,8 @@
 
 All notable changes to the Anda Brain project.
 
+## Unreleased
+
 ## [0.12.0] — 2026-09-20
 
 **KIP 2.0 / CognitiveMemory 2.1 is a breaking release.** Anda Brain and its
@@ -19,6 +21,15 @@ Assertion records an actor's stance and Evidence. Existence is not belief.
 - Native wiki writes survive cancelled waiters and drain before database close. Regression coverage includes ACL changes during reads/extraction, failed-update history, OKF value preservation, full-batch withdrawal checks, pending work across restart, and cancellation followed by close/reopen.
 
 ### Upgrading a KIP 1.x space
+
+- Ground budgeted Recall in a bounded search for the actual question before
+  selection. Return compact, provenance-bearing views and individually packed
+  candidates rather than repeated legacy payloads; only unresolved commitments
+  consume mandatory space.
+- Deliver explicit partial host-read results when planner input cannot fit,
+  while retaining required constraints, warnings and native procedure checks.
+- Source builds include Nexus's guarded repair for previously migrated completed
+  Commitments; historical completion does not become a blocked obligation.
 
 - Local source builds include the Nexus migration fixes for staging sets over
   1000 rows and legacy terminal SleepTasks. Lease-less historical running,

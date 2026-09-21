@@ -873,6 +873,23 @@ than a free-form answer. `memory_policy.recall_budget` can enforce the same
 limits for every Recall; a request may tighten them but cannot raise or disable
 the policy. An absent/null policy and request preserve the legacy response.
 
+Each request first runs a bounded, parameterized concept search for its query.
+Unresolved commitments (`pending`/`blocked`) remain mandatory; terminal
+commitments are optional historical candidates. Returned element views retain
+IDs, versions and provenance, omit duplicate LegacyRecord bodies, and list
+omitted fields in `recall_detail`. Required attributes and native procedure
+checks are never summarized away. The complete Primer remains planning context;
+the delivered packet carries its compact execution basis. Explicit KQL field
+projections can fetch details when needed.
+
+Whole optional candidates are admitted independently; `coverage.partial` and
+`coverage.omitted` identify incomplete delivery. If the cumulative model-input
+budget is exhausted, the host can still return its authorized read candidates
+with a required warning naming `recall_context_budget_exhausted`. This is a
+partial `bounded` packet, not model synthesis or proof of relevance. A missing
+required read or an output budget too small for all constraints/warnings still
+returns `budget_insufficient`. Provider failures remain failures.
+
 The fixed codec counts the entire compact packet, including escaping and
 coverage. `context_tokens` additionally bounds the cumulative versioned
 serialization of planner input across this Recall. Provider message templates,

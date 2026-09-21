@@ -55,9 +55,15 @@ async fn references_are_budgeted_planning_context_never_memory_or_coverage() {
             .any(|tool| tool.name == "memory_runtime")
     );
     let prompt: Json = serde_json::from_str(&requests[1].prompt).unwrap();
-    assert_eq!(prompt["observations"][0]["reference"]["document"], "syntax");
+    let reference = prompt["observations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item.get("reference").is_some())
+        .unwrap();
+    assert_eq!(reference["reference"]["document"], "syntax");
     assert!(
-        prompt["observations"][0]["reference"]["content"]
+        reference["reference"]["content"]
             .as_str()
             .unwrap()
             .contains("KQL")
@@ -86,9 +92,13 @@ async fn references_are_budgeted_planning_context_never_memory_or_coverage() {
         .await
         .unwrap();
     assert_eq!(seen.lock().len(), 1);
-    assert_eq!(
-        output.failed_reason.as_deref(),
-        Some("recall_context_budget_exhausted")
+    assert!(output.failed_reason.is_none());
+    let packet = check_output(&output, 8192).unwrap();
+    assert!(
+        packet
+            .items
+            .iter()
+            .any(|item| item.content["reason"] == "recall_context_budget_exhausted")
     );
     space.close().await.unwrap();
 }
@@ -351,10 +361,21 @@ async fn tiny_output_or_context_budget_never_calls_provider_or_returns_side_chan
             .await
             .unwrap();
         let packet = check_output(&output, budget.max_tokens);
-        assert!(output.failed_reason.is_some());
-        if let Some(packet) = packet {
-            assert_eq!(packet.status, "budget_insufficient");
-            assert!(packet.items.is_empty());
+        if budget.max_tokens == 1 {
+            assert!(output.failed_reason.is_some());
+            if let Some(packet) = packet {
+                assert_eq!(packet.status, "budget_insufficient");
+                assert!(packet.items.is_empty());
+            }
+        } else {
+            assert!(output.failed_reason.is_none());
+            assert!(
+                packet
+                    .unwrap()
+                    .items
+                    .iter()
+                    .any(|item| item.content["reason"] == "recall_context_budget_exhausted")
+            );
         }
     }
     assert!(requests.lock().is_empty());
@@ -425,9 +446,13 @@ async fn actual_planner_requests_and_final_packets_obey_the_same_pinned_encoding
         )
         .await
         .unwrap();
-    assert_eq!(
-        rejected.failed_reason.as_deref(),
-        Some("recall_context_budget_exhausted")
+    assert!(rejected.failed_reason.is_none());
+    let packet = check_output(&rejected, budget.max_tokens).unwrap();
+    assert!(
+        packet
+            .items
+            .iter()
+            .any(|item| item.content["reason"] == "recall_context_budget_exhausted")
     );
     assert_eq!(requests.lock().len(), seen.len());
     space.close().await.unwrap();
@@ -858,4 +883,180 @@ async fn provider_failure_reason_reaches_the_packet_without_private_diagnostics(
     assert!(!output.content.contains(LEAK));
     assert_eq!(requests.lock().len(), 1);
     space.close().await.unwrap();
+}
+
+#[test]
+fn compact_views_keep_constraints_and_provenance_without_duplicate_legacy_rows() {
+    let metadata =
+        json!({"source":"recorded conversation","observed_at":"2026-06-01T00:00:00.000Z"});
+    let original = json!({"id":"C-10","kind":"concept","schema_ref":format!("{PROFILE}Commitment"),
+        "_system":{"version":1},"attributes":{"summary":"Never publish without approval","description":"Never publish without approval",
+        "status":"pending","approval_required":true,"legacy":{"id":9,"metadata":metadata}},
+        "facets":{"kip://legacy/nexus@1.1.0/LegacyRecord":{"record":{"_id":9,"type":"Commitment",
+        "attributes":{"status":"pending","history":"old text ".repeat(3000)},"metadata":metadata}}}});
+    let mut compact = original.clone();
+    assert!(super::compact::memory(&mut compact, true));
+    assert_eq!(compact["attributes"]["approval_required"], true);
+    assert_eq!(
+        compact["attributes"]["summary"],
+        "Never publish without approval"
+    );
+    assert_eq!(
+        compact["recall_detail"]["legacy_source"]["metadata"],
+        metadata
+    );
+    assert_eq!(compact["recall_detail"]["element"], "C-10");
+    assert!(
+        compact["facets"]
+            .get("kip://legacy/nexus@1.1.0/LegacyRecord")
+            .is_none()
+    );
+    assert!(compact.to_string().len() < original.to_string().len() / 10);
+}
+
+#[tokio::test]
+async fn different_questions_discover_different_records_before_model_selection() {
+    let (_, space, requests) = setup("question_grounding", Behavior::Select).await;
+    let mut ids = Vec::new();
+    for term in ["Orionlaunch", "Oceanplaybook"] {
+        ids.push(
+            seed(
+                &space,
+                r#"CREATE CONCEPT ?c {TYPE "Event" NAME :term SET ATTRIBUTES {summary: :term}}"#,
+                kip::param("term", term),
+            )
+            .await["handles"]["c"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
+    }
+    for (index, term) in ["Orionlaunch", "Oceanplaybook"].into_iter().enumerate() {
+        let output = space
+            .query(
+                SELF_USER_ID,
+                StringOr::Value(RecallInput {
+                    query: term.into(),
+                    budget: Some(limits(4096, 131_072)),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(output.failed_reason.is_none(), "{output:?}");
+        let packet = check_output(&output, 4096).unwrap();
+        assert!(
+            packet
+                .items
+                .iter()
+                .any(|item| item.channel == Channel::Kip && item.content["id"] == ids[index])
+        );
+        assert!(
+            !packet
+                .items
+                .iter()
+                .any(|item| item.channel == Channel::Kip && item.content["id"] == ids[1 - index])
+        );
+    }
+    assert_eq!(requests.lock().len(), 2); // no model-controlled lookup was needed
+    space.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn small_output_and_context_budgets_return_useful_partial_records() {
+    let (_, space, requests) = setup("small_partial_recall", Behavior::Select).await;
+    for _ in 0..6 {
+        seed(&space, r#"CREATE CONCEPT ?c {TYPE "Commitment" SET ATTRIBUTES {summary: :summary,status:"fulfilled"}}"#,
+            kip::param("summary","Historical finished work ".repeat(1000))).await;
+    }
+    let pending=seed(&space,r#"CREATE CONCEPT ?c {TYPE "Commitment" SET ATTRIBUTES {summary:"Never publish without approval",status:"pending"}}"#,
+        Default::default()).await["handles"]["c"].clone();
+    let event=seed(&space,r#"CREATE CONCEPT ?c {TYPE "Event" NAME "Orionlaunch" SET ATTRIBUTES {summary:"Orionlaunch release reached its milestone"}}"#,
+        Default::default()).await["handles"]["c"].clone();
+    for context_tokens in [131_072, 1] {
+        let output = space
+            .query(
+                SELF_USER_ID,
+                StringOr::Value(RecallInput {
+                    query: "Orionlaunch".into(),
+                    budget: Some(limits(2048, context_tokens)),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(output.failed_reason.is_none(), "{output:?}");
+        let packet = check_output(&output, 2048).unwrap();
+        assert!(
+            packet
+                .items
+                .iter()
+                .any(|item| item.priority == Priority::Required && item.content["id"] == pending)
+        );
+        assert!(packet.items.iter().any(|item| item.content["id"] == event));
+        assert!(
+            !packet
+                .items
+                .iter()
+                .any(|item| item.content["attributes"]["status"] == "fulfilled")
+        );
+        if context_tokens == 1 {
+            assert!(
+                packet
+                    .items
+                    .iter()
+                    .any(|item| item.priority == Priority::Warning
+                        && item.content["reason"] == "recall_context_budget_exhausted")
+            );
+        }
+    }
+    assert_eq!(requests.lock().len(), 1);
+    space.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn fulfilled_commitments_remain_searchable_as_optional_history() {
+    let (_, space, _) = setup("fulfilled_history", Behavior::Select).await;
+    let id=seed(&space,r#"CREATE CONCEPT ?c {TYPE "Commitment" NAME "Mercuryreport" SET ATTRIBUTES {summary:"Mercuryreport delivered",status:"fulfilled"}}"#,
+        Default::default()).await["handles"]["c"].clone();
+    let output = space
+        .query(
+            SELF_USER_ID,
+            StringOr::Value(RecallInput {
+                query: "Mercuryreport".into(),
+                budget: Some(limits(2048, 131_072)),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(output.failed_reason.is_none(), "{output:?}");
+    let packet = check_output(&output, 2048).unwrap();
+    assert!(
+        packet
+            .items
+            .iter()
+            .any(|item| item.content["id"] == id && item.priority == Priority::Relevant)
+    );
+    space.close().await.unwrap();
+}
+
+#[test]
+fn packet_ties_preserve_search_order_beyond_nine_candidates() {
+    let mut material = Material::default();
+    let ids: Vec<_> = (0..14)
+        .map(|rank| {
+            material
+                .add(Channel::Kip, Priority::Relevant, json!({"rank":rank}))
+                .unwrap()
+                .unwrap()
+        })
+        .collect();
+    let full = limits(8192, 131_072);
+    let first = budget::pack(&full, &material.items, &ids[..1], material.coverage()).unwrap();
+    let restricted = limits(first.tokens as u32, 131_072);
+    let packet = budget::pack(&restricted, &material.items, &ids, material.coverage()).unwrap();
+    let packet: MemoryPacket = serde_json::from_str(&packet.content).unwrap();
+    assert_eq!(packet.items.len(), 1);
+    assert_eq!(packet.items[0].id, ids[0]);
 }

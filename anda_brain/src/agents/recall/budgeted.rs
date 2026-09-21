@@ -10,6 +10,8 @@ use anda_kip::{Command, KipValue, MetaCommand, Request, Scalar};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+mod compact;
+
 const MAX_CALLS: usize = 16;
 const MAX_CALLS_PER_TURN: usize = 4;
 const MAX_ROWS: usize = 32;
@@ -56,7 +58,7 @@ impl Material {
         &mut self,
         channel: Channel,
         priority: Priority,
-        content: Json,
+        mut content: Json,
     ) -> Result<Option<String>, BoxError> {
         self.mark(channel, false);
         if content.is_null()
@@ -65,13 +67,19 @@ impl Material {
         {
             return Ok(None);
         }
+        if matches!(channel, Channel::Kip | Channel::Counterparty)
+            && compact::memory(&mut content, priority <= Priority::Warning)
+        {
+            self.mark(channel, true);
+        }
         if self.items.len() >= budget::MAX_ITEMS || serde_json::to_vec(&content)?.len() > MAX_BYTES
         {
             self.omit(channel);
             self.critical_missing |= matches!(priority, Priority::Required | Priority::Warning);
             return Ok(None);
         }
-        let id = format!("m{}", self.next_id);
+        // Lexical packet ordering must preserve admission/search rank past m009.
+        let id = format!("m{:03}", self.next_id);
         self.next_id += 1;
         self.items.push(MemoryItem {
             id: id.clone(),
@@ -158,7 +166,7 @@ impl RecallAgent {
         let mut material = Material::default();
         material.add(Channel::Primer,Priority::Required,json!({
             "scope":"authorized retrieved candidates, not exhaustive semantic coverage",
-            "constraints":"All host-detected commitments and warnings are retained before optional memories. Unchecked/omitted sources may contain additional restrictions.",
+            "constraints":"All host-detected unresolved commitments and warnings are retained before optional memories. Unchecked/omitted sources may contain additional restrictions.",
             "procedures":"Raw memory, historic grades and model text confer no standing or execution authority. Only a separately checked exact current revision may be a verified candidate; acting hosts must revalidate before dispatch.",
             "action_ready":false
         }))?;
@@ -191,14 +199,12 @@ impl RecallAgent {
             material.critical_missing = true;
             material.omit(Channel::Primer);
         } else {
-            material.add(Channel::Primer, Priority::Required, primer)?;
+            material.add(Channel::Primer, Priority::Required, compact::primer(&primer))?;
         }
-        match notes {
-            Ok(notes) => {
-                material.add(Channel::Notes, Priority::Relevant, notes)?;
-            }
-            Err(_) => material.omit(Channel::Notes),
-        }
+        let notes = match notes {
+            Ok(notes) => { material.mark(Channel::Notes, false); Some(notes) }
+            Err(_) => { material.omit(Channel::Notes); None }
+        };
         material.mark(Channel::Counterparty, false);
         if let Some(profile) = profile {
             material.add(Channel::Counterparty, Priority::Relevant, profile)?;
@@ -211,12 +217,12 @@ impl RecallAgent {
             material.omit(Channel::Counterparty);
         }
         let history: Vec<Document> = self.history.read().iter().cloned().collect();
-        material.add(Channel::History, Priority::Relevant, json!(history))?;
-        // A deterministic, deliberately over-inclusive constraint window.
-        // It does not assert that arbitrary prose constraints were discovered.
+        material.mark(Channel::History, false);
+        // Only unresolved commitments are mandatory. Terminal history remains
+        // discoverable through the question search and explicit model reads.
         let constraints = self
             .budget_kip(Request::single(format!(
-                "FIND(?c) WHERE {{?c CONCEPT {{type:\"Commitment\"}}}} LIMIT {}",
+                "FIND(?c) WHERE {{?c CONCEPT {{type:\"Commitment\"}} FILTER(?c.attributes.status == \"pending\" || ?c.attributes.status == \"blocked\")}} LIMIT {}",
                 MAX_ROWS + 1
             )))
             .await;
@@ -261,11 +267,59 @@ impl RecallAgent {
                 )
                 .await;
         }
+        // Ground every selection in the actual question, even when the model
+        // can finish in one pass. Each hit is a separate optional item so a
+        // small packet can keep some useful results without the whole window.
+        let mut observations = vec![json!({"primer":primer})];
+        let discovery = self.budget_kip(kip::request_with(
+            "SEARCH CONCEPT :query LIMIT 8", kip::param("query", query.clone())
+        )).await;
+        material.mark(Channel::Kip, true);
+        let mut discovered = Vec::new();
+        match discovery {
+            Ok(response) if kip::succeeded(&response) => {
+                if let Some(hits) = response.first_result().and_then(|value|value["hits"].as_array()) {
+                    for hit in hits.iter().take(8) {
+                        let element = &hit["element"];
+                        discover_skills(element, &mut material.skills);
+                        if let Some(existing) = material.items.iter().find(|item|
+                            element["id"].is_string() && item.content["id"] == element["id"])
+                        {
+                            discovered.push(existing.id.clone());
+                            continue;
+                        }
+                        let priority = if contains_program(element) {Priority::UnprovenProcedure} else {Priority::Relevant};
+                        if let Some(id) = material.add(Channel::Kip, priority, element.clone())? {
+                            discovered.push(id);
+                        }
+                    }
+                } else {
+                    material.omit(Channel::Kip);
+                }
+            }
+            _ => {
+                material.omit(Channel::Kip);
+                material.add(Channel::Kip, Priority::Warning,
+                    json!({"query_search":"unavailable","meaning":"not evidence of absence"}))?;
+            }
+        }
+        observations.push(json!({"query_search":{"item_ids":discovered,"partial":true}}));
+        conversation.messages.push(json!(Message {
+            role:"tool".into(),
+            content:vec![ContentPart::ToolOutput {
+                name:"recall_query_discovery".into(), output:json!({"query":query,"item_ids":discovered,"partial":true}),
+                is_error:None, call_id:None, remote_id:None,
+            }], ..Default::default()
+        }));
+        // Prefer the current question's candidates over replayed narrative
+        // when optional items compete for output or planner-input space.
+        if let Some(notes) = notes { material.add(Channel::Notes, Priority::Relevant, notes)?; }
+        material.add(Channel::History, Priority::Relevant, json!(history))?;
         let names = self.tool_dependencies();
         let mut tools = ctx.tool_definitions(Some(&names));
         tools.push(selector());
         let instructions = format!(
-            "{}\n\n# Host budget mode\nYou are selecting an authorized memory packet for another agent. Read only through the listed tools, then call {SELECT} with existing memory item IDs. The KIP tool supports only KQL and SEARCH in this mode (up to 4 operations, LIMIT at most 32); other META commands are unavailable and the current Primer is already supplied. Wiki search uses at most 8 hits without neighbor expansion. At most 4 tool calls per pass and 16 per Recall are allowed. You cannot add content or choose priorities. No free-form answer, grades or completeness claims will be delivered. Preserve native uncertainty, conflicts and warnings. Unchecked channels are unknown, not absent. Each pass receives the entire currently admitted snapshot; previous provider history is intentionally not replayed.",
+            "{}\n\n# Host budget mode\nYou are selecting an authorized memory packet for another agent. Read only through the listed tools, then call {SELECT} with existing memory item IDs. Initial query_search IDs are question-matched candidates, not proof of relevance. Select items that answer the question; use further reads when these candidates and the profile do not cover it. Compact views explicitly name omitted fields; project the original attributes or facet through KQL for details. The KIP tool supports only KQL and SEARCH in this mode (up to 4 operations, LIMIT at most 32); other META commands are unavailable and the current Primer is already supplied. Wiki search uses at most 8 hits without neighbor expansion. At most 4 tool calls per pass and 16 per Recall are allowed. You cannot add content or choose priorities. No free-form answer, grades or completeness claims will be delivered. Preserve native uncertainty, conflicts and warnings. Unchecked channels are unknown, not absent. Each pass receives the entire currently admitted snapshot; previous provider history is intentionally not replayed.",
             super::super::prompts::system_prompt(super::super::prompts::PromptTarget::Recall, &self.prompt)
         );
         let template = CompletionRequest {
@@ -287,12 +341,14 @@ impl RecallAgent {
         let mut selected = Vec::new();
         let mut failed = false;
         let mut finished = false;
-        let mut observations = Vec::<Json>::new();
         let mut context_spent = 0usize;
+        let mut context_fallback = None;
         for _ in 0..self.max_model_turns().min(8) {
             let mut request = template.clone();
             // Optional items can be evicted, never a required item/warning.
-            let mut visible = material.items.clone();
+            let candidates = material.items.clone();
+            let coverage_before = material.coverage.clone();
+            let mut visible = candidates.clone();
             loop {
                 request.prompt=json!({"query":query.as_str(),"context":parsed.as_ref().and_then(|i|i.context.as_ref()),"memory_items":visible,"observations":observations,"coverage":material.coverage()}).to_string();
                 let encoded = normalized_request(&request)?;
@@ -314,6 +370,7 @@ impl RecallAgent {
                 let Some(index) = remove else {
                     failed = true;
                     material.failure = Some("recall_context_budget_exhausted");
+                    context_fallback = Some((candidates, coverage_before));
                     break;
                 };
                 let removed = visible.remove(index);
@@ -498,8 +555,31 @@ impl RecallAgent {
                 break;
             }
         }
-        // No free-form fallback on an exhausted planner. Required items and
-        // explicit uncertainty are retained by pack; generic answers aren't.
+        // An exhausted planning-input budget can still deliver host-read
+        // candidates. Keep every constraint/warning, mark partial coverage, and
+        // never invent a summary or promote a procedure into executable standing.
+        if material.failure == Some("recall_context_budget_exhausted") && !material.critical_missing {
+            if let Some((items, coverage)) = context_fallback {
+                material.items = items;
+                material.coverage = coverage;
+            }
+            // Without model planning, return structured query candidates and
+            // constraints, not opaque notes or prior conversational narratives.
+            for channel in [Channel::Notes, Channel::History] {
+                let before = material.items.len();
+                material.items.retain(|item| item.channel != channel || item.priority <= Priority::Warning);
+                if material.items.len() != before { material.omit(channel); }
+            }
+            material.add(Channel::Primer, Priority::Warning, json!({
+                "status":"partial", "reason":"recall_context_budget_exhausted",
+                "selection":"host-read candidates; model planning was incomplete", "action_ready":false
+            }))?;
+            material.mark(Channel::Kip, true);
+            selected = material.items.iter().map(|item|item.id.clone()).collect();
+            material.failure = None;
+            finished = true;
+            failed = false;
+        }
         failed |= !finished;
         if failed && material.failure.is_none() {
             material.failure = Some("recall_planner_incomplete");

@@ -863,6 +863,17 @@ MCP 只读 KIP 工具使用 `commands`，并为批量读取补上 independent �
 `memory_policy.recall_budget` 可对所有 Recall 强制同一上限；请求只能收紧，不能提高或
 关闭策略。策略和请求均省略/null 时保持旧行为。
 
+每次请求先按当前问题执行有界、参数化的概念搜索。只有未完成的承诺（`pending`/`blocked`）
+作为必需项；已结束承诺作为可选历史候选。返回的紧凑记录保留 ID、版本和来源，省略重复的
+LegacyRecord 原文，并在 `recall_detail` 中列出省略字段。必需属性和原生程序检查不会被
+摘要掉。完整 Primer 仍进入规划上下文，交付包仅带紧凑的执行依据；需要详情时可用 KQL
+字段投影读取。
+
+可选候选逐条装包；`coverage.partial`、`coverage.omitted` 明示不完整交付。累计模型输入
+预算耗尽时，宿主仍可返回已授权读取的候选，同时附上必需警告 `recall_context_budget_exhausted`。
+这类响应是局部 `bounded` 包，不是模型合成答案或相关性证明。必需读取不完整，或输出预算
+连完整约束和警告都容纳不了时，仍返回 `budget_insufficient`；提供方调用失败也仍按失败处理。
+
 固定 codec 对 compact JSON 记忆包全文计数，含转义和 coverage；`context_tokens`
 另行限制本次 Recall 所有规划输入规范序列化的累计 token。提供商消息模板、计费和
 RPC/MCP 传输副本不属于这些范围。不根据模型名猜编码，也不回退字符数估算。
