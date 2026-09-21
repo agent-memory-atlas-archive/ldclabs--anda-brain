@@ -20,9 +20,10 @@ The service stores memory in an AndaDB-backed Cognitive Nexus and uses KIP 2.0
 (Knowledge Interaction Protocol) internally. Business agents should not need to
 write KIP directly.
 
-`anda_kip`, `anda_cognitive_nexus`, `anda_db*`, `anda_core` and `anda_engine`
-resolve from published crates. A sibling `anda-db` checkout is needed only
-when deliberately refreshing vendored KIP prompt assets.
+Source builds use the sibling `anda-db` checkout for unreleased Nexus migration
+fixes. Shared DB/KIP crates are patched together to preserve one type identity;
+`anda_core` and `anda_engine` remain published dependencies. Verify Cargo
+metadata before changing these patches.
 The current 0.12.0 release pins `anda_kip = "=0.13.1"` and requires
 `anda_cognitive_nexus = "0.13.1"`; the Worker pins `@ldclabs/kip-do` 0.13.1.
 KIP v2 has not been deployed. Use fresh v2 Spaces for current acceptance;

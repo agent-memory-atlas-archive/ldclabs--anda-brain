@@ -81,6 +81,16 @@ rmcp = { version = "3", features = [
 ], default-features = false }
 schemars = "1"
 
+# Unreleased Nexus v1 migration fixes. Keep shared DB/KIP types unified.
+[patch.crates-io]
+# anda_cognitive_nexus = { path = "../anda-db/rs/anda_cognitive_nexus" }
+# anda_db = { path = "../anda-db/rs/anda_db" }
+# anda_db_schema = { path = "../anda-db/rs/anda_db_schema" }
+# anda_db_tfs = { path = "../anda-db/rs/anda_db_tfs" }
+# anda_db_utils = { path = "../anda-db/rs/anda_db_utils" }
+# anda_object_store = { path = "../anda-db/rs/anda_object_store" }
+# anda_kip = { path = "../anda-db/rs/anda_kip" }
+
 [profile.release]
 debug = false
 lto = true

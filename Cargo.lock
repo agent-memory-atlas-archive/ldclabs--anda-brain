@@ -110,7 +110,7 @@ dependencies = [
  "mimalloc",
  "object_store",
  "parking_lot",
- "rand 0.10.2",
+ "rand 0.10.3",
  "rmcp",
  "schemars",
  "serde",
@@ -145,9 +145,9 @@ dependencies = [
 
 [[package]]
 name = "anda_cognitive_nexus"
-version = "0.13.2"
+version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea4363dfb6988ca9f532faec3ec22260dc8ce8646d9b83e039ec0667a59bc3b0"
+checksum = "02eb981713157bfe1ced8f845e043abd661b031b6b0368ca20540d90aa5b232b"
 dependencies = [
  "anda_db",
  "anda_db_schema",
@@ -161,7 +161,7 @@ dependencies = [
  "jsonschema",
  "log",
  "parking_lot",
- "rand 0.10.2",
+ "rand 0.10.3",
  "regex",
  "rustc-hash",
  "serde",
@@ -202,9 +202,9 @@ dependencies = [
 
 [[package]]
 name = "anda_db"
-version = "0.13.1"
+version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d341f0cd25db84efad367eeb5785f18271005c40fb8cc90df3ca5a22fddb106a"
+checksum = "f189471a3324fae4946c3252ab556c71da5afd571453a5eda9a9d9ca40465e42"
 dependencies = [
  "anda_db_btree",
  "anda_db_hnsw",
@@ -270,7 +270,7 @@ dependencies = [
  "ordered-float",
  "papaya",
  "parking_lot",
- "rand 0.10.2",
+ "rand 0.10.3",
  "rustc-hash",
  "serde",
  "smallvec",
@@ -279,9 +279,9 @@ dependencies = [
 
 [[package]]
 name = "anda_db_schema"
-version = "0.13.0"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09af63c0fe8c797fd37fbd81bd912ad38cc0140924832b6e0f3d8b837afdb570"
+checksum = "32e75e957b9c4c0027a03cac290b781e7b5d8b5d7f65153f8acc465e4cb4d0d4"
 dependencies = [
  "anda_db_derive",
  "base64 0.22.1",
@@ -354,7 +354,7 @@ dependencies = [
  "moka",
  "object_store",
  "parking_lot",
- "rand 0.10.2",
+ "rand 0.10.3",
  "reqwest",
  "rmcp",
  "schemars",
@@ -402,7 +402,7 @@ dependencies = [
  "log",
  "moka",
  "object_store",
- "rand 0.10.2",
+ "rand 0.10.3",
  "serde",
  "serde_bytes",
  "sha3",
@@ -2276,9 +2276,9 @@ dependencies = [
 
 [[package]]
 name = "hyper-rustls"
-version = "0.27.9"
+version = "0.27.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33ca68d021ef39cf6463ab54c1d0f5daf03377b70561305bb89a8f83aab66e0f"
+checksum = "dfa8e654703247911e29c23fbeaa261834bd9bb74efba2f9acddc37bfb127f53"
 dependencies = [
  "http",
  "hyper",
@@ -3522,7 +3522,7 @@ dependencies = [
  "parking_lot",
  "percent-encoding",
  "quick-xml",
- "rand 0.10.2",
+ "rand 0.10.3",
  "reqwest",
  "rustls-pki-types",
  "serde",
@@ -3939,7 +3939,7 @@ dependencies = [
  "bytes",
  "getrandom 0.4.3",
  "lru-slab",
- "rand 0.10.2",
+ "rand 0.10.3",
  "rand_pcg",
  "ring",
  "rustc-hash",
@@ -4000,9 +4000,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.10.2"
+version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
+checksum = "65c9fb96cbc91e3478eaae79a69fcd3f1ae4ad052e471fe6732fff548984b4af"
 dependencies = [
  "chacha20",
  "getrandom 0.4.3",
@@ -4240,7 +4240,7 @@ dependencies = [
  "pastey",
  "pin-project-lite",
  "process-wrap",
- "rand 0.10.2",
+ "rand 0.10.3",
  "reqwest",
  "rmcp-macros",
  "schemars",

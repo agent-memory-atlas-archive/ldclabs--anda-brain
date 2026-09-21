@@ -549,3 +549,36 @@ async fn revision_order_does_not_follow_legacy_row_ids_and_survives_retry() {
         statuses
     );
 }
+
+#[tokio::test]
+async fn terminal_legacy_tasks_remain_auditable_after_restart_without_a_lease() {
+    for status in ["completed", "failed"] {
+        let original = json!({"status":status,"description":"Historical maintenance","result":"legacy result"});
+        let store = seed(
+            &[("SleepTask", "historical-task", original.clone())],
+            json!({}),
+        )
+        .await;
+        for _ in 0..2 {
+            let nexus = open(store.clone()).await.unwrap();
+            let rows = read(
+                &nexus,
+                r#"FIND(?c) WHERE { ?c CONCEPT {type: "SleepTask", key: "historical-task"} }"#,
+            )
+            .await;
+            assert_eq!(rows.as_array().unwrap().len(), 1);
+            let row = &rows[0];
+            assert_eq!(row["attributes"]["status"], "blocked");
+            assert_eq!(
+                row["facets"]["kip://legacy/nexus@1.1.0/LegacyRecord"]["record"]["attributes"],
+                original
+            );
+            assert!(
+                row["facets"]
+                    .get("kip://profiles/cognitive-memory@2.1.0/LeaseState")
+                    .is_none()
+            );
+            nexus.close().await.unwrap();
+        }
+    }
+}

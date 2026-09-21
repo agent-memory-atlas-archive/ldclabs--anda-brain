@@ -12,6 +12,11 @@ Assertion records an actor's stance and Evidence. Existence is not belief.
 
 ### Upgrading a KIP 1.x space
 
+- Local source builds include the Nexus migration fixes for staging sets over
+  1000 rows and legacy terminal SleepTasks. Lease-less historical running,
+  completed and failed tasks become blocked; their original status and result
+  remain in LegacyRecord. Regression coverage includes reopening those tasks.
+
 - Stop the 1.x writer, take a consistent backup and rehearse on a copy. Each
   space migrates on **first access**, replacing its 1.x graph collections in
   place. The migration is one-way; rollback requires the original backup.
