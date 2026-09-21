@@ -114,6 +114,7 @@ dependencies = [
  "rmcp",
  "schemars",
  "serde",
+ "serde-saphyr",
  "serde_json",
  "sha2 0.11.0",
  "sha3",

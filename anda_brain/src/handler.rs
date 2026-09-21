@@ -493,22 +493,14 @@ pub async fn get_wiki_doc(
     let (space, caller) = read_public(&app, &space_id, &token, sharding, now_ms).await?;
     let access = caller.wiki_access();
 
-    let (doc, toc) = tokio::try_join!(
-        space.wiki.get_doc_scoped(&access, doc_id),
-        space.wiki.read_scoped(
-            &access,
-            WikiReadInput {
-                doc_id,
-                version: None,
-                selector: WikiSelector::Toc,
-            },
-            now_ms,
-        ),
-    )
-    .map_err(wiki_error)?;
+    let (doc, toc) = space
+        .wiki
+        .document_scoped(&access, doc_id, now_ms)
+        .await
+        .map_err(wiki_error)?;
     Ok(ct.response(RpcResponse::success(json!({
         "doc": doc,
-        "toc": toc.toc,
+        "toc": toc,
     }))))
 }
 

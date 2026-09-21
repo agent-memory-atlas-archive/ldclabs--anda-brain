@@ -324,6 +324,10 @@ Stop the old writer, back up the object store, and rehearse the upgrade on a cop
 
 [**Anda DB**](https://github.com/ldclabs/anda-db) is the embedded database engine driving the cognitive nexus. Written in Rust for extreme performance and memory safety, it natively supports graph traversals, multimodal data, and vector similarity—all optimized for AI workloads.
 
+### Versioned reference wiki
+
+The optional wiki provides CAS-versioned Markdown, ACL-scoped reads, a heading-based TOC independent of retrieval chunks, and verifiable citations. OKF exchange preserves unknown YAML values through edits. Optional WikiDigest uses durable document scheduling and explicit old-claim reviews; a model omitting a fact does not withdraw it. It remains disabled by default. See the [wiki API contract](./anda_brain/API.md#43-wiki-endpoints-v1space_idwiki).
+
 ## Quick Start
 
 Anda Brain is [open-source software](https://github.com/ldclabs/anda-brain), designed to be **self-hosted**.

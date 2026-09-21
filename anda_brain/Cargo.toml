@@ -30,7 +30,7 @@ experiments = ["dep:sha2", "anda_cognitive_nexus/simulation"]
 # Structured wiki: documents, versions, ACL-scoped reads, OKF import/export,
 # the wiki agent tools, and the WikiDigest graph extraction, plus their HTTP
 # routes and `SpaceInfo`/`UpdateSpaceInput` fields.
-wiki = ["dep:sha3", "dep:unicode-normalization"]
+wiki = ["dep:sha3", "dep:unicode-normalization", "dep:serde-saphyr"]
 # The MCP channel: stdio and Streamable HTTP servers exposing the memory
 # tools. With `wiki` also on, the wiki tools join the same tool router.
 mcp = ["dep:rmcp", "dep:schemars"]
@@ -58,6 +58,7 @@ sha2 = { workspace = true, optional = true }
 structured-logger = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+serde-saphyr = { workspace = true, optional = true }
 tokio = { workspace = true }
 tiktoken-rs = { workspace = true }
 log = { workspace = true }

@@ -514,7 +514,7 @@ export interface WikiEventInfo {
   id: number;
   // DocCreated | VersionCommitted | DocArchived | DocRestored | OrphanSwept
   // | CitationVerifyFailed | ImportCompleted | ExportCompleted
-  // | DigestExtracted | WikiQueried | WikiRead | StaleReport | EventsPruned
+  // | DigestExtracted | DigestFailed | WikiQueried | WikiRead | StaleReport | EventsPruned
   kind: string;
   doc_id?: number;
   version_id?: number;
@@ -524,11 +524,12 @@ export interface WikiEventInfo {
 }
 
 export interface WikiDigestReport {
-  digested: number; // versions distilled into the Cognitive Nexus
-  facts: number; // facts this document currently claims
-  superseded: number; // claims the digest retracted because the document dropped them
-  skipped: number;
-  citations_checked: number; // post-run citation sample
+  digested: number; // document generations processed by extraction or result reuse
+  facts: number; // claims retained in the processed ledgers, not an exhaustive inventory
+  superseded: number; // owned Assertions retracted after review or source withdrawal
+  skipped: number; // archived, labeled or evaluation documents handled without extraction
+  failed: number; // failed documents remain pending; another call retries them
+  citations_checked: number;
   citations_invalid: number;
   usage: Usage;
 }
@@ -618,7 +619,7 @@ export interface SpaceInfo {
   wiki_chunks: number;
   wiki_versions: number;
   wiki_queries: number;
-  wiki_digested: number; // digest high-water mark (version id)
+  wiki_digested: number; // observed version high-water mark, not processing coverage
   wiki_stale_docs: number; // from the last housekeeping stale scan
 }
 
@@ -1002,9 +1003,16 @@ Accepts explicit Concept (`C-*`), Proposition (`P-*`), Assertion (`A-*`), Eviden
 
 ## 4.3 Wiki Endpoints (`/v1/{space_id}/wiki`)
 
-The wiki is the space's versioned reference memory (policies, manuals, SOPs, API docs). Writes are git-like immutable commits with CAS concurrency control; searches return verifiable `wiki://` citations. ACL: documents may carry an `acl_label`; space tokens with `labels` see unlabeled content plus their granted labels — enforced inside the retrieval query itself. Anonymous readers of public spaces see unlabeled content only; denials surface as 404.
+The wiki is the space's versioned reference memory (policies, manuals, SOPs, API docs). Writes are git-like immutable commits with CAS concurrency control; searches return verifiable `wiki://` citations. ACL: documents may carry an `acl_label`; space tokens with `labels` see unlabeled content plus their granted labels — prefiltered in the query and checked against the current document version, state and ACL. Authorization and version selection use the same document snapshot. Anonymous readers of public spaces see unlabeled content only; denials surface as 404.
 
 Wiki-specific error semantics: `409` commit conflict (`RpcError.data.current_version` carries the version to rebase on), `413` content over 1 MiB, `404` not found / ACL-denied.
+
+The TOC comes from Markdown ATX headings (`#`–`######`) independently of retrieval chunks; a section includes its descendant headings. Anchors derive from heading names, with numeric suffixes for duplicates. `full`, `range` and `section` return at most 256 KiB. When `truncated` is true, continue with the returned `byte_range`. History and citation verification accept only versions in the published parent chain; incomplete commits are not history.
+
+OKF imports replace the file-owned title, tags, resource, type and unknown frontmatter values; deleting a field clears its imported state. Existing ACLs and unrelated host metadata are preserved. Export retains unknown key/value pairs even after commit changes the title or tags. Standard YAML parsing and serialization preserve values, not comments or original formatting.
+
+WikiDigest is disabled by default. When enabled, commit, archive, restore and ACL changes persist a per-document pending flag. Startup, post-maintenance hooks and explicit calls process up to 20 documents per run; failed documents remain pending for retry. An unchanged body checksum reuses the ledger without a model call. Omitted extraction results do not withdraw claims: every source batch must explicitly review an old claim as `absent`; missing, duplicate or `unknown` reviews retain it. Archive or labeling causes a later digest to retract this source's Assertions; graph synchronization is asynchronous. Changes during extraction fence out the stale graph write and leave the new generation queued. The observed `wiki_digested` high-water mark does not mean the queue is empty.
+
 
 ### POST `/v1/{space_id}/wiki/docs`
 
@@ -1071,7 +1079,7 @@ Wiki-specific error semantics: `409` commit conflict (`RpcError.data.current_ver
 
 ### POST `/v1/{space_id}/wiki/import`
 
-- Purpose: Import an OKF v0.1 bundle; checksum-idempotent (re-imports never grow version chains); unknown frontmatter keys survive round-trips verbatim
+- Purpose: Import an OKF v0.1 bundle; checksum-idempotent (re-imports never grow version chains); unknown frontmatter key/value pairs survive edits and round-trip structurally; comments and formatting are canonicalized
 - Auth: SpaceToken/CWT `*` (full scope)
 - Request body: `WikiImportInput`
 - Response: `RpcResponse<WikiImportOutput>`
@@ -1084,7 +1092,7 @@ Wiki-specific error semantics: `409` commit conflict (`RpcError.data.current_ver
 
 ### POST `/v1/{space_id}/wiki/digest`
 
-- Purpose: Distill pending wiki versions into the Cognitive Nexus — each fact becomes a Proposition plus an Assertion attributed to the Brain, citing its passage as Evidence. A fact the newest version no longer states has the digest's own Assertion retracted; the Proposition and anyone else's Assertions about it are untouched. Requires `update_space {"wiki_digest": true}`
+- Purpose: Distill pending wiki versions into the Cognitive Nexus — each fact becomes a Proposition plus an Assertion attributed to the Brain, citing its passage as Evidence. An old claim explicitly reviewed as unsupported across every source batch has the digest's own Assertion retracted; omitted or unknown reviews do not retract it; the Proposition and anyone else's Assertions about it are untouched. Requires `update_space {"wiki_digest": true}`
 - Auth: SpaceToken/CWT `write`
 - Response: `RpcResponse<WikiDigestReport>`
 

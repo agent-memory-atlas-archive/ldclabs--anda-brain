@@ -10,6 +10,14 @@ endpoints remain, but direct KIP clients, response readers and persisted 1.x
 spaces must follow the changes below. A Proposition records meaning; an
 Assertion records an actor's stance and Evidence. Existence is not belief.
 
+### Wiki refactor
+
+- Wiki reads authorize and select content from one document snapshot; BM25 candidates are checked against current version, archive state and ACL. History and verification follow the published parent chain, excluding failed commits even after a successful retry.
+- Separated publication/recovery, authorized reads, retrieval and source outlines. H1–H6 TOCs and section ranges no longer depend on chunk packing; sections include descendants and all text selectors are capped at 256 KiB. Expansion reads immutable source content.
+- OKF uses standard YAML parsing/serialization. Unknown values survive title/tag edits, quoted comma tags round-trip, and imports propagate field deletions while preserving ACLs and unrelated host metadata. Comments, ordering and scalar formatting are canonicalized. Wiki storage is for fresh Spaces; no preproduction wiki migration or compatibility layer is provided.
+- WikiDigest remains opt-in. Durable document generations queue content and lifecycle changes, unchanged bodies reuse prior ledgers, and concurrent edits fence stale graph writes. A bounded extraction omission cannot retract a claim: every source batch must explicitly review it as absent. Failed documents remain queued and appear in `WikiDigestReport.failed`; source withdrawal retracts document-owned Assertions without touching other sources. Graph reconciliation remains asynchronous, and tests use deterministic model substitutes rather than establishing empirical extraction quality.
+- Native wiki writes survive cancelled waiters and drain before database close. Regression coverage includes ACL changes during reads/extraction, failed-update history, OKF value preservation, full-batch withdrawal checks, pending work across restart, and cancellation followed by close/reopen.
+
 ### Upgrading a KIP 1.x space
 
 - Local source builds include the Nexus migration fixes for staging sets over

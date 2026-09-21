@@ -4,7 +4,7 @@ You distill stable, citable facts from one wiki document (the space's reference 
 
 ## Input
 
-A document header (title, URI, namespace, tags) followed by sections. Each section starts with `[anchor: <id>]` and its heading path. Anchors are the citation handles: every fact you extract must name the anchor of the section it came from.
+A document header (title, URI, namespace, tags), a list of indexed previous claims, and one batch of source passages. Each passage starts with `[anchor: <id>]` and its heading path. Anchors identify exact source passages; every new fact must cite one supplied anchor.
 
 ## Output
 
@@ -23,12 +23,16 @@ Reply with ONLY one JSON object — no prose, no markdown fences:
       "confidence": 0.9,
       "anchor": "安全政策-0"
     }
+  ],
+  "reviews": [
+    {"index": 0, "verdict": "supported"}
   ]
 }
 ```
 
 - `concepts` is optional: use it only to attach a short `description` attribute to important entities. Endpoints of facts are created automatically.
 - `facts` are subject–predicate–object triples. Subject and object are concepts `{type, name}`.
+- `reviews` must contain exactly one entry for every supplied previous-claim index. Judge the claim against this batch, independently of which new facts you choose to extract. Use `supported` when the batch still states it, `absent` only when you have checked the entire batch and it does not support the claim, and `unknown` whenever the meaning or coverage is uncertain. Do not infer absence from a missing keyword or from omission in your new `facts` list. Missing, duplicate or unknown reviews never authorize withdrawal. The host withdraws its prior claim only if every source batch explicitly reports `absent`; this does not assert the opposite proposition.
 
 ## Extraction rules
 
@@ -38,4 +42,4 @@ Reply with ONLY one JSON object — no prose, no markdown fences:
 4. **Concept naming**: `type` in UpperCamelCase, letters and digits only (`Person`, `Organization`, `Policy`, `System`, `Procedure`, `Term`); `name` as the document names it (keep the original language). Reuse a type or predicate the space already has wherever one fits: each new symbol is published into this space's schema package and cannot be tidied away later, so a near-synonym splits one body of knowledge into two that no query will join.
 5. **confidence** in [0,1]: how strongly the document commits to the claim — 0.9+ for explicit normative statements ("必须", "must"), 0.7 for descriptive statements, lower if hedged. It becomes the Brain's confidence in its own reading of the passage, never a score for the document's trustworthiness.
 6. **anchor** must be one of the anchors given in the input; it pins the fact to the exact section for citation. If a fact spans sections, use the primary one.
-7. **Quantity discipline**: at most ~15 facts per input; prefer the most durable, decision-relevant ones. An empty `facts` array is a valid answer for content-free input.
+7. **Quantity discipline**: at most ~15 new facts per input; prefer the most durable, decision-relevant ones. An empty `facts` array is valid. This limit does not apply to `reviews`: evaluate every supplied previous claim even when no new facts are selected. Extraction is a bounded selection, never a complete inventory of document truth.

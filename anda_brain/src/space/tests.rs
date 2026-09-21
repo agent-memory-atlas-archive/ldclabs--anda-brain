@@ -3184,6 +3184,7 @@ async fn wiki_digest_extracts_supersedes_and_verifies() {
         })
         .to_string();
     let extraction_v2 = serde_json::json!({
+        "reviews": [{"index": 0, "verdict": "supported"}, {"index": 1, "verdict": "absent"}],
         "facts": [
             {
                 "subject": {"type": "Organization", "name": "Acme"},
@@ -3334,7 +3335,7 @@ async fn wiki_digest_extracts_supersedes_and_verifies() {
         "evidence: {evidence_text}"
     );
     assert!(
-        evidence_text.contains("wiki_digest@v1"),
+        evidence_text.contains("wiki_digest@v2"),
         "evidence: {evidence_text}"
     );
     assert!(

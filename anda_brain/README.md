@@ -53,6 +53,14 @@ and its `memory_*` bundles are **not advertised** by these adapters.
 - **Pluggable storage backends** — Local filesystem, AWS S3, or in-memory (for development/testing).
 - **MIB offline regression** — Product timelines and business outcomes are evaluated by the independent MIB runner; Brain retains online diagnostics and native learning-mechanism tests.
 
+## Versioned wiki (`wiki` feature)
+
+Wiki stores immutable Markdown versions with CAS updates and verifiable byte-range citations. ACL checks and content selection share one document snapshot; search candidates are checked against current document state. Published parent chains define history. Native wiki writes survive cancelled request waiters and drain before Space close or eviction.
+
+Document outlines follow ATX headings (`#`–`######`) independently of BM25 chunks. Sections include child headings, and all text reads are capped at 256 KiB. OKF import/export preserves unknown YAML values through edits; comments, ordering and formatting are canonicalized. Imports replace file-owned fields and preserve native ACLs and unrelated host metadata.
+
+Optional WikiDigest remains disabled by default. It reconciles durable document generations, including archive/restore and ACL changes, and reports failed documents without retiring their pending work. Metadata-only edits reuse prior results. Old claims are withdrawn only after explicit absence reviews covering every body batch, or withdrawal of the source; omitted or unknown model output is not negative evidence. Concurrent edits fence out stale writes. This is a mechanism contract, not a real-model quality claim. See the [English API](./API.md#43-wiki-endpoints-v1space_idwiki) and [中文接口](./API_cn.md#43-wiki-接口v1space_idwiki).
+
 ## Agents
 
 ### Formation — Memory Encoding (`formation_memory`)

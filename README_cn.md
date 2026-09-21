@@ -291,6 +291,10 @@ Worker 同样内嵌该版本的参考，通过结构化 JSON 的 `references` �
 
 [**Anda DB**](https://github.com/ldclabs/anda-db) 是驱动认知中枢的嵌入式数据库引擎。它采用 Rust 编写，具有极高的性能和内存安全性，原生支持图谱遍历、多模态数据和向量相似度检索——所有这些都为 AI 工作负载进行了优化。
 
+### 版本化参考 Wiki
+
+可选 wiki 提供基于 CAS 的 Markdown 版本管理、按 ACL 授权的读取、独立于检索分块的标题目录及可校验引用。OKF 交换在编辑后仍保留未知 YAML 键值。可选 WikiDigest 使用持久化的文档待处理状态，并明确核验旧断言；模型漏提取不会触发撤回。该功能继续默认关闭。详见 [Wiki 接口契约](./anda_brain/API_cn.md#43-wiki-接口v1space_idwiki)。
+
 ## 快速开始
 
 Anda Brain 是[开源软件](https://github.com/ldclabs/anda-brain)，面向**私有化部署**设计。

@@ -612,7 +612,7 @@ impl AppState {
                 // right after maintenance finishes, in the same window this
                 // check races against).
                 #[cfg(feature = "wiki")]
-                if space.wiki_digest.is_processing() {
+                if space.wiki_digest.is_processing() || space.wiki.is_busy() {
                     return false;
                 }
                 if space.pinned || space.is_busy() {
@@ -2468,7 +2468,7 @@ impl Space {
         // The digest writes graph memory outside the formation hook, so it
         // must invalidate the negative-knowledge cache itself (plan M5): a
         // probe miss cached before this digest could now be answerable.
-        if rt.digested > 0 {
+        if rt.digested > 0 || rt.superseded > 0 {
             if let Err(err) = self.miss_cache.clear().await {
                 log::warn!(
                     target: "brain",
@@ -2493,7 +2493,7 @@ impl Space {
     #[cfg(feature = "wiki")]
     fn kick_wiki_housekeeping(self: &Arc<Self>) {
         let space = self.clone();
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             let now_ms = unix_ms();
             match space.wiki.orphan_sweep(now_ms).await {
                 Ok(report) if !report.is_empty() => {
@@ -2538,9 +2538,12 @@ impl Space {
             return;
         }
         let space = self.clone();
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             match space.run_wiki_digest(SELF_USER_ID).await {
-                Ok(report) if report.digested > 0 => {
+                Ok(report) if report.failed > 0 => {
+                    log::warn!(target: "brain", space_id = space.id, report:serde = report; "wiki digest has failed documents awaiting retry");
+                }
+                Ok(report) if report.digested > 0 || report.superseded > 0 => {
                     log::info!(target: "brain", space_id = space.id, report:serde = report; "wiki digest completed");
                 }
                 Ok(_) => {}
@@ -2695,6 +2698,8 @@ impl Space {
         self.tasks.cancel();
         self.engine.cancel();
         self.tasks.shutdown().await;
+        #[cfg(feature = "wiki")]
+        self.wiki.shutdown().await;
 
         // A hard stop is needed for an unresponsive provider, but it may also
         // drop a KIP/document write after its durable PUT. Treat that as a

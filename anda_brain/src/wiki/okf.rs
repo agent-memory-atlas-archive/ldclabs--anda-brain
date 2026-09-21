@@ -1,12 +1,9 @@
 //! OKF (Open Knowledge Format) v0.1 bundle import/export.
 //!
-//! OKF is the exchange layer only; the internal model stays authoritative
-//! (PRD §9). Fidelity strategy: the YAML frontmatter block is stored
-//! verbatim in `doc.metadata["x_okf_frontmatter"]` and written back on
-//! export — unknown keys, ordering and comments survive round-trips without
-//! a YAML dependency. Known keys (`title`, `tags`, `resource`, `type`) are
-//! additionally extracted by a line-level parser for mapping. `x_anda_*`
-//! keys are ours: appended fresh on export, stripped on import.
+//! Frontmatter is parsed as YAML mappings. Unknown key/value pairs are
+//! preserved structurally; comments, key ordering and scalar formatting are
+//! deliberately not part of the exchange contract. Native document fields
+//! remain authoritative when exported.
 
 use anda_db::schema::Json;
 use std::collections::BTreeMap;
@@ -19,7 +16,7 @@ use super::{
 };
 
 pub const OKF_VERSION: &str = "0.1";
-/// Metadata key holding the verbatim frontmatter block (no delimiters).
+/// Metadata key holding unknown frontmatter key/value pairs.
 pub const FRONTMATTER_KEY: &str = "x_okf_frontmatter";
 /// Metadata key holding the OKF `type` value.
 pub const OKF_TYPE_KEY: &str = "okf_type";
@@ -36,6 +33,17 @@ impl WikiService {
     /// updated; identical content is a checksum-idempotent no-op, so
     /// re-importing a bundle never grows the version chain.
     pub async fn import_bundle(
+        &self,
+        actor: String,
+        input: WikiImportInput,
+        now_ms: u64,
+    ) -> Result<WikiImportOutput, WikiError> {
+        let wiki = self.clone();
+        self.owned(async move { wiki.import_bundle_inner(actor, input, now_ms).await })
+            .await
+    }
+
+    async fn import_bundle_inner(
         &self,
         actor: String,
         input: WikiImportInput,
@@ -116,18 +124,24 @@ impl WikiService {
         let slug = slugify_path(&concept);
 
         let (frontmatter, body) = split_frontmatter(&entry.content);
-        let parsed = frontmatter.as_deref().map(parse_frontmatter);
-        let title = parsed
-            .as_ref()
-            .and_then(|fm| fm.title.clone())
+        let mut fields = match frontmatter.as_deref() {
+            Some(raw) => parse_frontmatter(raw)?,
+            None => BTreeMap::new(),
+        };
+        let title = take_string(&mut fields, "title")?
             .or_else(|| markdown_title(body))
             .unwrap_or_else(|| concept.rsplit('/').next().unwrap_or(&concept).to_string());
-
+        let tags = take_tags(&mut fields)?;
+        let resource = take_string(&mut fields, "resource")?.unwrap_or_default();
+        let kind = take_string(&mut fields, "type")?;
         let mut metadata = BTreeMap::new();
-        if let Some(raw) = &frontmatter {
-            metadata.insert(FRONTMATTER_KEY.to_string(), Json::from(raw.clone()));
+        if !fields.is_empty() {
+            metadata.insert(
+                FRONTMATTER_KEY.to_string(),
+                serde_json::to_value(fields).map_err(|err| WikiError::Invalid(err.to_string()))?,
+            );
         }
-        if let Some(kind) = parsed.as_ref().and_then(|fm| fm.r#type.clone()) {
+        if let Some(kind) = kind.filter(|kind| kind != "Document") {
             metadata.insert(OKF_TYPE_KEY.to_string(), Json::from(kind));
         }
 
@@ -140,23 +154,12 @@ impl WikiService {
             slug: Some(slug.clone()),
             title,
             content: body.to_string(),
-            // A deleted `tags:` key must propagate on re-import: `None`
-            // would read as "keep the stored tags" and the next export
-            // would resurrect them.
-            tags: Some(
-                parsed
-                    .as_ref()
-                    .and_then(|fm| fm.tags.clone())
-                    .unwrap_or_default(),
-            ),
-            // OKF cannot express enterprise ACLs (PRD §9): imported docs
-            // keep their stored label or inherit the namespace default.
+            tags: Some(tags),
+            // Exchange content cannot change native access control.
             acl_label: None,
-            // `None` keeps the stored source_uri: deleting a `resource:` key
-            // does not propagate through OKF (clear it via `wiki_commit`).
-            source_uri: parsed.as_ref().and_then(|fm| fm.resource.clone()),
+            source_uri: Some(resource),
             message: Some(format!("okf import: {}", entry.path)),
-            metadata: (!metadata.is_empty()).then_some(metadata),
+            metadata: Some(metadata),
         })?;
 
         // "Slug lookup + commit" runs under one write-lock acquisition:
@@ -169,6 +172,14 @@ impl WikiService {
             let doc = self.doc_record(id).await?;
             prepared.input.doc_id = Some(doc._id);
             prepared.input.parent_version = Some(doc.current_version);
+            // A file replaces the importer's fields, preserving unrelated host metadata.
+            let imported = prepared.input.metadata.take().unwrap_or_default();
+            let mut metadata = doc.metadata;
+            metadata.remove(FRONTMATTER_KEY);
+            metadata.remove(OKF_TYPE_KEY);
+            metadata.extend(imported);
+            prepared.input.metadata = Some(metadata);
+            prepared.input.validate()?;
         }
         let out = self
             .commit_prepared(actor.to_string(), prepared, now_ms)
@@ -187,11 +198,22 @@ impl WikiService {
         }))
     }
 
-    /// Exports one namespace as an OKF bundle: concept `.md` files (verbatim
+    /// Exports one namespace as an OKF bundle: concept `.md` files (canonical
     /// frontmatter plus `x_anda_*` provenance keys), a root `index.md`, and
     /// a `manifest.json` with checksums so the bundle can be diffed and
     /// replayed.
     pub async fn export_bundle(
+        &self,
+        actor: String,
+        namespace: Option<String>,
+        now_ms: u64,
+    ) -> Result<WikiExportOutput, WikiError> {
+        let wiki = self.clone();
+        self.owned(async move { wiki.export_bundle_inner(actor, namespace, now_ms).await })
+            .await
+    }
+
+    async fn export_bundle_inner(
         &self,
         actor: String,
         namespace: Option<String>,
@@ -245,18 +267,7 @@ impl WikiService {
 
         for doc in &docs {
             let version = self.version_record(doc.current_version).await?;
-            let raw = doc
-                .metadata
-                .get(FRONTMATTER_KEY)
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-            let okf_type = doc
-                .metadata
-                .get(OKF_TYPE_KEY)
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-            let frontmatter =
-                render_frontmatter(raw.as_deref(), okf_type.as_deref(), doc, &version);
+            let frontmatter = render_frontmatter(doc, &version)?;
             let path = format!("{}.md", doc.slug);
             entries.push(WikiBundleEntry {
                 path: path.clone(),
@@ -349,7 +360,7 @@ fn skip_reason(path: &str) -> String {
 }
 
 /// Splits an optional leading YAML frontmatter block. Returns the block
-/// content without delimiters (LF-normalized, `x_anda_*` lines stripped)
+/// content without delimiters (LF-normalized)
 /// and the body. Permissive: malformed frontmatter is treated as body.
 pub(super) fn split_frontmatter(content: &str) -> (Option<String>, &str) {
     // The BOM is stripped in every branch so it never reaches the body (and
@@ -372,12 +383,7 @@ pub(super) fn split_frontmatter(content: &str) -> (Option<String>, &str) {
         if trimmed == "---" || trimmed == "..." {
             let raw = &block_start[..offset];
             let body = &block_start[offset + line.len()..];
-            let raw = raw
-                .replace("\r\n", "\n")
-                .lines()
-                .filter(|l| !is_x_anda_line(l))
-                .collect::<Vec<_>>()
-                .join("\n");
+            let raw = raw.replace("\r\n", "\n").trim_end_matches('\n').to_string();
             return (Some(raw), body);
         }
         offset += line.len();
@@ -385,177 +391,80 @@ pub(super) fn split_frontmatter(content: &str) -> (Option<String>, &str) {
     (None, stripped)
 }
 
-fn is_x_anda_line(line: &str) -> bool {
-    !line.starts_with(char::is_whitespace) && line.trim_start().starts_with("x_anda_")
+/// Parse the mapping once; YAML quoting, escapes and flow collections are
+/// handled by the parser rather than by line splitting.
+fn parse_frontmatter(raw: &str) -> Result<BTreeMap<String, Json>, WikiError> {
+    if raw.trim().is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let mut fields: BTreeMap<String, Json> = serde_saphyr::from_str(raw)
+        .map_err(|err| WikiError::Invalid(format!("invalid YAML frontmatter: {err}")))?;
+    fields.retain(|key, _| !key.starts_with("x_anda_"));
+    Ok(fields)
 }
 
-#[derive(Debug, Default, Clone)]
-pub(super) struct ParsedFrontmatter {
-    pub title: Option<String>,
-    pub tags: Option<Vec<String>>,
-    pub resource: Option<String>,
-    pub r#type: Option<String>,
-}
-
-/// Line-level extraction of the known OKF keys. Everything else stays in
-/// the verbatim raw block; this parser never has to be complete.
-pub(super) fn parse_frontmatter(raw: &str) -> ParsedFrontmatter {
-    let mut out = ParsedFrontmatter::default();
-    let lines: Vec<&str> = raw.lines().collect();
-    let mut i = 0usize;
-    while i < lines.len() {
-        let line = lines[i];
-        i += 1;
-        if line.starts_with(char::is_whitespace) || line.trim_start().starts_with('#') {
-            continue;
+fn take_string(
+    fields: &mut BTreeMap<String, Json>,
+    key: &str,
+) -> Result<Option<String>, WikiError> {
+    match fields.remove(key) {
+        None | Some(Json::Null) => Ok(None),
+        Some(Json::String(value)) => {
+            Ok((!value.trim().is_empty()).then(|| value.trim().to_string()))
         }
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
-        let key = key.trim();
-        let value = value.trim();
-
-        let scalar = |v: &str| -> Option<String> {
-            // Folded/block scalars (`title: >` / `title: |`) are beyond the
-            // line-level parser: fall back to the other title sources rather
-            // than storing the indicator character as the value.
-            if v.starts_with(['|', '>']) {
-                return None;
-            }
-            let v = unquote(v);
-            if v.is_empty() { None } else { Some(v) }
-        };
-        match key {
-            "title" => out.title = scalar(value),
-            "resource" => out.resource = scalar(value),
-            "type" => out.r#type = scalar(value),
-            "tags" => {
-                if let Some(inline) = value.strip_prefix('[').and_then(|v| v.strip_suffix(']')) {
-                    out.tags = Some(parse_list_items(inline.split(',')));
-                } else if value.is_empty() {
-                    let mut items = Vec::new();
-                    while i < lines.len() {
-                        let item = lines[i].trim_start();
-                        let Some(item) = item.strip_prefix("- ") else {
-                            break;
-                        };
-                        items.push(item);
-                        i += 1;
-                    }
-                    out.tags = Some(parse_list_items(items.into_iter()));
-                } else {
-                    out.tags = Some(parse_list_items(std::iter::once(value)));
-                }
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
-fn parse_list_items<'a>(items: impl Iterator<Item = &'a str>) -> Vec<String> {
-    items
-        .map(|item| unquote(item.trim()))
-        .filter(|item| !item.is_empty())
-        .collect()
-}
-
-fn unquote(value: &str) -> String {
-    let value = value.trim();
-    if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
-        return value[1..value.len() - 1]
-            .replace("\\\"", "\"")
-            .replace("\\\\", "\\");
-    }
-    if value.len() >= 2 && value.starts_with('\'') && value.ends_with('\'') {
-        return value[1..value.len() - 1].replace("''", "'");
-    }
-    value.to_string()
-}
-
-fn yaml_scalar(value: &str) -> String {
-    let plain_safe = !value.is_empty()
-        && !value.starts_with(char::is_whitespace)
-        && !value.ends_with(char::is_whitespace)
-        && !value.contains(['"', '\'', ':', '#', '[', ']', '{', '}', '\n'])
-        && !value.starts_with(['-', '&', '*', '!', '|', '>', '%', '@']);
-    if plain_safe {
-        value.to_string()
-    } else {
-        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+        Some(_) => Err(WikiError::Invalid(format!(
+            "frontmatter {key} must be a string"
+        ))),
     }
 }
 
-fn tags_line(tags: &[String]) -> String {
-    format!(
-        "tags: [{}]",
-        tags.iter()
-            .map(|t| yaml_scalar(t))
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
-}
-
-/// The frontmatter block (no delimiters) synthesized for documents that
-/// never carried one, or whose stored block drifted (see
-/// [`frontmatter_is_stale`]).
-fn synthesized_frontmatter(
-    okf_type: Option<&str>,
-    title: &str,
-    tags: &[String],
-    source_uri: Option<&str>,
-) -> String {
-    let mut lines = vec![
-        format!("type: {}", yaml_scalar(okf_type.unwrap_or("Document"))),
-        format!("title: {}", yaml_scalar(title)),
-    ];
-    if !tags.is_empty() {
-        lines.push(tags_line(tags));
+fn take_tags(fields: &mut BTreeMap<String, Json>) -> Result<Vec<String>, WikiError> {
+    match fields.remove("tags") {
+        None | Some(Json::Null) => Ok(Vec::new()),
+        Some(Json::Array(tags)) => tags
+            .into_iter()
+            .map(|tag| match tag {
+                Json::String(tag) => Ok(tag),
+                _ => Err(WikiError::Invalid(
+                    "frontmatter tags must contain strings".into(),
+                )),
+            })
+            .collect(),
+        Some(_) => Err(WikiError::Invalid("frontmatter tags must be a list".into())),
     }
-    if let Some(resource) = source_uri {
-        lines.push(format!("resource: {}", yaml_scalar(resource)));
-    }
-    lines.join("\n")
 }
 
-/// Documents edited through `wiki_commit` after an OKF import drift from
-/// their stored frontmatter block. Exporting the stale block would make the
-/// bundle disagree with its own manifest and silently revert title/tags on
-/// replay, so a drifted block is discarded wholesale and export falls back
-/// to the synthesized form (unknown keys and comments are lost on drift;
-/// the no-drift path stays byte-stable so replays do not churn versions).
-/// A missing `title:` key falls back to the body heading exactly like
-/// import does, so such blocks are not spuriously treated as drifted.
-fn frontmatter_is_stale(raw: &str, doc: &WikiDocInfo, body: &str) -> bool {
-    let parsed = parse_frontmatter(raw);
-    let title = parsed.title.or_else(|| markdown_title(body));
-    title.as_deref() != Some(doc.title.as_str())
-        || parsed.tags.unwrap_or_default() != doc.tags
-        || parsed.resource.as_deref() != doc.source_uri.as_deref()
-}
-
-/// Assembles the exported frontmatter: the stored verbatim block (when no
-/// known key drifted) or the synthesized one, plus fresh `x_anda_*`
-/// provenance keys.
 fn render_frontmatter(
-    raw: Option<&str>,
-    okf_type: Option<&str>,
     doc: &WikiDocInfo,
     version: &super::WikiVersionRecord,
-) -> String {
-    let block = match raw {
-        Some(raw) if !frontmatter_is_stale(raw, doc, &version.content) => raw.to_string(),
-        _ => synthesized_frontmatter(okf_type, &doc.title, &doc.tags, doc.source_uri.as_deref()),
+) -> Result<String, WikiError> {
+    let mut fields: BTreeMap<String, Json> = match doc.metadata.get(FRONTMATTER_KEY) {
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|err| WikiError::Invalid(format!("invalid stored OKF fields: {err}")))?,
+        None => BTreeMap::new(),
     };
-    let mut lines: Vec<String> = block
-        .lines()
-        .filter(|l| !is_x_anda_line(l))
-        .map(str::to_string)
-        .collect();
-    lines.push(format!("x_anda_doc_id: {}", doc.id));
-    lines.push(format!("x_anda_version_id: {}", doc.current_version));
-    lines.push(format!("x_anda_checksum: {}", version.checksum));
-    format!("---\n{}\n---\n", lines.join("\n"))
+    fields.retain(|key, _| !key.starts_with("x_anda_"));
+    fields.insert(
+        "type".into(),
+        doc.metadata
+            .get(OKF_TYPE_KEY)
+            .cloned()
+            .unwrap_or_else(|| "Document".into()),
+    );
+    fields.insert("title".into(), doc.title.clone().into());
+    fields.remove("tags");
+    if !doc.tags.is_empty() {
+        fields.insert("tags".into(), serde_json::json!(doc.tags));
+    }
+    fields.remove("resource");
+    if let Some(resource) = &doc.source_uri {
+        fields.insert("resource".into(), resource.clone().into());
+    }
+    fields.insert("x_anda_doc_id".into(), doc.id.into());
+    fields.insert("x_anda_version_id".into(), doc.current_version.into());
+    fields.insert("x_anda_checksum".into(), version.checksum.clone().into());
+    let raw = serde_saphyr::to_string(&fields).map_err(|err| WikiError::Db(err.to_string()))?;
+    Ok(format!("---\n{}\n---\n", raw.trim_end_matches('\n')))
 }
 
 #[cfg(test)]
@@ -563,128 +472,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn split_frontmatter_extracts_block_and_strips_x_anda() {
-        let content = "---\ntype: SOP\n# a comment\ncustom_field: 保留我\nx_anda_doc_id: 7\n---\n\n# Body\ntext\n";
-        let (raw, body) = split_frontmatter(content);
-        let raw = raw.unwrap();
-        assert!(raw.contains("custom_field: 保留我"));
-        assert!(raw.contains("# a comment"));
-        assert!(!raw.contains("x_anda_doc_id"));
-        assert_eq!(body, "\n# Body\ntext\n");
-
-        // Permissive: no frontmatter, unclosed frontmatter.
-        assert_eq!(split_frontmatter("# Just body"), (None, "# Just body"));
-        let unclosed = "---\ntype: X\nno closing";
-        assert_eq!(split_frontmatter(unclosed), (None, unclosed));
-    }
-
-    #[test]
-    fn parse_frontmatter_reads_known_keys() {
-        let fm = parse_frontmatter(
-            "type: API Endpoint\ntitle: \"Recall \\\"v1\\\"\"\nresource: anda://x\ntags: [api, recall]\nunknown: kept",
-        );
-        assert_eq!(fm.r#type.as_deref(), Some("API Endpoint"));
-        assert_eq!(fm.title.as_deref(), Some("Recall \"v1\""));
-        assert_eq!(fm.resource.as_deref(), Some("anda://x"));
-        assert_eq!(fm.tags, Some(vec!["api".to_string(), "recall".to_string()]));
-
-        let block = parse_frontmatter("tags:\n  - a\n  - 'b c'\ntitle: t");
-        assert_eq!(block.tags, Some(vec!["a".to_string(), "b c".to_string()]));
-        assert_eq!(block.title.as_deref(), Some("t"));
-
-        // Folded/block scalars are unsupported: fall back instead of storing
-        // the indicator character.
-        let folded = parse_frontmatter("title: >\n  folded text\ntype: Doc");
-        assert_eq!(folded.title, None);
-        assert_eq!(folded.r#type.as_deref(), Some("Doc"));
-    }
-
-    fn doc_info(title: &str, tags: &[&str], source_uri: Option<&str>) -> WikiDocInfo {
-        WikiDocInfo {
-            id: 1,
-            namespace: "kb".to_string(),
-            slug: "d".to_string(),
-            title: title.to_string(),
-            status: "active".to_string(),
-            current_version: 2,
-            current_checksum: String::new(),
-            tags: tags.iter().map(|t| t.to_string()).collect(),
-            acl_label: String::new(),
-            source_uri: source_uri.map(str::to_string),
-            metadata: BTreeMap::new(),
-            created_by: String::new(),
-            updated_by: String::new(),
-            created_at: 0,
-            updated_at: 0,
-        }
-    }
-
-    #[test]
-    fn frontmatter_staleness_detects_known_key_drift() {
-        let raw = "type: Guide\n# keep this comment\ntitle: 旧标题\ntags: [old]\nunknown: kept";
-
-        // No drift: the stored block exports verbatim (byte-stable replays).
-        assert!(!frontmatter_is_stale(
-            raw,
-            &doc_info("旧标题", &["old"], None),
-            ""
-        ));
-
-        // Any known-key drift discards the block wholesale on export.
-        assert!(frontmatter_is_stale(
-            raw,
-            &doc_info("新标题", &["old"], None),
-            ""
-        ));
-        assert!(frontmatter_is_stale(
-            raw,
-            &doc_info("旧标题", &["new"], None),
-            ""
-        ));
-        assert!(frontmatter_is_stale(
-            raw,
-            &doc_info("旧标题", &["old"], Some("anda://x")),
-            ""
-        ));
-
-        // A block without `title:` falls back to the body heading (the same
-        // derivation import uses): not drift.
-        assert!(!frontmatter_is_stale(
-            "type: Guide\nunknown: kept",
-            &doc_info("正文标题", &[], None),
-            "# 正文标题\n\n正文。\n"
-        ));
-    }
-
-    #[test]
-    fn synthesized_frontmatter_matches_export_shape() {
-        let block = synthesized_frontmatter(None, "标题", &["a".to_string()], Some("anda://x"));
+    fn yaml_handles_quotes_comments_nested_values_and_folded_scalars() {
+        let mut fields = parse_frontmatter("title: >\n  A long\n  title\ntags: ['research,development', 'true'] # comment\ncustom: {owner: platform, enabled: true}\nx_anda_fake: {ignore: me}\n").unwrap();
         assert_eq!(
-            block,
-            "type: Document\ntitle: 标题\ntags: [a]\nresource: \"anda://x\""
+            take_string(&mut fields, "title").unwrap().as_deref(),
+            Some("A long title")
+        );
+        assert_eq!(
+            take_tags(&mut fields).unwrap(),
+            ["research,development", "true"]
+        );
+        assert_eq!(fields["custom"]["owner"], "platform");
+        assert!(!fields.contains_key("x_anda_fake"));
+    }
+
+    #[test]
+    fn malformed_or_wrongly_typed_frontmatter_is_an_error() {
+        assert!(parse_frontmatter("tags: [broken").is_err());
+        assert!(take_tags(&mut parse_frontmatter("tags: [true]").unwrap()).is_err());
+        assert!(
+            take_string(
+                &mut parse_frontmatter("title: {nested: value}").unwrap(),
+                "title"
+            )
+            .is_err()
         );
     }
 
     #[test]
-    fn yaml_scalar_quotes_only_when_needed() {
-        assert_eq!(yaml_scalar("部署指南"), "部署指南");
-        assert_eq!(yaml_scalar("a: b"), "\"a: b\"");
-        assert_eq!(yaml_scalar("he said \"hi\""), "\"he said \\\"hi\\\"\"");
-        assert_eq!(unquote(&yaml_scalar("he said \"hi\"")), "he said \"hi\"");
+    fn frontmatter_boundary_preserves_body() {
+        let (raw, body) =
+            split_frontmatter("\u{feff}---\r\ntitle: Guide\r\n---\r\n# Guide\nBody.\n");
+        assert_eq!(raw.as_deref(), Some("title: Guide"));
+        assert_eq!(body, "# Guide\nBody.\n");
     }
 
     #[test]
-    fn concept_path_filters_reserved_and_invalid() {
+    fn concept_paths_exclude_reserved_and_unsafe_names() {
+        for path in [
+            "index.md",
+            "log.md",
+            "a/index.md",
+            "../d.md",
+            "/d.md",
+            "a//b.md",
+            "a.json",
+        ] {
+            assert!(concept_path(path).is_none(), "{path}");
+        }
         assert_eq!(
             concept_path("guides/setup.md").as_deref(),
             Some("guides/setup")
         );
-        assert_eq!(concept_path("指南.md").as_deref(), Some("指南"));
-        assert!(concept_path("index.md").is_none());
-        assert!(concept_path("a/log.md").is_none());
-        assert!(concept_path("manifest.json").is_none());
-        assert!(concept_path("../evil.md").is_none());
-        assert!(concept_path("/abs.md").is_none());
-        assert!(concept_path("a//b.md").is_none());
     }
 }

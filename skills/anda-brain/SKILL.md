@@ -469,7 +469,7 @@ POST /v1/{space_id}/wiki/search
 { "query": "rollback checksum", "namespaces": ["engineering"], "top_k": 8, "mode": "chunks", "expand": 1 }
 ```
 
-Each hit carries the matching text and a citation: `{ "uri": "wiki://{space}/{doc_id}@{version_id}#{start}-{end}", "checksum": "sha3-256:...", "anchor": "...", "quote": "..." }`. `mode: "docs"` returns one best hit per document. `expand` (0-2, default 0) widens each hit with adjacent passages; overlapping expansions merge and the citation range widens while staying verifiable. BM25 favors exact terms (product names, error codes); reformulate keywords rather than sending full sentences.
+Each hit carries the matching text and a citation: `{ "uri": "wiki://{space}/{doc_id}@{version_id}#{start}-{end}", "checksum": "sha3-256:...", "anchor": "...", "quote": "..." }`. `mode: "docs"` returns one best hit per document. `expand` (0-2, default 0) widens each hit with adjacent passages; each expansion uses immutable source text and widens its citation range; nearby hits may overlap. BM25 favors exact terms (product names, error codes); reformulate keywords rather than sending full sentences.
 
 **Read progressively:**
 
@@ -481,7 +481,7 @@ GET /v1/{space_id}/wiki/docs/{doc_id}/content              → full text (bounde
 GET /v1/{space_id}/wiki/docs/{doc_id}/content?version=...  → historical version
 ```
 
-Prefer TOC → section over full reads for long documents.
+Prefer TOC → section over full reads for long documents. The TOC follows ATX headings (`#`–`######`) independently of retrieval chunks; sections include their descendants. All text selectors return at most 256 KiB. Use `truncated` and the returned `byte_range` to continue reading. Historical reads and verification accept only published versions.
 
 **Manage and audit:**
 
@@ -498,7 +498,7 @@ GET  /v1/{space_id}/wiki/events?kind=&doc_id=
 
 **Access control (ACL labels):**
 
-Documents may carry an `acl_label` (set via commit, or inherited from a per-namespace default configured with `update_space {"wiki_acl_defaults": {"hr": "hr-internal"}}`). Space tokens may carry `labels`: a token with labels sees only unlabeled documents plus its granted labels — enforced as a filter clause inside the same database query as retrieval, so over-broad results are structurally impossible. Tokens without labels and CWT holders are unrestricted; anonymous readers of public spaces see unlabeled content only. Denials surface as 404 (existence does not leak); the audit log, agentic recall, and the conversations endpoints (which persist full recall runner history) all require an unrestricted token and answer `403` to a labeled one. Note: OKF bundles do not carry ACL labels (the exchange format cannot express enterprise ACLs) — imported documents inherit namespace defaults.
+Documents may carry an `acl_label` (set via commit, or inherited from a per-namespace default configured with `update_space {"wiki_acl_defaults": {"hr": "hr-internal"}}`). Space tokens may carry `labels`: a token with labels sees only unlabeled documents plus its granted labels — prefiltered in the query and then checked against the authoritative document version, status and ACL. Content reads authorize and select a version from the same document snapshot. Tokens without labels and CWT holders are unrestricted; anonymous readers of public spaces see unlabeled content only. Denials surface as 404 (existence does not leak); the audit log, agentic recall, and the conversations endpoints (which persist full recall runner history) all require an unrestricted token and answer `403` to a labeled one. Note: OKF bundles do not carry ACL labels (the exchange format cannot express enterprise ACLs) — imported documents inherit namespace defaults.
 
 ```
 POST /v1/{space_id}/management/add_space_token
@@ -516,7 +516,9 @@ PATCH /v1/{space_id}/management/update_space   {"wiki_digest": true}
 POST  /v1/{space_id}/wiki/digest
 ```
 
-When enabled, committed wiki versions are distilled into the Cognitive Nexus: an LLM proposes subject–predicate–object facts per section, and the runtime writes each as a Proposition plus an Assertion attributed to the Brain (`mode: "inferred"`), citing the exact passage as Evidence — a `wiki://` citation with checksum and the extractor fingerprint. Provenance is attached by construction, not by prompt discipline. Re-committing a document **retracts the digest's own Assertion** for a fact the new version no longer states; the Proposition and anyone else's Assertions about it survive, because a document going quiet is a withdrawal by this one reader, not a claim that the world changed. Recall answers can therefore explain *why* a fact is believed and quote the source passage. The digest also runs automatically after maintenance cycles and on space startup, and each run re-verifies a sample of recorded citations. Disabled by default because it writes to the graph.
+When enabled, WikiDigest processes durable pending document generations, up to 20 per run. Commit, archive, restore and ACL changes enqueue work; failed documents remain pending and increment `WikiDigestReport.failed`. Retry by calling the endpoint again. Startup and post-maintenance hooks also process pending work. The `wiki_digested` version high-water mark is diagnostic, not a coverage guarantee.
+
+The model proposes facts; the host writes attributed Assertions with versioned citation Evidence. An unchanged body checksum reuses the existing ledger without a model call. **Omission from a bounded extraction never proves withdrawal.** The model must explicitly review each old claim against every source batch; only all-`absent` reviews authorize retracting that source's Assertion. Missing, duplicate or `unknown` reviews retain it, and the ledger retains ownership so later reconciliation can still withdraw it. Archive or labeling withdraws the document's claims during a subsequent digest; this graph synchronization is asynchronous. Concurrent edits fence out stale extraction results. Propositions and other sources' Assertions are preserved. Digest remains off by default, and mechanism tests do not establish real-model extraction quality.
 
 **OKF interchange (requires full-scope token):**
 
@@ -525,7 +527,7 @@ POST /v1/{space_id}/wiki/import    {"entries": [{"path": "guides/setup.md", "con
 GET  /v1/{space_id}/wiki/export?namespace=kb
 ```
 
-Bundles follow the OKF v0.1 convention (Markdown + YAML frontmatter; concept paths become hierarchical slugs). Unknown frontmatter keys, ordering and comments survive round-trips verbatim; re-importing an unchanged bundle is a no-op (checksum-idempotent). Export adds `x_anda_doc_id` / `x_anda_version_id` / `x_anda_checksum` provenance keys plus a root `index.md` and `manifest.json`, so a wiki snapshot can be reviewed with git diff and replayed into an empty space. Reserved files (`index.md`, `log.md`, non-Markdown) are skipped on import.
+Bundles follow the OKF v0.1 convention (Markdown + YAML frontmatter; concept paths become hierarchical slugs). Unknown frontmatter key/value pairs survive structurally, including after title/tag edits; YAML comments, key order and scalar formatting are canonicalized. Re-importing unchanged values is a no-op. Import replaces the file-owned fields, so deleting tags, resource, type or unknown frontmatter fields clears them, while preserving existing ACLs and unrelated host metadata. Export adds `x_anda_doc_id` / `x_anda_version_id` / `x_anda_checksum` provenance keys plus a root `index.md` and `manifest.json`, so a wiki snapshot can be reviewed with git diff and replayed into an empty space. Reserved files (`index.md`, `log.md`, non-Markdown) are skipped on import.
 
 ---
 

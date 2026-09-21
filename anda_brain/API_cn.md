@@ -507,7 +507,7 @@ export interface WikiEventInfo {
   id: number;
   // DocCreated | VersionCommitted | DocArchived | DocRestored | OrphanSwept
   // | CitationVerifyFailed | ImportCompleted | ExportCompleted
-  // | DigestExtracted | WikiQueried | WikiRead | StaleReport | EventsPruned
+  // | DigestExtracted | DigestFailed | WikiQueried | WikiRead | StaleReport | EventsPruned
   kind: string;
   doc_id?: number;
   version_id?: number;
@@ -517,11 +517,12 @@ export interface WikiEventInfo {
 }
 
 export interface WikiDigestReport {
-  digested: number; // 本轮蒸馏进图谱的版本数
-  facts: number; // 写入的命题数（metadata 携带 wiki:// 引用）
-  superseded: number; // 因文档不再陈述而被 digest 撤回（retract）的断言数
-  skipped: number;
-  citations_checked: number; // 蒸馏后引用抽检
+  digested: number; // 已提取或复用已有结果的文档代数
+  facts: number; // 本轮处理的文档账本中保留的断言数，不表示事实完整性
+  superseded: number; // 经明确核验或来源撤回而 retract 的本来源断言数
+  skipped: number; // 无需提取的已归档、带标签或评测文档
+  failed: number; // 失败且仍在待处理队列中的文档；再次调用可重试
+  citations_checked: number;
   citations_invalid: number;
   usage: Usage;
 }
@@ -611,7 +612,7 @@ export interface SpaceInfo {
   wiki_chunks: number;
   wiki_versions: number;
   wiki_queries: number;
-  wiki_digested: number; // 蒸馏高水位（version id）
+  wiki_digested: number; // 观测用的版本高水位，不代表所有文档都已处理
   wiki_stale_docs: number; // 最近一次 housekeeping 陈旧扫描结果
 }
 
@@ -986,9 +987,16 @@ RPC/MCP 传输副本不属于这些范围。不根据模型名猜编码，也不
 
 ## 4.3 Wiki 接口（`/v1/{space_id}/wiki`）
 
-Wiki 是空间的版本化参考记忆（政策、手册、SOP、API 文档）。写入是 Git 式不可变提交（CAS 并发控制）；检索返回可校验的 `wiki://` 引用。ACL：文档可携带 `acl_label`；带 `labels` 的 space token 仅可见无标签内容 + 所授标签——过滤在检索查询内部执行。公开空间的匿名读者仅可见无标签内容；越权一律表现为 404。
+Wiki 是空间的版本化参考记忆（政策、手册、SOP、API 文档）。写入是 Git 式不可变提交（CAS 并发控制）；检索返回可校验的 `wiki://` 引用。ACL：文档可携带 `acl_label`；带 `labels` 的 space token 仅可见无标签内容 + 所授标签——查询预过滤后仍核对文档当前版本、状态和权限。权限检查与版本选择共享同一文档快照。公开空间的匿名读者仅可见无标签内容；越权一律表现为 404。
 
 Wiki 专属错误语义：`409` 提交冲突（`RpcError.data.current_version` 为应 rebase 的版本）、`413` 内容超 1 MiB、`404` 不存在或 ACL 拒绝。
+
+目录由 Markdown 的 ATX 标题（`#`–`######`）生成，独立于检索分块；读取 section 包含该标题的子章节。锚点按标题派生，同名标题加序号。`full`、`range` 和 `section` 均最多返回 256 KiB；`truncated` 为 true 时，使用返回的 `byte_range` 继续读取。历史和引用校验只接受已发布 parent 链中的版本，失败提交的残留不是历史。
+
+OKF 导入按完整文件替换 title、tags、resource、type 和未知 frontmatter 键值，删除字段会清空对应导入状态；已有 ACL 与其他宿主 metadata 保留。标题或标签经 commit 修改后，导出仍保留未知键值。YAML 使用标准解析和序列化，不承诺注释或原始排版保真。
+
+WikiDigest 默认关闭。开启后，commit、archive、restore 和 ACL 变化持久化文档待处理标记；每轮最多处理 20 个文档，启动、维护后或显式调用时推进，失败文档保留待重试。正文校验和未变时复用已有账本，不再调用模型。提取漏项不是撤回依据：对旧断言必须在每个正文批次中明确核验为 `absent`，缺失、重复或 `unknown` 判断均保留原断言。归档或加标签由后续 digest 撤回本来源断言；该图谱同步是异步的。模型处理中发生文档变更时，不发布旧结果，保留新一代待处理标记。观测高水位 `wiki_digested` 不表示队列已经清空。
+
 
 ### POST `/v1/{space_id}/wiki/docs`
 
@@ -1055,7 +1063,7 @@ Wiki 专属错误语义：`409` 提交冲突（`RpcError.data.current_version` �
 
 ### POST `/v1/{space_id}/wiki/import`
 
-- 作用：导入 OKF v0.1 bundle；checksum 幂等（重复导入零版本膨胀）；未知 frontmatter 字段逐字往返
+- 作用：导入 OKF v0.1 bundle；checksum 幂等（重复导入零版本膨胀）；未知 frontmatter 键值按结构保留；YAML 注释、字段顺序及标量排版不保留
 - 鉴权：SpaceToken/CWT `*`（全量 scope）
 - 请求体：`WikiImportInput`
 - 响应：`RpcResponse<WikiImportOutput>`
@@ -1068,7 +1076,7 @@ Wiki 专属错误语义：`409` 提交冲突（`RpcError.data.current_version` �
 
 ### POST `/v1/{space_id}/wiki/digest`
 
-- 作用：把待处理 wiki 版本蒸馏进 Cognitive Nexus（每条事实写成 Proposition + 归属于 Brain 的 Assertion，并引用对应段落作为 Evidence）；新版本不再陈述的事实，digest 撤回它自己的 Assertion——Proposition 与他人的 Assertion 不受影响（需先 `update_space {"wiki_digest": true}` 开启）
+- 作用：把待处理 wiki 版本蒸馏进 Cognitive Nexus（每条事实写成 Proposition + 归属于 Brain 的 Assertion，并引用对应段落作为 Evidence）；经完整正文批次明确核验不再支持的旧断言，digest 撤回自己的 Assertion；漏提取或未知判断不会触发撤回，Proposition 与他人的 Assertion 不受影响（需先 `update_space {"wiki_digest": true}` 开启）
 - 鉴权：SpaceToken/CWT `write`
 - 响应：`RpcResponse<WikiDigestReport>`
 

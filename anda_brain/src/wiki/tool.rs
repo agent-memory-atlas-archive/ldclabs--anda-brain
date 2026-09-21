@@ -136,8 +136,8 @@ impl Tool<BaseCtx> for WikiReadTool {
 
     fn description(&self) -> String {
         "Reads a wiki document progressively: 'toc' lists sections with anchors, 'section' \
-         returns one section's full text, 'range' slices exact bytes, 'full' returns the whole \
-         document (bounded). Prefer toc → section over full for long documents. Pass a version \
+         returns a heading and its descendants, 'range' slices exact bytes, 'full' returns the whole \
+         document. All text reads are capped at 256 KiB; use the returned byte range and truncated flag to continue. Prefer toc → section over full for long documents. Pass a version \
          id to read history."
             .to_string()
     }

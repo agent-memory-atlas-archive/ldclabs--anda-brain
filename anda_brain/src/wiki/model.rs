@@ -36,6 +36,11 @@ pub struct WikiDocRecord {
     pub title: String,
     pub status: String,
     pub current_version: u64,
+    /// Changes with content, ACL and archive/restore. Host-only fencing token.
+    pub generation: u64,
+    /// 1 until the current generation has been reconciled by WikiDigest.
+    /// Published atomically with every document state change.
+    pub digest_pending: u64,
     pub current_checksum: String,
     pub tags: Vec<String>,
     /// ACL label; empty = readable by any space reader. Restricted tokens
@@ -64,9 +69,8 @@ pub struct WikiVersionRecord {
     pub created_at: u64,
 }
 
-/// Retrieval-plane row. `current` is the only visibility switch a search
-/// consults (1 = visible, 0 = inactive; u64 because AndaDB BTree indexes do
-/// not support Bool); `text` is always the exact
+/// Retrieval-plane row. `current` and the copied ACL label are prefilters;
+/// the document snapshot authorizes the version actually returned. `text` is the exact
 /// `content[byte_start..byte_end]` slice of its version.
 #[derive(Debug, Clone, Serialize, Deserialize, AndaDBSchema)]
 pub struct WikiChunkRecord {
@@ -89,8 +93,8 @@ pub struct WikiChunkRecord {
     pub acl_label: String,
 }
 
-/// Append-only audit row for writes and background tasks. Reads are not
-/// evented; read auditing belongs to the recall conversation log.
+/// Audit row for writes and background tasks, plus optional external reads.
+/// Retention preserves the latest digest ledger for each document.
 #[derive(Debug, Clone, Serialize, Deserialize, AndaDBSchema)]
 pub struct WikiEventRecord {
     pub _id: u64,
