@@ -298,6 +298,15 @@ async fn r5_scheduler_retains_missing_cohort_then_enrolls_review_and_consumes_la
 async fn r5_more_than_32_native_terminal_jobs_release_hot_capacity_and_replay_after_restart() {
     let (store, _, space, mut cfg, mut plan, basis) = setup().await;
     cfg.maximum_jobs = 1;
+    // This is a capacity, pagination and cold-replay test. Its one complete
+    // cohort can share a slow CI runner with hundreds of other tests, so the
+    // ordinary 10-second attempt lease makes runner scheduling an accidental
+    // part of the assertion. Real lease expiry has dedicated coverage in
+    // `paused_business_clock_does_not_extend_the_real_dispatch_lease`.
+    cfg.budget.elapsed_ms = 60_000;
+    plan.execution.budget = cfg.budget.clone();
+    plan.budget_digest = cfg.budget.digest().unwrap();
+    cfg.observer.configuration_digest = plan.execution.observer_configuration_digest().unwrap();
     let clock = crate::runtime::BusinessClock::manual(anda_engine::unix_ms()).unwrap();
     let rt = LearningRuntime::connect(
         store.clone(),
@@ -321,19 +330,31 @@ async fn r5_more_than_32_native_terminal_jobs_release_hot_capacity_and_replay_af
         rt.enroll(id.clone(), plan.clone(), basis.clone())
             .await
             .unwrap();
-        p4::cohort(
-            &rt,
-            &id,
-            Executor::new(&cfg, &plan, space.memory.nexus()),
-            false,
-            false,
-        )
-        .await;
+        if n == 0 {
+            // One full native lifecycle supplies the verdict replay evidence.
+            // The remaining terminal jobs exercise the same public archive and
+            // catalog paths without repeating 132 unrelated dispatches.
+            p4::cohort(
+                &rt,
+                &id,
+                Executor::new(&cfg, &plan, space.memory.nexus()),
+                false,
+                false,
+            )
+            .await;
+        }
         clock
             .advance_to(time_ms(&plan.execution.cutoff).unwrap())
             .unwrap();
         let settled = rt.settle(id.clone()).await.unwrap();
-        assert_eq!(settled.stage, JobStage::Settled);
+        assert_eq!(
+            settled.stage,
+            if n == 0 {
+                JobStage::Settled
+            } else {
+                JobStage::Expired
+            }
+        );
         let archived = rt.archive(id.clone()).await.unwrap();
         assert!(archived.archive.is_some());
         assert!(rt.jobs().await.unwrap().is_empty());

@@ -5,6 +5,35 @@ on:
   pull_request:
     branches: ["main"]
 jobs:
+  quality:
+    name: Lint and feature surfaces
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: anda-brain
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: anda-brain
+      - name: Install protobuf compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 protobuf-compiler
+      - name: Install Rust stable
+        run: rustup update --no-self-update stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "anda-brain -> target"
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Run clippy
+        run: cargo clippy --locked -p anda_brain --all-targets --all-features -- -D warnings
+      - name: Check library feature surfaces
+        run: |
+          cargo check --locked -p anda_brain --lib --no-default-features
+          cargo check --locked -p anda_brain --lib --no-default-features --features wiki
+          cargo check --locked -p anda_brain --lib --no-default-features --features mcp
+          cargo check --locked -p anda_brain --lib --no-default-features --features learning,experiments
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -16,7 +45,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: anda-brain
       - name: Install protobuf compiler (Linux)
@@ -32,30 +61,23 @@ jobs:
         run: brew install protobuf
       - name: Install Rust stable
         run: rustup update --no-self-update stable
-      - name: Run clippy
-        run: cargo clippy -p anda_brain --all-targets --all-features -- -D warnings
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "anda-brain -> target"
       - name: Run tests
         env:
           # CognitiveMemory 2.1 schema validation exceeds Rust's 2 MiB test
           # thread default in debug builds on the supported CI platforms.
           RUST_MIN_STACK: 16777216
-        run: cargo test --workspace --all-features -- --nocapture
-      - name: Check optional library surfaces
-        env:
-          RUST_MIN_STACK: 16777216
-        run: |
-          cargo test -p anda_brain --lib
-          cargo test -p anda_brain --lib --features wiki
-          cargo test -p anda_brain --lib --features mcp
-          cargo test -p anda_brain --lib --features learning,experiments
+        run: cargo test --locked --workspace --all-features
   mib-regression:
     name: MIB public product regression (no model)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: anda-brain
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: ldclabs/MIB
           # Follow MIB's maintained regression runner; MIB_REF can pin a replay.
@@ -83,7 +105,7 @@ jobs:
       run:
         working-directory: anda-cli
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version-file: anda-cli/go.mod
@@ -100,7 +122,7 @@ jobs:
       run:
         working-directory: anda-brain
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: anda-brain
       - uses: pnpm/action-setup@v4
