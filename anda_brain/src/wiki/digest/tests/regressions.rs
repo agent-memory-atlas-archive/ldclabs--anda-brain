@@ -28,6 +28,31 @@ impl anda_engine::model::CompletionFeaturesDyn for ReviewCompleter {
     }
 }
 
+#[derive(Debug)]
+struct SelectiveFailureCompleter;
+
+impl anda_engine::model::CompletionFeaturesDyn for SelectiveFailureCompleter {
+    fn model_name(&self) -> String {
+        "wiki-selective-failure-model".into()
+    }
+
+    fn completion(
+        &self,
+        request: anda_core::CompletionRequest,
+    ) -> anda_core::BoxPinFut<Result<anda_core::AgentOutput, BoxError>> {
+        let succeeds = request.prompt.contains("Document: Good\n");
+        Box::pin(async move {
+            if !succeeds {
+                return Err("persistent document-specific failure".into());
+            }
+            Ok(anda_core::AgentOutput {
+                content: json!({"facts": []}).to_string(),
+                ..Default::default()
+            })
+        })
+    }
+}
+
 async fn review_space(name: &str, replies: Vec<String>) -> Arc<crate::space::Space> {
     let models = crate::testkit::models_with_completer(ReviewCompleter(std::sync::Mutex::new(
         replies.into(),
@@ -291,6 +316,70 @@ async fn failed_extraction_stays_pending_without_blocking_other_documents() {
             .digest_pending,
         0
     );
+}
+
+#[tokio::test]
+async fn a_full_failed_batch_does_not_starve_later_pending_documents() {
+    let models = crate::testkit::models_with_completer(SelectiveFailureCompleter);
+    let app = crate::testkit::app_state_core("digest_fair_retry", models, vec![], "review", 0);
+    let space = crate::testkit::create_loaded_space(&app, "digest_fair_retry").await;
+    space.db.set_extension_from("wiki_digest".into(), true);
+
+    for index in 0..MAX_VERSIONS_PER_RUN {
+        space
+            .wiki
+            .commit(
+                "a".into(),
+                commit_input(
+                    &format!("Bad {index}"),
+                    &format!("# Bad {index}\nThis document always fails extraction.\n"),
+                ),
+                1000 + index as u64,
+            )
+            .await
+            .unwrap();
+    }
+    let good = space
+        .wiki
+        .commit(
+            "a".into(),
+            commit_input("Good", "# Good\nThis document can be reconciled.\n"),
+            2000,
+        )
+        .await
+        .unwrap();
+
+    let first = space
+        .run_wiki_digest(crate::agents::SELF_USER_ID)
+        .await
+        .unwrap();
+    assert_eq!(first.failed, MAX_VERSIONS_PER_RUN);
+    assert_eq!(first.digested, 0);
+    assert_eq!(
+        space
+            .wiki
+            .doc_record(good.doc.id)
+            .await
+            .unwrap()
+            .digest_pending,
+        1
+    );
+
+    let second = space
+        .run_wiki_digest(crate::agents::SELF_USER_ID)
+        .await
+        .unwrap();
+    assert_eq!(second.digested, 1);
+    assert_eq!(
+        space
+            .wiki
+            .doc_record(good.doc.id)
+            .await
+            .unwrap()
+            .digest_pending,
+        0
+    );
+    space.close().await.unwrap();
 }
 
 #[derive(Debug)]

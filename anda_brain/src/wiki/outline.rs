@@ -78,13 +78,24 @@ pub(super) fn outline(content: &str) -> Vec<WikiTocEntry> {
     entries.into_iter().map(|(_, entry)| entry).collect()
 }
 
-/// A hit navigates to the deepest real section containing its first byte.
-/// The citation's byte range continues to describe the exact retrieval slice.
-pub(super) fn anchor_at(entries: &[WikiTocEntry], start: usize) -> String {
+/// A hit navigates to the deepest real section covering its complete retrieval
+/// slice. Retrieval packing may merge short sibling sections under their
+/// common parent, so anchoring only the first byte can point at a child whose
+/// section ends before the matching text. Pathological cross-root chunks have
+/// no covering section and fall back to the section containing their start.
+pub(super) fn anchor_covering(entries: &[WikiTocEntry], start: usize, end: usize) -> String {
+    let start = start as u64;
+    let end = end as u64;
     entries
         .iter()
         .rev()
-        .find(|entry| entry.byte_start <= start as u64 && entry.byte_end > start as u64)
+        .find(|entry| entry.byte_start <= start && entry.byte_end >= end)
+        .or_else(|| {
+            entries
+                .iter()
+                .rev()
+                .find(|entry| entry.byte_start <= start && entry.byte_end > start)
+        })
         .map(|entry| entry.anchor.clone())
         .unwrap_or_default()
 }

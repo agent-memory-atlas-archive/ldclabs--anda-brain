@@ -92,6 +92,13 @@ schemars = "1"
 # anda_object_store = { path = "../anda-db/rs/anda_object_store" }
 # anda_kip = { path = "../anda-db/rs/anda_kip" }
 
+[profile.dev.package."*"]
+# Shrink dependency code and unwind tables so macOS debug builds fit the
+# compact-unwind format's 24-bit DWARF offsets (16 MiB). Keep anda_brain itself
+# unoptimized for debugging, and retain debug info and panic unwinding.
+# The test profile inherits this override from dev.
+opt-level = 1
+
 [profile.release]
 debug = false
 lto = true

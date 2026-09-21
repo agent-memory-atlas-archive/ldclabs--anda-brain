@@ -546,6 +546,43 @@ async fn section_reads_are_independent_of_retrieval_packing_and_include_children
 }
 
 #[tokio::test]
+async fn merged_sibling_search_anchor_reads_a_section_covering_the_hit() {
+    let wiki = test_wiki("wiki_merged_anchor").await;
+    let content = format!(
+        "# FAQ\n{}\n## Q1\nshort first answer\n\n## Q2\nsecondanswerneedle\n",
+        "introductory material ".repeat(80)
+    );
+    let out = wiki
+        .commit("a".into(), commit_input("FAQ", &content), 1000)
+        .await
+        .unwrap();
+    let hits = wiki
+        .search(WikiSearchInput::from_query("secondanswerneedle".into()))
+        .await
+        .unwrap();
+    let hit = hits.hits.first().expect("the second answer should match");
+    assert_eq!(hit.heading_path, ["FAQ"]);
+    assert_eq!(hit.citation.anchor, "faq");
+
+    let section = wiki
+        .read(WikiReadInput {
+            doc_id: out.doc.id,
+            version: None,
+            selector: WikiSelector::Section {
+                anchor: hit.citation.anchor.clone(),
+            },
+        })
+        .await
+        .unwrap();
+    assert!(
+        section
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("secondanswerneedle"))
+    );
+}
+
+#[tokio::test]
 async fn import_replaces_only_exchange_owned_metadata() {
     let wiki = test_wiki("wiki_import_metadata").await;
     let mut input = commit_input("Guide", "# Guide\nText.\n");

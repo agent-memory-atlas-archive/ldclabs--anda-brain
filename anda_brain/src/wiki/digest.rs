@@ -42,6 +42,8 @@ pub const WIKI_DIGEST_EXTRACTOR: &str = "wiki_digest@v2";
 const DIGEST_PROMPT: &str = include_str!("../../assets/BrainWikiDigest.md");
 /// Collection-extension key holding the digest high-water mark (version id).
 const DIGEST_CURSOR_KEY: &str = "wiki_digested";
+/// Last document id attempted by the fair pending-work scan.
+const DIGEST_DOC_CURSOR_KEY: &str = "wiki_digest_doc_cursor";
 const DIGEST_USAGE_KEY: &str = "wiki_digest_usage";
 const MAX_FACTS_PER_VERSION: usize = 64;
 const MAX_EXTRA_CONCEPTS: usize = 64;
@@ -223,25 +225,12 @@ impl WikiDigest {
         }
         let _guard = RunningGuard(self.running.clone());
         let mut report = WikiDigestReport::default();
-        let docs: Vec<WikiDocRecord> = self
-            .wiki
-            .docs
-            .search_as(Query {
-                search: None,
-                filter: Some(Filter::And(vec![
-                    Box::new(Filter::Field((
-                        "digest_pending".into(),
-                        RangeQuery::Eq(Fv::U64(1)),
-                    ))),
-                    Box::new(Filter::Field((
-                        "current_version".into(),
-                        RangeQuery::Gt(Fv::U64(0)),
-                    ))),
-                ])),
-                limit: Some(MAX_VERSIONS_PER_RUN),
-            })
-            .await?;
+        let docs = self.pending_documents().await?;
         for doc in docs {
+            // Advance on every attempt, including failures and stale
+            // generations. Otherwise the lowest failing document ids can
+            // occupy the bounded batch forever and starve later work.
+            self.save_doc_cursor(doc._id);
             self.running.store(doc.current_version, Ordering::SeqCst);
             match self.digest_document(&ctx, &doc, now_ms, &mut report).await {
                 Ok(DigestOutcome::Changed) => continue,
@@ -276,6 +265,63 @@ impl WikiDigest {
         report.citations_invalid = invalid;
         self.save_usage(&report.usage).await;
         Ok(report)
+    }
+
+    /// Select one cyclic, ascending page of pending documents. The cursor is
+    /// scheduling state only: `digest_pending` remains the durable source of
+    /// truth, so failed work is retried after the scan wraps around.
+    async fn pending_documents(&self) -> Result<Vec<WikiDocRecord>, WikiError> {
+        let cursor = self
+            .wiki
+            .docs
+            .get_extension_as::<u64>(DIGEST_DOC_CURSOR_KEY)
+            .unwrap_or_default();
+        let mut docs = self
+            .pending_documents_in(RangeQuery::Gt(Fv::U64(cursor)), MAX_VERSIONS_PER_RUN)
+            .await?;
+        let remaining = MAX_VERSIONS_PER_RUN.saturating_sub(docs.len());
+        if remaining > 0 {
+            docs.extend(
+                self.pending_documents_in(RangeQuery::Le(Fv::U64(cursor)), remaining)
+                    .await?,
+            );
+        }
+        Ok(docs)
+    }
+
+    async fn pending_documents_in(
+        &self,
+        id_range: RangeQuery<Fv>,
+        limit: usize,
+    ) -> Result<Vec<WikiDocRecord>, WikiError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .wiki
+            .docs
+            .search_as(Query {
+                search: None,
+                filter: Some(Filter::And(vec![
+                    Box::new(Filter::Field(("_id".into(), id_range))),
+                    Box::new(Filter::Field((
+                        "digest_pending".into(),
+                        RangeQuery::Eq(Fv::U64(1)),
+                    ))),
+                    Box::new(Filter::Field((
+                        "current_version".into(),
+                        RangeQuery::Gt(Fv::U64(0)),
+                    ))),
+                ])),
+                limit: Some(limit),
+            })
+            .await?)
+    }
+
+    fn save_doc_cursor(&self, cursor: u64) {
+        self.wiki
+            .docs
+            .set_extension_from(DIGEST_DOC_CURSOR_KEY.to_string(), cursor);
     }
 
     /// Caller holds the wiki write lock and has checked the generation.

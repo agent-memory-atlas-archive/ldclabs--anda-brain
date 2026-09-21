@@ -787,7 +787,7 @@ pub(super) fn prepare_commit(mut input: WikiCommitInput) -> Result<PreparedCommi
                 current: 0,
                 title: input.title.clone(),
                 heading_path: draft.heading_path.clone(),
-                anchor: outline::anchor_at(&outline, draft.byte_start),
+                anchor: outline::anchor_covering(&outline, draft.byte_start, draft.byte_end),
                 ordinal: idx as u64,
                 text: text.to_string(),
                 byte_start: draft.byte_start as u64,
