@@ -28,7 +28,7 @@ Assertion records an actor's stance and Evidence. Existence is not belief.
   consume mandatory space.
 - Deliver explicit partial host-read results when planner input cannot fit,
   while retaining required constraints, warnings and native procedure checks.
-- Source builds include Nexus's guarded repair for previously migrated completed
+- Use published Nexus 0.13.4's guarded repair for previously migrated completed
   Commitments; historical completion does not become a blocked obligation.
 
 - Local source builds include the Nexus migration fixes for staging sets over

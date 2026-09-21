@@ -15,7 +15,7 @@
 
 ## KIP 2.0 / CognitiveMemory 2.1 更新
 
-Rust 源码构建通过同级 `anda-db` 引入 Nexus 迁移修复，并统一 patch 共享 DB/KIP crate；Worker 使用
+Rust 使用已发布的 Nexus 0.13.4 及兼容的 DB/KIP 包，包含旧数据迁移修复；Worker 使用
 已发布的 `@ldclabs/kip-do` 0.13。Skill 行为保存为不可变的
 `SkillRevision`；Watch 进度和任务租约通过 Nexus 的受保护接口维护。旧的 family
 成功率晋升规则已移除；未配置独立观察者、冻结试验和可重放评估时，程序候选保持未验证，

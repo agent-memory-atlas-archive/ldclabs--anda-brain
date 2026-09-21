@@ -970,11 +970,9 @@ anda_brain = "0.12"
 anda_brain = { version = "0.12", features = ["mcp", "wiki"] }
 ```
 
-To use development APIs before a crate release, build this checkout alongside
-`anda-db`. Source builds currently patch Nexus and shared DB/KIP dependencies
-to that sibling checkout for legacy-migration fixes; Core/Engine remain
-published dependencies. Clone `https://github.com/ldclabs/anda-db` next to
-`anda-brain` before building. Trusted experiment hosts add `experiments`; it is independent of the
+To use development APIs before a crate release, build this checkout. Dependencies
+resolve from published crates, including Nexus 0.13.4's legacy migration fixes;
+a sibling `anda-db` checkout is only needed for optional local development overrides. Trusted experiment hosts add `experiments`; it is independent of the
 `learning` feature.
 
 The `anda_brain` **binary** is the full product and declares

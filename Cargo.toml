@@ -40,7 +40,7 @@ anda_web3_client = { version = "0.16" }
 anda_object_store = "0.13"
 anda_db = { version = "0.13", features = ["full"] }
 anda_db_tfs = { version = "0.13", features = ["full"] }
-anda_cognitive_nexus = "0.13.1"
+anda_cognitive_nexus = "0.13.4"
 # The embedded reference supplement is generated from this exact release.
 anda_kip = "=0.13.1"
 base64 = "0.23"
@@ -82,7 +82,7 @@ rmcp = { version = "3", features = [
 ], default-features = false }
 schemars = "1"
 
-# Unreleased Nexus v1 migration fixes. Keep shared DB/KIP types unified.
+# Optional local overrides: enable the shared DB/KIP stack together.
 [patch.crates-io]
 # anda_cognitive_nexus = { path = "../anda-db/rs/anda_cognitive_nexus" }
 # anda_db = { path = "../anda-db/rs/anda_db" }

@@ -15,8 +15,8 @@ The [offline Eval API and CLI have been retired](anda_brain/README.md#offline-re
 
 ## KIP 2.0 / CognitiveMemory 2.1 update
 
-Rust source builds use a sibling `anda-db` checkout for the Nexus migration
-fixes, with shared DB/KIP crates patched together;
+Rust uses published Nexus 0.13.4 and compatible DB/KIP packages, including the
+legacy migration corrections;
 the Worker uses published `@ldclabs/kip-do` 0.13. Skill behavior is an
 immutable `SkillRevision`; Watch progress and task leases use protected Nexus
 operations. The former family-rate Skill promotion rule has been removed. Without
