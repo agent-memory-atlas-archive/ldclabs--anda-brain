@@ -125,6 +125,14 @@ Assertion records an actor's stance and Evidence. Existence is not belief.
   precede optional content; packet and cumulative planning-input limits are
   enforced without claiming semantic completeness or execution permission.
   Requests without a budget policy retain ordinary Recall behavior.
+- Budgeted Recall no longer sends a hard-coded `max_output_tokens` parameter,
+  allowing backends that reject explicit output limits to use their provider
+  defaults. Host packet and cumulative planning-input budgets remain enforced.
+- Failed budgeted Recall packets include an optional static `failed_reason`
+  when it fits the counted packet budget, distinguishing model/provider failure
+  from token exhaustion. Tiny budgets retain the existing packet or `null`
+  fallback. Provider error details are limited to 512 characters in local logs;
+  they are not delivered in packets or stored in conversation diagnostics.
 
 ### Durable attention and authenticated outcomes
 

@@ -243,6 +243,7 @@ impl Capture {
             MemoryPacket {
                 format: recall_budget::PACKET_FORMAT.into(),
                 status: "budget_insufficient".into(),
+                failed_reason: None,
                 tokenizer: limits.recall.tokenizer.clone(),
                 token_limit: limits.recall.max_tokens,
                 items: vec![],

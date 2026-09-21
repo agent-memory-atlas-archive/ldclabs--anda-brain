@@ -886,6 +886,9 @@ out of the envelope, and adds `memory_budget` with `tokenizer`, `token_limit`,
 delivered, not that semantic relevance or completeness was proved. Markdown
 returns the same packet text. `budget_insufficient` or literal `null` with a
 static `failed_reason` is unusable/incomplete, not a successful empty answer.
+When it fits, an optional `failed_reason` inside the packet exposes the same
+static code, so model/provider failures are distinguishable from token exhaustion.
+It is included in the packet token count; provider error bodies are never delivered.
 Budget-mode failures use fixed codes: `recall_output_budget_exhausted`,
 `recall_required_read_incomplete`, `recall_context_budget_exhausted`,
 `recall_deadline_reached`, `recall_model_unavailable`,

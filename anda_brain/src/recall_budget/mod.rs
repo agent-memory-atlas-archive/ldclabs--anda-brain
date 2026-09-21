@@ -125,6 +125,9 @@ pub struct Coverage {
 pub struct MemoryPacket {
     pub format: String,
     pub status: String,
+    /// Static host failure code, included only when it fits the packet budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_reason: Option<String>,
     pub tokenizer: String,
     pub token_limit: u32,
     pub items: Vec<MemoryItem>,
@@ -236,6 +239,30 @@ pub fn insufficient(
     insufficient_packet(budget, &[], &coverage)
 }
 
+/// Keep a static host diagnostic inside the same counted delivery boundary.
+/// Tiny budgets retain their existing failure envelope or null sentinel.
+pub(crate) fn with_failure_reason(
+    limits: &RecallBudget,
+    packet: SerializedPacket,
+    reason: &str,
+) -> Result<SerializedPacket, BoxError> {
+    debug_assert!(packet.insufficient);
+    let Some(mut value) = serde_json::from_str::<Option<MemoryPacket>>(&packet.content)? else {
+        return Ok(packet);
+    };
+    value.failed_reason = Some(reason.to_string());
+    let content = serde_json::to_string(&value)?;
+    let tokens = count(&content)?;
+    if tokens > limits.max_tokens as usize {
+        return Ok(packet);
+    }
+    Ok(SerializedPacket {
+        content,
+        tokens,
+        insufficient: true,
+    })
+}
+
 fn validate_items(items: &[MemoryItem]) -> Result<(), BoxError> {
     if items.len() > MAX_ITEMS {
         return Err("Recall memory item count exceeds 256".into());
@@ -300,6 +327,7 @@ fn serialize_packet(
             "bounded"
         }
         .into(),
+        failed_reason: None,
         tokenizer: TOKENIZER.into(),
         token_limit: budget.max_tokens,
         items: kept.to_vec(),

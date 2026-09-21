@@ -525,3 +525,27 @@ fn bounded_inputs_reject_ambiguous_ids_and_oversized_json_before_selection() {
         .is_err()
     );
 }
+
+#[test]
+fn failure_reason_is_optional_and_counted_inside_the_packet() {
+    for max_tokens in [1, 64, 128, 256, 4096] {
+        let limits = RecallBudget {
+            max_tokens,
+            ..Default::default()
+        };
+        let before = insufficient(&limits, Coverage::default()).unwrap();
+        let after =
+            with_failure_reason(&limits, before.clone(), "recall_model_unavailable").unwrap();
+        let packet = checked(&after, max_tokens);
+        if max_tokens == 4096 {
+            let packet = packet.unwrap();
+            assert_eq!(
+                packet.failed_reason.as_deref(),
+                Some("recall_model_unavailable")
+            );
+            assert!(packet.items.is_empty());
+            let previous: MemoryPacket = serde_json::from_str(&before.content).unwrap();
+            assert!(previous.failed_reason.is_none());
+        }
+    }
+}

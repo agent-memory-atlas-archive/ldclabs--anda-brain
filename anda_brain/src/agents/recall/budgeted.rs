@@ -272,7 +272,8 @@ impl RecallAgent {
             instructions,
             tools,
             tool_choice_required: true,
-            max_output_tokens: Some(2048),
+            // The host bounds the delivered packet below. Keep provider
+            // output defaults: some backends reject max_output_tokens entirely.
             effort: Some(ModelEffort::Medium),
             ..Default::default()
         };
@@ -333,7 +334,16 @@ impl RecallAgent {
             let cancel = ctx.cancellation_token();
             let response = tokio::select! {
                 _=cancel.cancelled()=>None,
-                result=timeout(remaining,model.completion(request))=>result.ok().and_then(Result::ok),
+                result=timeout(remaining,model.completion(request))=>match result {
+                    Ok(Ok(output)) => Some(output),
+                    Ok(Err(error)) => {
+                        log::warn!(target: "brain", model = model.model_name(),
+                            error = error.to_string().chars().take(512).collect::<String>();
+                            "budgeted Recall model request failed");
+                        None
+                    }
+                    Err(_) => None,
+                },
             };
             let Some(output) = response else {
                 failed = true;
@@ -722,6 +732,9 @@ impl RecallAgent {
                 .unwrap_or("recall_output_budget_exhausted")
                 .to_string()
         });
+        if let Some(reason) = &failure {
+            packet = budget::with_failure_reason(limits, packet, reason)?;
+        }
         conversation.failed_reason = failure.clone();
         conversation.usage = usage.clone();
         conversation.updated_at = unix_ms();

@@ -173,6 +173,8 @@ fn query_limits_never_raise_literal_or_parameter_bounds_and_expired_flags_are_re
 #[derive(Clone, Debug)]
 enum Behavior {
     Select,
+    RejectOutputLimit,
+    ProviderFailure,
     ReadThenSelect(Vec<ToolCall>),
     LegacyOrSelect,
 }
@@ -198,6 +200,13 @@ impl CompletionFeaturesDyn for Planner {
                 seen.push(request.clone());
                 call
             };
+            match &behavior {
+                Behavior::RejectOutputLimit if request.max_output_tokens.is_some() => {
+                    return Err("Unsupported parameter: max_output_tokens".into());
+                }
+                Behavior::ProviderFailure => return Err(LEAK.into()),
+                _ => {}
+            }
             let prompt: Json = serde_json::from_str(&request.prompt).unwrap_or(Json::Null);
             let ids = prompt["memory_items"]
                 .as_array()
@@ -813,5 +822,40 @@ async fn real_commitment_that_cannot_fit_prevents_an_ordinary_answer_or_model_ca
     // The constraint window was actually queried, not replaced by a model's
     // assertion that no applicable restrictions were found.
     assert!(packet.coverage.queried.contains(&Channel::Kip));
+    space.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn budgeted_recall_accepts_backends_without_an_output_limit_parameter() {
+    let (_app, space, requests) =
+        setup("provider_output_defaults", Behavior::RejectOutputLimit).await;
+    let output = space
+        .query(SELF_USER_ID, input(Some(limits(8192, 131_072))))
+        .await
+        .unwrap();
+    assert!(output.failed_reason.is_none(), "{output:?}");
+    let packet = check_output(&output, 8192).unwrap();
+    assert!(packet.failed_reason.is_none());
+    assert_eq!(requests.lock().len(), 1);
+    assert!(requests.lock()[0].max_output_tokens.is_none());
+    space.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn provider_failure_reason_reaches_the_packet_without_private_diagnostics() {
+    let (_app, space, requests) = setup("provider_failure_packet", Behavior::ProviderFailure).await;
+    let output = space
+        .query(SELF_USER_ID, input(Some(limits(8192, 131_072))))
+        .await
+        .unwrap();
+    let packet = check_output(&output, 8192).unwrap();
+    assert_eq!(
+        output.failed_reason.as_deref(),
+        Some("recall_model_unavailable")
+    );
+    assert_eq!(packet.failed_reason, output.failed_reason);
+    assert!(packet.items.is_empty());
+    assert!(!output.content.contains(LEAK));
+    assert_eq!(requests.lock().len(), 1);
     space.close().await.unwrap();
 }

@@ -872,7 +872,9 @@ RPC/MCP 传输副本不属于这些范围。不根据模型名猜编码，也不
 `memory_budget`：`tokenizer`、`token_limit`、`tokens`、`context_token_limit`；此模式的
 `found` 仅表示交付了非 Primer 候选，不表示已证明语义相关或完整。Markdown 返回同一
 包文本。`budget_insufficient` 或带静态 `failed_reason` 的字面量 `null` 表示不可用/
-不充分，不能当成成功的空答案。预算失败使用固定代码：`recall_output_budget_exhausted`、
+不充分，不能当成成功的空答案。预算允许时，包内可选的 `failed_reason` 字段携带同一
+固定错误代码，用于区分模型调用失败和 token 预算耗尽；该字段计入包的 token 总数，
+不会交付提供方的原始错误内容。预算失败使用固定代码：`recall_output_budget_exhausted`、
 `recall_required_read_incomplete`、`recall_context_budget_exhausted`、
 `recall_deadline_reached`、`recall_model_unavailable`、
 `recall_planner_incomplete` 或 `recall_procedure_window_incomplete`。
