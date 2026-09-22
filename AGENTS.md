@@ -23,7 +23,7 @@ write KIP directly.
 Rust dependencies resolve from published crates, including Nexus 0.13.4's
 legacy Commitment repair. Optional sibling `anda-db` overrides must patch the
 shared DB/KIP stack together; verify one type identity with Cargo metadata.
-The current 0.12.0 release pins `anda_kip = "=0.13.1"` and requires
+The 0.12.1 release candidate pins `anda_kip = "=0.13.1"` and requires
 `anda_cognitive_nexus = "0.13.4"`; the Worker pins `@ldclabs/kip-do` 0.13.2; its protocol reference remains 0.13.1.
 KIP v2 has not been deployed. Use fresh v2 Spaces for current acceptance;
 do not add pre-release old-data migration work unless explicitly requested.
@@ -282,7 +282,7 @@ or endpoints:
 - Keep English and Chinese runtime guides in separate files, with language links
   and matching formulas, limits, API names and examples. Chinese entry points link
   to `_cn.md`; never remove necessary detail while separating translations.
-- Keep the release at 0.12.0 until explicitly asked to change it. Record completed
+- Keep the release version at 0.12.1 until explicitly asked to change it. Record completed
   behavior and known limits in `CHANGELOG.md`; do not list planned work as shipped.
 
 ## Prompt and Asset Changes

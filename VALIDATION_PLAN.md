@@ -2,7 +2,7 @@
 
 **[English](VALIDATION_PLAN.md) | [中文](VALIDATION_PLAN_cn.md)**
 
-Status: proposed implementation and acceptance work for **0.12.0**, 2026-09-20.
+Status: proposed implementation and acceptance work following **0.12.1**, updated 2026-09-23.
 This document specifies work still to do; it does not announce implemented metrics,
 completed business calibration or permission to enable automatic learning.
 KIP v2 has not been deployed. Start with fresh v2 Spaces; old-data inventory and
@@ -65,7 +65,7 @@ Use monotonic clocks for a process-local duration. Across restarts/services, com
 only validated timestamps in the same clock domain, retaining skew/unknown flags.
 Never mix experimental business time and wall time. Missing or negative-clock
 measurements are unknown, not zero. Record `measurement_started_at`; no historical
-backfill is required for this unreleased deployment.
+backfill is required for this proposed observability rollout.
 
 Each cost entry has request/attempt identity, scope, stage, source, token/call counts,
 nullable amount/currency and `accounting_complete`. Preserve cumulative provider

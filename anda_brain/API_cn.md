@@ -14,7 +14,9 @@ Attempt 和原生租约分派接入同一调度器。默认不安装生产执行
 批量记忆强度代谢跳过 SleepTask/Watch 运行记录；宿主结算错误通过
 assessment.settlement_errors 提供给维护模型。
 
-## 可信宿主记忆产品合同（未发布）
+<a id="trusted-host-memory-product-contracts"></a>
+
+## 可信宿主记忆产品合同（v0.12.1）
 
 Rust `product` 模块提供由 Assertion 支撑的 `MemoryRecord`、稳定修订、明确的立场/语义生命周期/存储状态，以及 Evidence 的 typed 来源引用。`Space::product_records`、`product_record`、`product_source` 不负责终端用户认证；嵌入宿主在返回记录、预览、派生 ID 或来源引用前必须检查所有者及来源权限。摘要匹配证明来源关联，不证明推断正确。
 
@@ -30,7 +32,7 @@ Rust `product` 模块提供由 Assertion 支撑的 `MemoryRecord`、稳定修订
 
 `RuntimeConfig::validate` 静态校验不加载 Space、不运行模型、不探测业务服务、不配置授权。可选学习运行时的 `product_readiness` 表示已安装隔离工作流的准备度，区分服务缺失、身份摘要不匹配、校准未审阅及批准门槛。ready 不授予业务部署权限，每项工作的服务与原生权限检查仍必须执行。
 
-Anda Bot 在这些合同发布前通过同级临时 patch 联调。保持 registry DB/KIP/Core 的单一类型身份，原生版本实际发布后再移除 patch。机制测试不证明真实学习收益或完整成本计量。
+Anda Bot 当前通过同级临时 patch 使用这些合同。改用已发布的 0.12.1 crate 后再移除 patch，并保持 registry DB/KIP/Core 的单一类型身份。机制测试不证明真实学习收益或完整成本计量。
 
 
 ## 1) 通用约定

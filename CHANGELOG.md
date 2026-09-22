@@ -2,18 +2,22 @@
 
 All notable changes to the Anda Brain project.
 
-## Unreleased
+## [0.12.1] — 2026-09-23
 
-- Verify product Evidence against its captured Formation message or confirmed correction before trusting a source key. Fence vocabulary publication and native runtime mutations under the current processing epoch, and clear product preview copies after direct Rust forget.
-- Apply native `max_results` limits to Worker record pages, erase archived graph elements through `/memory/forget`, and allow cancellation of an interrupted record Watch creation.
-- Sync the compact Worker with portable Rust changes through `c886b94`: full syntax in every model stage, one receipt-preserving large-input Formation review, grounding before Recall planning, and explicit Evidence/Activity graph erasure with per-kind counts.
-- Add trusted Worker product RPCs for source-backed records, reviewed conditional corrections, source-fenced archive/purge, durable per-step recovery and stale-agent output/write fences. Add explicitly bound, host-polled native record Watches with cancellation; do not advertise an inbox, automatic dispatch or learning runtime. Nonempty unsupported Recall budgets are rejected rather than ignored.
-- Keep the Worker's existing `kip-do` 0.13.2 dependency update and pin protocol reference validation independently to `anda_kip` 0.13.1, retaining file hashes and generated-asset checks. Document commit-by-commit parity and platform-specific limits in `anda-brain-worker/PORTING_AUDIT.md`.
+### Recoverable memory product contracts
 
-- Fix managed memory change boundaries: budgeted Recall excludes old history, failed Recall outputs recheck the processing epoch, Formation admits sources atomically with their epoch, and pagination rejects pre-change snapshots while retaining newer continuations. Deletion also clears related saved previews/correction text and invalidates affected uncommitted intents; correction-source reads verify live Evidence.
-- Add trusted Rust memory product contracts: source-backed Assertion catalog, immutable conditional correction intents, source-suppressed archive/purge operations, in-flight processor/Notes fences, current-state Recall guards and cold-load reconciliation of admitted changes.
-- Add recipient-owned record subscriptions with native arming, bounded cancellation grants, archive cancellation and no rearming/regrant on retry. Add static runtime configuration validation and isolated-workflow learning readiness; no new business execution authority or model outcome tool.
-- Add deterministic source, conflict, retention, cancelled-waiter, archive and restart-recovery fixtures. These changes are coordinated with Anda Bot through an explicitly authorized temporary local patch; no release version was changed.
+- Trusted Rust hosts can inspect Assertion-backed records and captured Evidence sources, prepare conditional corrections, suppress or purge a reviewed claim closure, and resume admitted changes after restart. Corrections append a new attributed claim; native history remains intact. Sources must match the captured Formation message or a confirmed correction receipt before they can authorize a managed change.
+- Managed changes persist source exclusions and a processing epoch before native writes. Stale Formation, Maintenance, Notes, vocabulary and protected runtime mutations are fenced; Recall rechecks its epoch before returning content. Budgeted Recall excludes old processing history, and pre-change pagination must restart while newer continuations remain usable.
+- Purges clear affected saved preview and correction text, discard uncommitted intents, and verify live Evidence before exposing a correction source. Direct Rust `/memory/forget` also clears affected product previews. Native legal holds and per-target versions remain enforced.
+- Recipient-owned record Watches use native arming and authorized coverage. Cancellation archives the Watch; retries do not re-arm it or restore a revoked grant. Runtime configuration gains static validation and optional isolated-workflow learning readiness reporting.
+
+### Worker parity and limits
+
+- The Worker includes complete KIP syntax in every model stage, a single receipt-preserving review for large Formation inputs, grounding before Recall planning, and explicit Evidence/Activity erasure with per-kind counts, including archived records.
+- Trusted Worker RPCs provide source-backed records, reviewed changes, source fences, durable per-step recovery and processing-epoch checks. Native read limits apply to record projections. Explicitly bound record Watches support host-polled advancement and cancellation, including interrupted creation.
+- The Worker uses `@ldclabs/kip-do` 0.13.2 while compiled protocol references remain pinned independently to `anda_kip` 0.13.1 and verified by hash. It still has no cross-operation atomic batch, semantic search, Wiki, budgeted Recall packet, background inbox delivery or learning execution runtime; a nonempty Recall `budget` is rejected.
+
+Mechanism tests cover source identity, authority, retention, cancellation and restart recovery. They do not establish empirical model gains, production learning calibration or provider-cost completeness.
 
 ## [0.12.0] — 2026-09-20
 

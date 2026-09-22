@@ -448,7 +448,7 @@ Recall priorities. Retrieval frequency and model self-reports never earn credit.
 Methods require explicit parameters and reviewed calibration; corrections suspend
 ranking without rewriting historical receipts. See [memory utility](anda_brain/UTILITY_RUNTIME.md).
 
-## Trusted host memory product contracts (unreleased)
+## Trusted host memory product contracts (v0.12.1)
 
-Unreleased native contracts add source-backed record views, reviewed corrections, suppression/deletion with source fences, recipient subscriptions and learning readiness for trusted embedding hosts. See [the Rust product contract](anda_brain/API.md#trusted-host-memory-product-contracts-unreleased). These are separate from ordinary natural-language model tools.
+Version 0.12.1 adds source-backed record views, reviewed corrections, suppression/deletion with source fences, recipient subscriptions and learning readiness for trusted embedding hosts. See [the Rust product contract](anda_brain/API.md#trusted-host-memory-product-contracts). These are separate from ordinary natural-language model tools.
 Source references are checked against captured messages or confirmed correction receipts. Direct graph forget also scrubs affected saved product previews.

@@ -12,7 +12,7 @@ SleepTask and Watch are exempt from bulk mnemonic decay because all operational
 record updates require version guards. Failed host passes reach the model in
 assessment.settlement_errors.
 
-## Trusted host memory product contracts (unreleased)
+## Trusted host memory product contracts (v0.12.1)
 
 The Rust `product` module provides Assertion-backed `MemoryRecord` projections, stable native revisions, explicit stance/lifecycle/storage state and typed Evidence source references. `Space::product_records`, `product_record` and `product_source` do not authenticate a user. The embedding host must enforce owner/source visibility before returning any record, preview, dependent identifier or source quote. A matching source digest is provenance, not proof that an inference is correct.
 
@@ -29,7 +29,7 @@ Removal does not erase an embedding application's original chat/files/logs/backu
 
 `RuntimeConfig::validate` performs static validation without loading a Space, running models, probing services or provisioning grants. The optional learning runtime reports `product_readiness` for installed isolated workflow bindings, including missing services, mismatched pins, missing reviewed calibration and approval gates. Ready is not business deployment authority; native per-item service/permission checks remain mandatory.
 
-Anda Bot consumes these contracts through a temporary sibling patch while they are unreleased. Keep the shared registry DB/KIP/Core type identity; publish an actual native release before removing the patch. No empirical learning improvement or full cost accounting is implied by these mechanism tests.
+Anda Bot currently consumes these contracts through a temporary sibling patch. Replace it with the published 0.12.1 crate before removing the patch, while keeping the shared registry DB/KIP/Core type identity. No empirical learning improvement or full cost accounting is implied by these mechanism tests.
 
 
 ## KIP 2.0 / CognitiveMemory 2.1 update
