@@ -96,3 +96,23 @@ it('forgets Evidence and Activity with dry run, legal holds and exact per-kind c
   expect(erased.result.entities.find((row:any)=>row.entity==='E-99999')).toEqual({entity:'E-99999',existed:false})
   expect(erased.result.entities).toHaveLength(5)
 })
+
+it('forgets archived Evidence and Activity instead of reporting them absent',async()=>{
+  const ai = new Ai([]), space = crypto.randomUUID()
+  const created = await (await post(ai,space,'execute_kip',{command:`MUTATE {
+    CREATE EVIDENCE ?e {SET FIELDS {evidence_class:"user_statement",payload:"archived private text"}}
+    CREATE ACTIVITY ?x {SET FIELDS {activity_class:"archived private activity",status:"completed"}}
+  }`})).json<any>()
+  const ids = created.result[0].extensions['kip-do/outcome'].handles
+  for (const id of [ids.e,ids.x]) {
+    const transition = await (await post(ai,space,'execute_kip',{
+      command:'TRANSITION :id TO "archived"',parameters:{id},
+    })).json<any>()
+    expect(transition.result[0].status,JSON.stringify(transition)).toBe('succeeded')
+  }
+  const dry = await (await post(ai,space,'memory/forget',{entities:[ids.e,ids.x],dry_run:true})).json<any>()
+  expect(dry.result.entities.every((row:any)=>row.existed)).toBe(true)
+  const erased = await (await post(ai,space,'memory/forget',{entities:[ids.e,ids.x]})).json<any>()
+  expect(erased.result).toMatchObject({deleted_evidence:1,deleted_activities:1})
+  expect(erased.result.entities.every((row:any)=>row.existed && !row.error)).toBe(true)
+})

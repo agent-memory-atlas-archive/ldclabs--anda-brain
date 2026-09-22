@@ -104,6 +104,7 @@ export function assertCurrentOperations(operations: readonly KipOperation[]): vo
 export class MemoryProduct {
   constructor(private nexus: CognitiveNexus, private storage: DurableObjectStorage, private recipient?: string) {}
   private get kv() { return this.storage.kv }
+  private governedResultLimit: number | null | undefined
   state(): ControlState {
     const state = this.kv.get<ControlState>(CONTROL) ?? { version: 1, epoch: 0, suppressed: [], pending: null }
     if (state.version !== 1) fail('unsupported_product_state')
@@ -158,8 +159,16 @@ export class MemoryProduct {
   private load(session: Session, id: string): Element {
     const row = this.nexus.store.load(parseElementId(id))
     if (!row || row.row.space !== this.nexus.space) return fail('not_found')
-    const visibility = session.effectiveAuthority().mayRead(row, session.auth)
-    if (!visibility?.content || visibility.constraints.fields.length) return fail('not_found')
+    const authority = session.effectiveAuthority()
+    const spaceLimit = authority.authorize('read', spaceResource(), session.auth).constraints.max_results
+    const visibility = authority.mayRead(row, session.auth)
+    if (!visibility?.content || visibility.constraints.fields.length ||
+        spaceLimit === 0 || visibility.constraints.max_results === 0) return fail('not_found')
+    if (this.governedResultLimit !== undefined && visibility.constraints.max_results !== null) {
+      this.governedResultLimit = this.governedResultLimit === null
+        ? visibility.constraints.max_results
+        : Math.min(this.governedResultLimit, visibility.constraints.max_results)
+    }
     return row
   }
   source(auth: AuthContext, id: string): RecordSource {
@@ -216,17 +225,36 @@ export class MemoryProduct {
     }
   }
   records(auth: AuthContext, before = Number.MAX_SAFE_INTEGER, limit = 20) {
-    this.session(auth)
+    const session = this.session(auth)
     if (!Number.isSafeInteger(before) || before < 1 || !Number.isInteger(limit) || limit < 1 || limit > 50) fail('invalid_request')
+    this.governedResultLimit = session.effectiveAuthority()
+      .authorize('read', spaceResource(), auth).constraints.max_results
+    if (this.governedResultLimit === 0) return { records: [], next_cursor: null, complete: false }
     const ids = this.storage.sql.exec<{ id: number }>(
       'SELECT id FROM assertions WHERE space = ? AND id < ? ORDER BY id DESC LIMIT ?', this.nexus.space, before, limit,
     ).toArray()
     const records: MemoryRecord[] = []
     let complete = ids.length < limit
+    let lastConsumed: number | null = null
     for (const { id } of ids) {
-      try { records.push(this.record(auth, `A-${id}`)) } catch { complete = false }
+      try {
+        const record = this.record(auth, `A-${id}`)
+        if (this.governedResultLimit !== null && records.length >= this.governedResultLimit) {
+          complete = false
+          break
+        }
+        records.push(record)
+        lastConsumed = id
+      } catch {
+        complete = false
+        lastConsumed = id
+      }
+      if (this.governedResultLimit !== null && records.length >= this.governedResultLimit) {
+        complete = false
+        break
+      }
     }
-    return { records, next_cursor: ids.length === limit ? ids.at(-1)!.id : null, complete }
+    return { records, next_cursor: complete ? null : lastConsumed, complete }
   }
   private keysForSource(source: RecordSource): string[] {
     if (source.origin) {
@@ -499,7 +527,24 @@ export class MemoryProduct {
     return this.watch(auth, id)
   }
   cancelWatch(auth: AuthContext, id: string): RecordWatch {
-    const session = this.watchSession(auth), row = this.watch(auth, id)
+    const session = this.watchSession(auth), key = this.key(auth, id)
+    let row = this.watch(auth, id)
+    if (row.state === 'preparing' && !row.watch_id) {
+      // Creation may have committed before its id was saved. Resolve that
+      // native identity before deciding that there is nothing to archive.
+      const native = this.nexus.store.byClientKey('Concept', this.nexus.space, `product-watch:${key}`)
+      if (!native) {
+        row = { ...row, state: 'cancelled' }
+        this.kv.put(WATCH + key, row)
+        return row
+      }
+      if (native.kind !== 'Concept' || !native.row.schema_ref.endsWith('/Watch') ||
+          !isJsonMap(native.row.attributes.condition) ||
+          native.row.attributes.condition.element !== row.target_id) fail('watch_identity_conflict')
+      row = { ...row, watch_id: `C-${native.row.id}` }
+      this.load(session, row.watch_id)
+      this.kv.put(WATCH + key, row)
+    }
     if (row.state !== 'cancelled') {
       const current = this.load(session, row.watch_id)
       session.execute('TRANSITION :id TO "archived" EXPECT VERSION :version', {id: row.watch_id,version:current.row.version})

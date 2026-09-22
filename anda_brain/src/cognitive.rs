@@ -48,6 +48,7 @@ pub(crate) struct RuntimeArgs {
 pub(crate) struct MemoryRuntimeTool {
     memory: Arc<MemoryManagement>,
     attention: Arc<crate::attention::AttentionRuntime>,
+    product_control: Option<Arc<crate::product::control::Control>>,
 }
 
 impl MemoryRuntimeTool {
@@ -57,7 +58,19 @@ impl MemoryRuntimeTool {
         memory: Arc<MemoryManagement>,
         attention: Arc<crate::attention::AttentionRuntime>,
     ) -> Self {
-        Self { memory, attention }
+        Self {
+            memory,
+            attention,
+            product_control: None,
+        }
+    }
+
+    pub(crate) fn with_product_control(
+        mut self,
+        control: Arc<crate::product::control::Control>,
+    ) -> Self {
+        self.product_control = Some(control);
+        self
     }
 
     pub async fn execute(&self, args: RuntimeArgs, maintenance: bool) -> Result<Json, BoxError> {
@@ -165,6 +178,17 @@ impl Tool<BaseCtx> for MemoryRuntimeTool {
         args: RuntimeArgs,
         _resources: Vec<Resource>,
     ) -> Result<ToolOutput<Json>, BoxError> {
+        let _guard = if matches!(args.operation.as_str(), "arm_watch" | "lease_task") {
+            if let Some(control) = &self.product_control {
+                let guard = control.gate.lock().await;
+                control.check(&ctx)?;
+                Some(guard)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let result = self
             .execute(args, ctx.agent == crate::agents::MaintenanceAgent::NAME)
             .await?;

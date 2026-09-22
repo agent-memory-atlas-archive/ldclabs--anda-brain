@@ -960,6 +960,7 @@ Explicit `parameters` override the space policy; omitted members use policy defa
 - Response: `RpcResponse<MemoryForgetReport>`; per-entity errors appear in `result.entities`.
 
 Accepts explicit Concept (`C-*`), Proposition (`P-*`), Assertion (`A-*`), Evidence (`E-*`) and Activity (`X-*`) IDs, including the Evidence containing captured message text. Native legal holds and reference checks still apply; successful purges leave erased identity stubs. Counts report each erased kind, including cascades. This removes the selected graph records; stored conversations, wiki documents and external copies have separate lifecycles.
+Saved product previews that reference successfully purged elements are scrubbed before the response is reported as clean; a preview-cleanup failure is reported on that entity.
 
 ### GET `/v1/{space_id}/memory_status`
 

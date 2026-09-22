@@ -13,7 +13,8 @@ the relevant permission. This adapter creates no Grants or ActorBindings.
 
 - `productRecords(auth, before?, limit?)`: newest Assertion-backed records, at
   most 50 per page (default 20); `next_cursor` is the exclusive numeric id bound.
-  `complete` is false for another page or an unavailable record.
+  `complete` is false when a further page may remain, native result limits apply,
+  or a record is unavailable.
 - `productRecord(auth, assertionId)`: proposition, semantic actor, stance,
   epistemic status, storage state, revision, valid times and source references.
   Proposition existence alone never becomes a true personal fact.
@@ -99,7 +100,10 @@ setting grants no authority and is never inferred from the legacy HTTP API key.
   version and WatchState generation and asks the native engine to advance at most
   200 changes. Native authorized coverage decides whether it fires.
 - `productCancelRecordWatch(auth, operation_id)` archives the Watch, preserving
-  generation and checkpoint. Retrying creation or cancellation never rearms it.
+  generation and checkpoint. A `preparing` operation with no native Watch can
+  also be cancelled; if native creation committed before its receipt was saved,
+  cancellation resolves that same Watch and archives it. Retrying creation or
+  cancellation never rearms it.
 
 This is a host-polled subscription, without background inbox delivery, arbitrary
 callbacks, semantic conditions, business dispatch or automatic grants.

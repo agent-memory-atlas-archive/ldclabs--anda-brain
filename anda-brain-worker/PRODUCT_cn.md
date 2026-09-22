@@ -10,7 +10,8 @@ HTTP API Key、语义 actor 和原生 Principal 是不同身份。每次产品�
 ## 记录与来源
 
 - `productRecords(auth, before?, limit?)`：按新到旧返回 Assertion 记录；每页最多 50 条，
-  默认 20 条。`next_cursor` 是排他的数字 id 上界。有下一页或记录不可读时 `complete=false`。
+  默认 20 条。`next_cursor` 是排他的数字 id 上界。可能还有下一页、原生结果上限生效或
+  记录不可读时 `complete=false`。
 - `productRecord(auth, assertionId)`：返回 Proposition、语义 actor、立场、认识状态、
   存储状态、版本、有效时间和来源引用。Proposition 存在本身不表示事实为真。
 - `productSource(auth, evidenceId)`：返回当前来源引用和 payload 摘要；摘要不是原文，
@@ -75,7 +76,8 @@ Formation 在调用模型前注册 `formation:sha256:…` 观察身份。默认�
 - `productAdvanceRecordWatch(auth, operation_id)`：读取当前整体版本和 WatchState generation，
   交给原生引擎推进至多 200 条变更；是否触发由原生授权覆盖决定。
 - `productCancelRecordWatch(auth, operation_id)`：归档 Watch，保留 generation 和 checkpoint。
-  重试创建或取消都不会重新 arm。
+  若 `preparing` 操作尚无原生 Watch，也可取消；若原生创建已提交但回执尚未保存，则先定位同一
+  Watch 再归档。重试创建或取消都不会重新 arm。
 
 这是由宿主轮询的订阅，没有后台 inbox 投递、任意回调、语义条件、业务执行或自动权限授予。
 

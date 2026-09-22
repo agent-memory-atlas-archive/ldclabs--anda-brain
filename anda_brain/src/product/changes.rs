@@ -581,11 +581,19 @@ impl Space {
         key: &str,
         targets: &[Target],
     ) -> Result<(), BoxError> {
-        let erased: BTreeSet<&str> = targets.iter().map(|target| target.id.as_str()).collect();
+        let erased: BTreeSet<String> = targets.iter().map(|target| target.id.clone()).collect();
+        self.clear_product_preview_content(&erased, Some(key)).await
+    }
+
+    pub(crate) async fn clear_product_preview_content(
+        &self,
+        erased: &BTreeSet<String>,
+        except: Option<&str>,
+    ) -> Result<(), BoxError> {
         let journal = &self.product_control.journal;
         let mut paths = journal.keys("changes/");
         while let Some(path) = paths.try_next().await? {
-            if path == format!("changes/{key}") {
+            if except.is_some_and(|key| path == format!("changes/{key}")) {
                 continue;
             }
             let Some(mut stored) = journal.read::<StoredChange>(&path).await? else {
@@ -731,7 +739,7 @@ impl Space {
         Ok(keys)
     }
 
-    async fn add_source_keys(
+    pub(super) async fn add_source_keys(
         &self,
         source: &RecordSource,
         keys: &mut BTreeSet<String>,
@@ -742,6 +750,38 @@ impl Space {
                 .get_conversation(id)
                 .await
                 .map_err(|_| "unsupported_scope")?;
+            let prompt = conversation
+                .messages
+                .first()
+                .and_then(|message| {
+                    serde_json::from_value::<anda_core::Message>(message.clone()).ok()
+                })
+                .and_then(|message| message.text())
+                .ok_or("unsupported_scope")?;
+            let input = serde_json::from_str::<crate::types::FormationInput>(&prompt)
+                .unwrap_or_else(|_| crate::types::FormationInput {
+                    messages: vec![anda_core::Message {
+                        role: "user".into(),
+                        content: vec![prompt.clone().into()],
+                        ..Default::default()
+                    }],
+                    context: None,
+                    timestamp: None,
+                });
+            let message = input
+                .messages
+                .get(source.message_index.ok_or("unsupported_scope")?)
+                .ok_or("unsupported_scope")?;
+            let digest = anda_cognitive_nexus::content_digest(&serde_json::to_value(message)?)?;
+            let observed_at = crate::kip::observation_timestamp(
+                input.timestamp.as_deref(),
+                conversation.created_at,
+            );
+            if source.payload_digest.as_deref() != Some(digest.as_str())
+                || source.observed_at.as_deref() != Some(observed_at.as_str())
+            {
+                return Err("unsupported_scope".into());
+            }
             keys.extend(SourceIdentity::for_conversation(&conversation)?.keys());
             keys.insert(format!("formation:{id}"));
             return Ok(());
@@ -753,10 +793,24 @@ impl Space {
                 .read::<StoredChange>(&format!("changes/{operation}"))
                 .await?
                 .ok_or("unsupported_scope")?;
-            keys.insert(format!(
-                "product-change:{}",
-                change.value.receipt.operation_key
-            ));
+            let receipt = &change.value.receipt;
+            let statement = change
+                .value
+                .requests
+                .first()
+                .and_then(|request| request.parameters.as_ref())
+                .and_then(|parameters| parameters.get("statement"));
+            if receipt.state != "confirmed"
+                || receipt.source_evidence.as_deref() != Some(&source.evidence_id)
+                || statement
+                    .map(anda_cognitive_nexus::content_digest)
+                    .transpose()?
+                    .as_ref()
+                    != source.payload_digest.as_ref()
+            {
+                return Err("unsupported_scope".into());
+            }
+            keys.insert(format!("product-change:{}", receipt.operation_key));
             return Ok(());
         }
         Err("unsupported_scope".into())

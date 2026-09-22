@@ -937,6 +937,7 @@ RPC/MCP 传输副本不属于这些范围。不根据模型名猜编码，也不
 - 响应：`RpcResponse<MemoryForgetReport>`；单个实体的错误位于 `result.entities`。
 
 接受显式的 Concept（`C-*`）、Proposition（`P-*`）、Assertion（`A-*`）、Evidence（`E-*`）和 Activity（`X-*`）ID，包括保存消息原文的 Evidence。原生 legal hold 和引用检查仍然生效，成功清除后保留已擦除身份桩。计数分别报告各类被清除记录，包含级联删除。此操作清除所选图谱记录；已保存的会话、wiki 文档及外部副本各有独立生命周期。
+引用已清除元素的产品预览会在报告成功前清理；预览清理失败会写入该实体的错误字段。
 
 ### GET `/v1/{space_id}/memory_status`
 

@@ -1,4 +1,4 @@
-# Rust → Worker 同步核对（2026-09-22）
+# Rust → Worker 同步核对（2026-09-23）
 
 范围：`a6e3360^..c886b94`，包含起始提交。核对依据是提交 diff、当前两端实现和
 锁定的 `@ldclabs/kip-do` 0.13.2 源码。既有 Worker 定位仍是精简的独立 KIP 引擎宿主，
@@ -36,10 +36,11 @@
 
 ## 验证
 
-`CI=true pnpm --filter @ldclabs/anda-brain-worker check` 通过：7 个测试文件、86 个测试
-（新增 25 个），并通过生成资产校验、TypeScript 与部署 dry-run。`cargo fmt --check`、
-`git diff --check` 和两份集成 SKILL 一致性检查通过；未修改 Rust 运行代码，未重新运行
-Rust 测试矩阵。没有部署服务或更改版本号。
+`CI=true pnpm --filter @ldclabs/anda-brain-worker check` 通过：7 个测试文件、89 个测试
+（相对原有 Worker 新增 28 个），并通过生成资产校验、TypeScript 与部署 dry-run。
+后续修复为 Rust 来源验证、直接擦除的预览清理及模型工具代次闸门加入定向回归；
+`RUST_MIN_STACK=16777216 cargo test -p anda_brain --all-features` 通过 532 个库测试和
+45 个二进制／集成测试。没有部署服务或更改版本号。
 
 本地 workerd / SQLite 测试覆盖原有行为，以及完整提示词、复核触发/失败/usage、
 先检索后规划、预算拒绝、五类元素删除、来源链、条件预览、身份/权限撤销、

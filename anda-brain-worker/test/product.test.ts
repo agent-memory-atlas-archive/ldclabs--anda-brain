@@ -1,6 +1,6 @@
 import { env, evictDurableObject, runInDurableObject } from 'cloudflare:test'
 import { describe, expect, it } from 'vitest'
-import { anonymousAuth, principalAuth, systemAuth, SYSTEM_PRINCIPAL, parseKip, type CognitiveNexus } from '@ldclabs/kip-do'
+import { anonymousAuth, contentDigest, principalAuth, systemAuth, SYSTEM_PRINCIPAL, parseKip, type CognitiveNexus } from '@ldclabs/kip-do'
 import { formMemory, recallMemory, maintainMemory } from '../src/operations.js'
 import { MemoryProduct, assertCurrentOperations } from '../src/product.js'
 import type { AndaBrain } from '../src/brain.js'
@@ -159,6 +159,62 @@ describe('recoverable memory product', () => {
     await runInDurableObject(brain as never,(instance,state)=>{
       const product = new MemoryProduct((instance as unknown as {nexus:CognitiveNexus}).nexus,state.storage,auth.principal_id)
       expect(product.createWatch(auth,'watch',record.id,'notify').state).toBe('cancelled')
+    })
+  })
+
+  it('caps record pages at the current native max_results constraint', async () => {
+    const {brain,record} = await seed()
+    const second = await brain.executeKip(`MUTATE {
+      CREATE CONCEPT ?another {TYPE "Preference" NAME "another preference"}
+      ASSERT ?claim (:subject, :predicate, ?another) {by: :actor,mode:"stated"}
+    }`,{subject:record.subject,predicate:record.predicate,actor:{id:record.actor_id}})
+    expect(second.status,JSON.stringify(second)).toBe('succeeded')
+    await runInDurableObject(brain as never,(instance,state)=>{
+      const nexus = (instance as unknown as {nexus:CognitiveNexus}).nexus
+      const principal = 'kip:principal:limited-reader'
+      nexus.store.governance.ensurePrincipal({principal_id:principal})
+      nexus.systemSession().createGrant({space_id:nexus.space,grantee_principal:principal,
+        actions:['read','discover'],constraints:{max_results:1}})
+      const product = new MemoryProduct(nexus,state.storage)
+      const page = product.records(principalAuth(principal),undefined,50)
+      expect(page.records).toHaveLength(1)
+      expect(page.next_cursor).not.toBeNull()
+      expect(product.records(principalAuth(principal),page.next_cursor!,50).records).toHaveLength(1)
+
+      const zero = 'kip:principal:zero-results'
+      nexus.store.governance.ensurePrincipal({principal_id:zero})
+      nexus.systemSession().createGrant({space_id:nexus.space,grantee_principal:zero,
+        actions:['read','discover'],constraints:{max_results:0}})
+      expect(product.records(principalAuth(zero),undefined,50)).toMatchObject({
+        records:[],next_cursor:null,complete:false,
+      })
+      expect(()=>product.record(principalAuth(zero),record.id)).toThrow('not_found')
+      expect(()=>product.source(principalAuth(zero),record.sources[0]!.evidence_id)).toThrow('not_found')
+    })
+  })
+
+  it('cancels a preparing Watch with or without a lost native creation receipt', async () => {
+    const {brain,record} = await seed()
+    await runInDurableObject(brain as never,(instance,state)=>{
+      const nexus = (instance as unknown as {nexus:CognitiveNexus}).nexus
+      const product = new MemoryProduct(nexus,state.storage,auth.principal_id)
+      const pending = (operation_id:string,summary:string) => {
+        const key = contentDigest({caller:auth.principal_id,operation_id}).slice(7)
+        state.storage.kv.put('anda-brain:product:v1:watch:'+key,{
+          operation_id,watch_id:'',target_id:record.id,state:'preparing',
+          digest:contentDigest({target:record.id,summary}),
+        })
+      }
+      pending('failed-create','failed create')
+      expect(product.cancelWatch(auth,'failed-create').state).toBe('cancelled')
+      expect(product.createWatch(auth,'failed-create',record.id,'failed create').state).toBe('cancelled')
+
+      product.createWatch(auth,'lost-receipt',record.id,'lost receipt')
+      pending('lost-receipt','lost receipt')
+      const cancelled = product.cancelWatch(auth,'lost-receipt')
+      expect(cancelled.watch_id).toMatch(/^C-/)
+      expect(cancelled.state).toBe('cancelled')
+      expect(product.createWatch(auth,'lost-receipt',record.id,'lost receipt').state).toBe('cancelled')
     })
   })
 

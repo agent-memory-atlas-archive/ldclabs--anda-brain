@@ -2204,6 +2204,15 @@ impl Space {
         if input.entities.len() > 100 {
             return Err("too many entities in one forget request (max 100)".into());
         }
+        let _product_guard = if input.dry_run {
+            None
+        } else {
+            let guard = self.product_control.gate.lock().await;
+            if !self.product_control.available() {
+                return Err("memory_change_pending".into());
+            }
+            Some(guard)
+        };
         let mut report = MemoryForgetReport {
             dry_run: input.dry_run,
             ..Default::default()
@@ -2304,6 +2313,18 @@ impl Space {
                     report.deleted_assertions += purged_of_kind(&response, "assertion");
                     report.deleted_evidence += purged_of_kind(&response, "evidence");
                     report.deleted_activities += purged_of_kind(&response, "activity");
+                    let erased = kip::ok_result(&response)
+                        .and_then(|result| result.get("changes"))
+                        .and_then(serde_json::Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter(|change| change["op"] == "purge")
+                        .filter_map(|change| change["id"].as_str().map(str::to_string))
+                        .collect();
+                    if let Err(err) = self.clear_product_preview_content(&erased, None).await {
+                        entry.error =
+                            Some(format!("graph purged, saved preview cleanup failed: {err}"));
+                    }
                     for gone in &cascade {
                         let _ = self.ledger.forget_entity(gone).await;
                     }
@@ -3105,7 +3126,8 @@ impl Space {
         let note_tool = crate::product::control::ControlledNotes::new(product_control.clone());
         // Formation and Maintenance may grow this Space's vocabulary; Recall
         // may not, and gets the tool nowhere.
-        let declare_tool = crate::vocabulary::DeclareSymbolsTool::new(memory.clone());
+        let declare_tool = crate::vocabulary::DeclareSymbolsTool::new(memory.clone())
+            .with_product_control(product_control.clone());
 
         let hooks = Arc::new(Hooks::new(db.clone()));
         let formation = Arc::new(
@@ -3173,10 +3195,10 @@ impl Space {
             .register_tool(Arc::new(note_tool))?
             .register_tool(Arc::new(declare_tool))?
             .register_tool(Arc::new(crate::kip_reference::KipReferenceTool))?
-            .register_tool(Arc::new(crate::cognitive::MemoryRuntimeTool::new(
-                memory.clone(),
-                attention.clone(),
-            )))?;
+            .register_tool(Arc::new(
+                crate::cognitive::MemoryRuntimeTool::new(memory.clone(), attention.clone())
+                    .with_product_control(product_control.clone()),
+            ))?;
         #[allow(unused_mut)]
         let mut exported_tools = vec![MemoryTool::NAME.to_string()];
         #[cfg(feature = "learning")]

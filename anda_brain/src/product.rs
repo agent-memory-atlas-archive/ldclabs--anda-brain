@@ -70,7 +70,7 @@ impl Space {
         if row.space != DEFAULT_SPACE || row.state == "purged" {
             return Err("not_found".into());
         }
-        source_from_evidence(&row)
+        Ok(self.verified_record_source(&row).await?.0)
     }
 
     pub fn product_epoch(&self) -> u64 {
@@ -169,11 +169,8 @@ impl Space {
                 sources_complete = false;
                 continue;
             };
-            let source = source_from_evidence(&evidence)?;
-            if evidence.state == "purged"
-                || evidence.payload_mode != "inline"
-                || (source.formation_conversation.is_none() && source.product_operation.is_none())
-            {
+            let (source, verified) = self.verified_record_source(&evidence).await?;
+            if !verified {
                 sources_complete = false;
             }
             sources.push(source);
@@ -207,6 +204,25 @@ impl Space {
             sources,
             sources_complete,
         })
+    }
+
+    async fn verified_record_source(
+        &self,
+        evidence: &anda_cognitive_nexus::store::rows::EvidenceRow,
+    ) -> Result<(RecordSource, bool), BoxError> {
+        let mut source = source_from_evidence(evidence)?;
+        let verified = evidence.state != "purged"
+            && evidence.payload_mode == "inline"
+            && self
+                .add_source_keys(&source, &mut std::collections::BTreeSet::new())
+                .await
+                .is_ok();
+        if !verified {
+            source.formation_conversation = None;
+            source.message_index = None;
+            source.product_operation = None;
+        }
+        Ok((source, verified))
     }
 }
 

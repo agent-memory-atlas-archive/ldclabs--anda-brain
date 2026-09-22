@@ -319,6 +319,7 @@ Maintenance 可以使用受限的维护 KML，学习和运行时 Facet 由宿主
 `dry_run:true` 只检查存在性，不删除，也不保证实际擦除一定通过。响应包含
 `deleted_concepts/propositions/assertions/evidence/activities` 实际计数与每个目标的
 `existed/error`；一个目标失败不掩盖其他目标的成功。
+已归档元素也可按 ID 清除；`existed:false` 不会将仍在存储中的归档记录误报为不存在。
 
 该管理 API 会使旧模型处理代次失效，并清除被擦除记录在产品预览中的副本，但不封禁新输入
 来源。需要可复核的来源封禁和可恢复闭包删除时，使用受信宿主的

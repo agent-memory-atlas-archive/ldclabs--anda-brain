@@ -19,8 +19,12 @@ export function forget(session: Session, input: ForgetInput, afterErase?: (ids: 
     const entry: ForgetReport['entities'][number] = {entity,existed:false}
     try {
       const id = parseElementId(entity)
-      const matcher = id.kind === 'Proposition' ? 'PROPOSITION(id: :id)' : `${id.kind.toUpperCase()} {id: :id}`
-      entry.existed = session.query(`FIND(?e.id) WHERE {?e ${matcher}} LIMIT 1`,{id:entity}).length > 0
+      // KQL omits archived and tombstoned elements unless their state is
+      // selected explicitly. Erasure must find those identity stubs as well.
+      const row = session.nexus.store.load(id)
+      entry.existed = row !== null && row.row.space === session.nexus.space &&
+        row.row.state !== 'purged' && row.row.state !== 'pending' &&
+        session.effectiveAuthority().mayRead(row, session.auth) !== null
       if (entry.existed && !report.dry_run) {
         const outcome = session.execute('PURGE :id REFERENCE POLICY "authorized_cascade" CONFIRM "PURGE"',{id:entity})
         for (const change of outcome.changes) {

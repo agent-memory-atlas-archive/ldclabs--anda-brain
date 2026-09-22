@@ -456,6 +456,7 @@ async fn highest_installed_revision(nexus: &CognitiveNexus) -> Result<u32, BoxEr
 #[derive(Clone)]
 pub struct DeclareSymbolsTool {
     memory: Arc<MemoryManagement>,
+    product_control: Option<Arc<crate::product::control::Control>>,
     /// Serializes publication. Two concurrent extends would each read the same
     /// vocabulary, add their own symbol, and publish — the second overwriting
     /// the first's, which is how a declared symbol quietly stops existing.
@@ -470,8 +471,17 @@ impl DeclareSymbolsTool {
     pub fn new(memory: Arc<MemoryManagement>) -> Self {
         Self {
             memory,
+            product_control: None,
             lock: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    pub(crate) fn with_product_control(
+        mut self,
+        control: Arc<crate::product::control::Control>,
+    ) -> Self {
+        self.product_control = Some(control);
+        self
     }
 
     /// Publishes the symbols and returns the names it refused.
@@ -525,10 +535,17 @@ impl Tool<BaseCtx> for DeclareSymbolsTool {
 
     async fn call(
         &self,
-        _ctx: BaseCtx,
+        ctx: BaseCtx,
         args: Self::Args,
         _resources: Vec<Resource>,
     ) -> Result<ToolOutput<Self::Output>, BoxError> {
+        let _guard = if let Some(control) = &self.product_control {
+            let guard = control.gate.lock().await;
+            control.check(&ctx)?;
+            Some(guard)
+        } else {
+            None
+        };
         let (vocabulary, rejected) = self.declare(&args).await?;
         // A refusal is reported, not raised: the caller can still write every
         // memory whose symbols were accepted, and telling it which names to

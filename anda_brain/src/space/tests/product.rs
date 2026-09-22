@@ -31,9 +31,11 @@ async fn product_record_sources_use_host_evidence_bindings_and_preserve_claim_se
     assert_eq!(record.actor_key.as_deref(), Some("owner-key"));
     assert_eq!(record.subject_label, "Owner");
     assert_eq!(record.object_label, "Concise release notes");
-    assert!(record.sources_complete);
-    assert_eq!(record.sources[0].formation_conversation, Some(42));
-    assert_eq!(record.sources[0].message_index, Some(0));
+    // A client key alone is not a host binding: conversation 42 was never
+    // persisted in this fixture, even though the Evidence carries its spelling.
+    assert!(!record.sources_complete);
+    assert_eq!(record.sources[0].formation_conversation, None);
+    assert_eq!(record.sources[0].message_index, None);
     assert_eq!(
         record.sources[0].payload_digest,
         Some(
@@ -62,7 +64,7 @@ async fn managed_record(
     let input = crate::types::FormationInput {
         messages: messages.clone(),
         context: None,
-        timestamp: None,
+        timestamp: Some("2026-09-22T00:00:00.000Z".into()),
     };
     let conversation = anda_engine::memory::Conversation {
         user: SELF_USER_ID,
@@ -105,6 +107,200 @@ async fn managed_record(
             .remove(0),
         source,
     )
+}
+
+#[tokio::test]
+async fn product_rejects_forged_evidence_source_keys() {
+    use crate::product::{ChangeInput, ChangeKind};
+    let app = test_app_state("product_forged_sources");
+    let space = create_loaded_space(&app, "product_forged_sources").await;
+    let caller = Principal::management_canister();
+    let (original, _) = managed_record(&space).await;
+    assert!(original.sources_complete);
+    assert!(original.sources[0].formation_conversation.is_some());
+    let genuine = space
+        .product_source(&original.sources[0].evidence_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        genuine.formation_conversation,
+        original.sources[0].formation_conversation
+    );
+    let conversation = original.sources[0].formation_conversation.unwrap();
+
+    for (index, source_key) in [
+        format!("formation:conversation:{conversation}:99"),
+        format!("memory-product:{}:input", "a".repeat(64)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        seed_kip(
+            &space,
+            kip::request_with(
+                r#"MUTATE {
+                    CREATE EVIDENCE ?fake { CLIENT KEY :source_key SET FIELDS {
+                        evidence_class: "user_statement", payload: "fabricated source",
+                        observed_at: "2026-09-22T00:00:00.000Z"
+                    } }
+                    ASSERT ?claim (:subject, :predicate, :object) {
+                        by: :actor, mode: "stated", evidence: ?fake
+                    }
+                }"#,
+                serde_json::Map::from_iter([
+                    ("source_key".into(), serde_json::json!(source_key)),
+                    ("subject".into(), original.subject.clone()),
+                    ("predicate".into(), serde_json::json!(original.predicate)),
+                    ("object".into(), original.object.clone()),
+                    ("actor".into(), serde_json::json!({"id": original.actor_id})),
+                ]),
+            ),
+        )
+        .await;
+        let forged = space
+            .product_records(None, 1)
+            .await
+            .unwrap()
+            .records
+            .remove(0);
+        assert!(
+            !forged.sources_complete,
+            "forged source {index} was trusted"
+        );
+        assert!(forged.sources[0].formation_conversation.is_none());
+        assert!(forged.sources[0].product_operation.is_none());
+        let source = space
+            .product_source(&forged.sources[0].evidence_id)
+            .await
+            .unwrap();
+        assert!(source.formation_conversation.is_none());
+        assert!(source.product_operation.is_none());
+        let error = space
+            .product_prepare(
+                caller,
+                ChangeInput {
+                    operation_id: format!("forged-{index}"),
+                    record_id: forged.id,
+                    expected_revision: forged.revision,
+                    kind: ChangeKind::Delete,
+                    new_value: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("unsupported_scope"), "{error}");
+    }
+    space.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn direct_forget_removes_saved_product_previews() {
+    use crate::product::{ChangeInput, ChangeKind};
+    let app = test_app_state("product_direct_forget");
+    let space = create_loaded_space(&app, "product_direct_forget").await;
+    let caller = Principal::management_canister();
+    let (record, _) = managed_record(&space).await;
+    let prepared = space
+        .product_prepare(
+            caller,
+            ChangeInput {
+                operation_id: "prepared-before-forget".into(),
+                record_id: record.id.clone(),
+                expected_revision: record.revision,
+                kind: ChangeKind::Correct,
+                new_value: Some("private draft that must be erased".into()),
+            },
+        )
+        .await
+        .unwrap();
+    let report = space
+        .forget_memory(crate::types::MemoryForgetInput {
+            entities: vec![record.id],
+            dry_run: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(report.deleted_assertions, 1, "{report:?}");
+    assert!(report.entities[0].error.is_none(), "{report:?}");
+    let saved = space
+        .product_change(caller, &prepared.operation_id)
+        .await
+        .unwrap();
+    assert_eq!(saved.state, "discarded");
+    assert!(saved.preview.new_value.is_none());
+    assert!(saved.preview.record.text.is_empty());
+    let raw = space
+        .product_control
+        .journal
+        .read::<serde_json::Value>(&format!("changes/{}", prepared.operation_key))
+        .await
+        .unwrap()
+        .unwrap()
+        .value;
+    assert!(
+        !raw.to_string()
+            .contains("private draft that must be erased")
+    );
+    space.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn stale_model_tools_cannot_publish_symbols_or_lease_tasks() {
+    let app = test_app_state("product_other_tools");
+    let space = create_loaded_space(&app, "product_other_tools").await;
+    let ctx = space
+        .engine
+        .ctx_with(
+            SELF_USER_ID,
+            MaintenanceAgent::NAME,
+            "",
+            anda_core::RequestMeta::default(),
+        )
+        .unwrap();
+    ctx.base.set_state(crate::product::control::ProcessingEpoch(
+        space.product_epoch(),
+    ));
+    let mut state = space.product_control.snapshot();
+    state.epoch += 1;
+    space.product_control.save(state).await.unwrap();
+
+    let vocabulary = crate::vocabulary::DeclareSymbolsTool::new(space.memory.clone())
+        .with_product_control(space.product_control.clone());
+    let error = vocabulary
+        .call(
+            ctx.child_base(crate::vocabulary::DeclareSymbolsTool::NAME)
+                .unwrap(),
+            crate::vocabulary::DeclareSymbolsArgs {
+                types: vec!["StaleType".into()],
+                predicates: vec![],
+            },
+            vec![],
+        )
+        .await
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("memory changed"), "{error}");
+
+    let runtime =
+        crate::cognitive::MemoryRuntimeTool::new(space.memory.clone(), space.attention.clone())
+            .with_product_control(space.product_control.clone());
+    let error = runtime
+        .call(
+            ctx.child_base(crate::cognitive::MemoryRuntimeTool::NAME)
+                .unwrap(),
+            crate::cognitive::RuntimeArgs {
+                operation: "lease_task".into(),
+                target_ref: Some("C-1".into()),
+                expected_version: Some(1),
+                content: None,
+            },
+            vec![],
+        )
+        .await
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("memory changed"), "{error}");
+    space.close().await.unwrap();
 }
 
 #[tokio::test]

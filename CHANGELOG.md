@@ -4,6 +4,8 @@ All notable changes to the Anda Brain project.
 
 ## Unreleased
 
+- Verify product Evidence against its captured Formation message or confirmed correction before trusting a source key. Fence vocabulary publication and native runtime mutations under the current processing epoch, and clear product preview copies after direct Rust forget.
+- Apply native `max_results` limits to Worker record pages, erase archived graph elements through `/memory/forget`, and allow cancellation of an interrupted record Watch creation.
 - Sync the compact Worker with portable Rust changes through `c886b94`: full syntax in every model stage, one receipt-preserving large-input Formation review, grounding before Recall planning, and explicit Evidence/Activity graph erasure with per-kind counts.
 - Add trusted Worker product RPCs for source-backed records, reviewed conditional corrections, source-fenced archive/purge, durable per-step recovery and stale-agent output/write fences. Add explicitly bound, host-polled native record Watches with cancellation; do not advertise an inbox, automatic dispatch or learning runtime. Nonempty unsupported Recall budgets are rejected rather than ignored.
 - Keep the Worker's existing `kip-do` 0.13.2 dependency update and pin protocol reference validation independently to `anda_kip` 0.13.1, retaining file hashes and generated-asset checks. Document commit-by-commit parity and platform-specific limits in `anda-brain-worker/PORTING_AUDIT.md`.
