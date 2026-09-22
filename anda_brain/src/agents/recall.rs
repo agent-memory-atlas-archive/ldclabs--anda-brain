@@ -122,6 +122,7 @@ pub static FUNCTION_DEFINITION: LazyLock<FunctionDefinition> = LazyLock::new(|| 
 
 #[derive(Clone)]
 pub struct TimedMemoryReadonly {
+    product_control: Option<Arc<crate::product::control::Control>>,
     memory: Arc<MemoryManagement>,
     timeout: Duration,
     clock: Arc<crate::runtime::BusinessClock>,
@@ -129,9 +130,17 @@ pub struct TimedMemoryReadonly {
 }
 
 impl TimedMemoryReadonly {
+    pub(crate) fn with_product_control(
+        mut self,
+        control: Arc<crate::product::control::Control>,
+    ) -> Self {
+        self.product_control = Some(control);
+        self
+    }
     pub fn new(memory: Arc<MemoryManagement>) -> Self {
         Self {
             memory,
+            product_control: None,
             timeout: READONLY_KIP_TIMEOUT,
             clock: Arc::new(crate::runtime::BusinessClock::default()),
             attention: None,
@@ -171,13 +180,23 @@ impl Tool<BaseCtx> for TimedMemoryReadonly {
 
     async fn call(
         &self,
-        _ctx: BaseCtx,
+        ctx: BaseCtx,
         args: Self::Args,
         _resources: Vec<Resource>,
     ) -> Result<ToolOutput<Self::Output>, BoxError> {
         let mut request = match args.into_readonly_request() {
             Ok(request) => request,
             Err(err) => return Ok(error_output(Response::from(err))),
+        };
+        let _guard = if let Some(control) = &self.product_control {
+            let guard = control.gate.lock().await;
+            control.check(&ctx)?;
+            if control.epoch() > 0 {
+                control.current_request(&request)?;
+            }
+            Some(guard)
+        } else {
+            None
         };
         self.clock.bind_read(&mut request)?;
         let nexus = self.memory.nexus();
@@ -226,6 +245,7 @@ pub type MemoryPolicyReader = Arc<dyn Fn() -> MemoryPolicy + Send + Sync>;
 
 #[derive(Clone)]
 pub struct RecallAgent {
+    product_control: Option<Arc<crate::product::control::Control>>,
     utility: Option<std::sync::Weak<crate::consequence::utility::UtilityRuntime>>,
     receipts: Option<Arc<crate::recall_receipt::RecallReceipts>>,
     prompt: Arc<str>,
@@ -243,6 +263,13 @@ pub struct RecallAgent {
 }
 
 impl RecallAgent {
+    pub(crate) fn with_product_control(
+        mut self,
+        control: Arc<crate::product::control::Control>,
+    ) -> Self {
+        self.product_control = Some(control);
+        self
+    }
     pub const NAME: &'static str = "recall_memory";
     pub fn new(
         memory: Arc<MemoryManagement>,
@@ -253,6 +280,7 @@ impl RecallAgent {
         policy: MemoryPolicyReader,
     ) -> Self {
         Self {
+            product_control: None,
             prompt: super::prompts::active_prompt(super::prompts::PromptTarget::Recall),
             receipts: None,
             utility: None,
@@ -301,6 +329,18 @@ impl RecallAgent {
         match (self.policy)().recall_max_rounds as usize {
             0 => RECALL_MAX_MODEL_TURNS,
             rounds => rounds,
+        }
+    }
+
+    fn context_history(&self) -> Vec<Document> {
+        if self
+            .product_control
+            .as_ref()
+            .is_some_and(|control| control.epoch() > 0)
+        {
+            vec![]
+        } else {
+            self.history.read().iter().cloned().collect()
         }
     }
 
@@ -541,6 +581,26 @@ impl Agent<AgentCtx> for RecallAgent {
         prompt: String, // RecallInput serialized as JSON string
         _resources: Vec<Resource>,
     ) -> Result<AgentOutput, BoxError> {
+        if let Some(control) = &self.product_control {
+            if !control.available() {
+                return Err("memory_change_pending".into());
+            }
+            ctx.base
+                .set_state(crate::product::control::ProcessingEpoch(control.epoch()));
+        }
+        let base = ctx.base.clone();
+        let output = self.run_inner(ctx, prompt).await?;
+        // Failed outputs can also contain prior reads in their diagnostic or
+        // partial answer. Check every returned output after all async work.
+        if let Some(control) = &self.product_control {
+            control.check(&base)?;
+        }
+        Ok(output)
+    }
+}
+
+impl RecallAgent {
+    async fn run_inner(&self, ctx: AgentCtx, prompt: String) -> Result<AgentOutput, BoxError> {
         let budget_input = RecallInput::parse_prompt(&prompt)?;
         if let Some(budget) = crate::recall_budget::RecallBudget::resolve(
             (self.policy)().recall_budget.as_ref(),
@@ -597,7 +657,7 @@ impl Agent<AgentCtx> for RecallAgent {
 
         // add bounded history conversations to provide context without bloating
         // every recall request.
-        let chat_history: Vec<Document> = { self.history.read().iter().cloned().collect() };
+        let chat_history = self.context_history();
 
         let chat_history = if chat_history.is_empty() {
             vec![]
@@ -1315,5 +1375,109 @@ mod tests {
             failed_reason.contains("recall exceeded model turn limit of 3"),
             "{failed_reason}"
         );
+    }
+
+    #[derive(Debug)]
+    struct PausedToolLoop {
+        calls: Arc<AtomicU64>,
+        waiting: Arc<tokio::sync::Notify>,
+        resume: Arc<tokio::sync::Notify>,
+    }
+
+    impl CompletionFeaturesDyn for PausedToolLoop {
+        fn model_name(&self) -> String {
+            "product-recall-failure".into()
+        }
+
+        fn completion(&self, _: CompletionRequest) -> BoxPinFut<Result<AgentOutput, BoxError>> {
+            let calls = self.calls.clone();
+            let waiting = self.waiting.clone();
+            let resume = self.resume.clone();
+            Box::pin(async move {
+                if calls.fetch_add(1, Ordering::SeqCst) > 0 {
+                    waiting.notify_one();
+                    resume.notified().await;
+                }
+                Ok(AgentOutput {
+                    content: "stale partial memory".into(),
+                    tool_calls: vec![ToolCall {
+                        name: "kip_reference".into(),
+                        args: serde_json::json!({"document":"index"}),
+                        call_id: Some("reference".into()),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn product_changes_fence_recall_timeout_and_turn_limit_outputs() {
+        for timed_out in [false, true] {
+            let waiting = Arc::new(tokio::sync::Notify::new());
+            let resume = Arc::new(tokio::sync::Notify::new());
+            let app = test_app_state_with_completer(
+                "product_recall_failure",
+                PausedToolLoop {
+                    calls: Arc::new(AtomicU64::new(0)),
+                    waiting: waiting.clone(),
+                    resume: resume.clone(),
+                },
+            );
+            let space = create_loaded_space(&app, "product_recall_failure").await;
+            space
+                .update(
+                    crate::types::UpdateSpaceInput {
+                        memory_policy: Some(crate::types::MemoryPolicy {
+                            recall_max_rounds: 2,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    anda_engine::unix_ms(),
+                )
+                .await
+                .unwrap();
+            if timed_out {
+                tokio::time::pause();
+            }
+            let running = space.clone();
+            let task = tokio::spawn(async move {
+                running
+                    .query(
+                        SELF_USER_ID,
+                        crate::payload::StringOr::String("Read past memory".into()),
+                    )
+                    .await
+            });
+            waiting.notified().await;
+            let mut state = space.product_control.snapshot();
+            state.epoch += 1;
+            space.product_control.save(state).await.unwrap();
+            if timed_out {
+                tokio::time::advance(
+                    super::RECALL_TOTAL_TIMEOUT + std::time::Duration::from_secs(1),
+                )
+                .await;
+            } else {
+                resume.notify_one();
+            }
+            let error = task.await.unwrap().unwrap_err();
+            assert!(error.to_string().contains("memory changed"), "{error}");
+            let conversation = space
+                .get_conversation(Some("recall".into()), 1)
+                .await
+                .unwrap();
+            let reason = conversation.failed_reason.unwrap();
+            assert!(
+                reason.contains(if timed_out { "timed out" } else { "turn limit" }),
+                "{reason}"
+            );
+            if timed_out {
+                tokio::time::resume();
+            }
+            space.close().await.unwrap();
+        }
     }
 }

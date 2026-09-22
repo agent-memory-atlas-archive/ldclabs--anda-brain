@@ -4,6 +4,11 @@ All notable changes to the Anda Brain project.
 
 ## Unreleased
 
+- Fix managed memory change boundaries: budgeted Recall excludes old history, failed Recall outputs recheck the processing epoch, Formation admits sources atomically with their epoch, and pagination rejects pre-change snapshots while retaining newer continuations. Deletion also clears related saved previews/correction text and invalidates affected uncommitted intents; correction-source reads verify live Evidence.
+- Add trusted Rust memory product contracts: source-backed Assertion catalog, immutable conditional correction intents, source-suppressed archive/purge operations, in-flight processor/Notes fences, current-state Recall guards and cold-load reconciliation of admitted changes.
+- Add recipient-owned record subscriptions with native arming, bounded cancellation grants, archive cancellation and no rearming/regrant on retry. Add static runtime configuration validation and isolated-workflow learning readiness; no new business execution authority or model outcome tool.
+- Add deterministic source, conflict, retention, cancelled-waiter, archive and restart-recovery fixtures. These changes are coordinated with Anda Bot through an explicitly authorized temporary local patch; no release version was changed.
+
 ## [0.12.0] — 2026-09-20
 
 **KIP 2.0 / CognitiveMemory 2.1 is a breaking release.** Anda Brain and its

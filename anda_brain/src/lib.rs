@@ -28,6 +28,7 @@ mod legacy_upgrade;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod payload;
+pub mod product;
 pub mod recall_budget;
 pub mod recall_receipt;
 pub(crate) mod settlement;

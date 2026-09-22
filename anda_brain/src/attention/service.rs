@@ -400,6 +400,62 @@ impl AttentionRuntime {
             })
             .await
     }
+    /// Provision only the cancellation of this newly created product Watch.
+    /// The durable marker prevents a retry/restart from regranting revoked rights.
+    pub(crate) async fn provision_watch_cancellation(
+        self: &Arc<Self>,
+        target: String,
+    ) -> Result<(), BoxError> {
+        use anda_cognitive_nexus::governance::{rows::AuthorityScope, store::GrantDraft};
+        let this = self.clone();
+        self.tasks.run(async move {
+            let _guard=this.gate.lock().await;
+            let session=this.work_session().await?;
+            let principal=session.auth().principal_id.clone();
+            let key=format!("watch-cancellation/{}",&anda_cognitive_nexus::content_digest(&json!({"watch":target,"principal":principal}))?[7..]);
+            if let Some(marker)=this.directory.read::<bool>(&key).await? {
+                if marker.value {return Ok(())}
+                let grants=this.nexus.governance().grants_for(DEFAULT_SPACE,&principal,&[]).await?;
+                if grants.iter().any(|grant|grant.scope["elements"]==json!([target])&&grant.actions==vec!["archive".to_string()]) {
+                    this.directory.put(&key,&true,object_store::PutMode::Update(marker.version)).await?;
+                    return Ok(())
+                }
+                return Err("Watch cancellation provisioning interrupted; explicit grant review required".into())
+            }
+            this.directory.put(&key,&false,object_store::PutMode::Create).await?;
+            this.nexus.system_session().create_grant(DEFAULT_SPACE,GrantDraft {grantee_principal:principal,actions:vec!["archive".into()],scope:AuthorityScope {elements:vec![target],..Default::default()},..Default::default()}).await?;
+            let marker=this.directory.read::<bool>(&key).await?.ok_or("watch grant marker missing")?;
+            this.directory.put(&key,&true,object_store::PutMode::Update(marker.version)).await?;
+            Ok(())
+        }).await
+    }
+    /// Trusted controller cancellation; never grants the requester authority.
+    pub async fn archive_watch(
+        self: &Arc<Self>,
+        target: String,
+        expected: u64,
+    ) -> Result<Json, BoxError> {
+        let this = self.clone();
+        self.tasks
+            .run(async move {
+                let _guard = this.gate.lock().await;
+                this.register_inner().await?;
+                let request = crate::kip::request_with(
+                    "TRANSITION :target TO \"archived\" EXPECT VERSION :version",
+                    serde_json::Map::from_iter([
+                        ("target".into(), serde_json::json!(target)),
+                        ("version".into(), serde_json::json!(expected)),
+                    ]),
+                );
+                let response =
+                    anda_kip::execute_request(&this.work_session().await?, &request).await;
+                crate::kip::ok_result(&response)
+                    .cloned()
+                    .ok_or_else(|| crate::kip::error_message(&response).into())
+            })
+            .await
+    }
+
     /// Only a trusted consumer supplies these obligations. A due time requests
     /// revalidation; it never changes Assertion truth or authorizes an action.
     pub async fn schedule_recheck(self: &Arc<Self>, mut recheck: Recheck) -> Result<(), BoxError> {

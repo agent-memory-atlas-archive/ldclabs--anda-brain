@@ -181,6 +181,8 @@ pub struct LearningPass {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct LearningRuntimeStatus {
+    /// Product readiness is a snapshot, never permission to skip native per-job checks.
+    pub product_readiness: serde_json::Value,
     pub compiled: bool,
     pub registered: bool,
     pub registration_enabled: bool,

@@ -57,6 +57,7 @@ impl Drop for MaintenanceClaim {
 
 #[derive(Clone)]
 pub struct MaintenanceAgent {
+    product_control: Option<Arc<crate::product::control::Control>>,
     prompt: Arc<str>,
     pub conversations: Conversations,
     /// The collection backing `conversations`. `Conversations` wraps document
@@ -76,6 +77,13 @@ pub struct MaintenanceAgent {
 }
 
 impl MaintenanceAgent {
+    pub(crate) fn with_product_control(
+        mut self,
+        control: Arc<crate::product::control::Control>,
+    ) -> Self {
+        self.product_control = Some(control);
+        self
+    }
     pub const NAME: &'static str = "maintenance_memory";
     pub fn new(
         memory: Arc<MemoryManagement>,
@@ -84,6 +92,7 @@ impl MaintenanceAgent {
         hook: Arc<dyn BrainHook>,
     ) -> Self {
         Self {
+            product_control: None,
             prompt: super::prompts::active_prompt(super::prompts::PromptTarget::Maintenance),
             clock: Arc::new(crate::runtime::BusinessClock::default()),
             tasks: crate::runtime::RuntimeTasks::default(),
@@ -374,6 +383,15 @@ impl MaintenanceAgent {
     }
 
     async fn process_one(&self, ctx: &AgentCtx, conversation: &mut Conversation) {
+        if let Some(control) = &self.product_control {
+            if !control.available() {
+                self.mark_conversation_failed(conversation, "memory_change_pending".into())
+                    .await;
+                return;
+            }
+            ctx.base
+                .set_state(crate::product::control::ProcessingEpoch(control.epoch()));
+        }
         let prompt = match conversation
             .messages
             .first()
@@ -400,7 +418,15 @@ impl MaintenanceAgent {
                 }
             },
         );
-        let chat_history: Vec<Document> = { self.history.read().iter().cloned().collect() };
+        let chat_history: Vec<Document> = if self
+            .product_control
+            .as_ref()
+            .is_some_and(|control| control.epoch() > 0)
+        {
+            vec![]
+        } else {
+            self.history.read().iter().cloned().collect()
+        };
 
         let chat_history = if chat_history.is_empty() {
             vec![]

@@ -3,6 +3,7 @@
 use anda_core::BoxError;
 #[cfg(feature = "learning")]
 use futures::TryStreamExt;
+use futures::{StreamExt, stream::BoxStream};
 use object_store::{ObjectStore, ObjectStoreExt, PutMode, UpdateVersion, path::Path};
 use serde::{Serialize, de::DeserializeOwned};
 use std::sync::Arc;
@@ -28,6 +29,22 @@ impl Journal {
 
     fn path(&self, key: &str) -> Path {
         Path::from(format!("{}/{key}", self.prefix))
+    }
+
+    pub(crate) fn keys(&self, prefix: &str) -> BoxStream<'_, Result<String, BoxError>> {
+        let root = format!("{}/", self.prefix);
+        self.store
+            .list(Some(&self.path(prefix)))
+            .map(move |entry| {
+                let entry = entry?;
+                entry
+                    .location
+                    .as_ref()
+                    .strip_prefix(&root)
+                    .map(str::to_string)
+                    .ok_or_else(|| "invalid journal path".into())
+            })
+            .boxed()
     }
 
     pub async fn read<T: DeserializeOwned>(

@@ -15,8 +15,10 @@ pub mod config;
 mod inbox;
 mod native;
 mod service;
+mod watches;
 pub(crate) use native::full_read;
 pub use service::MemoryRuntime;
+pub use watches::RecordWatch;
 
 pub const FORMAT: &str = "anda-brain:runtime-api-v1";
 pub(crate) const PROFILE: &str = "kip://profiles/cognitive-memory@2.1.0/";

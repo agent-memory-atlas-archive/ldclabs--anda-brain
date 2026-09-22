@@ -126,6 +126,12 @@ impl InboxAdapter {
 }
 
 impl RuntimeConfig {
+    /// Static validation only: resolve configured secrets and compiled bindings
+    /// without loading a Space, probing services or provisioning authority.
+    pub fn validate(&self, secret: impl FnMut(&str) -> Option<String>) -> Result<(), BoxError> {
+        self.clone().resolve(secret).map(|_| ())
+    }
+
     pub(crate) fn resolve(
         self,
         mut secret: impl FnMut(&str) -> Option<String>,

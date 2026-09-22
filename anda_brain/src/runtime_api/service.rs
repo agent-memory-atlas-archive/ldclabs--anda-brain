@@ -24,7 +24,7 @@ pub struct MemoryRuntime {
     pub(super) bindings: Arc<SpaceRuntimeBindings>,
     pub(super) cursor_key: [u8; 32],
     pub(super) tasks: crate::runtime::DurableTasks,
-    gate: Mutex<()>,
+    pub(super) gate: Mutex<()>,
     consequences: Arc<crate::consequence::ConsequenceRuntime>,
     automatic: bool,
     #[cfg(feature = "learning")]

@@ -882,3 +882,7 @@ Frequency, citations, likes and model self-reports never earn objective credit.
 Configured utility can only order peers inside existing Recall priorities; it
 cannot override constraints, uncertainty or revoked procedure status. See the
 [utility guide](https://github.com/ldclabs/anda-brain/blob/main/anda_brain/UTILITY_RUNTIME.md).
+
+## Host-managed memory changes
+
+Trusted Rust product management is separate from the model tool surface. Do not invent source identities, operation approvals or caller authority from a prompt. A stopped source must not be reintroduced through processor history, historical KIP reads or copied Notes. After a managed change, automatic KIP reads reject historical/inactive queries and stale processing contexts must be rebuilt. Restart pagination from the first page if its cursor predates the change; newer cursors remain usable. Budgeted Recall also excludes old processing history. Natural-language corrections submit new information; they are not confirmation of a reviewed native correction or deletion. Ordinary memory requires neither inbox configuration nor MIB.

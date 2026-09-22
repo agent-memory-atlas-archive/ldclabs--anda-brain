@@ -90,13 +90,22 @@ pub(crate) struct Observation(pub Option<Arc<anda_kip::IngestContext>>);
 /// instead of merely written down.
 #[derive(Clone)]
 pub struct GuardedMemory {
+    product_control: Option<Arc<crate::product::control::Control>>,
     memory: Arc<MemoryManagement>,
     clock: Arc<crate::runtime::BusinessClock>,
 }
 
 impl GuardedMemory {
+    pub(crate) fn with_product_control(
+        mut self,
+        control: Arc<crate::product::control::Control>,
+    ) -> Self {
+        self.product_control = Some(control);
+        self
+    }
     pub fn new(memory: Arc<MemoryManagement>) -> Self {
         Self {
+            product_control: None,
             memory,
             clock: Arc::new(crate::runtime::BusinessClock::default()),
         }
@@ -133,6 +142,18 @@ impl Tool<BaseCtx> for GuardedMemory {
         args: Self::Args,
         resources: Vec<Resource>,
     ) -> Result<ToolOutput<Self::Output>, BoxError> {
+        let _gate = if let Some(control) = &self.product_control {
+            let guard = control.gate.lock().await;
+            control.check(&ctx)?;
+            Some(guard)
+        } else {
+            None
+        };
+        if let Some(control) = &self.product_control
+            && control.epoch() > 0
+        {
+            control.current_request(&args.clone().into_request()?)?;
+        }
         let formation = ctx.agent == FormationAgent::NAME;
         if !formation && ctx.agent != MaintenanceAgent::NAME {
             return self.memory.call(ctx, args, resources).await;

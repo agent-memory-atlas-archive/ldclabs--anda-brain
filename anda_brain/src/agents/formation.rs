@@ -68,6 +68,7 @@ impl Drop for ProcessingGuard {
 
 #[derive(Clone)]
 pub struct FormationAgent {
+    product_control: Option<Arc<crate::product::control::Control>>,
     prompt: Arc<str>,
     memory: Arc<MemoryManagement>,
     /// The collection backing `memory`'s conversations. `MemoryManagement`
@@ -83,6 +84,13 @@ pub struct FormationAgent {
 }
 
 impl FormationAgent {
+    pub(crate) fn with_product_control(
+        mut self,
+        control: Arc<crate::product::control::Control>,
+    ) -> Self {
+        self.product_control = Some(control);
+        self
+    }
     pub const NAME: &'static str = "formation_memory";
     pub fn new(
         memory: Arc<MemoryManagement>,
@@ -91,6 +99,7 @@ impl FormationAgent {
         max_input_tokens: usize,
     ) -> Self {
         Self {
+            product_control: None,
             prompt: super::prompts::active_prompt(super::prompts::PromptTarget::Formation),
             clock: Arc::new(crate::runtime::BusinessClock::default()),
             tasks: crate::runtime::RuntimeTasks::default(),
@@ -332,7 +341,10 @@ impl FormationAgent {
                     .await;
             }
 
-            if conversation.status != ConversationStatus::Completed {
+            if !matches!(
+                conversation.status,
+                ConversationStatus::Completed | ConversationStatus::Cancelled
+            ) {
                 log::error!(
                     target: "brain",
                     "Conversation {} ended with status {:?}, not marking as processed",
@@ -449,6 +461,26 @@ impl FormationAgent {
     }
 
     async fn process_one(&self, ctx: &AgentCtx, conversation: &mut Conversation) {
+        if let Some(control) = &self.product_control {
+            use crate::product::{SourceAdmissionError, SourceIdentity};
+            let admission = SourceIdentity::for_conversation(conversation)
+                .map_err(|_| SourceAdmissionError::Suppressed)
+                .and_then(|source| control.admit_source(&source));
+            match admission {
+                Ok(epoch) => {
+                    ctx.base.set_state(epoch);
+                }
+                Err(error) => {
+                    conversation.status = match error {
+                        SourceAdmissionError::Busy => ConversationStatus::Submitted,
+                        SourceAdmissionError::Suppressed => ConversationStatus::Cancelled,
+                    };
+                    conversation.failed_reason = Some(error.to_string());
+                    self.persist_conversation_snapshot(conversation).await;
+                    return;
+                }
+            }
+        }
         let prompt = match conversation
             .messages
             .first()
@@ -526,7 +558,15 @@ impl FormationAgent {
         ));
 
         // add history conversations to provide more context for recall
-        let chat_history: Vec<Document> = { self.history.read().iter().cloned().collect() };
+        let chat_history: Vec<Document> = if self
+            .product_control
+            .as_ref()
+            .is_some_and(|control| control.epoch() > 0)
+        {
+            vec![]
+        } else {
+            self.history.read().iter().cloned().collect()
+        };
 
         let chat_history = if chat_history.is_empty() {
             vec![]
@@ -678,6 +718,7 @@ impl Agent<AgentCtx> for FormationAgent {
             created_at: now_ms,
             updated_at: now_ms,
             label: Some("formation".to_string()),
+            extra: Some(json!(ctx.meta().extra)),
             ..Default::default()
         };
 

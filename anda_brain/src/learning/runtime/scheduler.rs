@@ -68,8 +68,12 @@ impl LearningRuntime {
             running: self.scheduler_running.load(Ordering::SeqCst),
             ..Default::default()
         };
+        let mut calibration_reviewed = false;
+        let mut identity_valid = false;
         if let Some(b) = bindings {
             status.automation = b.automation.clone();
+            identity_valid = b.validate().is_ok();
+            calibration_reviewed = b.calibration["approved_for_automatic_trials"] == true;
         }
         if status.registered {
             status.registration_enabled = self.registration(false).await?.enabled;
@@ -111,6 +115,37 @@ impl LearningRuntime {
                 .blocked_reasons
                 .push("automatic_reviews_disabled".into());
         }
+        let (state, next_step) = if !status.bindings_ready {
+            (
+                "services_missing",
+                "install_workflow_http_v1_with_separate_executor_observer_source",
+            )
+        } else if !identity_valid {
+            (
+                "identity_mismatch",
+                "revalidate_frozen_contract_and_service_identities",
+            )
+        } else if !calibration_reviewed {
+            (
+                "calibration_missing",
+                "review_task_family_specific_train_validation_evidence",
+            )
+        } else if !status.registration_enabled
+            || !automatic
+            || !status.automation.trials
+            || !status.automation.reviews
+        {
+            (
+                "awaiting_approval",
+                "review_deployment_and_enable_each_automation_explicitly",
+            )
+        } else {
+            (
+                "ready",
+                "native_authority_and_service_readiness_rechecked_per_work_item",
+            )
+        };
+        status.product_readiness = json!({"state":state,"next_step":next_step,"template":"tool_workflow.precondition.v1","per_item_revalidation":true});
         Ok(status)
     }
 

@@ -1,6 +1,6 @@
 # Anda Brain API 文档（含 TypeScript 类型）
 
-Rust 现要求 Cognitive Nexus 0.13.1：Watch 触发会原子记录状态变化、`watch_fire`
+Rust 现要求 Cognitive Nexus 0.13.4：Watch 触发会原子记录状态变化、`watch_fire`
 活动及受保护 wake，并提供可重放回执和原生租约。服务现会独立于 Full Maintenance
 调度结构化 Watch，从持久化目录发现已驱逐的注册 Space，并在重启后恢复有界扫描。
 受信任 Rust 宿主现可在加载 Space 前安装 `ActionBindings`：四分支决策、澄清、固定
@@ -11,6 +11,25 @@ Attempt 和原生租约分派接入同一调度器。默认不安装生产执行
 
 批量记忆强度代谢跳过 SleepTask/Watch 运行记录；宿主结算错误通过
 assessment.settlement_errors 提供给维护模型。
+
+## 可信宿主记忆产品合同（未发布）
+
+Rust `product` 模块提供由 Assertion 支撑的 `MemoryRecord`、稳定修订、明确的立场/语义生命周期/存储状态，以及 Evidence 的 typed 来源引用。`Space::product_records`、`product_record`、`product_source` 不负责终端用户认证；嵌入宿主在返回记录、预览、派生 ID 或来源引用前必须检查所有者及来源权限。摘要匹配证明来源关联，不证明推断正确。
+
+`Space::ingest_product` 接收有界、可信的 `SourceIdentity`，包含父会话/会话链标识，自然语言输入不能指定它。`product_prepare`、`product_commit`、`product_change`、`product_discard` 按 caller/operation 保存不可变请求，绑定修订、预览摘要及十分钟有效期。更正撤回旧 Assertion，创建新声明、用户更正 Evidence 和 Activity；不改写原 Concept 名称，也不伪造跨 Proposition 的 supersession。反向更正是新的条件操作。
+
+`Suppress` 归档，`Delete` 清除已声明的有界集合：选定 Proposition/Assertions、引用输入及已记录的反向依赖。未知来源、Concept 级联、保留约束和超过 128 项的集合会被拒绝。写入前先持久接受来源排除与处理 epoch；原生任务不因 API 等待者取消而丢失，Space 重载开放前会恢复已接受操作。旧 Formation/Maintenance/Notes 写入被版本栅栏拦截。变更清空处理 Notes 和 miss cache、停止向新上下文注入旧处理历史，并限制自动 KIP 读取当前 active 数据；可信所有者审计接口保持独立。Recall 返回上下文前重新核对捕获的 epoch。
+
+受管理变更也会阻止预算版 Recall 注入旧历史，并在超时或轮次耗尽返回前检查处理版本。变更前开始的分页须从首页重试，变更后的分页仍可继续。删除会清理已清除内容在操作预览／更正正文中的副本，并废弃受影响的未提交意图，同时保留操作标识和摘要。若独立更正的声明及 Evidence 仍然存在，其来源正文会保留。更正来源读取会检查 Evidence 尚未清除且正文摘要一致。
+
+移除不清理宿主的原聊天、文件、日志、备份、其他独立图谱记录、已交付的上下文或服务商副本。最小来源标识与摘要用于阻止重放。用不含当前排除信息的旧备份覆盖数据库不是保留删除语义的回滚方式。宿主也必须清空自己的注入 Notes，并防止后续对话链再次导入已排除来源。
+
+`MemoryRuntime::{create_record_watch,record_watch,cancel_record_watch}` 使用不可伪造的已认证 `RuntimeCaller` 实现收件人拥有的窄范围订阅。创建持久记录身份，仅启用初始 generation；配置的控制器只获准归档该 Watch，持久标记保证不重新授予已撤销权限。取消使用原生归档，不伪造受保护运行状态；重试不重新启用。已投递的问题是独立工作，仍可见。它们是 Rust 接口，不新增通用模型工具或原生 HTTP 产品管理路由。
+
+`RuntimeConfig::validate` 静态校验不加载 Space、不运行模型、不探测业务服务、不配置授权。可选学习运行时的 `product_readiness` 表示已安装隔离工作流的准备度，区分服务缺失、身份摘要不匹配、校准未审阅及批准门槛。ready 不授予业务部署权限，每项工作的服务与原生权限检查仍必须执行。
+
+Anda Bot 在这些合同发布前通过同级临时 patch 联调。保持 registry DB/KIP/Core 的单一类型身份，原生版本实际发布后再移除 patch。机制测试不证明真实学习收益或完整成本计量。
+
 
 ## 1) 通用约定
 

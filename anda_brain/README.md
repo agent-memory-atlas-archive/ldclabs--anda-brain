@@ -10,6 +10,25 @@ SleepTask and Watch are exempt from bulk mnemonic decay because all operational
 record updates require version guards. Failed host passes reach the model in
 assessment.settlement_errors.
 
+## Trusted host memory product contracts (unreleased)
+
+The Rust `product` module provides Assertion-backed `MemoryRecord` projections, stable native revisions, explicit stance/lifecycle/storage state and typed Evidence source references. `Space::product_records`, `product_record` and `product_source` do not authenticate a user. The embedding host must enforce owner/source visibility before returning any record, preview, dependent identifier or source quote. A matching source digest is provenance, not proof that an inference is correct.
+
+`Space::ingest_product` accepts a bounded, trusted `SourceIdentity` with parent conversation/session keys. Natural-language input cannot set that identity. `product_prepare`, `product_commit`, `product_change` and `product_discard` implement caller/operation-scoped immutable requests, fixed revision/preview digests and ten-minute previews. Corrections retract the old Assertion and create a new claim with a user-statement Evidence and correction Activity; they never rewrite a Concept label or create an illegal cross-Proposition supersession. Undo is another conditional correction.
+
+`Suppress` archives and `Delete` purges the declared bounded closure: selected Proposition/Assertions, cited inputs and recorded referrers. Unknown sources, Concept cascades, retention holds and closures above 128 elements are rejected. A durable source exclusion and processing epoch are admitted before mutation; tracked native work survives a cancelled API waiter and resumes before a reloaded Space is exposed. Stale Formation/Maintenance/Notes writes are fenced. Managed changes clear processing Notes and miss caches, stop old processor histories from entering new contexts and restrict automatic KIP readers to current active state. Trusted owner audit APIs remain distinct. Recall rechecks its captured epoch before returning context.
+
+Managed changes also exclude history from budgeted Recall and fence timeout/turn-limit outputs. Pagination started before the change must restart; newer continuations remain usable. Deletion clears copies of erased content from saved previews/corrections and discards affected uncommitted intents while retaining operation identities and digests. An independent correction whose claim and Evidence survive keeps its source text. Correction-source reads check that the Evidence still exists with the matching payload.
+
+Removal does not erase an embedding application's original chat/files/logs/backups, other independent graph records, already delivered context or provider copies. Minimal source keys/digests survive for replay suppression. Replacing the database with an old backup without its current exclusions is not a supported deletion-preserving rollback. The host must also reset its own injected Notes and prevent excluded sources from being imported through later conversation chains.
+
+`MemoryRuntime::{create_record_watch,record_watch,cancel_record_watch}` is a narrow recipient-owned subscription adapter using an opaque authenticated `RuntimeCaller`. Creation persists identity and arms only the initial generation. It provisions a cancellation grant restricted to that one Watch for the configured controller, with a durable no-regrant marker. Cancellation archives the Watch rather than forging its protected status; retries never re-arm it. Already delivered questions are separate work and remain visible. A revoked grant is not restored by subscription retry or bootstrap. These Rust methods are not new generic model tools or native HTTP product routes.
+
+`RuntimeConfig::validate` performs static validation without loading a Space, running models, probing services or provisioning grants. The optional learning runtime reports `product_readiness` for installed isolated workflow bindings, including missing services, mismatched pins, missing reviewed calibration and approval gates. Ready is not business deployment authority; native per-item service/permission checks remain mandatory.
+
+Anda Bot consumes these contracts through a temporary sibling patch while they are unreleased. Keep the shared registry DB/KIP/Core type identity; publish an actual native release before removing the patch. No empirical learning improvement or full cost accounting is implied by these mechanism tests.
+
+
 ## KIP 2.0 / CognitiveMemory 2.1 update
 
 Rust uses published `anda_kip`, Cognitive Nexus and AndaDB 0.13 packages;

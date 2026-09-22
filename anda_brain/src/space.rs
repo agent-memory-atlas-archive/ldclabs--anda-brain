@@ -13,7 +13,6 @@ use anda_db::{
 use anda_db_tfs::jieba_tokenizer;
 use anda_engine::{
     engine::Engine,
-    extension::note::NoteTool,
     management::Management,
     memory::{Conversation, ConversationStatus, Conversations, MemoryManagement, MemoryTool},
     model::{Model, ModelConfig as EngineModelConfig, Models, reqwest},
@@ -677,7 +676,7 @@ struct CloseState {
 
 pub struct Space {
     id: String,
-    engine: Engine,
+    pub(crate) engine: Engine,
     http_client: reqwest::Client,
     models: Arc<Models>,
     maintenance: Arc<MaintenanceAgent>,
@@ -687,6 +686,7 @@ pub struct Space {
     tasks: crate::runtime::RuntimeTasks,
     attention: Arc<crate::attention::AttentionRuntime>,
     memory_runtime: Option<Arc<crate::runtime_api::MemoryRuntime>>,
+    pub(crate) product_control: Arc<crate::product::control::Control>,
     recovery_started: AtomicBool,
     close_state: tokio::sync::Mutex<CloseState>,
     interrupted_conversations: parking_lot::Mutex<BTreeMap<&'static str, BTreeSet<u64>>>,
@@ -699,7 +699,7 @@ pub struct Space {
     trust: Arc<crate::consequence::trust::TrustRuntime>,
     /// Negative-knowledge cache (plan M5): probe queries the graph had
     /// nothing for; cleared whenever formation completes.
-    miss_cache: Arc<MissCache>,
+    pub(crate) miss_cache: Arc<MissCache>,
     /// Serializes memory-metabolism settlements (plan M2); the settlement
     /// itself is idempotent, the lock just avoids wasted duplicate passes.
     settlement_lock: tokio::sync::Mutex<()>,
@@ -746,6 +746,7 @@ impl Space {
     /// without changing Formation/Maintenance's own processing gate.
     pub fn is_busy(&self) -> bool {
         self.is_processing()
+            || self.product_control.tasks.is_busy()
             || self.attention.is_busy()
             || self.recall_receipts.is_busy()
             || self.utility.is_busy()
@@ -1097,6 +1098,37 @@ impl Space {
         user: Principal,
         input: StringOr<FormationInput>,
     ) -> Result<AgentOutput, BoxError> {
+        self.ingest_with_source(user, input, None).await
+    }
+
+    /// Trusted host source identity; derive it from authenticated conversation
+    /// state, never from a model's arguments or recalled instructions.
+    pub async fn ingest_product(
+        &self,
+        user: Principal,
+        input: FormationInput,
+        source: crate::product::SourceIdentity,
+    ) -> Result<AgentOutput, BoxError> {
+        source.validate()?;
+        self.ingest_with_source(user, StringOr::Value(input), Some(source))
+            .await
+    }
+
+    async fn ingest_with_source(
+        &self,
+        user: Principal,
+        input: StringOr<FormationInput>,
+        source: Option<crate::product::SourceIdentity>,
+    ) -> Result<AgentOutput, BoxError> {
+        if !self.product_control.available() {
+            return Err(crate::product::SourceAdmissionError::Busy.into());
+        }
+        if source
+            .as_ref()
+            .is_some_and(|source| !self.product_control.source_allowed(source))
+        {
+            return Err(crate::product::SourceAdmissionError::Suppressed.into());
+        }
         if self.engine.is_cancelled() {
             return Err("space is closed".into());
         }
@@ -1143,6 +1175,13 @@ impl Space {
                 AgentInput {
                     name: FormationAgent::NAME.to_string(),
                     prompt: input.to_string(),
+                    meta: source.map(|source| anda_core::RequestMeta {
+                        extra: serde_json::Map::from_iter([(
+                            crate::product::control::SOURCE_KEY.into(),
+                            serde_json::json!(source),
+                        )]),
+                        ..Default::default()
+                    }),
                     resources: vec![],
                     ..Default::default()
                 },
@@ -2685,6 +2724,7 @@ impl Space {
         if state.closed {
             return Ok(());
         }
+        self.product_control.tasks.shutdown().await;
         if let Some(runtime) = &self.memory_runtime {
             runtime.shutdown().await;
         }
@@ -3055,12 +3095,14 @@ impl Space {
             runtime.bind_utility(Arc::downgrade(&utility));
             utility.bind_consequences(Arc::downgrade(&runtime.consequences()));
         }
+        let product_control = crate::product::control::Control::connect(db.clone()).await?;
         let memory_r = TimedMemoryReadonly::new(memory.clone())
+            .with_product_control(product_control.clone())
             .with_clock(clock.clone())
             .with_attention(attention.clone());
         let tasks = crate::runtime::RuntimeTasks::default();
         let memory_tool = MemoryTool::new(memory.clone());
-        let note_tool = NoteTool::new();
+        let note_tool = crate::product::control::ControlledNotes::new(product_control.clone());
         // Formation and Maintenance may grow this Space's vocabulary; Recall
         // may not, and gets the tool nowhere.
         let declare_tool = crate::vocabulary::DeclareSymbolsTool::new(memory.clone());
@@ -3068,6 +3110,7 @@ impl Space {
         let hooks = Arc::new(Hooks::new(db.clone()));
         let formation = Arc::new(
             FormationAgent::new(memory.clone(), conversations.clone(), hooks.clone(), 100000)
+                .with_product_control(product_control.clone())
                 .with_prompt(prompts.prompt(crate::agents::prompts::PromptTarget::Formation))
                 .with_clock(clock.clone())
                 .with_tasks(tasks.clone()),
@@ -3084,6 +3127,7 @@ impl Space {
                     Arc::new(move || memory_policy_of(&db))
                 },
             )
+            .with_product_control(product_control.clone())
             .with_prompt(prompts.prompt(crate::agents::prompts::PromptTarget::Recall))
             .with_receipts(recall_receipts.clone())
             .with_utility(Arc::downgrade(&utility))
@@ -3096,6 +3140,7 @@ impl Space {
                 maintenance_conversations,
                 hooks.clone(),
             )
+            .with_product_control(product_control.clone())
             .with_prompt(prompts.prompt(crate::agents::prompts::PromptTarget::Maintenance))
             .with_clock(clock.clone())
             .with_tasks(tasks.clone()),
@@ -3119,7 +3164,9 @@ impl Space {
             // `memory` handle stays available to host code, which is
             // deterministic and not what the gate is for.
             .register_tool(Arc::new(
-                GuardedMemory::new(memory.clone()).with_clock(clock.clone()),
+                GuardedMemory::new(memory.clone())
+                    .with_clock(clock.clone())
+                    .with_product_control(product_control.clone()),
             ))?
             .register_tool(Arc::new(memory_r))?
             .register_tool(Arc::new(memory_tool))?
@@ -3202,12 +3249,14 @@ impl Space {
             tasks,
             attention,
             memory_runtime,
+            product_control,
             recovery_started: AtomicBool::new(false),
             close_state: tokio::sync::Mutex::new(CloseState::default()),
             interrupted_conversations: parking_lot::Mutex::new(BTreeMap::new()),
             #[cfg(feature = "learning")]
             learning,
         });
+        this.recover_product_change().await?;
         hooks.bind_space(Arc::downgrade(&this));
         this.trust.bind_space(Arc::downgrade(&this));
         let weak = Arc::downgrade(&this);

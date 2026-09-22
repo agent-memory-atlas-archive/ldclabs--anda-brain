@@ -33,6 +33,7 @@ use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 
 mod forget;
+mod product;
 
 #[derive(Debug)]
 struct FinalCompleter;

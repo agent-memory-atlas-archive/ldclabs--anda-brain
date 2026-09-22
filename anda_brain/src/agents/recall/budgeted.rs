@@ -216,7 +216,7 @@ impl RecallAgent {
         {
             material.omit(Channel::Counterparty);
         }
-        let history: Vec<Document> = self.history.read().iter().cloned().collect();
+        let history = self.context_history();
         material.mark(Channel::History, false);
         // Only unresolved commitments are mandatory. Terminal history remains
         // discoverable through the question search and explicit model reads.
@@ -615,6 +615,18 @@ impl RecallAgent {
     }
 
     async fn budget_kip(&self, mut request: Request) -> Result<Response, BoxError> {
+        let _guard = if let Some(control) = &self.product_control {
+            let guard = control.gate.lock().await;
+            if !control.available() {
+                return Err("memory_change_pending".into());
+            }
+            if control.epoch() > 0 {
+                control.current_request(&request)?;
+            }
+            Some(guard)
+        } else {
+            None
+        };
         self.clock.bind_read(&mut request)?;
         Ok(timeout(
             READONLY_KIP_TIMEOUT,

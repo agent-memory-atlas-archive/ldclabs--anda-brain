@@ -14,6 +14,46 @@ use parking_lot::Mutex;
 const LEAK: &str = "provider-private-data-must-not-escape";
 
 #[tokio::test]
+async fn product_changes_exclude_history_from_budgeted_planning_and_delivery() {
+    let (_, space, seen) = setup("budget_product_history", Behavior::Select).await;
+    let history = Conversation {
+        status: ConversationStatus::Completed,
+        messages: vec![json!(Message {
+            role: "assistant".into(),
+            content: vec!["removed-product-memory".to_string().into()],
+            ..Default::default()
+        })],
+        ..Default::default()
+    };
+    let history = Document::from(history);
+    space.recall.history.write().push_back(history.clone());
+    space
+        .query(SELF_USER_ID, input(Some(limits(8192, 131_072))))
+        .await
+        .unwrap();
+    assert!(seen.lock()[0].prompt.contains("removed-product-memory"));
+
+    // Keep the old history present, as it also is after loading stored conversations.
+    *space.recall.history.write() = VecDeque::from([history]);
+    let mut state = space.product_control.snapshot();
+    state.epoch += 1;
+    space.product_control.save(state).await.unwrap();
+    seen.lock().clear();
+    let output = space
+        .query(SELF_USER_ID, input(Some(limits(8192, 131_072))))
+        .await
+        .unwrap();
+    assert!(output.failed_reason.is_none(), "{output:?}");
+    assert!(!output.content.contains("removed-product-memory"));
+    assert!(
+        seen.lock()
+            .iter()
+            .all(|request| !request.prompt.contains("removed-product-memory"))
+    );
+    space.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn references_are_budgeted_planning_context_never_memory_or_coverage() {
     let reference_call = ToolCall {
         name: "kip_reference".into(),

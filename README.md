@@ -445,3 +445,7 @@ atomic bounded Concept utility calibration, and optional ranking within existing
 Recall priorities. Retrieval frequency and model self-reports never earn credit.
 Methods require explicit parameters and reviewed calibration; corrections suspend
 ranking without rewriting historical receipts. See [memory utility](anda_brain/UTILITY_RUNTIME.md).
+
+## Trusted host memory product contracts (unreleased)
+
+Unreleased native contracts add source-backed record views, reviewed corrections, suppression/deletion with source fences, recipient subscriptions and learning readiness for trusted embedding hosts. See [the Rust product contract](anda_brain/API.md#trusted-host-memory-product-contracts-unreleased). These are separate from ordinary natural-language model tools.
