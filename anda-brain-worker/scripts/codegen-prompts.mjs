@@ -24,6 +24,7 @@ const root = dirname(here)
 
 /** Each asset, with the constant it becomes and where it came from. */
 const ASSETS = [
+  { file: 'BrainFormationReview.md', constant: 'BRAIN_FORMATION_REVIEW', origin: 'anda_brain/assets/BrainFormationReview.md', doc: 'Focused host Formation review policy.' },
   ...[['KIPFormation.md', 'KIP_FORMATION_CARD'], ['KIPRecall.md', 'KIP_RECALL_CARD'],
     ['KIPMaintenance.md', 'KIP_MAINTENANCE_CARD'], ['MemoryInterface.md', 'MEMORY_AGENT_CARD']]
     .map(([file, constant]) => ({file, constant, origin: `anda-db/rs/anda_kip/brain/${file}`, doc: 'The upstream role card.'})),
@@ -81,8 +82,10 @@ ${bodies.join('\n')}`
 
 const target = join(root, 'src', 'assets.generated.ts')
 const bundle = JSON.parse(readFileSync(join(root, 'assets/kip-reference.json'), 'utf8'))
-const engine = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).dependencies['@ldclabs/kip-do']
-if (bundle.version !== engine) throw new Error('Reference bundle must match the pinned kip-do release')
+// Protocol references track anda_kip, not the independently versioned TS engine.
+const protocol = readFileSync(join(root, '../Cargo.toml'), 'utf8').match(/anda_kip = "=([^"]+)"/)?.[1]
+if (bundle.version !== protocol) throw new Error('Reference bundle must match the exact anda_kip pin')
+if (readFileSync(join(root, 'assets/BrainFormationReview.md'), 'utf8') !== readFileSync(join(root, '../anda_brain/assets/BrainFormationReview.md'), 'utf8')) throw new Error('Formation review policy must match Rust')
 const imports = []
 const documents = bundle.documents.map(({ id, source, sha256, content, constant, asset }) => {
   if (constant) {

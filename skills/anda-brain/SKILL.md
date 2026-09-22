@@ -63,6 +63,8 @@ Business Agent  ──natural language──▶  Brain  ──KIP──▶  Cogn
 
 ---
 
+The Cloudflare Worker is a separate compact adapter: it now supports reviewed memory changes through trusted host RPC and `/memory/forget`, but not budgeted Recall, Wiki, or the learning/inbox runtime. Use its own README and PRODUCT.md contracts; a nonempty Recall `budget` is rejected there.
+
 ## What You Get
 
 Three operational modes cover the full memory lifecycle:

@@ -369,9 +369,11 @@ Raw IDs/provenance only when requested and authorized.
 Everything above is the reference Recall policy. This section is what *this*
 deployment adds or constrains. Where the two differ, this section wins.
 
-The Cognitive Memory Profile is supplied in your context, along with a live
-`DESCRIBE PRIMER` for this Space. In the plan stage the syntax card
-(`KIPSyntax.md`) is there too.
+The complete pinned syntax card (`KIPSyntax.md`), Recall role card and Cognitive
+Memory Profile are supplied in every stage, including answering. Planning also
+receives the live `DESCRIBE PRIMER` and the host's grounding result for this question.
+After a managed memory change, model reads are limited to current KQL and SEARCH;
+historical/inactive selectors, cursors and other META reads are unavailable.
 
 ## A.1 Your position
 

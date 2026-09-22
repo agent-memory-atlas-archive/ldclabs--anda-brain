@@ -1,4 +1,5 @@
-import type { KipResult } from '@ldclabs/kip-do'
+import { assertCurrentOperations, type SourceIdentity } from './product.js'
+import { contentDigest, type KipResult } from '@ldclabs/kip-do'
 import { observationTimestamp } from './validation.js'
 import {
   DEFAULT_AI_MODEL,
@@ -22,6 +23,7 @@ import {
 } from './kip.js'
 import {
   formationMessages,
+  formationReviewMessages,
   maintenanceMessages,
   recallAnswerMessages,
   recallPlanMessages,
@@ -89,47 +91,78 @@ export async function formMemory(
   env: Env,
   brain: BrainRpc,
   input: FormationInput,
+  sourceIdentity?: SourceIdentity,
 ): Promise<unknown> {
   const timestamp = observationTimestamp(input.timestamp, Date.now())
-  const counterparty = await counterpartyElement(brain, input.context?.counterparty)
-  const primer = resultOrThrow(await brain.describePrimer(), 'formation primer failed')
-  const model = env.AI_MODEL || DEFAULT_AI_MODEL
-  const plan = await createMutationPlan(
-    env.AI,
-    model,
-    formationMessages(primer, input, timestamp),
-  )
+  const origin = await conversationOrigin(input, timestamp)
+  const epoch = await brain.beginProcessing(sourceIdentity ?? { key: origin,
+    parents: input.context?.source ? [`source:${contentDigest(input.context.source)}`] : [] }, origin)
+  try {
+    const counterparty = await counterpartyElement(brain, input.context?.counterparty, epoch)
+    const primer = resultOrThrow(await brain.describePrimer(), 'formation primer failed')
+    const model = env.AI_MODEL || DEFAULT_AI_MODEL
+    const plan = await createMutationPlan(
+      env.AI,
+      model,
+      formationMessages(primer, input, timestamp),
+    )
 
-  if (plan.value.runtime?.length) throw new OperationError('Formation cannot manage Watch arming or task leases', 422)
+    if (plan.value.runtime?.length) throw new OperationError('Formation cannot manage Watch arming or task leases', 422)
 
-  const { operations, vocabulary } = await preparePlan(
-    brain,
-    plan.value,
-    assertFormationOperations,
-    'formation',
-  )
+    const { operations, vocabulary } = await preparePlan(
+      brain,
+      plan.value,
+      assertFormationOperations,
+      'formation',
+      epoch,
+    )
 
-  // The observation rides the envelope, so the model's commands cite `:msg1`
-  // instead of retyping what was said (§71.1).
-  const ingest = observationIngest(operations, input.messages, {
-    at: timestamp,
-    origin: await conversationOrigin(input, timestamp),
-    sourceActor: counterparty.id,
-  })
-  const results = operations.length
-    ? await brain.executeFormationPlan(operations, ingest)
-    : []
-  throwOnKipError(results, 'formation KIP failed')
-  const stored = countWrites(results)
-  stored.concepts += counterparty.created
+    // The observation rides the envelope, so the model's commands cite `:msg1`
+    // instead of retyping what was said (§71.1).
+    const ingest = observationIngest(operations, input.messages, {
+      at: timestamp,
+      origin,
+      sourceActor: counterparty.id,
+    })
+    const results = operations.length
+      ? await brain.executeFormationPlan(operations, ingest, epoch)
+      : []
+    throwOnKipError(results, 'formation KIP failed')
+    let usage = plan.usage
+    let review: { performed: boolean; commands: number; summary: string } | undefined
+    let repairResults: KipResult[] = []
+    // Same 10K-token cost heuristic as Rust (approximately four characters per
+    // token). Count the original input, never the compacted prompt or references.
+    if (JSON.stringify(input).length >= 40_000) {
+      try {
+        const repair = await createMutationPlan(env.AI, model,
+          formationReviewMessages(primer, input, timestamp, results))
+        usage = addUsage(usage, repair.usage)
+        if (repair.value.commands.length > 1) throw new OperationError('Formation review accepts at most one repair MUTATE', 422)
+        if (repair.value.runtime?.length) throw new OperationError('Formation review cannot manage runtime actions', 422)
+        const prepared = await preparePlan(brain, repair.value, assertFormationOperations, 'formation review', epoch)
+        const repairIngest = observationIngest(prepared.operations, input.messages, {at: timestamp, origin, sourceActor: counterparty.id})
+        repairResults = prepared.operations.length ? await brain.executeFormationPlan(prepared.operations, repairIngest, epoch) : []
+        throwOnKipError(repairResults, 'formation review KIP failed')
+        review = { performed:true, commands:prepared.operations.length, summary:repair.value.summary }
+      } catch (error) {
+        if (error instanceof AiResponseError) usage = addUsage(usage, error.usage)
+        throw new OperationError('formation review failed after initial writes; inspect receipts before retrying', 422,
+          {initial_results:results, repair_results:repairResults, usage})
+      }
+    }
+    const stored = countWrites([...results, ...repairResults])
+    stored.concepts += counterparty.created
 
-  return {
-    content: plan.value.summary || 'No durable memory was extracted.',
-    stored,
-    commands: operations.length,
-    ...(vocabulary ? { vocabulary } : {}),
-    usage: plan.usage,
-  }
+    return {
+      content: plan.value.summary || 'No durable memory was extracted.',
+      stored,
+      commands: operations.length + (review?.commands ?? 0),
+      ...(vocabulary ? { vocabulary } : {}),
+      ...(review ? { review } : {}),
+      usage,
+    }
+  } finally { await brain.checkProcessing(epoch) }
 }
 
 /**
@@ -163,25 +196,26 @@ async function conversationOrigin(
 async function counterpartyElement(
   brain: BrainRpc,
   counterparty: string | undefined,
+  epoch: number,
 ): Promise<{ id?: string; created: number }> {
   if (!counterparty) return { created: 0 }
   const lookup = {
     command: 'FIND(?person.id) WHERE { ?person CONCEPT {type: "Person", key: :key} } LIMIT 1',
     parameters: { key: counterparty },
   }
-  const [known] = await brain.executeKipReadonlyBatch([lookup])
+  const [known] = await brain.executeAgentRead([lookup], epoch)
   if (known?.status === 'failed') throw new OperationError('counterparty lookup failed', 422, known.error)
   const knownId = Array.isArray(known?.result) ? known.result[0] : undefined
   if (typeof knownId === 'string') return { id: knownId, created: 0 }
-  const created = await brain.executeKipBatch([{
+  const created = await brain.executeFormationPlan([{
     command: 'CREATE CONCEPT ?person { TYPE "Person" NAME :key CLIENT KEY :creation_key SET FIELDS {key: :key} }',
     parameters: { key: counterparty, creation_key: `anda-brain:counterparty:${counterparty}` },
-  }])
+  }], undefined, epoch)
   // A concurrent creation may win the key. Reading the winner preserves its
   // display name; an UPSERT here could overwrite a rename made meanwhile.
   const collision = created.some((result) => result.error?.code === 'IdentityConflict')
   if (!collision) throwOnKipError(created, 'counterparty initialization failed')
-  const [found] = await brain.executeKipReadonlyBatch([lookup])
+  const [found] = await brain.executeAgentRead([lookup], epoch)
   if (found?.status !== 'succeeded') throw new OperationError('counterparty lookup failed', 422, found?.error)
   const row = Array.isArray(found.result) ? found.result[0] : undefined
   const count = countWrites(created).concepts
@@ -196,65 +230,66 @@ export async function recallMemory(
   brain: BrainRpc,
   input: RecallInput,
 ): Promise<unknown> {
-  const model = env.AI_MODEL || DEFAULT_AI_MODEL
-  const primer = resultOrThrow(await brain.describePrimer(), 'recall primer failed')
-  let usage = { ...EMPTY_USAGE }
-  let planned: KipOperation[] = []
-  let plannerWarning: string | undefined
-
+  const epoch = await brain.beginProcessing()
   try {
-    const plan = await createRecallPlan(env.AI, model, recallPlanMessages(primer, input))
-    usage = addUsage(usage, plan.usage)
-    planned = keepReadonlyOperations(plan.value.commands.map((command) => ({ command })))
-  } catch (error) {
-    if (error instanceof AiResponseError) usage = addUsage(usage, error.usage)
-    plannerWarning = error instanceof Error ? error.message : String(error)
-  }
+    const model = env.AI_MODEL || DEFAULT_AI_MODEL
+    const primer = resultOrThrow(await brain.describePrimer(), 'recall primer failed')
+    const lookup = conceptLookupCommand(input.query, 8)
+    const [grounding] = await brain.executeAgentRead([lookup], epoch)
+    if (grounding === undefined || grounding.status !== 'succeeded') {
+      throw new OperationError('recall KIP failed', 422, grounding?.error)
+    }
+    let usage = { ...EMPTY_USAGE }
+    let planned: KipOperation[] = []
+    let plannerWarning: string | undefined
 
-  // The grounding lookup runs first and always. It is deterministic, so its
-  // failure is the service's failure — a planned read failing is the model's,
-  // and answering "nothing found" because one speculative query was malformed
-  // would report a miss the memory never had.
-  const lookup = conceptLookupCommand(input.query, 8)
-  const operations = [lookup, ...planned].slice(0, MAX_KIP_OPERATIONS)
-  const results = await brain.executeKipReadonlyBatch(operations)
-  const grounding = results[0]
-  if (grounding === undefined || grounding.status === 'failed') {
-    throw new OperationError('recall KIP failed', 422, grounding?.error)
-  }
+    try {
+      const plan = await createRecallPlan(env.AI, model, recallPlanMessages(primer, input, grounding))
+      usage = addUsage(usage, plan.usage)
+      planned = keepReadonlyOperations(plan.value.commands.map((command) => ({ command }))).filter(operation => {
+        try { if (epoch > 0) assertCurrentOperations([operation]); return true } catch { return false }
+      })
+    } catch (error) {
+      if (error instanceof AiResponseError) usage = addUsage(usage, error.usage)
+      plannerWarning = error instanceof Error ? error.message : String(error)
+    }
 
-  const planFailures = results
-    .slice(1)
-    .flatMap((result) => (result.status === 'failed' ? [result.error?.code ?? 'Unknown'] : []))
-  const memories = citationsFrom(grounding, results.slice(1))
-  const answer = await createRecallAnswer(
-    env.AI,
-    model,
-    recallAnswerMessages(input, results),
-  )
-  usage = addUsage(usage, answer.usage)
+    const operations = [lookup, ...planned].slice(0, MAX_KIP_OPERATIONS)
+    const results = [grounding, ...(planned.length ? await brain.executeAgentRead(operations.slice(1), epoch) : [])]
 
-  return {
-    content: answer.value.answer,
-    answer: answer.value.answer,
-    // The model's own report, not `&& memories.length > 0`. A citation is an
-    // element id lifted out of whatever the reads happened to project, and a
-    // `BELIEF` projection or an aggregate answers with values rather than ids
-    // — so ANDing the two reported "answered from absence" for answers that
-    // had evidence. That is the `insufficient` / `rejected` collapse the
-    // policy exists to prevent, arriving through the transport instead of the
-    // prose. Where the model reports nothing found, `memories` is the
-    // fallback.
-    found: answer.value.found,
-    uncertainty: answer.value.uncertainty,
-    memories,
-    usage,
-    diagnostics: {
-      kip_commands: operations.length,
-      ...(plannerWarning ? { planner_warning: plannerWarning } : {}),
-      ...(planFailures.length ? { planned_read_errors: planFailures } : {}),
-    },
-  }
+    const planFailures = results
+      .slice(1)
+      .flatMap((result) => (result.status === 'failed' ? [result.error?.code ?? 'Unknown'] : []))
+    const memories = citationsFrom(grounding, results.slice(1))
+    const answer = await createRecallAnswer(
+      env.AI,
+      model,
+      recallAnswerMessages(input, results),
+    )
+    usage = addUsage(usage, answer.usage)
+
+    return {
+      content: answer.value.answer,
+      answer: answer.value.answer,
+      // The model's own report, not `&& memories.length > 0`. A citation is an
+      // element id lifted out of whatever the reads happened to project, and a
+      // `BELIEF` projection or an aggregate answers with values rather than ids
+      // — so ANDing the two reported "answered from absence" for answers that
+      // had evidence. That is the `insufficient` / `rejected` collapse the
+      // policy exists to prevent, arriving through the transport instead of the
+      // prose. Where the model reports nothing found, `memories` is the
+      // fallback.
+      found: answer.value.found,
+      uncertainty: answer.value.uncertainty,
+      memories,
+      usage,
+      diagnostics: {
+        kip_commands: operations.length,
+        ...(plannerWarning ? { planner_warning: plannerWarning } : {}),
+        ...(planFailures.length ? { planned_read_errors: planFailures } : {}),
+      },
+    }
+  } finally { await brain.checkProcessing(epoch) }
 }
 
 /**
@@ -268,9 +303,9 @@ export async function probeMemory(
   brain: BrainRpc,
   input: RecallInput,
 ): Promise<unknown> {
-  const [probe] = await brain.executeKipReadonlyBatch([
-    conceptLookupCommand(input.query, 8),
-  ])
+  const epoch = await brain.beginProcessing()
+  const [probe] = await brain.executeAgentRead([conceptLookupCommand(input.query, 8)], epoch)
+  await brain.checkProcessing(epoch)
   if (probe === undefined || probe.status === 'failed') {
     throw new OperationError('probe KIP failed', 422, probe?.error)
   }
@@ -283,45 +318,49 @@ export async function maintainMemory(
   brain: BrainRpc,
   input: MaintenanceInput,
 ): Promise<unknown> {
-  const timestamp = observationTimestamp(input.timestamp, Date.now())
-  // Deterministic first, model second — the same order `anda_brain` runs in.
-  // Disuse metabolism, silence-Watch expiry and the Skill lifecycle are
-  // arithmetic; doing them before the completion means the cycle assesses an
-  // already-settled graph rather than one it would have had to settle by hand.
-  const settlement = await brain.settleMemory(Date.parse(timestamp), input.parameters?.memory_strength_decay_factor)
-  const [snapshot, assessment] = await Promise.all([
-    brain.executeKipReadonlyBatch(MAINTENANCE_SNAPSHOT),
-    brain.maintenanceAssessment(),
-  ])
-  throwOnKipError(snapshot, 'maintenance snapshot failed')
-  const model = env.AI_MODEL || DEFAULT_AI_MODEL
-  const plan = await createMutationPlan(
-    env.AI,
-    model,
-    maintenanceMessages(input, { snapshot, assessment, settlement }, timestamp),
-  )
+  const epoch = await brain.beginProcessing()
+  try {
+    const timestamp = observationTimestamp(input.timestamp, Date.now())
+    // Deterministic first, model second — the same order `anda_brain` runs in.
+    // Disuse metabolism, silence-Watch expiry and the Skill lifecycle are
+    // arithmetic; doing them before the completion means the cycle assesses an
+    // already-settled graph rather than one it would have had to settle by hand.
+    const settlement = await brain.settleMemory(Date.parse(timestamp), input.parameters?.memory_strength_decay_factor)
+    const [snapshot, assessment] = await Promise.all([
+      brain.executeAgentRead(MAINTENANCE_SNAPSHOT, epoch),
+      brain.maintenanceAssessment(),
+    ])
+    throwOnKipError(snapshot, 'maintenance snapshot failed')
+    const model = env.AI_MODEL || DEFAULT_AI_MODEL
+    const plan = await createMutationPlan(
+      env.AI,
+      model,
+      maintenanceMessages(input, { snapshot, assessment, settlement }, timestamp),
+    )
 
-  const { operations, vocabulary } = await preparePlan(
-    brain,
-    plan.value,
-    assertMaintenanceOperations,
-    'maintenance',
-  )
+    const { operations, vocabulary } = await preparePlan(
+      brain,
+      plan.value,
+      assertMaintenanceOperations,
+      'maintenance',
+      epoch,
+    )
 
-  const results = (operations.length || plan.value.runtime?.length) ? await brain.executeMaintenancePlan(operations, plan.value.runtime) : []
-  throwOnKipError(results, 'maintenance KIP failed')
-  // A model completion does not prove complete change-stream consumption.
+    const results = (operations.length || plan.value.runtime?.length) ? await brain.executeMaintenancePlan(operations, plan.value.runtime, epoch) : []
+    throwOnKipError(results, 'maintenance KIP failed')
+    // A model completion does not prove complete change-stream consumption.
 
-  return {
-    content: plan.value.summary || 'No maintenance changes were needed.',
-    scope: input.scope ?? 'daydream',
-    changed: countChanges(results),
-    commands: operations.length,
-    settlement,
-    runtime: results.filter((result) => result.op_id?.startsWith('runtime_')),
-    ...(vocabulary ? { vocabulary } : {}),
-    usage: plan.usage,
-  }
+    return {
+      content: plan.value.summary || 'No maintenance changes were needed.',
+      scope: input.scope ?? 'daydream',
+      changed: countChanges(results),
+      commands: operations.length,
+      settlement,
+      runtime: results.filter((result) => result.op_id?.startsWith('runtime_')),
+      ...(vocabulary ? { vocabulary } : {}),
+      usage: plan.usage,
+    }
+  } finally { await brain.checkProcessing(epoch) }
 }
 
 /**
@@ -344,10 +383,12 @@ async function preparePlan(
   plan: MutationPlan,
   gate: (operations: readonly KipOperation[]) => void,
   mode: string,
+  epoch: number,
 ): Promise<{ operations: KipOperation[]; vocabulary?: DeclaredVocabulary }> {
   const operations = plan.commands.map((command) => ({ command, parameters: plan.parameters }))
   try {
     if (operations.length > 0) gate(operations)
+    if (epoch > 0) assertCurrentOperations(operations)
   } catch (error) {
     throw new OperationError(
       error instanceof Error ? error.message : `invalid ${mode} plan`,
@@ -357,7 +398,7 @@ async function preparePlan(
   if (plan.types.length === 0 && plan.predicates.length === 0) return { operations }
   return {
     operations,
-    vocabulary: await brain.declareSymbols(plan.types, plan.predicates),
+    vocabulary: await brain.declareSymbols(plan.types, plan.predicates, epoch),
   }
 }
 

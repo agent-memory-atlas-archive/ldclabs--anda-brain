@@ -1,3 +1,4 @@
+import { validateForget } from './forget.js'
 import { assertReadonlyOperations } from './kip.js'
 import { AndaBrain } from './brain.js'
 import {
@@ -23,6 +24,7 @@ const SPACE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 const GET_ONLY = new Set(['info', 'formation_status', 'vocabulary'])
 const POST_ACTIONS = new Set([
   'formation',
+  'memory/forget',
   'recall',
   'recall_structured',
   'maintenance',
@@ -57,7 +59,7 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       })
     }
 
-    const match = /^\/v1\/([^/]+)\/([^/]+)$/.exec(url.pathname)
+    const match = /^\/v1\/([^/]+)\/([^/]+(?:\/[^/]+)?)$/.exec(url.pathname)
     if (!match) throw new ApiError('not found', 404)
     authorize(request, env)
 
@@ -92,6 +94,9 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
 
     const body = await readJson(request)
     switch (action) {
+      case 'memory/forget':
+        try { validateForget(body) } catch (error) { throw new ValidationError((error as Error).message) }
+        return ok(await brain.forgetMemory(body))
       case 'formation':
         return ok(await formMemory(env, brain, parseFormationInput(body)))
       case 'recall':
@@ -130,6 +135,7 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
         throw new ApiError('not found', 404)
     }
   } catch (error) {
+    if (error instanceof Error && ['memory_change_pending', 'memory_changed_rebuild_context', 'source_suppressed'].some(reason => error.message.includes(reason))) return fail('memory changed or source suppressed; rebuild context before retrying', 409)
     if (error instanceof ApiError) return fail(error.message, error.status, error.data)
     if (error instanceof ValidationError) return fail(error.message, 400)
     if (error instanceof OperationError) return fail(error.message, error.status, error.data)

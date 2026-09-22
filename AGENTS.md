@@ -24,7 +24,7 @@ Rust dependencies resolve from published crates, including Nexus 0.13.4's
 legacy Commitment repair. Optional sibling `anda-db` overrides must patch the
 shared DB/KIP stack together; verify one type identity with Cargo metadata.
 The current 0.12.0 release pins `anda_kip = "=0.13.1"` and requires
-`anda_cognitive_nexus = "0.13.4"`; the Worker pins `@ldclabs/kip-do` 0.13.1.
+`anda_cognitive_nexus = "0.13.4"`; the Worker pins `@ldclabs/kip-do` 0.13.2; its protocol reference remains 0.13.1.
 KIP v2 has not been deployed. Use fresh v2 Spaces for current acceptance;
 do not add pre-release old-data migration work unless explicitly requested.
 Keep normal restart, eviction and unresolved-write recovery fully tested.
@@ -151,7 +151,7 @@ you touch `anda-brain-worker/`:
 CI=true pnpm --filter @ldclabs/anda-brain-worker check
 ```
 
-The Worker resolves `@ldclabs/kip-do` 0.13.1 from the npm registry; use the
+The Worker resolves `@ldclabs/kip-do` 0.13.2 from the npm registry; use the
 repository's pnpm lockfile and run `CI=true pnpm install --frozen-lockfile` first.
 The check includes generated-asset verification, TypeScript, tests and a deployment
 dry run; it does not deploy the Worker.

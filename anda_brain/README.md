@@ -1,5 +1,7 @@
 # Anda Brain — Technical Documentation
 
+Cloudflare Worker parity and limits are documented in the [commit audit](../anda-brain-worker/PORTING_AUDIT.md) and [trusted host contracts](../anda-brain-worker/PRODUCT.md). The Worker supports source records, reviewed changes, recovery and processing fences; budgeted Recall, Wiki and learning runtimes remain unavailable.
+
 A dedicated LLM-powered memory management service that maintains a persistent **Cognitive Nexus** on behalf of business AI agents via [KIP 2.0 (Knowledge Interaction Protocol)](https://github.com/ldclabs/KIP).
 
 Business agents interact entirely through natural language and a REST API — no KIP knowledge required.

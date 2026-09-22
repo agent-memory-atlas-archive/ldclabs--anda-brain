@@ -1072,6 +1072,9 @@ function failingReadBrain(): BrainRpc {
     throw new Error('unexpected brain call')
   }
   return {
+    beginProcessing: async () => 0,
+    checkProcessing: async () => {},
+    executeAgentRead: async () => [failure],
     declareSymbols: unsupported,
     describePrimer: async () => ({ status: 'succeeded', result: {} }),
     executeFormationPlan: unsupported,

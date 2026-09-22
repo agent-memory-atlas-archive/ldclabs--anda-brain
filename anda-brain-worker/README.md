@@ -1,5 +1,7 @@
 # Anda Brain Worker
 
+[逐提交移植核对](PORTING_AUDIT.md) · [记忆产品宿主契约](PRODUCT_cn.md) · [English host contracts](PRODUCT.md)
+
 这是一个参考 Rust 版 `anda_brain`、基于 `@ldclabs/kip-do` 实现的简化版 Cloudflare Worker，使用 **KIP 2.0**。它保留三条核心认知链路：
 
 - Formation：把对话提炼成 KIP KML 事务，写入长期图谱记忆。
@@ -58,6 +60,9 @@ pnpm --filter @ldclabs/anda-brain-worker check
 | CBOR / Markdown 协商 | 未实现 |
 | 异步 Formation 队列与对话历史 | 未实现 |
 | Wiki、MCP、BYOK、分级令牌 | 未实现 |
+| 来源记录、审阅式更正/抑制/删除 | 受信宿主 RPC，见 [产品契约](PRODUCT_cn.md) |
+| 记录 Watch | 显式接收者绑定、原生推进与取消；无后台 inbox |
+| 预算化 Recall / 学习运行时 | 未实现；非空 Recall `budget` 显式拒绝，学习就绪保持不可用 |
 | 自动周期维护 | 未实现；由调用方或 Cron Trigger 调用 maintenance |
 | 确定性 settlement（代谢 / Nexus Watch 推进 / 更正发现） | 保留，见下节 |
 | 全文检索（`SEARCH`） | 保留，keyword 模式，见「检索」一节 |
@@ -163,7 +168,7 @@ curl http://localhost:8787/v1/alice/execute_kip_readonly \
 
 ## 提示词
 
-三个模式提示词是 KIP 2.0 参考 Brain 策略（`anda-db/rs/anda_kip/brain/Brain*.md`），各自附一段本部署的契约（`# A. Anda Brain Worker deployment contract`），再拼上对应角色卡与 Cognitive Memory Profile。它们放在 `assets/`，由脚本内联：
+三个模式提示词是 KIP 2.0 参考 Brain 策略（`anda-db/rs/anda_kip/brain/Brain*.md`），各自附一段本部署的契约（`# A. Anda Brain Worker deployment contract`），每次调用（包括 Recall 回答与 Formation 复核）再拼上完整 KIP 语法、对应角色卡与 Cognitive Memory Profile。它们放在 `assets/`，由脚本内联：
 
 ```bash
 pnpm run sync:assets      # 从 anda_kip 刷新全部 vendor 资产
@@ -201,7 +206,9 @@ Formation、Maintenance、Recall 规划及回答阶段均支持查阅。查阅�
 digest 或运行时动作。最终结果省略 `references` 或使用 `[]`，才会进入原有校验及执行流程。
 查阅不会读取图谱、更新快照、扩展权限，也不构成记忆证据或变更覆盖。
 
-`@ldclabs/kip-do` 和参考资源锁定为 `0.13.1`。从仓库根目录刷新资源：
+`@ldclabs/kip-do` 锁定为 `0.13.2`；协议参考独立锁定为 Cargo 中的 `anda_kip = 0.13.1`。
+生成检查验证协议 pin、各参考文件 SHA-256 与生成文件；引擎补丁版本不改变协议资料来源。
+从仓库根目录刷新资源：
 
 ```bash
 ANDA_KIP_SOURCE=/path/to/published/anda_kip-0.13.1 node scripts/sync-kip-reference.mjs --worker
@@ -266,6 +273,12 @@ Formation / Maintenance 的 `timestamp` 接受带时区偏移及不同小数精�
 
 Formation 只能写认知：`CREATE CONCEPT`、`UPSERT CONCEPT`、`ENSURE PROPOSITION`、`CREATE EVIDENCE / ASSERTION / ACTIVITY`、`ASSERT`，以及用于更正和自身 Activity 的 `TRANSITION`——状态限于 `retracted` / `superseded` / `corrected` / `running` / `completed` / `failed` / `cancelled`。`TRANSITION ... TO "archived"`、`TO "tombstoned"` 以及 `UPDATE`、`PURGE`、`MERGE CONCEPT` 会在 Durable Object 内被拒绝。状态必须写成字面量：闸门读不到的参数化状态一律拒绝，否则「六条语句合并成一条 `TRANSITION`」就等于给 Formation 开了一条以绑定值 tombstone 的路。
 
+输入 JSON 达到约 40,000 字符（10K token 的成本估算阈值）时，初次写入成功后追加一次
+Formation 语义复核。复核保留原始有界来源、每条实际回执和最近 16 条消息的精确 Evidence
+绑定窗口；至多执行一个最小修复命令，不重新编码整份输入，也不扩大 Formation 权限。
+返回 `review` 与累计 `usage`；若复核失败，422 错误包含初次写入/修复回执及 usage，
+不能把它当作初次写入已回滚并重试整份输入。该检查不保证完整语义覆盖。
+
 ### Recall
 
 ```bash
@@ -278,7 +291,10 @@ curl http://localhost:8787/v1/alice/recall_structured \
   }'
 ```
 
-召回计划只能执行 KQL / META，且每条必须带 `LIMIT 20` 或更小；无界、可变更或无法解析的命令会被静默丢弃。服务固定先跑一条上文的 grounding 查询，因此模型给出无效计划时仍能完成基本召回——它失败才算服务失败，模型规划的那几条失败只会记进 `diagnostics.planned_read_errors`。
+召回计划只能执行 KQL / META，且每条必须带 `LIMIT 20` 或更小；无界、可变更或无法解析的命令会被静默丢弃。服务在首次模型规划调用**之前**固定运行 grounding 查询，并把结果交给规划器，因此模型给出无效计划时仍能完成基本召回——它失败才算服务失败，模型规划的那几条失败只会记进 `diagnostics.planned_read_errors`。
+
+Worker 尚未实现 Rust 的 tokenizer 计数 Recall packet 和累计规划输入预算；非空 `budget`
+明确返回 400，不能降级成无预算回答。提示词按字符的截断不是 token 预算。
 
 ### Maintenance
 
@@ -295,6 +311,19 @@ Maintenance 可以使用受限的维护 KML，学习和运行时 Facet 由宿主
 
 请求参数：`memory_strength_decay_factor`、`stale_event_threshold_days`、`unconsolidated_max_backlog`（兼容旧名 `unsorted_max_backlog`）、`orphan_max_count`——与 Rust 服务的 `MaintenanceParameters` 逐字段对齐。没有 `confidence_decay_factor`：2.0 禁止随时间衰减 Assertion 置信度。
 
+### 显式图谱擦除
+
+`POST /v1/{space}/memory/forget` 接受 `{"entities":["E-4","X-5"],"dry_run":false}`，
+单次最多 100 个元素 id，支持 `C-`、`P-`、`A-`、`E-`、`X-`。输入去重，逐目标调用
+原生 `PURGE … REFERENCE POLICY "authorized_cascade"`，保留 legal hold 和权限检查。
+`dry_run:true` 只检查存在性，不删除，也不保证实际擦除一定通过。响应包含
+`deleted_concepts/propositions/assertions/evidence/activities` 实际计数与每个目标的
+`existed/error`；一个目标失败不掩盖其他目标的成功。
+
+该管理 API 会使旧模型处理代次失效，并清除被擦除记录在产品预览中的副本，但不封禁新输入
+来源。需要可复核的来源封禁和可恢复闭包删除时，使用受信宿主的
+[productPrepare / productCommit](PRODUCT_cn.md)。这些产品方法不暴露为 HTTP 或模型工具。
+
 ### Probe 与直接 KIP
 
 | Method | Path | 说明 |
@@ -303,6 +332,7 @@ Maintenance 可以使用受限的维护 KML，学习和运行时 Facet 由宿主
 | `GET` | `/v1/{space}/info` | 元素计数、Schema 环境版本和初始化时间 |
 | `GET` | `/v1/{space}/vocabulary` | 本空间已发布的类型与谓词 |
 | `GET` | `/v1/{space}/formation_status` | 同步模式状态 |
+| `POST` | `/v1/{space}/memory/forget` | 显式图谱擦除与逐种类计数 |
 | `POST` | `/v1/{space}/probe` | 不调用 LLM 的轻量记忆查找 |
 | `POST` | `/v1/{space}/execute_kip_readonly` | 只允许 KQL / META |
 | `POST` | `/v1/{space}/execute_kip` | 管理级原始 KIP，允许写入 |

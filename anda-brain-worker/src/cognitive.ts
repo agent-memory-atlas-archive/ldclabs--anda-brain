@@ -11,6 +11,11 @@ export const BRAIN_CAPABILITIES = {
   structured_watch_runtime: true,
   text_watch_evaluator: false,
   procedural_standing: 'unproven',
+  source_backed_records: true,
+  reviewed_memory_changes: true,
+  product_http_api: false,
+  record_watch_requires_recipient_binding: true,
+  budgeted_recall: false,
 } satisfies JsonMap
 
 export interface RuntimeOperation {

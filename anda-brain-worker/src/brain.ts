@@ -1,6 +1,9 @@
+import { forget, validateForget, type ForgetInput } from './forget.js'
+import { MemoryProduct, assertCurrentOperations, type SourceIdentity, type ChangeInput, type RecordSource } from './product.js'
 import { BRAIN_CAPABILITIES, legacyRuntimeReplacement, runtimeOperations, type RuntimeOperation } from './cognitive.js'
 import {
   KipDatabase,
+  type AuthContext,
   KipError,
   isJsonMap,
   tryParseElementId,
@@ -56,6 +59,90 @@ const ACTOR_BOOTSTRAP = `MUTATE {
 
 /** One compact Anda Brain graph per Durable Object / space id. */
 export class AndaBrain extends KipDatabase<Env> {
+  private get product(): MemoryProduct {
+    return new MemoryProduct(this.nexus, this.ctx.storage, this.env.BRAIN_PRODUCT_RECIPIENT)
+  }
+
+  forgetMemory(input: ForgetInput) {
+    validateForget(input)
+    this.ensureInitialized()
+    if (!input.dry_run) this.product.invalidate()
+    return forget(this.nexus.session(this.authenticate(undefined)), input, ids => this.product.scrubChanges(ids))
+  }
+  beginProcessing(source?: SourceIdentity, origin?: string): number {
+    this.ensureInitialized()
+    return this.product.begin(source, origin)
+  }
+  checkProcessing(epoch: number): void {
+    this.ensureInitialized()
+    this.product.check(epoch)
+  }
+  executeAgentRead(operations: readonly KipOperation[], epoch: number): KipResult[] {
+    this.checkProcessing(epoch)
+    if (epoch > 0) assertCurrentOperations(operations)
+    return this.executeKipReadonlyBatch(operations)
+  }
+  // Trusted RPC only. The embedding host supplies verified native authentication;
+  // the public HTTP router never accepts AuthContext or exposes these methods.
+  productRecords(auth: AuthContext, before?: number, limit?: number) {
+    this.ensureInitialized()
+    return this.product.records(auth, before, limit)
+  }
+  productRecord(auth: AuthContext, id: string) {
+    this.ensureInitialized()
+    return this.product.record(auth, id)
+  }
+  productSource(auth: AuthContext, id: string) {
+    this.ensureInitialized()
+    return this.product.source(auth, id)
+  }
+  productCorrectionSource(auth: AuthContext, source: RecordSource) {
+    this.ensureInitialized()
+    return this.product.correctionSource(auth, source)
+  }
+  productPrepare(auth: AuthContext, input: ChangeInput) {
+    this.ensureInitialized()
+    return this.product.prepare(auth, input)
+  }
+  productChange(auth: AuthContext, id: string) {
+    this.ensureInitialized()
+    return this.product.change(auth, id)
+  }
+  productCommit(auth: AuthContext, id: string, previewDigest: string) {
+    this.ensureInitialized()
+    return this.product.commit(auth, id, previewDigest)
+  }
+  productDiscard(auth: AuthContext, id: string) {
+    this.ensureInitialized()
+    this.product.discard(auth, id)
+  }
+  productStatus() {
+    this.ensureInitialized()
+    const state = this.product.state()
+    return {
+      epoch: state.epoch, available: !state.pending, pending: state.pending,
+      learning_readiness: {
+        state: 'services_missing', next_step: 'use_rust_learning_runtime_with_explicit_bindings', supported: false,
+      },
+    }
+  }
+  productRecordWatch(auth: AuthContext, id: string) {
+    this.ensureInitialized()
+    return this.product.watch(auth, id)
+  }
+  productCreateRecordWatch(auth: AuthContext, id: string, target: string, summary: string) {
+    this.ensureInitialized()
+    return this.product.createWatch(auth, id, target, summary)
+  }
+  productAdvanceRecordWatch(auth: AuthContext, id: string) {
+    this.ensureInitialized()
+    return this.product.advanceWatch(auth, id)
+  }
+  productCancelRecordWatch(auth: AuthContext, id: string) {
+    this.ensureInitialized()
+    return this.product.cancelWatch(auth, id)
+  }
+
   /**
    * The Profile plus whatever vocabulary this Space has already published.
    *
@@ -147,13 +234,19 @@ export class AndaBrain extends KipDatabase<Env> {
   executeFormationPlan(
     operations: readonly KipOperation[],
     ingest?: IngestContext,
+    epoch = 0,
   ): KipResult[] {
+    this.checkProcessing(epoch)
+    if (epoch > 0) assertCurrentOperations(operations)
     assertFormationOperations(operations)
     this.ensureInitialized()
+    this.product.capture(ingest)
     return super.executeKipBatch(operations, undefined, undefined, { mode: 'sequence', onError: 'stop' }, ingest)
   }
 
-  executeMaintenancePlan(operations: readonly KipOperation[], runtime: readonly RuntimeOperation[] = []): KipResult[] {
+  executeMaintenancePlan(operations: readonly KipOperation[], runtime: readonly RuntimeOperation[] = [], epoch = 0): KipResult[] {
+    this.checkProcessing(epoch)
+    if (epoch > 0) assertCurrentOperations(operations)
     const work = runtimeOperations(runtime)
     if (operations.length > 0) assertMaintenanceOperations(operations)
     this.ensureInitialized()
@@ -268,7 +361,8 @@ export class AndaBrain extends KipDatabase<Env> {
    * A refused name is reported, not raised. The caller can still write every
    * memory whose symbols were accepted.
    */
-  declareSymbols(types: readonly string[], predicates: readonly string[]): DeclaredVocabulary {
+  declareSymbols(types: readonly string[], predicates: readonly string[], epoch = 0): DeclaredVocabulary {
+    this.checkProcessing(epoch)
     this.ensureInitialized()
     const vocabulary = MemoryVocabulary.load(this.nexus)
     const before = vocabulary.revision
@@ -312,6 +406,7 @@ export class AndaBrain extends KipDatabase<Env> {
    */
   private ensureInitialized(): void {
     if (this.ctx.storage.kv.get<string>(APP_BOOTSTRAP_KEY) === APP_BOOTSTRAP_VERSION) {
+      this.product.recover()
       return
     }
     const result = super.executeKip(ACTOR_BOOTSTRAP, { key: SELF_ACTOR_KEY })

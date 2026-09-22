@@ -15,6 +15,7 @@ import { BRAIN_CAPABILITIES } from './cognitive.js'
 import type { AiMessage } from './ai.js'
 import {
   BRAIN_FORMATION,
+  BRAIN_FORMATION_REVIEW,
   BRAIN_MAINTENANCE,
   BRAIN_RECALL,
   COGNITIVE_MEMORY_PROFILE,
@@ -27,11 +28,11 @@ import type { FormationInput, MaintenanceInput, RecallInput } from './types.js'
 
 /**
  * Load the role-specific card with the ontology and actual adapter limits.
- * Planning stages retain the full syntax card for ordinary single-pass plans.
+ * Every stage retains the complete pinned syntax, including review and answering.
  * The structured AI runner can serve bounded reference requests for details.
  */
-const reference = (card: string, syntax = false): string =>
-  `${card}\n\n${syntax ? `${KIP_SYNTAX}\n\n` : ''}${COGNITIVE_MEMORY_PROFILE}\n\n` +
+const reference = (card: string): string =>
+  `${card}\n\n${KIP_SYNTAX}\n\n${COGNITIVE_MEMORY_PROFILE}\n\n` +
   `Brain adapter capabilities (distinct from engine Schema): ${JSON.stringify(BRAIN_CAPABILITIES)}`
 
 export function formationMessages(
@@ -40,7 +41,7 @@ export function formationMessages(
   timestamp: string,
 ): AiMessage[] {
   return [
-    { role: 'system', content: `${BRAIN_FORMATION}\n\n---\n\n${reference(KIP_FORMATION_CARD, true)}` },
+    { role: 'system', content: `${BRAIN_FORMATION}\n\n---\n\n${reference(KIP_FORMATION_CARD)}` },
     {
       role: 'user',
       content: boundedJson({
@@ -55,13 +56,14 @@ export function formationMessages(
   ]
 }
 
-export function recallPlanMessages(primer: unknown, input: RecallInput): AiMessage[] {
+export function recallPlanMessages(primer: unknown, input: RecallInput, grounding?: unknown): AiMessage[] {
   return [
-    { role: 'system', content: `${BRAIN_RECALL}\n\n---\n\n${reference(KIP_RECALL_CARD, true)}` },
+    { role: 'system', content: `${BRAIN_RECALL}\n\n---\n\n${reference(KIP_RECALL_CARD)}` },
     {
       role: 'user',
       content: boundedJson({
         stage: 'plan',
+        grounding,
         query: input.query,
         context: input.context ?? {},
         primer,
@@ -70,13 +72,7 @@ export function recallPlanMessages(primer: unknown, input: RecallInput): AiMessa
   ]
 }
 
-/**
- * The answer stage gets the policy and the ontology, not the syntax card.
- *
- * It writes no commands, and the card is the largest thing in the context: what
- * it needs is §9 BELIEF, §10 Open World and what a `Preference` means, all of
- * which live in the other two documents.
- */
+/** Every stage carries the complete pinned syntax, roles and Profile. */
 export function recallAnswerMessages(input: RecallInput, evidence: unknown): AiMessage[] {
   return [
     { role: 'system', content: `${BRAIN_RECALL}\n\n---\n\n${reference(KIP_RECALL_CARD)}` },
@@ -98,7 +94,7 @@ export function maintenanceMessages(
   timestamp: string,
 ): AiMessage[] {
   return [
-    { role: 'system', content: `${BRAIN_MAINTENANCE}\n\n---\n\n${reference(`${KIP_RECALL_CARD}\n${KIP_FORMATION_CARD}\n${KIP_MAINTENANCE_CARD}`, true)}` },
+    { role: 'system', content: `${BRAIN_MAINTENANCE}\n\n---\n\n${reference(`${KIP_RECALL_CARD}\n${KIP_FORMATION_CARD}\n${KIP_MAINTENANCE_CARD}`)}` },
     {
       role: 'user',
       content: boundedJson({ stage: 'maintenance', timestamp, request: input, snapshot }),
@@ -139,4 +135,20 @@ export function boundedJson(value: unknown, maxChars = 64_000): string {
     headChars -= headReduction
     tailChars -= tailReduction
   }
+}
+
+/** One semantic review, preserving receipts independently of source truncation. */
+export function formationReviewMessages(
+  primer: unknown, input: FormationInput, timestamp: string, receipts: unknown,
+): AiMessage[] {
+  const messages = formationMessages(primer, input, timestamp)
+  messages[0]!.content += `\n\n${BRAIN_FORMATION_REVIEW}\nThe Worker allows one final repair plan, with the same Formation gate. Return empty commands when no supported defect is established. No additional general review follows.`
+  messages[1]!.content = JSON.stringify({
+    stage: 'formation_review',
+    source: JSON.parse(messages[1]!.content),
+    captured_window: { first_message: Math.max(1, input.messages.length - 15), last_message: input.messages.length,
+      bindings: 'msg1 through msg' + Math.min(16, input.messages.length), write_time_only: true },
+    receipts,
+  })
+  return messages
 }

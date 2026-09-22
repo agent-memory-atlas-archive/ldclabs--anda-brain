@@ -1,5 +1,7 @@
 # 🧠 Anda Brain (大脑) — 为 AI 智能体打造的自主图谱记忆
 
+Cloudflare Worker 的对应能力和限制见[逐提交核对](anda-brain-worker/PORTING_AUDIT.md)与[受信宿主产品契约](anda-brain-worker/PRODUCT_cn.md)。Worker 已同步来源记录、审阅式修改、恢复和处理代次边界；预算化 Recall、Wiki 和学习运行时仍不提供。
+
 > 消耗电力训练大模型，得到神经网络本体；消耗词元训练记忆图谱，得到符号网络本体。
 >
 > 两者结合，就是**神经符号 AI**——而 Brain 正是那颗让符号网络持续生长的大脑。

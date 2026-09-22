@@ -1,3 +1,4 @@
+import type { SourceIdentity } from './product.js'
 import type { RuntimeOperation } from './cognitive.js'
 import type { KipResult } from '@ldclabs/kip-do'
 import type { IngestContext, KipExecution, KipOperation } from './kip.js'
@@ -14,6 +15,8 @@ export interface Env {
   AI: AiBinding
   AI_MODEL?: string
   BRAIN_API_KEY?: string
+  /** Explicit native principal allowed to own record watches; never inferred from API key. */
+  BRAIN_PRODUCT_RECIPIENT?: string
 }
 
 /**
@@ -23,14 +26,20 @@ export interface Env {
  * boundary, which is why these signatures do not match the class's.
  */
 export interface BrainRpc {
+  forgetMemory(input: import('./forget.js').ForgetInput): Promise<import('./forget.js').ForgetReport>
+  beginProcessing(source?: SourceIdentity, origin?: string): Promise<number>
+  checkProcessing(epoch: number): Promise<void>
+  executeAgentRead(operations: readonly KipOperation[], epoch: number): Promise<KipResult[]>
   declareSymbols(
     types: readonly string[],
     predicates: readonly string[],
+    epoch?: number,
   ): Promise<DeclaredVocabulary>
   describePrimer(): Promise<KipResult>
   executeFormationPlan(
     operations: readonly KipOperation[],
     ingest?: IngestContext,
+    epoch?: number,
   ): Promise<KipResult[]>
   executeKip(command: string, params?: Record<string, unknown>): Promise<KipResult>
   executeKipBatch(
@@ -43,7 +52,7 @@ export interface BrainRpc {
     operations: readonly KipOperation[],
     execution?: KipExecution,
   ): Promise<KipResult[]>
-  executeMaintenancePlan(operations: readonly KipOperation[], runtime?: readonly RuntimeOperation[]): Promise<KipResult[]>
+  executeMaintenancePlan(operations: readonly KipOperation[], runtime?: readonly RuntimeOperation[], epoch?: number): Promise<KipResult[]>
   maintenanceAssessment(): Promise<MaintenanceAssessment>
   settleMemory(nowMs: number, decayFactor?: number): Promise<SettlementReport>
   stats(): Promise<BrainStats>

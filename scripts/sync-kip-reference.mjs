@@ -35,8 +35,7 @@ const provenance = JSON.stringify({ source: 'anda_kip', version, sha256: hashes 
 contents.push(['manifest.json', Buffer.from(provenance)])
 if (process.argv.includes('--worker')) {
   const worker = join(root, 'anda-brain-worker')
-  const engine = JSON.parse(readFileSync(join(worker, 'package.json'), 'utf8')).dependencies['@ldclabs/kip-do']
-  if (engine !== version) throw new Error('Worker kip-do must be pinned to the reference release')
+  // anda_kip owns the reference version; kip-do has an independent release cadence.
   const ids = {
     'SPECIFICATION.md': 'specification', 'Invariants.md': 'invariants',
     'brain/ExperienceLearningArchitecture.md': 'experience-learning',

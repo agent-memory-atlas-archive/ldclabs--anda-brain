@@ -773,3 +773,8 @@ infer implemented worker behavior from a Schema name or an engine capability.
 The snapshot is bounded; no complete change-stream consumption is claimed for it.
 
 Your snapshot includes the actual settlement report, including decay_error.
+
+After a managed memory change, all previously planned work is fenced. Rebuild a
+new snapshot; current KQL and SEARCH remain available, while historical/inactive
+selectors and continuation cursors cannot feed model processing. Protocol reference
+lookups remain available and do not widen this boundary.

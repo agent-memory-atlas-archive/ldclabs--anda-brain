@@ -650,17 +650,23 @@ deployment adds or constrains. Where the two differ, this section wins — not
 because it is better policy, but because it describes the engine you are
 actually writing to.
 
-The applicable KIP role card and the Cognitive Memory Profile are supplied
-in your context, along with a live `DESCRIBE PRIMER` for this Space.
+The complete pinned KIP syntax, applicable role card and Cognitive Memory Profile
+are supplied in every model call, along with a live `DESCRIBE PRIMER` for this Space.
 
 ## A.1 You return JSON; you do not call tools
 
-This deployment executes one final plan per formation. Before that you may request
-embedded documentation using the host's bounded `references` JSON field; follow
+This deployment executes one initial plan per formation. Large inputs may receive
+one focused `formation_review` pass with the original bounded source, exact captured
+message window and committed operation receipts. That pass may return at most one
+minimal repair `MUTATE`, or no commands; it never repeats the whole encoding and
+never certifies exhaustive source coverage. Initial and repair calls use the same
+Formation permissions. Before a final plan you may request embedded documentation using the host's bounded `references` JSON field; follow
 its lookup instructions and leave all plan fields empty in a reference request.
 Markdown links are source citations, not filesystem access. Reference rounds never
-read the graph or execute commands. You never see a command's result, so you cannot
-ground, read the answer, and write again. Your final plan is one object:
+read the graph or execute commands. The initial plan cannot read its own results.
+A scheduled review receives receipts as host data; failed or skipped operations are
+not committed facts. No general tool loop or second review is available. Your final
+plan is one object:
 
 ```json
 {

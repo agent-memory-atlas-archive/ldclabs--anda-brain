@@ -9,8 +9,6 @@ allowBuilds:
   sharp: true
   workerd: true
 minimumReleaseAgeExclude:
-  # This coordinated KIP 2.0 release is newer than pnpm's release-age gate.
-  - '@ldclabs/kip-do@0.13.1'
-  - '@ldclabs/kip-do@0.13.1'
+  - '@ldclabs/kip-do@0.13.2'
 onlyBuiltDependencies:
   - esbuild

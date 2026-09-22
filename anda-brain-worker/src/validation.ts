@@ -36,6 +36,7 @@ export function parseFormationInput(value: unknown): FormationInput {
 
 export function parseRecallInput(value: unknown): RecallInput {
   const body = object(value, 'recall body must be a JSON object')
+  if (body.budget !== undefined && body.budget !== null) throw new ValidationError('budgeted Recall is not supported by this Worker; use the Rust service')
   const query = requiredString(body.query, 'query', 4_000).trim()
   if (!query) throw new ValidationError('`query` cannot be blank')
   const context = body.context === undefined ? undefined : parseContext(body.context)

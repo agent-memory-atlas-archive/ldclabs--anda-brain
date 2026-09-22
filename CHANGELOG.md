@@ -4,6 +4,10 @@ All notable changes to the Anda Brain project.
 
 ## Unreleased
 
+- Sync the compact Worker with portable Rust changes through `c886b94`: full syntax in every model stage, one receipt-preserving large-input Formation review, grounding before Recall planning, and explicit Evidence/Activity graph erasure with per-kind counts.
+- Add trusted Worker product RPCs for source-backed records, reviewed conditional corrections, source-fenced archive/purge, durable per-step recovery and stale-agent output/write fences. Add explicitly bound, host-polled native record Watches with cancellation; do not advertise an inbox, automatic dispatch or learning runtime. Nonempty unsupported Recall budgets are rejected rather than ignored.
+- Keep the Worker's existing `kip-do` 0.13.2 dependency update and pin protocol reference validation independently to `anda_kip` 0.13.1, retaining file hashes and generated-asset checks. Document commit-by-commit parity and platform-specific limits in `anda-brain-worker/PORTING_AUDIT.md`.
+
 - Fix managed memory change boundaries: budgeted Recall excludes old history, failed Recall outputs recheck the processing epoch, Formation admits sources atomically with their epoch, and pagination rejects pre-change snapshots while retaining newer continuations. Deletion also clears related saved previews/correction text and invalidates affected uncommitted intents; correction-source reads verify live Evidence.
 - Add trusted Rust memory product contracts: source-backed Assertion catalog, immutable conditional correction intents, source-suppressed archive/purge operations, in-flight processor/Notes fences, current-state Recall guards and cold-load reconciliation of admitted changes.
 - Add recipient-owned record subscriptions with native arming, bounded cancellation grants, archive cancellation and no rearming/regrant on retry. Add static runtime configuration validation and isolated-workflow learning readiness; no new business execution authority or model outcome tool.
