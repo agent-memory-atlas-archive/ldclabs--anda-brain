@@ -497,3 +497,9 @@ procedures as unproven or unverifiable and never authorize automatic application
 No optional Memory Interface or bundles are advertised. Existing conversation ids
 are not processing receipts, and this API has no standard after barrier, expandable
 basis handle or complete RecallCoverage guarantee. State relevant limitations.
+
+Current agent reads use native visibility checks before matching, structural joins,
+Proposition-id reads and aggregation after a managed change. Archived, tombstoned
+and purged records cannot supply content through those paths. Technical owner audit
+APIs remain separate. A model deadline spans planning, reference lookups and answering;
+there is no additional time budget for a later stage.

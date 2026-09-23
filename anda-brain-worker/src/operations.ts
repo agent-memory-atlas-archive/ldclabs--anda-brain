@@ -4,6 +4,7 @@ import { observationTimestamp } from './validation.js'
 import {
   DEFAULT_AI_MODEL,
   AiResponseError,
+  ModelDeadline,
   addUsage,
   createMutationPlan,
   createRecallAnswer,
@@ -41,41 +42,6 @@ import type {
 
 const EMPTY_USAGE: Usage = { input_tokens: 0, output_tokens: 0 }
 
-/**
- * What Maintenance is shown before it plans.
- *
- * Bounded reads rather than a free look: reference rounds can fetch protocol
- * documentation only, never additional graph data. Recent Events are the
- * consolidation backlog, open SleepTasks are the work it left itself, and the
- * longest-untouched Concepts are where consolidation and re-encoding have
- * something to say.
- *
- * That third read orders by `updated_at`, not by `MnemonicState.memory_strength`:
- * a Concept the model never gave the Facet has no strength to sort on, and
- * sorting on a mostly-absent field would rank the graph by which memories
- * happened to be annotated. `?c.facets` still rides along, so a Concept that
- * does carry one can be judged on it.
- */
-const MAINTENANCE_SNAPSHOT: KipOperation[] = [
-  {
-    command:
-      'FIND(?e.id, ?e.name, ?e.updated_at) WHERE { ?e CONCEPT {type: "Event"} } ' +
-      'ORDER BY ?e.updated_at DESC LIMIT 20',
-  },
-  {
-    command:
-      'FIND(?t) WHERE { ?t CONCEPT {type: "SleepTask"} } LIMIT 20',
-  },
-  {
-    command:
-      'FIND(?c.id, ?c.name, ?c.schema_ref, ?c.facets) WHERE { ?c CONCEPT {} } ' +
-      'ORDER BY ?c.updated_at ASC LIMIT 20',
-  },
-  {
-    command: 'FIND(?w) WHERE { ?w CONCEPT {type: "Watch"} FILTER(?w.attributes.status == "disarmed") } LIMIT 20',
-  },
-]
-
 export class OperationError extends Error {
   constructor(
     message: string,
@@ -97,6 +63,8 @@ export async function formMemory(
   const origin = await conversationOrigin(input, timestamp)
   const epoch = await brain.beginProcessing(sourceIdentity ?? { key: origin,
     parents: input.context?.source ? [`source:${contentDigest(input.context.source)}`] : [] }, origin)
+  const deadline = new ModelDeadline(env.AI_TIMEOUT_MS)
+  let usage = { ...EMPTY_USAGE }
   try {
     const counterparty = await counterpartyElement(brain, input.context?.counterparty, epoch)
     const primer = resultOrThrow(await brain.describePrimer(), 'formation primer failed')
@@ -105,8 +73,12 @@ export async function formMemory(
       env.AI,
       model,
       formationMessages(primer, input, timestamp),
+      deadline,
     )
 
+    usage = plan.usage
+    deadline.check()
+    if (plan.value.reviewed_corrections?.length) throw new OperationError('Formation cannot acknowledge maintenance corrections', 422)
     if (plan.value.runtime?.length) throw new OperationError('Formation cannot manage Watch arming or task leases', 422)
 
     const { operations, vocabulary } = await preparePlan(
@@ -124,11 +96,11 @@ export async function formMemory(
       origin,
       sourceActor: counterparty.id,
     })
+    deadline.check()
     const results = operations.length
       ? await brain.executeFormationPlan(operations, ingest, epoch)
       : []
     throwOnKipError(results, 'formation KIP failed')
-    let usage = plan.usage
     let review: { performed: boolean; commands: number; summary: string } | undefined
     let repairResults: KipResult[] = []
     // Same 10K-token cost heuristic as Rust (approximately four characters per
@@ -136,12 +108,15 @@ export async function formMemory(
     if (JSON.stringify(input).length >= 40_000) {
       try {
         const repair = await createMutationPlan(env.AI, model,
-          formationReviewMessages(primer, input, timestamp, results))
+          formationReviewMessages(primer, input, timestamp, results), deadline)
         usage = addUsage(usage, repair.usage)
+        deadline.check()
+        if (repair.value.reviewed_corrections?.length) throw new OperationError('Formation review cannot acknowledge maintenance corrections', 422)
         if (repair.value.commands.length > 1) throw new OperationError('Formation review accepts at most one repair MUTATE', 422)
         if (repair.value.runtime?.length) throw new OperationError('Formation review cannot manage runtime actions', 422)
         const prepared = await preparePlan(brain, repair.value, assertFormationOperations, 'formation review', epoch)
         const repairIngest = observationIngest(prepared.operations, input.messages, {at: timestamp, origin, sourceActor: counterparty.id})
+        deadline.check()
         repairResults = prepared.operations.length ? await brain.executeFormationPlan(prepared.operations, repairIngest, epoch) : []
         throwOnKipError(repairResults, 'formation review KIP failed')
         review = { performed:true, commands:prepared.operations.length, summary:repair.value.summary }
@@ -155,14 +130,16 @@ export async function formMemory(
     stored.concepts += counterparty.created
 
     return {
-      content: plan.value.summary || 'No durable memory was extracted.',
+      content: committedContent(plan.value.summary, [...results, ...repairResults], 'No memory-plan changes were committed.'),
+      operation_results: operationStatuses([...results, ...repairResults]),
       stored,
       commands: operations.length + (review?.commands ?? 0),
       ...(vocabulary ? { vocabulary } : {}),
       ...(review ? { review } : {}),
       usage,
     }
-  } finally { await brain.checkProcessing(epoch) }
+  } catch (error) { throw withUsage(error, usage) }
+  finally { deadline.close(); await brain.checkProcessing(epoch) }
 }
 
 /**
@@ -231,6 +208,8 @@ export async function recallMemory(
   input: RecallInput,
 ): Promise<unknown> {
   const epoch = await brain.beginProcessing()
+  const deadline = new ModelDeadline(env.AI_TIMEOUT_MS)
+  let usage = { ...EMPTY_USAGE }
   try {
     const model = env.AI_MODEL || DEFAULT_AI_MODEL
     const primer = resultOrThrow(await brain.describePrimer(), 'recall primer failed')
@@ -239,17 +218,17 @@ export async function recallMemory(
     if (grounding === undefined || grounding.status !== 'succeeded') {
       throw new OperationError('recall KIP failed', 422, grounding?.error)
     }
-    let usage = { ...EMPTY_USAGE }
     let planned: KipOperation[] = []
     let plannerWarning: string | undefined
 
     try {
-      const plan = await createRecallPlan(env.AI, model, recallPlanMessages(primer, input, grounding))
+      const plan = await createRecallPlan(env.AI, model, recallPlanMessages(primer, input, grounding), deadline)
       usage = addUsage(usage, plan.usage)
       planned = keepReadonlyOperations(plan.value.commands.map((command) => ({ command }))).filter(operation => {
         try { if (epoch > 0) assertCurrentOperations([operation]); return true } catch { return false }
       })
     } catch (error) {
+      if (error instanceof AiResponseError && error.code === 'model_timeout') throw error
       if (error instanceof AiResponseError) usage = addUsage(usage, error.usage)
       plannerWarning = error instanceof Error ? error.message : String(error)
     }
@@ -265,6 +244,7 @@ export async function recallMemory(
       env.AI,
       model,
       recallAnswerMessages(input, results),
+      deadline,
     )
     usage = addUsage(usage, answer.usage)
 
@@ -289,7 +269,8 @@ export async function recallMemory(
         ...(planFailures.length ? { planned_read_errors: planFailures } : {}),
       },
     }
-  } finally { await brain.checkProcessing(epoch) }
+  } catch (error) { throw withUsage(error, usage) }
+  finally { deadline.close(); await brain.checkProcessing(epoch) }
 }
 
 /**
@@ -314,53 +295,46 @@ export async function probeMemory(
 }
 
 export async function maintainMemory(
-  env: Env,
-  brain: BrainRpc,
-  input: MaintenanceInput,
+  env: Env, brain: BrainRpc, input: MaintenanceInput,
 ): Promise<unknown> {
   const epoch = await brain.beginProcessing()
+  const deadline = new ModelDeadline(env.AI_TIMEOUT_MS)
+  let run: string | undefined
+  let usage = { ...EMPTY_USAGE }
   try {
+    run = await brain.beginMaintenance(epoch, deadline.expiresAt)
     const timestamp = observationTimestamp(input.timestamp, Date.now())
-    // Deterministic first, model second — the same order `anda_brain` runs in.
-    // Disuse metabolism, silence-Watch expiry and the Skill lifecycle are
-    // arithmetic; doing them before the completion means the cycle assesses an
-    // already-settled graph rather than one it would have had to settle by hand.
-    const settlement = await brain.settleMemory(Date.parse(timestamp), input.parameters?.memory_strength_decay_factor)
-    const [snapshot, assessment] = await Promise.all([
-      brain.executeAgentRead(MAINTENANCE_SNAPSHOT, epoch),
-      brain.maintenanceAssessment(),
+    const settlement = await brain.settleMemory(Date.parse(timestamp), input.parameters?.memory_strength_decay_factor, run, epoch)
+    const [snapshot, assessment, primerResult] = await Promise.all([
+      brain.maintenanceSnapshot(epoch, run), brain.maintenanceAssessment(), brain.describePrimer(),
     ])
     throwOnKipError(snapshot, 'maintenance snapshot failed')
-    const model = env.AI_MODEL || DEFAULT_AI_MODEL
-    const plan = await createMutationPlan(
-      env.AI,
-      model,
-      maintenanceMessages(input, { snapshot, assessment, settlement }, timestamp),
-    )
-
-    const { operations, vocabulary } = await preparePlan(
-      brain,
-      plan.value,
-      assertMaintenanceOperations,
-      'maintenance',
-      epoch,
-    )
-
-    const results = (operations.length || plan.value.runtime?.length) ? await brain.executeMaintenancePlan(operations, plan.value.runtime, epoch) : []
-    throwOnKipError(results, 'maintenance KIP failed')
-    // A model completion does not prove complete change-stream consumption.
-
-    return {
-      content: plan.value.summary || 'No maintenance changes were needed.',
-      scope: input.scope ?? 'daydream',
-      changed: countChanges(results),
-      commands: operations.length,
-      settlement,
-      runtime: results.filter((result) => result.op_id?.startsWith('runtime_')),
-      ...(vocabulary ? { vocabulary } : {}),
-      usage: plan.usage,
+    const primer = resultOrThrow(primerResult, 'maintenance primer failed')
+    const plan = await createMutationPlan(env.AI, env.AI_MODEL || DEFAULT_AI_MODEL,
+      maintenanceMessages(input, { snapshot, assessment, settlement }, timestamp, primer), deadline)
+    usage = plan.usage
+    deadline.check()
+    if (plan.value.reviewed_corrections?.some(id => !assessment.revised_roots.some(root => root.assertion === id))) {
+      throw new OperationError('reviewed_corrections must name roots in this maintenance snapshot', 422)
     }
-  } finally { await brain.checkProcessing(epoch) }
+    const { operations, vocabulary } = await preparePlan(brain, plan.value,
+      assertMaintenanceOperations, 'maintenance', epoch, run)
+    deadline.check()
+    const results = await brain.executeMaintenancePlan(operations, plan.value.runtime, epoch, run, plan.value.reviewed_corrections)
+    throwOnKipError(results, 'maintenance KIP failed')
+    return {
+      content: committedContent(plan.value.summary, results, 'No maintenance-plan changes were committed.'),
+      scope: input.scope ?? 'daydream', changed: countChanges(results), commands: operations.length,
+      operation_results: operationStatuses(results), settlement,
+      runtime: results.filter(result => result.op_id?.startsWith('runtime_')),
+      ...(vocabulary ? { vocabulary } : {}), usage,
+    }
+  } catch (error) { throw withUsage(error, usage) }
+  finally {
+    deadline.close()
+    if (run) await brain.endMaintenance(run)
+    await brain.checkProcessing(epoch)
+  }
 }
 
 /**
@@ -384,6 +358,7 @@ async function preparePlan(
   gate: (operations: readonly KipOperation[]) => void,
   mode: string,
   epoch: number,
+  run?: string,
 ): Promise<{ operations: KipOperation[]; vocabulary?: DeclaredVocabulary }> {
   const operations = plan.commands.map((command) => ({ command, parameters: plan.parameters }))
   try {
@@ -398,7 +373,7 @@ async function preparePlan(
   if (plan.types.length === 0 && plan.predicates.length === 0) return { operations }
   return {
     operations,
-    vocabulary: await brain.declareSymbols(plan.types, plan.predicates, epoch),
+    vocabulary: await brain.declareSymbols(plan.types, plan.predicates, epoch, run),
   }
 }
 
@@ -410,4 +385,23 @@ function resultOrThrow(result: KipResult, message: string): unknown {
 function throwOnKipError(results: readonly KipResult[], message: string): void {
   const failure = results.find((result) => result.status === 'failed')?.error
   if (failure) throw new OperationError(message, 422, { error: failure, results })
+}
+
+function operationStatuses(results: readonly KipResult[]) {
+  return results.map(({op_id, status, receipt}) => ({
+    ...(op_id === undefined ? {} : {op_id}), status, ...(receipt ? {receipt} : {}),
+  }))
+}
+
+function committedContent(summary: string, results: readonly KipResult[], empty: string): string {
+  return countChanges(results).total > 0 ? summary || 'Memory changes committed.' : empty
+}
+
+function withUsage(error: unknown, usage: Usage): unknown {
+  if (error instanceof AiResponseError) error.usage = addUsage(usage, error.usage)
+  if (error instanceof OperationError) {
+    const data = error.data && typeof error.data === 'object' ? error.data : { detail: error.data }
+    return new OperationError(error.message, error.status, { usage, ...data })
+  }
+  return error
 }

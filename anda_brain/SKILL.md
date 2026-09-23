@@ -65,7 +65,7 @@ Business Agent  ──natural language──▶  Brain  ──KIP──▶  Cogn
 
 ---
 
-The Cloudflare Worker is a separate compact adapter: it now supports reviewed memory changes through trusted host RPC and `/memory/forget`, but not budgeted Recall, Wiki, or the learning/inbox runtime. Use its own README and PRODUCT.md contracts; a nonempty Recall `budget` is rejected there.
+The Cloudflare Worker is a separate compact adapter: it now supports reviewed memory changes through trusted host RPC and `/memory/forget`, but not budgeted Recall, Wiki, or the learning/inbox runtime. Use its own README and PRODUCT.md contracts; a nonempty Recall `budget` is rejected there. Worker callers should inspect `operation_results`, preserve nullable `usage` and known subtotals, and handle 409 processing conflicts, 502 model failures and 504 shared-deadline timeouts. These Worker-specific response contracts do not change the Rust endpoints below.
 
 ## What You Get
 

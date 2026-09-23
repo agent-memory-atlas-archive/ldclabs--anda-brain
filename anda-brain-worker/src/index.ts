@@ -1,3 +1,5 @@
+import { AiResponseError } from './ai.js'
+import { processingErrorCode } from './processing.js'
 import { validateForget } from './forget.js'
 import { assertReadonlyOperations } from './kip.js'
 import { AndaBrain } from './brain.js'
@@ -135,7 +137,9 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
         throw new ApiError('not found', 404)
     }
   } catch (error) {
-    if (error instanceof Error && ['memory_change_pending', 'memory_changed_rebuild_context', 'source_suppressed'].some(reason => error.message.includes(reason))) return fail('memory changed or source suppressed; rebuild context before retrying', 409)
+    if (error instanceof AiResponseError) return fail(error.code === 'model_timeout' ? 'model request deadline exceeded' : 'model call failed', error.code === 'model_timeout' ? 504 : 502, { code: error.code, usage: error.usage })
+    const code = processingErrorCode(error)
+    if (code) return fail(code, 409, { code })
     if (error instanceof ApiError) return fail(error.message, error.status, error.data)
     if (error instanceof ValidationError) return fail(error.message, 400)
     if (error instanceof OperationError) return fail(error.message, error.status, error.data)

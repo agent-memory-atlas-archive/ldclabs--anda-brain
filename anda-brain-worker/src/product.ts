@@ -1,3 +1,4 @@
+import { clearMaintenanceContext } from './maintenance.js'
 /** Trusted embedding-host contracts. Never expose caller identity from an HTTP body. */
 import {
   ANONYMOUS_PRINCIPAL, contentDigest, formatElementId, isJsonMap, parseElementId,
@@ -54,6 +55,8 @@ const CHANGE = PREFIX + 'change:'
 const SOURCE = PREFIX + 'source:'
 const EVIDENCE = PREFIX + 'evidence:'
 const WATCH = PREFIX + 'watch:'
+const SCRUB = PREFIX + 'pending_scrub'
+interface PendingScrub { ids: string[]; except?: string }
 const digest = (value: unknown): string => contentDigest(JSON.parse(JSON.stringify(value)) as Json)
 const fail = (reason: string): never => { throw new Error(reason) }
 
@@ -112,7 +115,7 @@ export class MemoryProduct {
   }
   check(epoch: number): void {
     const state = this.state()
-    if (state.pending) fail('memory_change_pending')
+    if (state.pending || this.kv.get(SCRUB)) fail('memory_change_pending')
     if (epoch !== state.epoch) fail('memory_changed_rebuild_context')
   }
   begin(source?: SourceIdentity, origin?: string): number {
@@ -148,7 +151,7 @@ export class MemoryProduct {
     state.epoch += 1
     if (!Number.isSafeInteger(state.epoch)) fail('epoch_exhausted')
     this.kv.put(CONTROL, state)
-    this.kv.delete('anda-brain:revised_roots')
+    clearMaintenanceContext(this.kv)
   }
   private session(auth: AuthContext): Session {
     if (!auth?.principal_id || auth.principal_id === ANONYMOUS_PRINCIPAL) fail('unauthorized')
@@ -315,6 +318,7 @@ export class MemoryProduct {
     const key = this.key(auth, input.operation_id), inputDigest = digest(input)
     const old = this.kv.get<StoredChange>(CHANGE + key)
     if (old) {
+      this.expire(old, key)
       if (old.receipt.state === 'discarded') fail('preview_expired')
       if (old.input_digest !== inputDigest) fail('idempotency_conflict')
       return this.change(auth, input.operation_id)
@@ -337,6 +341,7 @@ export class MemoryProduct {
   }
   change(auth: AuthContext, id: string): ChangeReceipt {
     const stored = this.kv.get<StoredChange>(CHANGE + this.key(auth, id)) ?? fail('not_found')
+    this.expire(stored, stored.receipt.operation_key)
     // A stored preview must not bypass a later read revocation.
     const session = this.session(auth)
     const record = stored.receipt.preview.record
@@ -385,6 +390,11 @@ export class MemoryProduct {
     return this.apply(key)
   }
   recover(): void {
+    const scrub = this.kv.get<PendingScrub>(SCRUB)
+    if (scrub) {
+      try { this.scrubChanges(new Set(scrub.ids), scrub.except) }
+      catch { fail('memory_change_pending') }
+    }
     const key = this.state().pending
     if (key) this.apply(key)
   }
@@ -427,7 +437,7 @@ export class MemoryProduct {
       stored.receipt.error = null
       this.kv.put(CHANGE + key, stored)
       // Clear durable assessment context that may contain now-retired roots.
-      this.kv.delete('anda-brain:revised_roots')
+      clearMaintenanceContext(this.kv)
       this.kv.put(CONTROL, { ...this.state(), pending: null })
     } catch {
       // Provider/native diagnostics may contain retired bytes; keep only a stable
@@ -438,19 +448,43 @@ export class MemoryProduct {
     }
     return stored.receipt
   }
+  /** One bounded page at a time; never materialize the entire preview journal. */
+  private *changes(): Generator<[string, StoredChange]> {
+    let startAfter: string | undefined
+    while (true) {
+      const page = [...this.kv.list<StoredChange>({ prefix: CHANGE, limit: 50, ...(startAfter ? {startAfter} : {}) })]
+      yield* page
+      if (page.length < 50) return
+      startAfter = page.at(-1)![0]
+    }
+  }
+  private expire(stored: StoredChange, key: string): void {
+    if (stored.receipt.state === 'prepared' && stored.receipt.expires_at < Date.now() && this.state().pending !== key) {
+      stored.receipt.state = 'discarded'
+      clearContent(stored)
+      this.kv.put(CHANGE + key, stored)
+    }
+  }
   /** Erased graph content must not survive in host preview copies. */
   scrubChanges(erased: ReadonlySet<string>, except?: string): void {
-    for (const [path, related] of this.kv.list<StoredChange>({ prefix: CHANGE })) {
+    // A failed cleanup must be retried even when the native elements are now
+    // purged and a repeated forget consequently has no new changes to report.
+    const pending = this.kv.get<PendingScrub>(SCRUB)
+    const ids = new Set([...erased, ...(pending?.ids ?? [])])
+    this.kv.put(SCRUB, {ids:[...ids], ...(except ? {except} : {})} satisfies PendingScrub)
+    for (const [path, related] of this.changes()) {
       if (path === CHANGE + except) continue
+      this.expire(related, path.slice(CHANGE.length))
       const record = related.receipt.preview.record
-      const oldErased = erased.has(record.id) || erased.has(record.proposition_id) || record.sources.some(source => erased.has(source.evidence_id))
-      const replacementErased = erased.has(related.receipt.replacement_record ?? '') || erased.has(related.receipt.source_evidence ?? '')
+      const oldErased = ids.has(record.id) || ids.has(record.proposition_id) || record.sources.some(source => ids.has(source.evidence_id))
+      const replacementErased = ids.has(related.receipt.replacement_record ?? '') || ids.has(related.receipt.source_evidence ?? '')
       if (!oldErased && !replacementErased) continue
       if (related.receipt.state === 'prepared') related.receipt.state = 'discarded'
       if (replacementErased || related.receipt.state !== 'confirmed') clearContent(related)
       else clearRecord(related)
       this.kv.put(path, related)
     }
+    this.kv.delete(SCRUB)
   }
 
   private requests(auth: AuthContext, key: string, input: ChangeInput, preview: ChangePreview): KipOperation[] {

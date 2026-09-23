@@ -237,7 +237,7 @@ function assertBoundedReadonlyOperations(
   operations: readonly KipOperation[],
   maxResults: number,
 ): void {
-  assertReadonlyOperations(operations)
+  assertOperationBatch(operations)
   for (const operation of operations) {
     assertBoundedRead(parseKip(operation.command), operation.parameters, maxResults)
   }

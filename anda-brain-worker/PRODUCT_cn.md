@@ -85,3 +85,25 @@ Formation 在调用模型前注册 `formation:sha256:…` 观察身份。默认�
 学习保持 `services_missing`、`supported:false`，需使用具有显式 executor/observer/source
 和校准绑定的 Rust 学习运行时。模型调用成功或 Watch 触发不代表独立 Outcome、真实收益或
 执行某个程序的权限。
+
+## 处理可靠性
+
+管理修改后的模型 Session 在匹配、结构引用、按 ID 读取 Proposition、嵌套查询和聚合
+之前执行原生可见性收窄，非活跃内容不能通过间接引用重新进入。管理审计保持原有权限。
+批量 forget 汇总擦除 ID，再分批清理一次预览；中断清理会持久化，在后续访问或驱逐恢复
+时重试，完成前关闭自动处理。过期未提交预览在访问或清理时删除内容，保留操作身份。
+
+Maintenance 每个 Space 同时只允许一次运行，使用持久身份和过期时间。接管后的新运行
+拒绝旧调用者的写入和更正确认。未确认的更正页跨失败、驱逐保留；模型计划可用
+`reviewed_corrections` 确认本页已审阅的根，仅在计划执行无失败后应用，不证明依赖覆盖
+完整，也不覆盖原生有效性。直接使用 `settleMemory` 的受信宿主可调用
+`acknowledgeCorrections(ids, epoch)` 确认已审阅项。快照轮转有界候选 ID，排除终态任务，
+提供原生内容、版本和 live primer；谓词计数合并为一次原生分组查询，词汇读取仅加载
+活跃包正文。
+
+Worker HTTP 409 在 `error.data.code` 提供精确冲突码。Formation / Maintenance 返回
+`operation_results`（status、可用的 receipt、可选 op_id），无实际变更使用宿主文案。
+`usage.input_tokens/output_tokens` 可为 null，未知计量保持未知；`usage.known` 保存
+可计量部分之和。`AI_TIMEOUT_MS` 默认 120000，范围 1–300000 毫秒，所有模型阶段共享。
+超时返回 504 / `model_timeout`，其他模型失败返回 502，迟到输出不执行计划。
+初次写入后的 Formation 复核失败保留带回执的 422。这些契约仅适用于 Worker。

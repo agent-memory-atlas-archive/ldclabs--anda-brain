@@ -961,8 +961,10 @@ describe('Anda Brain Worker', () => {
     const failed = await post(runtime, uniqueSpace('internal'), 'formation', {
       messages: [{ role: 'user', content: 'Remember this.' }],
     })
-    expect(failed.status).toBe(500)
-    expect(await failed.text()).toBe('{"error":{"message":"internal error"}}')
+    expect(failed.status).toBe(502)
+    const body = await failed.json<any>()
+    expect(body.error).toMatchObject({message:'model call failed',data:{code:'model_call_failed',usage:{input_tokens:null,output_tokens:null}}})
+    expect(JSON.stringify(body)).not.toContain('provider-secret-detail')
   })
 
   it('reports what this Space holds', async () => {

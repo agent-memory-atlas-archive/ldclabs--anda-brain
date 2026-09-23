@@ -2,7 +2,7 @@
 
 Rust 写入互斥、后台模型并发、关闭重试和自检预算详见[执行与资源限制](anda_brain/RUNTIME_cn.md#执行与资源限制)。
 
-Cloudflare Worker 的对应能力和限制见[逐提交核对](anda-brain-worker/PORTING_AUDIT.md)与[受信宿主产品契约](anda-brain-worker/PRODUCT_cn.md)。Worker 已同步来源记录、审阅式修改、恢复和处理代次边界；预算化 Recall、Wiki 和学习运行时仍不提供。
+Cloudflare Worker 的对应能力和限制见[逐提交核对](anda-brain-worker/PORTING_AUDIT.md)与[受信宿主产品契约](anda-brain-worker/PRODUCT_cn.md)。Worker 已同步来源记录、审阅式修改、恢复和处理代次边界；预算化 Recall、Wiki 和学习运行时仍不提供。 Worker 特有的操作回执、可空用量、共享模型超时和维护确认见其宿主契约；Rust API 形状不变。
 
 > 消耗电力训练大模型，得到神经网络本体；消耗词元训练记忆图谱，得到符号网络本体。
 >

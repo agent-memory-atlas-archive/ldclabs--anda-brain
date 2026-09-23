@@ -113,3 +113,34 @@ learning readiness. Readiness remains `services_missing`, `supported:false`;
 use the Rust learning runtime with explicit executor/observer/source and calibration
 bindings. A successful model call or Watch firing is not an independent outcome,
 empirical improvement or permission to execute a procedure.
+
+## Processing reliability
+
+Managed changes narrow the model Session's native visibility before matching,
+structural joins, Proposition-id reads, nested patterns and aggregation. Inactive
+content cannot re-enter through an indirect reference. Administrative audit reads
+retain their existing access. Batched forget collects erased ids for one paged
+preview cleanup; interrupted cleanup is persisted and retried on object access or
+reload before automated processing resumes. Expired uncommitted previews lose their
+content on access or cleanup while retaining their operation identity.
+
+Maintenance admits one request per Space, with a durable run identity and expiry.
+A replacement run fences an expired caller's writes and correction acknowledgements.
+Unacknowledged correction pages survive failures and eviction. The optional model
+plan field `reviewed_corrections` acknowledges only roots supplied in the pending
+page after successful plan execution; it does not establish complete dependent
+coverage or override native validity. Trusted hosts using `settleMemory` directly
+can acknowledge their reviewed roots with `acknowledgeCorrections(ids, epoch)`.
+Snapshots rotate bounded candidate ids, exclude terminal tasks and include native
+content/versions plus a live primer. Predicate counts use one grouped native query;
+vocabulary inspection loads active package artifacts rather than every version.
+
+Worker HTTP processing returns exact conflict codes in `error.data.code` (409).
+Formation and Maintenance expose `operation_results` with status, available receipt
+and optional op_id; a plan with no changes gets a host-generated no-change summary.
+`usage.input_tokens` and `output_tokens` are nullable: unknown measurements remain
+null, with `usage.known` holding measured subtotals when any call is unmeasured.
+`AI_TIMEOUT_MS` (default 120000, range 1–300000) bounds all model stages together.
+Timeout is 504 / `model_timeout`; other model failures are 502. Late output cannot
+execute a plan. Formation review failures after initial writes retain their 422
+receipt-bearing response. These contracts are specific to the Worker.

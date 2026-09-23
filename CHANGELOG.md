@@ -21,6 +21,11 @@ All notable changes to the Anda Brain project.
 
 ### Worker parity and limits
 
+- Model Sessions now exclude inactive elements before structural joins, Proposition-id reads and aggregation after managed changes; administrative audit access remains intact.
+- Maintenance persists unacknowledged correction pages and run ownership, fences expired writers, rotates bounded native snapshot candidates and excludes terminal tasks. The model receives content, versions and a live primer; explicit review acknowledgements do not claim complete dependency coverage.
+- Worker responses retain per-operation statuses and distinguish no-effect plans from successful changes. Missing model usage stays nullable with known subtotals. One configurable deadline covers all model stages and fences late output; provider errors use 502 and timeouts 504, with receipt-preserving post-write review failures remaining 422.
+- Grouped predicate counts replace repeated per-predicate reads, vocabulary inspection reads only active package artifacts, and batch erasure performs one paged, recoverable preview cleanup that also clears expired draft content.
+
 - The Worker includes complete KIP syntax in every model stage, a single receipt-preserving review for large Formation inputs, grounding before Recall planning, and explicit Evidence/Activity erasure with per-kind counts, including archived records.
 - Trusted Worker RPCs provide source-backed records, reviewed changes, source fences, durable per-step recovery and processing-epoch checks. Native read limits apply to record projections. Explicitly bound record Watches support host-polled advancement and cancellation, including interrupted creation.
 - The Worker uses `@ldclabs/kip-do` 0.13.2 while compiled protocol references remain pinned independently to `anda_kip` 0.13.1 and verified by hash. It still has no cross-operation atomic batch, semantic search, Wiki, budgeted Recall packet, background inbox delivery or learning execution runtime; a nonempty Recall `budget` is rejected.

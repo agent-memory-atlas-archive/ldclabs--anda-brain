@@ -739,7 +739,7 @@ own Activities — `TRANSITION` to `retracted`, `superseded`, `corrected`,
 `TRANSITION ... TO "archived"` and `TO "tombstoned"` are refused here, and so
 are `UPDATE`, `PURGE` and `MERGE CONCEPT`. They act on memory in bulk from a
 selection, and a pass reading an untrusted conversation is the last thing that
-should hold them. Maintenance has them. Write the state as a literal: a
+should hold them. Maintenance can update, merge and retire; PURGE remains administrative. Write the state as a literal: a
 `TRANSITION` whose state arrives as a parameter this request does not bind is
 refused, because the gate cannot check what it cannot read.
 
@@ -849,3 +849,12 @@ salience and utility are optional; repeated reports are not independent attempts
 Optional digests maps digest_ names to canonical JSON; the host binds their
 SHA-256 to :digest_name in your KML. Include all revision attributes except
 behavior_digest. runtime operations are forbidden in Formation plans.
+
+### Bound values in the JSON plan
+
+Only `:msg1` through the captured message window and host-computed `:digest_*`
+parameters are bound by this plan API. Other placeholder names in reference examples
+are illustrative: write the actual safely quoted literal from the supplied context,
+or defer when it is unknown. Formation cannot acknowledge maintenance corrections.
+The runtime reports actual per-operation status and replaces an unsupported success
+summary when the plan committed no changes.

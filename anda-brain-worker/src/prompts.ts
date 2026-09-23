@@ -92,12 +92,13 @@ export function maintenanceMessages(
   input: MaintenanceInput,
   snapshot: unknown,
   timestamp: string,
+  primer?: unknown,
 ): AiMessage[] {
   return [
     { role: 'system', content: `${BRAIN_MAINTENANCE}\n\n---\n\n${reference(`${KIP_RECALL_CARD}\n${KIP_FORMATION_CARD}\n${KIP_MAINTENANCE_CARD}`)}` },
     {
       role: 'user',
-      content: boundedJson({ stage: 'maintenance', timestamp, request: input, snapshot }),
+      content: boundedJson({ stage: 'maintenance', timestamp, request: input, primer, snapshot }),
     },
   ]
 }

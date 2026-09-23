@@ -1,6 +1,6 @@
 /** Bounded maintenance. Nexus owns Watch generations and authorized coverage.
  * No local outcome-count rule can confer validated Skill standing. */
-import { KipError, type JsonMap, type KipResult } from '@ldclabs/kip-do'
+import { KipError, isJsonMap, type JsonMap, type KipResult } from '@ldclabs/kip-do'
 import type { KipOperation } from './kip.js'
 import type {
   ArmedWatch,
@@ -18,6 +18,7 @@ export type RunKip = (operation: KipOperation) => KipResult
 export type AdvanceWatch = (id: string, version: number, generation: number) => JsonMap
 
 export interface SettlePosition {
+  pendingCorrections?: CorrectionScan
   correctionCursor?: number | CorrectionCursor
   advanceWatch?: AdvanceWatch
   decayFactor?: number
@@ -37,7 +38,7 @@ export function settle(run: RunKip, nowMs: number, position: SettlePosition = {}
       graded: 0, transitions: 0, conflicted: 0,
       unsupported_reason: 'memory_learning requires configured independent observers, frozen trials and replayable evaluations',
     },
-    corrections: scanCorrections(run, position.correctionCursor ?? 0),
+    corrections: position.pendingCorrections ?? scanCorrections(run, position.correctionCursor ?? 0),
   }
 }
 
@@ -241,7 +242,7 @@ function scanCorrections(run: RunKip, position: number | CorrectionCursor): Corr
       root.dependents = readDependents(walked.result)
       root.truncated =
         walked.next_cursor !== undefined ||
-        (walked.warnings ?? []).some((warning) => isObject(warning) && warning.code === 'truncated')
+        walked.extensions?.['kip-do/dependents']?.truncated === true
     }
     scan.revised_roots.push(root)
   }
@@ -363,30 +364,29 @@ function watchesInStatus(run: RunKip, status: string): ArmedWatch[] {
  * wrong target.
  */
 function predicateCensus(run: RunKip): Record<string, number> {
+  const listed = run({ command: 'LIST PREDICATES LIMIT 1000' })
+  const counted = run({ command: 'FIND(?predicate, COUNT(?link)) WHERE { ?link (?s, ?predicate, ?o) } LIMIT 1000' })
+  if (listed.status !== 'succeeded' || counted.status !== 'succeeded' || counted.next_cursor ||
+      !Array.isArray(listed.result) || !Array.isArray(counted.result)) return {}
+  // Native counts retain visibility. Merge exact-version groups by lineage,
+  // then expose only unambiguous active local names, including zero-use symbols.
+  const lineage = (ref: string) => ref.replace(/@[^/]+(?=\/[^/]+$)/, '')
+  const counts = new Map<string, number>()
+  for (const row of counted.result) {
+    if (!Array.isArray(row) || typeof row[0] !== 'string' || typeof row[1] !== 'number') return {}
+    const key = lineage(row[0])
+    counts.set(key, (counts.get(key) ?? 0) + row[1])
+  }
+  const entries = listed.result.filter(isJsonMap)
   const census: Record<string, number> = {}
-  const listed = run({ command: 'LIST PREDICATES LIMIT 100' })
-  if (listed.status === 'failed' || !Array.isArray(listed.result)) return census
-  for (const entry of listed.result) {
-    // A `LIST` row, the same one both engines answer with:
-    // `{ref, local_name, package_ref, status}`. `local_name` is what a command
-    // may write, which is what the census counts by.
-    if (!isObject(entry)) continue
-    const name = entry.local_name
-    if (typeof name !== 'string' || name === '') continue
-    const counted = run(predicateCensusCommand(name))
-    if (counted.status === 'failed') continue
-    const count = Array.isArray(counted.result) ? counted.result[0] : undefined
-    if (typeof count === 'number') census[name] = count
+  for (const entry of entries) {
+    const name = entry.local_name, ref = entry.ref
+    if (typeof name === 'string' && typeof ref === 'string' &&
+        entries.filter(candidate => candidate.local_name === name).length === 1) {
+      census[name] = counts.get(lineage(ref)) ?? 0
+    }
   }
   return census
-}
-
-/** How many links each registered predicate carries — the sprawl indicator. */
-function predicateCensusCommand(predicate: string): KipOperation {
-  return {
-    command: 'FIND(COUNT(?link)) WHERE { ?link (?s, :predicate, ?o) }',
-    parameters: { predicate },
-  }
 }
 
 // --- helpers ----------------------------------------------------------------

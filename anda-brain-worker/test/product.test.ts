@@ -339,6 +339,26 @@ it('rejects historical reads inside nested AST while retaining ordinary literal 
   expect(()=>assertCurrentOperations([{command:'CREATE EVIDENCE ?e {SET FIELDS {evidence_class:"user_statement",payload:{state:"a literal",cursor:"source text",matcher:{state:"not a selector"}}}}'}])).not.toThrow()
 })
 
+it('recovers erased preview cleanup even when a retry has no live graph targets', async () => {
+  const {brain,record} = await seed()
+  const preview = await brain.productPrepare(auth,{operation_id:'cleanup-retry',record_id:record.id,expected_revision:record.revision,kind:'correct',new_value:'private pending correction'})
+  await runInDurableObject(brain as never,(instance,state)=>{
+    const nexus=(instance as unknown as {nexus:CognitiveNexus}).nexus
+    const product=new MemoryProduct(nexus,state.storage)
+    product.invalidate()
+    const outcome=nexus.execute('PURGE :id REFERENCE POLICY "authorized_cascade" CONFIRM "PURGE"',{id:record.sources[0]!.evidence_id})
+    const ids=outcome.changes.filter(change=>change.op==='purge').map(change=>change.id)
+    // Native deletion committed; preview cleanup has not completed.
+    state.storage.kv.put('anda-brain:product:v1:pending_scrub',{ids})
+    expect(()=>product.begin()).toThrow('memory_change_pending')
+  })
+  await evictDurableObject(brain as never)
+  const receipt=await brain.productChange(auth,preview.operation_id)
+  expect(receipt.state).toBe('discarded')
+  expect(JSON.stringify(receipt)).not.toContain('private pending correction')
+  expect(await brain.beginProcessing()).toBe(1)
+})
+
 // Await RPC thenables directly; Vitest's rejects matcher probes thenables more
 // than once, which produces spurious unhandled rejections in workerd.
 async function rejects(result: PromiseLike<unknown>, message: string): Promise<void> {

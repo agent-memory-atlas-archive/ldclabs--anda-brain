@@ -364,6 +364,31 @@ curl http://localhost:8787/v1/alice/execute_kip_readonly \
 - 原始 `execute_kip` 是管理接口；不要把密钥交给不可信客户端。
 - 一个空间对应一个 Durable Object，KIP 存储操作会在其中串行提交；AI 规划仍可能并行运行，高吞吐场景应拆分空间。
 
+## 处理可靠性与返回状态
+
+- 同一 Space 的 Maintenance 为单次运行；重叠请求返回 HTTP 409，
+  `error.data.code=maintenance_busy`。运行标记持久化，过期接管使用新身份，旧计划不能写入。
+- 更正扫描保留未确认页。Maintenance 计划可返回 `reviewed_corrections:["A-1"]`，
+  仅确认本次快照中实际审阅的根；失败、延后或省略确认时，下轮仍提供这些根。
+  确认有界审阅不证明依赖闭包完整，也不覆盖原生 dependency validity。
+- 快照先在 SQLite 选每组最多 20 个候选 ID，再通过原生授权读取完整元素视图与版本，
+  并提供 live primer。任务排除终态；候选轮转位置表示已提供，不表示已处理。
+  KIP 查询的 `LIMIT` 仍是结果条数上限，不是通用扫描工作量上限。
+- Formation / Maintenance 返回 `operation_results`，每项包含 `status` 和可用的原生
+  `receipt`（以及请求指定时的 `op_id`）。没有实际计划变更时，宿主返回无变更文案，
+  不直接复述模型的成功摘要。Maintenance 的原生 settlement 仍单独报告。
+- `usage.input_tokens/output_tokens` 为数值或 `null`；`null` 表示至少一个调用缺少该项
+  计量。此时 `usage.known` 保留已知部分之和，不能当作整个请求的实际总量。
+- `AI_TIMEOUT_MS` 是所有模型阶段共享的截止时间，默认 120000，允许 1–300000 毫秒，
+  包括参考查阅、Recall 回答和 Formation 复核。宿主传递取消信号并丢弃迟到输出。
+  模型超时返回 HTTP 504（`model_timeout`）；其他模型调用/输出错误返回 HTTP 502。
+  错误数据保留已知用量。初次写入后复核失败仍返回带回执的 422，不能重放整份计划。
+- 管理修改后的模型 Session 在原生读取时排除非活跃元素，覆盖结构引用、按 ID 读取
+  Proposition、嵌套查询与聚合；管理审计接口仍可读取历史。HTTP 409 的
+  `error.data.code` 给出精确处理原因，模型供应商错误文本不会被子串匹配成状态冲突。
+- 批量擦除合并预览清理，分批读取历史预览并清除过期草稿内容；清理失败保留恢复记录，
+  后续对象访问/驱逐恢复会继续清理，完成前自动处理保持关闭。
+
 ## 检查
 
 ```bash

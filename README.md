@@ -2,7 +2,7 @@
 
 Rust writer admission, background model concurrency, close retry and self-test budgets are described in [execution limits](anda_brain/RUNTIME.md#execution-and-resource-limits).
 
-Cloudflare Worker parity and limits are documented in the [commit audit](anda-brain-worker/PORTING_AUDIT.md) and [trusted host contracts](anda-brain-worker/PRODUCT.md). The Worker supports source records, reviewed changes, recovery and processing fences; budgeted Recall, Wiki and learning runtimes remain unavailable.
+Cloudflare Worker parity and limits are documented in the [commit audit](anda-brain-worker/PORTING_AUDIT.md) and [trusted host contracts](anda-brain-worker/PRODUCT.md). The Worker supports source records, reviewed changes, recovery and processing fences; budgeted Recall, Wiki and learning runtimes remain unavailable. Worker-specific operation receipts, nullable usage, shared model deadlines and maintenance acknowledgements are documented in its host contracts; Rust API shapes are unchanged.
 
 > Burn electricity to train large models, and you get a neural network ontology; burn tokens to train a memory graph, and you get a symbolic network ontology.
 >

@@ -15,6 +15,7 @@ export function forget(session: Session, input: ForgetInput, afterErase?: (ids: 
     deleted_assertions:0,deleted_evidence:0,deleted_activities:0,entities:[]}
   const counters = {concept:'deleted_concepts',proposition:'deleted_propositions',assertion:'deleted_assertions',
     evidence:'deleted_evidence',activity:'deleted_activities'} as const
+  const erased = new Set<string>()
   for (const entity of new Set(input.entities.map(id => id.trim()))) {
     const entry: ForgetReport['entities'][number] = {entity,existed:false}
     try {
@@ -30,11 +31,12 @@ export function forget(session: Session, input: ForgetInput, afterErase?: (ids: 
         for (const change of outcome.changes) {
           if (change.op === 'purge' && change.kind in counters) report[counters[change.kind as keyof typeof counters]] += 1
         }
-        afterErase?.(new Set(outcome.changes.filter(change => change.op === 'purge').map(change => change.id)))
+        for (const change of outcome.changes) if (change.op === 'purge') erased.add(change.id)
       }
     } catch (error) { entry.error = error instanceof Error ? error.message : 'erasure failed' }
     report.entities.push(entry)
   }
+  if (erased.size) afterErase?.(erased)
   return report
 }
 export function validateForget(value: unknown): asserts value is ForgetInput {

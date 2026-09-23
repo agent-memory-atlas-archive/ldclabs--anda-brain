@@ -3,3 +3,6 @@ BRAIN_API_KEY=replace-me
 
 # Optional; defaults to the model configured in wrangler.jsonc.
 AI_MODEL=@cf/meta/llama-4-scout-17b-16e-instruct
+
+# Optional shared deadline for all model stages (1-300000 milliseconds).
+AI_TIMEOUT_MS=120000

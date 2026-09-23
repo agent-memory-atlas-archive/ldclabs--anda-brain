@@ -1,3 +1,4 @@
+import { lockFromJson, symbols } from '@ldclabs/kip-do/schema'
 /**
  * The Schema Package this Space's own memories are written against.
  *
@@ -20,13 +21,14 @@
  * cannot drift underneath it.
  *
  * The Schema Environment is also the *only* store. The vocabulary is read back
- * out of `LIST TYPES` / `LIST PREDICATES` rather than kept in a second place
+ * from the active lock and its exact packages rather than kept in a second place
  * that could disagree with it.
  */
 
 import {
   COGNITIVE_MEMORY,
-  parseSymbolRef,
+  CORE_PACKAGE,
+  CORE_PACKAGE_REF,
   type CognitiveNexus,
   type Json,
   type SchemaPackage,
@@ -100,23 +102,24 @@ export class MemoryVocabulary {
    * Keeping a second copy beside it would create exactly one bug — the two
    * disagreeing — and no capability.
    */
-  static load(nexus: CognitiveNexus): MemoryVocabulary {
+  static load(nexus: CognitiveNexus, reserveVersion = false): MemoryVocabulary {
     const vocabulary = new MemoryVocabulary()
-    for (const [command, mine, borrowed] of [
-      ['LIST TYPES LIMIT 1000', vocabulary.types, vocabulary.borrowedTypes],
-      ['LIST PREDICATES LIMIT 1000', vocabulary.predicates, vocabulary.borrowedPredicates],
-    ] as const) {
-      for (const text of symbolRefs(nexus.describe(command))) {
-        const symbol = parseSymbolRef(text)
-        if (symbol.package.packageId === MEMORY_PACKAGE_ID) {
-          mine.add(symbol.name)
-          vocabulary.revision = Math.max(vocabulary.revision, symbol.package.version.patch)
-        } else {
-          borrowed.add(symbol.name)
-        }
+    const stored = nexus.store.schemaEnv(nexus.space)
+    const packages = stored ? lockFromJson(stored.lock).packages : { 'kip://core': '2.0.0' }
+    for (const [id, version] of Object.entries(packages)) {
+      const ref = `${id}@${version}`
+      const artifact = ref === CORE_PACKAGE_REF ? CORE_PACKAGE : nexus.store.packageByRef(ref)?.artifact as SchemaPackage | undefined
+      if (!artifact) throw new Error(`active vocabulary package missing: ${ref}`)
+      const mine = id === MEMORY_PACKAGE_ID
+      for (const [kind, owned, borrowed] of [
+        ['ConceptType', vocabulary.types, vocabulary.borrowedTypes],
+        ['PredicateType', vocabulary.predicates, vocabulary.borrowedPredicates],
+      ] as const) {
+        for (const name of symbols(artifact, kind)) (mine ? owned : borrowed).add(name)
       }
+      if (mine) vocabulary.revision = Number(version.split('.')[2])
     }
-    vocabulary.floor = highestInstalledRevision(nexus)
+    if (reserveVersion) vocabulary.floor = highestInstalledRevision(nexus)
     return vocabulary
   }
 
@@ -292,8 +295,9 @@ export function activeSet(vocabulary: SchemaPackage | null): SchemaPackage[] {
  */
 function highestInstalledRevision(nexus: CognitiveNexus): number {
   let revision = 0
-  for (const row of nexus.store.packages()) {
-    if (row.package_id !== MEMORY_PACKAGE_ID) continue
+  for (const row of nexus.store.sql.exec<{version: string}>(
+    'SELECT version FROM schema_packages WHERE package_id = ?', MEMORY_PACKAGE_ID,
+  )) {
     const patch = Number(row.version.split('.')[2] ?? 0)
     if (Number.isInteger(patch)) revision = Math.max(revision, patch)
   }
@@ -308,7 +312,8 @@ function highestInstalledRevision(nexus: CognitiveNexus): number {
  * force by itself on the next restart.
  */
 export function activeVocabulary(nexus: CognitiveNexus): SchemaPackage | null {
-  const version = nexus.environment().lock.packages[MEMORY_PACKAGE_ID]
+  const stored = nexus.store.schemaEnv(nexus.space)
+  const version = stored ? lockFromJson(stored.lock).packages[MEMORY_PACKAGE_ID] : undefined
   if (version === undefined || version === '') return null
   const row = nexus.store.packageByRef(`${MEMORY_PACKAGE_ID}@${version}`)
   return (row?.artifact as SchemaPackage | undefined) ?? null
@@ -359,31 +364,4 @@ function isPredicateName(name: string): boolean {
     /^[a-z][a-z0-9_]*$/.test(name) &&
     !name.endsWith('_')
   )
-}
-
-/**
- * The exact symbol references a `LIST TYPES` / `LIST PREDICATES` page carries.
- *
- * A row, not a bare string: both engines answer with
- * `{ref, local_name, package_ref, status}`, and `ref` is the one member that
- * identifies the symbol — `local_name` means nothing outside the environment
- * that resolved it, and two packages may declare the same one.
- *
- * This used to read strings, which is how it came to matter: `@ldclabs/kip-do`
- * answered with bare references and the reference engine with rows, so the same
- * code read an empty vocabulary from one of them and re-declared symbols the
- * Space already had. An empty result is the worst shape mismatch there is,
- * because it reads as an empty Space rather than as a wrong path. The shape is
- * now one contract, pinned by the shared `meta-shapes` conformance fixture, so
- * this reads the one shape rather than tolerating two.
- */
-function symbolRefs(value: Json): string[] {
-  if (!Array.isArray(value)) return []
-  const refs: string[] = []
-  for (const row of value) {
-    if (typeof row !== 'object' || row === null || Array.isArray(row)) continue
-    const reference = (row as { ref?: unknown }).ref
-    if (typeof reference === 'string' && reference !== '') refs.push(reference)
-  }
-  return refs
 }

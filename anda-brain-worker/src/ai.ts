@@ -1,3 +1,4 @@
+import { tryParseElementId } from '@ldclabs/kip-do'
 import { digestParameters, runtimeOperations } from './cognitive.js'
 import { MAX_REFERENCE_PAGES, MAX_REFERENCE_ROUNDS, readReference, REFERENCE_INSTRUCTIONS } from './kip-reference.js'
 import type {
@@ -23,10 +24,31 @@ export interface StructuredResult<T> {
 }
 
 export class AiResponseError extends Error {
-  constructor(message: string, public usage: Usage = { input_tokens: 0, output_tokens: 0 }) {
+  constructor(message: string, public usage: Usage = { input_tokens: 0, output_tokens: 0 }, readonly code = 'invalid_model_response') {
     super(message)
     this.name = 'AiResponseError'
   }
+}
+
+/** One deadline for planning, reference lookups, answering and Formation review. */
+export class ModelDeadline {
+  readonly expiresAt: number
+  readonly signal: AbortSignal
+  private timer: ReturnType<typeof setTimeout>
+  constructor(config?: string) {
+    const timeout = config === undefined ? 120_000 : Number(config)
+    if (!Number.isInteger(timeout) || timeout < 1 || timeout > 300_000) throw new Error('AI_TIMEOUT_MS must be in [1, 300000]')
+    this.expiresAt = Date.now() + timeout
+    const controller = new AbortController()
+    this.signal = controller.signal
+    this.timer = setTimeout(() => controller.abort(), timeout)
+  }
+  check(): void {
+    if (this.signal.aborted || Date.now() >= this.expiresAt) {
+      throw new AiResponseError('model request deadline exceeded', {input_tokens:0,output_tokens:0}, 'model_timeout')
+    }
+  }
+  close(): void { clearTimeout(this.timer) }
 }
 
 const MUTATION_PLAN_SCHEMA: JsonObject = {
@@ -55,6 +77,7 @@ const MUTATION_PLAN_SCHEMA: JsonObject = {
       items: { type: 'string' },
     },
     summary: { type: 'string' },
+    reviewed_corrections: { type: 'array', maxItems: 20, items: { type: 'string' }, description: 'Maintenance only: ids from assessment.revised_roots explicitly reviewed in this plan. Omit deferred roots; acknowledging a bounded review does not certify complete dependent coverage. Not evidence of complete change coverage.' },
     digests: { type: 'object', description: 'Optional digest_ parameter name to canonical JSON content. Host computes SHA-256; use :digest_revision in behavior_digest. Content includes every revision attribute except behavior_digest.' },
     runtime: { type: 'array', maxItems: 4, items: {
       type: 'object', additionalProperties: false,
@@ -95,8 +118,9 @@ export async function createMutationPlan(
   ai: AiBinding,
   model: string,
   messages: AiMessage[],
+  deadline?: ModelDeadline,
 ): Promise<StructuredResult<MutationPlan>> {
-  const result = await runStructured(ai, model, messages, MUTATION_PLAN_SCHEMA, 1800)
+  const result = await runStructured(ai, model, messages, MUTATION_PLAN_SCHEMA, 1800, deadline)
   return validateResult(result, validateMutationPlan)
 }
 
@@ -104,8 +128,9 @@ export async function createRecallPlan(
   ai: AiBinding,
   model: string,
   messages: AiMessage[],
+  deadline?: ModelDeadline,
 ): Promise<StructuredResult<RecallPlan>> {
-  const result = await runStructured(ai, model, messages, RECALL_PLAN_SCHEMA, 900)
+  const result = await runStructured(ai, model, messages, RECALL_PLAN_SCHEMA, 900, deadline)
   return validateResult(result, validateRecallPlan)
 }
 
@@ -113,8 +138,9 @@ export async function createRecallAnswer(
   ai: AiBinding,
   model: string,
   messages: AiMessage[],
+  deadline?: ModelDeadline,
 ): Promise<StructuredResult<RecallAnswer>> {
-  const result = await runStructured(ai, model, messages, RECALL_ANSWER_SCHEMA, 1000)
+  const result = await runStructured(ai, model, messages, RECALL_ANSWER_SCHEMA, 1000, deadline)
   return validateResult(result, validateRecallAnswer)
 }
 
@@ -133,7 +159,9 @@ async function runStructured(
   messages: AiMessage[],
   schema: JsonObject,
   maxTokens: number,
+  suppliedDeadline?: ModelDeadline,
 ): Promise<StructuredResult<unknown>> {
+  const deadline = suppliedDeadline ?? new ModelDeadline()
   const history: AiMessage[] = messages.map(message => ({ ...message }))
   if (history[0]?.role === 'system') history[0].content += `\n\n${REFERENCE_INSTRUCTIONS}`
   else history.unshift({ role: 'system', content: REFERENCE_INSTRUCTIONS })
@@ -152,7 +180,7 @@ async function runStructured(
   let pages = 0
   try {
     for (let round = 0; round <= MAX_REFERENCE_ROUNDS; round++) {
-      const result = await runStructuredOnce(ai, model, history.map(message => ({ ...message })), referenceSchema, maxTokens)
+      const result = await runStructuredOnce(ai, model, history.map(message => ({ ...message })), referenceSchema, maxTokens, deadline)
       usage = addUsage(usage, result.usage)
       const value = asObject(result.value, 'invalid structured response')
       if (value.references === undefined) return { value, usage }
@@ -183,8 +211,9 @@ async function runStructured(
     throw new AiResponseError('embedded reference lookup budget exhausted')
   } catch (error) {
     throw new AiResponseError(error instanceof Error ? error.message : 'structured AI call failed',
-      addUsage(usage, error instanceof AiResponseError ? error.usage : { input_tokens: 0, output_tokens: 0 }))
-  }
+      addUsage(usage, error instanceof AiResponseError ? error.usage : { input_tokens: 0, output_tokens: 0 }),
+      error instanceof AiResponseError ? error.code : 'invalid_model_response')
+  } finally { if (!suppliedDeadline) deadline.close() }
 }
 
 function assertReferenceOnly(value: JsonObject, schema: JsonObject): void {
@@ -193,7 +222,7 @@ function assertReferenceOnly(value: JsonObject, schema: JsonObject): void {
   if (required.some(key => !(key in value))) throw new AiResponseError('reference requests require empty response placeholders')
   for (const [key, entry] of Object.entries(value)) {
     if (key === 'references') continue
-    const empty = ['commands', 'types', 'predicates', 'runtime'].includes(key)
+    const empty = ['commands', 'types', 'predicates', 'runtime', 'reviewed_corrections'].includes(key)
       ? Array.isArray(entry) && entry.length === 0
       : key === 'digests' ? isObject(entry) && Object.keys(entry).length === 0
         : key === 'found' ? entry === false
@@ -209,8 +238,10 @@ async function runStructuredOnce(
   messages: AiMessage[],
   schema: JsonObject,
   maxTokens: number,
+  deadline: ModelDeadline,
 ): Promise<StructuredResult<unknown>> {
-  const raw = await ai.run(model, {
+  deadline.check()
+  const raw = await runAi(ai, model, {
     messages,
     response_format: {
       type: 'json_schema',
@@ -218,9 +249,10 @@ async function runStructuredOnce(
     },
     max_tokens: maxTokens,
     temperature: 0.1,
-  })
+  }, deadline)
 
-  const envelope = asObject(raw, 'Workers AI returned a non-object response')
+  if (!isObject(raw)) throw new AiResponseError('Workers AI returned a non-object response', { input_tokens: null, output_tokens: null })
+  const envelope = raw
   const usage = readUsage(envelope.usage)
   const response = envelope.response
 
@@ -251,6 +283,7 @@ function validateMutationPlan(value: unknown): MutationPlan {
     summary: object.summary.trim(),
     parameters: digestParameters(object.digests),
     runtime: runtimeOperations(object.runtime),
+    reviewed_corrections: readCorrections(object.reviewed_corrections),
   }
 }
 
@@ -307,18 +340,41 @@ function readCommands(value: unknown, max: number): string[] {
   return value.map((item) => item.trim()).filter(Boolean)
 }
 
-function readUsage(value: unknown): Usage {
-  if (!isObject(value)) return { input_tokens: 0, output_tokens: 0 }
-  return {
-    input_tokens: readTokenCount(value.input_tokens ?? value.prompt_tokens),
-    output_tokens: readTokenCount(value.output_tokens ?? value.completion_tokens),
+function readCorrections(value: unknown): string[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value) || value.length > 20 || value.some(id => typeof id !== 'string' || tryParseElementId(id)?.kind !== 'Assertion')) {
+    throw new AiResponseError('reviewed_corrections must contain at most 20 Assertion ids')
   }
+  return [...new Set(value)]
 }
 
-function readTokenCount(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value)
-    ? Math.max(0, Math.trunc(value))
-    : 0
+function readUsage(value: unknown): Usage {
+  if (!isObject(value)) return { input_tokens: null, output_tokens: null }
+  return { input_tokens: readTokenCount(value.input_tokens ?? value.prompt_tokens),
+    output_tokens: readTokenCount(value.output_tokens ?? value.completion_tokens) }
+}
+
+function readTokenCount(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.trunc(value) : null
+}
+
+async function runAi(ai: AiBinding, model: string, input: JsonObject, deadline: ModelDeadline): Promise<unknown> {
+  const signal = deadline.signal
+  let abort!: () => void
+  const cancelled = new Promise<never>((_, reject) => {
+    abort = () => reject(new AiResponseError('model request deadline exceeded', {input_tokens:null,output_tokens:null}, 'model_timeout'))
+    signal.addEventListener('abort', abort, { once: true })
+  })
+  try {
+    // The race also fences providers that ignore cancellation: late output is
+    // never returned to the orchestration that could execute its mutation plan.
+    return await Promise.race([ai.run(model, input, { signal }), cancelled])
+  } catch (error) {
+    if (error instanceof AiResponseError) throw error
+    throw new AiResponseError(error instanceof Error ? error.message : 'model call failed',
+      {input_tokens:null,output_tokens:null}, signal.aborted ? 'model_timeout' : 'model_call_failed')
+  } finally { signal.removeEventListener('abort', abort) }
 }
 
 function stripCodeFence(value: string): string {
@@ -337,8 +393,11 @@ function isObject(value: unknown): value is JsonObject {
 }
 
 export function addUsage(left: Usage, right: Usage): Usage {
-  return {
-    input_tokens: left.input_tokens + right.input_tokens,
-    output_tokens: left.output_tokens + right.output_tokens,
-  }
+  const input = left.input_tokens === null || right.input_tokens === null ? null : left.input_tokens + right.input_tokens
+  const output = left.output_tokens === null || right.output_tokens === null ? null : left.output_tokens + right.output_tokens
+  return { input_tokens: input, output_tokens: output,
+    ...(input === null || output === null ? { known: {
+      input_tokens: (left.known?.input_tokens ?? left.input_tokens ?? 0) + (right.known?.input_tokens ?? right.input_tokens ?? 0),
+      output_tokens: (left.known?.output_tokens ?? left.output_tokens ?? 0) + (right.known?.output_tokens ?? right.output_tokens ?? 0),
+    } } : {}) }
 }

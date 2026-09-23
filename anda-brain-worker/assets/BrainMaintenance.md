@@ -778,3 +778,20 @@ After a managed memory change, all previously planned work is fenced. Rebuild a
 new snapshot; current KQL and SEARCH remain available, while historical/inactive
 selectors and continuation cursors cannot feed model processing. Protocol reference
 lookups remain available and do not widen this boundary.
+
+### Maintenance review acknowledgements
+
+The snapshot contains full native views (including attributes, structural references,
+facets and versions) of at most 20 candidates per group. Terminal SleepTasks are
+excluded; candidate ids rotate so deferred work cannot permanently occupy the first
+page. A rotation cursor records only what was offered, never completed processing.
+The live primer is supplied separately. Preserve truncation and missing-source limits.
+
+Optionally return `reviewed_corrections: ["A-1"]` naming only roots in this snapshot
+that you explicitly reviewed. Omit deferred roots. The host retains unacknowledged
+roots across errors and restart and advances the scan checkpoint only after the
+page is acknowledged and the mutation plan has no failed operations. An acknowledged
+review of a bounded dependent list never certifies complete closure coverage or
+changes native dependency validity. Never acknowledge roots in a reference-only
+response. Only one maintenance request per Space runs at a time; its deadline and
+run identity fence late writes and acknowledgements.

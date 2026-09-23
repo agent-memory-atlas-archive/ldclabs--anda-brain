@@ -1,3 +1,5 @@
+import { CurrentMemorySession, executeAgentOperations } from './agent-session.js'
+import { MaintenanceWork, REVISED_ROOTS_KEY } from './maintenance.js'
 import { forget, validateForget, type ForgetInput } from './forget.js'
 import { MemoryProduct, assertCurrentOperations, type SourceIdentity, type ChangeInput, type RecordSource } from './product.js'
 import { BRAIN_CAPABILITIES, legacyRuntimeReplacement, runtimeOperations, type RuntimeOperation } from './cognitive.js'
@@ -21,7 +23,6 @@ import {
 import { assess, settle } from './settle.js'
 import type {
   BrainStats,
-  CorrectionCursor,
   DeclaredVocabulary,
   Env,
   MaintenanceAssessment,
@@ -31,10 +32,6 @@ import type {
 import { MemoryVocabulary, activeSet, activeVocabulary } from './vocabulary.js'
 
 const APP_BOOTSTRAP_KEY = '__anda_brain_worker_bootstrap_version'
-/** Where the next correction scan reads after. */
-const CORRECTION_CURSOR_KEY = 'anda-brain:correction_cursor'
-/** What the last settlement's correction scan found, for the next assessment. */
-const REVISED_ROOTS_KEY = 'anda-brain:revised_roots'
 const APP_BOOTSTRAP_VERSION = '3'
 
 /** The key of the Person this brain speaks as when it asserts something. */
@@ -59,6 +56,23 @@ const ACTOR_BOOTSTRAP = `MUTATE {
 
 /** One compact Anda Brain graph per Durable Object / space id. */
 export class AndaBrain extends KipDatabase<Env> {
+  private get maintenance(): MaintenanceWork { return new MaintenanceWork(this.ctx.storage) }
+
+  beginMaintenance(epoch: number, expiresAt: number): string {
+    this.checkProcessing(epoch)
+    return this.maintenance.begin(epoch, expiresAt)
+  }
+  endMaintenance(id: string): void { this.maintenance.release(id) }
+  maintenanceSnapshot(epoch: number, run: string): KipResult[] {
+    this.checkProcessing(epoch)
+    this.maintenance.check(run, epoch)
+    return this.executeAgentRead(this.maintenance.snapshot(this.nexus.space), epoch)
+  }
+  acknowledgeCorrections(ids: string[], epoch: number): void {
+    this.checkProcessing(epoch)
+    this.maintenance.acknowledge(ids)
+  }
+
   private get product(): MemoryProduct {
     return new MemoryProduct(this.nexus, this.ctx.storage, this.env.BRAIN_PRODUCT_RECIPIENT)
   }
@@ -79,7 +93,11 @@ export class AndaBrain extends KipDatabase<Env> {
   }
   executeAgentRead(operations: readonly KipOperation[], epoch: number): KipResult[] {
     this.checkProcessing(epoch)
-    if (epoch > 0) assertCurrentOperations(operations)
+    if (epoch > 0) {
+      assertCurrentOperations(operations)
+      assertReadonlyOperations(operations)
+      return executeAgentOperations(new CurrentMemorySession(this.nexus, this.authenticate(undefined)), operations, true)
+    }
     return this.executeKipReadonlyBatch(operations)
   }
   // Trusted RPC only. The embedding host supplies verified native authentication;
@@ -241,11 +259,15 @@ export class AndaBrain extends KipDatabase<Env> {
     assertFormationOperations(operations)
     this.ensureInitialized()
     this.product.capture(ingest)
-    return super.executeKipBatch(operations, undefined, undefined, { mode: 'sequence', onError: 'stop' }, ingest)
+    return epoch > 0
+      ? executeAgentOperations(new CurrentMemorySession(this.nexus, this.authenticate(undefined)), operations, false, ingest)
+      : super.executeKipBatch(operations, undefined, undefined, { mode: 'sequence', onError: 'stop' }, ingest)
   }
 
-  executeMaintenancePlan(operations: readonly KipOperation[], runtime: readonly RuntimeOperation[] = [], epoch = 0): KipResult[] {
+  executeMaintenancePlan(operations: readonly KipOperation[], runtime: readonly RuntimeOperation[] = [], epoch = 0, run?: string, reviewed: string[] = []): KipResult[] {
     this.checkProcessing(epoch)
+    if (run) this.maintenance.check(run, epoch)
+    this.maintenance.validateAcknowledgement(reviewed)
     if (epoch > 0) assertCurrentOperations(operations)
     const work = runtimeOperations(runtime)
     if (operations.length > 0) assertMaintenanceOperations(operations)
@@ -272,7 +294,12 @@ export class AndaBrain extends KipDatabase<Env> {
         return results
       }
     }
-    return [...results, ...super.executeKipBatch(operations, undefined, undefined, { mode: 'sequence', onError: 'stop' })]
+    const writes = epoch > 0
+      ? executeAgentOperations(new CurrentMemorySession(this.nexus, this.authenticate(undefined)), operations, false)
+      : super.executeKipBatch(operations, undefined, undefined, { mode: 'sequence', onError: 'stop' })
+    const complete = [...results, ...writes]
+    if (run && !complete.some(result => result.status === 'failed')) this.maintenance.acknowledge(reviewed)
+    return complete
   }
 
   describePrimer(): KipResult {
@@ -303,24 +330,18 @@ export class AndaBrain extends KipDatabase<Env> {
    * the nexus, and {@link run} hands the settlement the one capability it
    * cannot supply itself.
    */
-  settleMemory(nowMs: number, decayFactor?: number): SettlementReport {
-    this.ensureInitialized()
-    const kv = this.ctx.storage.kv
+  settleMemory(nowMs: number, decayFactor?: number, run?: string, epoch = 0): SettlementReport {
+    this.checkProcessing(epoch)
+    if (run) this.maintenance.check(run, epoch)
+    const work = this.maintenance
     const report = settle((operation) => this.run(operation), nowMs, {
       decayFactor,
       advanceWatch: (id, version, generation) =>
         this.nexus.session(this.authenticate(undefined)).advanceWatch(id, version, generation, 200),
-      correctionCursor: kv.get<number | CorrectionCursor>(CORRECTION_CURSOR_KEY),
+      correctionCursor: work.cursor(),
+      pendingCorrections: work.pending(),
     })
-    // A scan that failed leaves the cursor where it was, so nothing it did
-    // not read falls behind the watermark.
-    if (report.corrections.error === undefined) {
-      kv.put(CORRECTION_CURSOR_KEY, {
-        seq: report.corrections.cursor,
-        after_id: report.corrections.cursor_after_id ?? '',
-      })
-    }
-    kv.put(REVISED_ROOTS_KEY, report.corrections.revised_roots)
+    work.save(report.corrections)
     return report
   }
 
@@ -361,10 +382,11 @@ export class AndaBrain extends KipDatabase<Env> {
    * A refused name is reported, not raised. The caller can still write every
    * memory whose symbols were accepted.
    */
-  declareSymbols(types: readonly string[], predicates: readonly string[], epoch = 0): DeclaredVocabulary {
+  declareSymbols(types: readonly string[], predicates: readonly string[], epoch = 0, run?: string): DeclaredVocabulary {
     this.checkProcessing(epoch)
+    if (run) this.maintenance.check(run, epoch)
     this.ensureInitialized()
-    const vocabulary = MemoryVocabulary.load(this.nexus)
+    const vocabulary = MemoryVocabulary.load(this.nexus, true)
     const before = vocabulary.revision
     const rejected = vocabulary.extend(types, predicates)
     if (vocabulary.revision !== before) vocabulary.activate(this.nexus)

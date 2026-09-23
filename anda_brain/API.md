@@ -1,6 +1,6 @@
 # Anda Brain API Documentation (with TypeScript Types)
 
-Cloudflare Worker parity and limits are documented in the [commit audit](../anda-brain-worker/PORTING_AUDIT.md) and [trusted host contracts](../anda-brain-worker/PRODUCT.md). The Worker supports source records, reviewed changes, recovery and processing fences; budgeted Recall, Wiki and learning runtimes remain unavailable.
+Cloudflare Worker parity and limits are documented in the [commit audit](../anda-brain-worker/PORTING_AUDIT.md) and [trusted host contracts](../anda-brain-worker/PRODUCT.md). The Worker supports source records, reviewed changes, recovery and processing fences; budgeted Recall, Wiki and learning runtimes remain unavailable. Worker-specific operation receipts, nullable usage, shared model deadlines and maintenance acknowledgements are documented in its host contracts; Rust API shapes are unchanged.
 
 Rust now requires Cognitive Nexus 0.13.4: Watch firing atomically records the
 transition, `watch_fire` Activity and a protected wake, with replayable receipts

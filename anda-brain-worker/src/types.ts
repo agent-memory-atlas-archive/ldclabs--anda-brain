@@ -7,13 +7,15 @@ export type JsonObject = Record<string, unknown>
 
 /** The small subset of the Workers AI binding used by this service. */
 export interface AiBinding {
-  run(model: string, input: Record<string, unknown>): Promise<unknown>
+  run(model: string, input: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<unknown>
 }
 
 export interface Env {
   BRAIN: DurableObjectNamespace<import('./brain.js').AndaBrain>
   AI: AiBinding
   AI_MODEL?: string
+  /** Shared wall-clock budget across all model stages, default 120000; max 300000. */
+  AI_TIMEOUT_MS?: string
   BRAIN_API_KEY?: string
   /** Explicit native principal allowed to own record watches; never inferred from API key. */
   BRAIN_PRODUCT_RECIPIENT?: string
@@ -34,6 +36,7 @@ export interface BrainRpc {
     types: readonly string[],
     predicates: readonly string[],
     epoch?: number,
+    run?: string,
   ): Promise<DeclaredVocabulary>
   describePrimer(): Promise<KipResult>
   executeFormationPlan(
@@ -52,9 +55,13 @@ export interface BrainRpc {
     operations: readonly KipOperation[],
     execution?: KipExecution,
   ): Promise<KipResult[]>
-  executeMaintenancePlan(operations: readonly KipOperation[], runtime?: readonly RuntimeOperation[], epoch?: number): Promise<KipResult[]>
+  executeMaintenancePlan(operations: readonly KipOperation[], runtime?: readonly RuntimeOperation[], epoch?: number, run?: string, reviewed?: string[]): Promise<KipResult[]>
+  beginMaintenance(epoch: number, expiresAt: number): Promise<string>
+  endMaintenance(id: string): Promise<void>
+  maintenanceSnapshot(epoch: number, run: string): Promise<KipResult[]>
+  acknowledgeCorrections(ids: string[], epoch: number): Promise<void>
   maintenanceAssessment(): Promise<MaintenanceAssessment>
-  settleMemory(nowMs: number, decayFactor?: number): Promise<SettlementReport>
+  settleMemory(nowMs: number, decayFactor?: number, run?: string, epoch?: number): Promise<SettlementReport>
   stats(): Promise<BrainStats>
   vocabulary(): Promise<DeclaredVocabulary>
 }
@@ -273,8 +280,10 @@ export interface MaintenanceAssessment {
 }
 
 export interface Usage {
-  input_tokens: number
-  output_tokens: number
+  input_tokens: number | null
+  output_tokens: number | null
+  /** Known subtotals when at least one call did not report complete usage. */
+  known?: { input_tokens: number; output_tokens: number }
 }
 
 /**
@@ -289,6 +298,7 @@ export interface MutationPlan {
   /** Host-computed digest bindings; never model-supplied authentication. */
   parameters?: import('@ldclabs/kip-do').JsonMap
   runtime?: RuntimeOperation[]
+  reviewed_corrections?: string[]
   commands: string[]
   types: string[]
   predicates: string[]

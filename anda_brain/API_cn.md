@@ -1,6 +1,6 @@
 # Anda Brain API 文档（含 TypeScript 类型）
 
-Cloudflare Worker 的对应能力和限制见[逐提交核对](../anda-brain-worker/PORTING_AUDIT.md)与[受信宿主产品契约](../anda-brain-worker/PRODUCT_cn.md)。Worker 已同步来源记录、审阅式修改、恢复和处理代次边界；预算化 Recall、Wiki 和学习运行时仍不提供。
+Cloudflare Worker 的对应能力和限制见[逐提交核对](../anda-brain-worker/PORTING_AUDIT.md)与[受信宿主产品契约](../anda-brain-worker/PRODUCT_cn.md)。Worker 已同步来源记录、审阅式修改、恢复和处理代次边界；预算化 Recall、Wiki 和学习运行时仍不提供。 Worker 特有的操作回执、可空用量、共享模型超时和维护确认见其宿主契约；Rust API 形状不变。
 
 Rust 现要求 Cognitive Nexus 0.13.4：Watch 触发会原子记录状态变化、`watch_fire`
 活动及受保护 wake，并提供可重放回执和原生租约。服务现会独立于 Full Maintenance
