@@ -3436,3 +3436,41 @@ async fn wiki_digest_extracts_supersedes_and_verifies() {
     assert_eq!(report.skipped, 1);
     assert_eq!(report.facts, 0);
 }
+
+#[tokio::test]
+async fn self_test_retests_after_horizon_and_preserves_counts_after_reopen() {
+    let app = test_app_state_with_self_test_model("self_test_revisit");
+    let space = create_loaded_space(&app, "self_test_revisit").await;
+    let (_, ids) = seed_people(&space).await;
+    let now = unix_ms();
+    assert_eq!(
+        space
+            .run_memory_self_test(now)
+            .await
+            .unwrap()
+            .unwrap()
+            .tested,
+        2
+    );
+    assert!(space.run_memory_self_test(now + 1).await.unwrap().is_none());
+    space.close().await.unwrap();
+    let reopened = app
+        .fork_with_store(app.object_store())
+        .load_space_with("self_test_revisit", false, false)
+        .await
+        .unwrap();
+    let after = now + 30 * 24 * 3_600_000;
+    // One pass may wrap the persisted scan cursor; the following pass tests.
+    let report = match reopened.run_memory_self_test(after).await.unwrap() {
+        Some(report) => report,
+        None => reopened.run_memory_self_test(after).await.unwrap().unwrap(),
+    };
+    assert_eq!(report.tested, 2);
+    for id in ids {
+        let usage = reopened.ledger.get(&id).await.unwrap().unwrap();
+        assert_eq!(usage.self_test_count, 2);
+        assert_eq!(usage.last_self_test_at, after);
+        assert_eq!(usage.recall_count, 0);
+    }
+    reopened.close().await.unwrap();
+}

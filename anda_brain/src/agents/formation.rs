@@ -76,6 +76,7 @@ pub struct FormationAgent {
     /// collection extension — is read and written through this handle.
     conversations: Arc<Collection>,
     processing_conversation: Arc<AtomicU64>,
+    processing_gate: Arc<super::ProcessingGate>,
     hook: Arc<dyn BrainHook>,
     history: Arc<RwLock<VecDeque<Document>>>,
     max_input_tokens: usize,
@@ -107,6 +108,7 @@ impl FormationAgent {
             memory,
             conversations,
             processing_conversation: Arc::new(AtomicU64::new(0)),
+            processing_gate: Arc::new(super::ProcessingGate::default()),
             history: Arc::new(RwLock::new(VecDeque::new())),
             hook,
         }
@@ -131,6 +133,12 @@ impl FormationAgent {
 
     pub(crate) fn with_tasks(mut self, tasks: crate::runtime::RuntimeTasks) -> Self {
         self.tasks = tasks;
+        self
+    }
+
+    pub(crate) fn with_processing_gate(mut self, gate: Arc<super::ProcessingGate>) -> Self {
+        self.processing_conversation = gate.formation.clone();
+        self.processing_gate = gate;
         self
     }
 
@@ -285,7 +293,7 @@ impl FormationAgent {
         // Find the next valid pending conversation starting from the given ID (inclusive)
         let conv = self
             .find_next_submitted(conversation.saturating_sub(1))
-            .await
+            .await?
             .ok_or_else(|| {
                 format!(
                     "No pending formation conversation found starting from {}",
@@ -298,6 +306,12 @@ impl FormationAgent {
     }
 
     pub fn try_process(&self, ctx: AgentCtx, conversation: Conversation) {
+        let admission = self.processing_gate.admission.lock();
+        if self.processing_gate.maintenance.load(Ordering::SeqCst)
+            || self.hook.is_maintenance_processing()
+        {
+            return;
+        }
         if self
             .processing_conversation
             .compare_exchange(0, conversation._id, Ordering::SeqCst, Ordering::SeqCst)
@@ -315,6 +329,7 @@ impl FormationAgent {
         let agent = self.clone();
         let pc = self.processing_conversation.clone();
         let guard = ProcessingGuard(Some(pc));
+        drop(admission);
         self.tasks.spawn(async move {
             // Guard is captured before spawn so cancellation before polling also releases the slot.
             agent.process_loop(ctx, conversation).await;
@@ -372,14 +387,14 @@ impl FormationAgent {
                     id
                 );
 
-                // 重置 processing 状态，以便 maintenance 完成后 try_start_formation 能重新启动
-                self.processing_conversation.store(0, Ordering::SeqCst);
+                // The maintenance claim transferred the writer slot before
+                // spawning its worker. Do not clear a newer formation owner.
                 break; // 交由 maintenance agent 处理后续流程，退出循环
             }
 
             // 查找下一个待处理的 conversation
             match self.find_next_submitted(conv_id).await {
-                Some(next_conv) => {
+                Ok(Some(next_conv)) => {
                     if self
                         .processing_conversation
                         .compare_exchange(
@@ -396,46 +411,87 @@ impl FormationAgent {
                     // CAS 失败说明其他线程已接管，退出
                     break;
                 }
-                None => {
+                Ok(None) => {
                     self.processing_conversation.store(0, Ordering::SeqCst);
                     // 双重检查：store(0) 前可能有新 conversation 到达但 try_process CAS 失败
-                    if let Some(next_conv) = self.find_next_submitted(conv_id).await
-                        && self
-                            .processing_conversation
-                            .compare_exchange(0, next_conv._id, Ordering::SeqCst, Ordering::SeqCst)
-                            .is_ok()
+                    if let Ok(Some(next_conv)) = self.find_next_submitted(conv_id).await
+                        && {
+                            let _admission = self.processing_gate.admission.lock();
+                            !self.processing_gate.maintenance.load(Ordering::SeqCst)
+                                && !self.hook.is_maintenance_processing()
+                                && self
+                                    .processing_conversation
+                                    .compare_exchange(
+                                        0,
+                                        next_conv._id,
+                                        Ordering::SeqCst,
+                                        Ordering::SeqCst,
+                                    )
+                                    .is_ok()
+                        }
                     {
                         conversation = next_conv;
                         continue;
                     }
                     break;
                 }
+                Err(error) => {
+                    log::error!(target: "brain", "formation queue read failed: {error}");
+                    self.processing_conversation.store(0, Ordering::SeqCst);
+                    break;
+                }
             }
         }
     }
 
-    async fn find_next_submitted(&self, after_id: u64) -> Option<Conversation> {
-        let mut id = after_id;
-        while id < self.memory.max_conversation_id() {
-            id += 1;
-            match self.memory.get_conversation(id).await {
-                Ok(conv) => {
-                    if conv.status == ConversationStatus::Completed
-                        || conv.status == ConversationStatus::Cancelled
-                    {
-                        continue;
-                    }
-                    if let Some(label) = &conv.label
-                        && label != "formation"
-                    {
-                        continue; // 只处理 label 为 "formation" 的 conversation，跳过其他类型
-                    }
-                    return Some(conv);
+    async fn find_next_submitted(&self, after_id: u64) -> Result<Option<Conversation>, BoxError> {
+        use anda_db::query::{Filter, Fv, RangeQuery};
+        let mut cursor = after_id;
+        loop {
+            let ids = self
+                .conversations
+                .query_ids(
+                    Filter::And(vec![
+                        Box::new(Filter::Field((
+                            "_id".into(),
+                            RangeQuery::Gt(Fv::U64(cursor)),
+                        ))),
+                        Box::new(Filter::Field((
+                            "status".into(),
+                            RangeQuery::Include(
+                                [
+                                    ConversationStatus::Submitted,
+                                    ConversationStatus::Working,
+                                    ConversationStatus::Idle,
+                                    ConversationStatus::Failed,
+                                ]
+                                .into_iter()
+                                .map(|status| Fv::Text(status.to_string()))
+                                .collect(),
+                            ),
+                        ))),
+                    ]),
+                    Some(64),
+                )
+                .await?;
+            if ids.is_empty() {
+                return Ok(None);
+            }
+            for id in ids {
+                cursor = id;
+                let conv = self.memory.get_conversation(id).await?;
+                if !matches!(
+                    conv.status,
+                    ConversationStatus::Completed | ConversationStatus::Cancelled
+                ) && conv
+                    .label
+                    .as_deref()
+                    .is_none_or(|label| label == "formation")
+                {
+                    return Ok(Some(conv));
                 }
-                _ => continue,
             }
         }
-        None
     }
 
     async fn mark_conversation_failed(&self, conversation: &mut Conversation, reason: String) {
@@ -746,7 +802,7 @@ impl Agent<AgentCtx> for FormationAgent {
                 let prev_id = self.get_processed().unwrap_or_default();
                 if prev_id + 1 < id {
                     // Resume from the last processed conversation to catch any missed ones
-                    if let Some(conv) = self.find_next_submitted(prev_id).await {
+                    if let Some(conv) = self.find_next_submitted(prev_id).await? {
                         self.try_process(ctx, conv);
                     }
                 } else {
@@ -1538,13 +1594,19 @@ mod tests {
             .await
             .unwrap();
 
-        let found = space.formation.find_next_submitted(0).await.unwrap();
+        let found = space
+            .formation
+            .find_next_submitted(0)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(found._id, pending_id);
         assert!(
             space
                 .formation
                 .find_next_submitted(pending_id)
                 .await
+                .unwrap()
                 .is_none()
         );
     }

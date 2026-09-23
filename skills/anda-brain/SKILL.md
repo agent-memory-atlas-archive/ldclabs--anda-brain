@@ -24,9 +24,11 @@ metadata:
 # 🧠 Anda Brain
 
 This skill targets the Rust **Anda Brain 0.12.1** service with KIP 2.0,
-CognitiveMemory 2.1 and published Nexus/KIP 0.13.1. The Cloudflare Worker uses a
+CognitiveMemory 2.1, published Nexus 0.13.4 and KIP 0.13.1. The Cloudflare Worker uses a
 separate engine and does not acquire these Rust runtime capabilities automatically.
 Check the deployed service and its configuration before choosing an optional path.
+
+Formation and Maintenance share a per-Space writer guard. If explicit Maintenance reports busy, let the active task finish before retrying. A successful Formation submission only acknowledges queued work; its background model calls keep using the host concurrency budget until they finish. A Space closing for eviction can temporarily be unavailable; retry after it finishes.
 
 Use Formation, Recall and Maintenance for ordinary memory work. A Proposition's
 existence is not belief; `insufficient` is not false. Corrections append new claims,

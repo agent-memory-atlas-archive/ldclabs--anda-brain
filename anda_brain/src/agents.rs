@@ -1,5 +1,6 @@
 mod formation;
 mod maintenance;
+mod processing;
 pub mod prompts;
 mod recall;
 
@@ -24,6 +25,7 @@ use crate::kip;
 
 pub use formation::*;
 pub use maintenance::*;
+pub(crate) use processing::ProcessingGate;
 pub use recall::*;
 
 /// Reads the Person Concept a counterparty handle keys.
@@ -303,6 +305,9 @@ pub(super) async fn drive_runner_loop<H: RunnerHost>(
     let mut unpersisted_turns = 0usize;
     let failure: Option<String> = 'run: {
         loop {
+            if runner.is_done() {
+                break 'run None;
+            }
             // Guardrails against a non-converging tool loop; see
             // RUNNER_MAX_MODEL_TURNS. Exceeding a budget takes the host's
             // existing mark_failed path.
@@ -334,6 +339,13 @@ pub(super) async fn drive_runner_loop<H: RunnerHost>(
                 Err(err) => break 'run Some(format!("CompletionRunner error: {err:?}")),
             }
 
+            if total_model_turns >= RUNNER_MAX_MODEL_TURNS {
+                break 'run Some(format!(
+                    "{} exceeded model turn limit of {}",
+                    host.label(),
+                    RUNNER_MAX_MODEL_TURNS
+                ));
+            }
             match runner.next().await {
                 Ok(None) => break 'run None,
                 Ok(Some(res)) => {

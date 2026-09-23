@@ -38,21 +38,11 @@ impl Drop for ConversationGuard {
     }
 }
 
-/// An externally-held claim on the maintenance processing slot (see
-/// [`MaintenanceAgent::try_claim_processing`]). If the claim is never
-/// consumed by [`MaintenanceAgent::run`] — e.g. the settlement or agent
-/// dispatch errored first — dropping it releases the slot.
+/// Owns the maintenance slot across settlement and worker dispatch. Passing
+/// this value to the worker transfers ownership without a global claim flag.
 pub(crate) struct MaintenanceClaim {
-    processing: Arc<AtomicBool>,
-    external_claim: Arc<AtomicBool>,
-}
-
-impl Drop for MaintenanceClaim {
-    fn drop(&mut self) {
-        if self.external_claim.swap(false, Ordering::SeqCst) {
-            self.processing.store(false, Ordering::SeqCst);
-        }
-    }
+    guard: ProcessingGuard,
+    handoff: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -67,9 +57,7 @@ pub struct MaintenanceAgent {
     memory: Arc<MemoryManagement>,
     processing: Arc<AtomicBool>,
     active_conversation: Arc<AtomicU64>,
-    /// True while a [`MaintenanceClaim`] holds `processing` on behalf of
-    /// `Space::maintenance` and the claim has not been consumed by `run`.
-    external_claim: Arc<AtomicBool>,
+    processing_gate: Arc<super::ProcessingGate>,
     hook: Arc<dyn BrainHook>,
     history: Arc<RwLock<VecDeque<Document>>>,
     clock: Arc<crate::runtime::BusinessClock>,
@@ -101,31 +89,41 @@ impl MaintenanceAgent {
             conversations_collection,
             processing: Arc::new(AtomicBool::new(false)),
             active_conversation: Arc::new(AtomicU64::new(0)),
-            external_claim: Arc::new(AtomicBool::new(false)),
+            processing_gate: Arc::new(super::ProcessingGate::default()),
             hook,
             history: Arc::new(RwLock::new(VecDeque::new())),
         }
     }
 
-    /// Claims the processing slot on behalf of `Space::maintenance` so the
-    /// deterministic settlement that precedes the LLM cycle runs under the
-    /// same formation/maintenance mutual exclusion as the cycle itself
-    /// (review P1-3: without this, formation could start inside the
-    /// multi-second settlement window and write the graph concurrently).
-    /// The claim is inherited by the next [`Agent::run`] call; if `run` is
-    /// never reached, dropping the claim releases the slot.
+    pub(crate) fn with_processing_gate(mut self, gate: Arc<super::ProcessingGate>) -> Self {
+        self.processing = gate.maintenance.clone();
+        self.processing_gate = gate;
+        self
+    }
+
     pub(crate) fn try_claim_processing(&self) -> Option<MaintenanceClaim> {
-        if self
-            .processing
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
+        self.try_claim_after_formation(None)
+    }
+
+    /// Only the Formation completion hook may offer its current slot. Its
+    /// worker waits for settlement, and retains ownership if dispatch fails.
+    pub(crate) fn try_claim_after_formation(
+        &self,
+        handoff: Option<u64>,
+    ) -> Option<MaintenanceClaim> {
+        let _admission = self.processing_gate.admission.lock();
+        let formation = self.processing_gate.formation.load(Ordering::SeqCst);
+        if formation != handoff.unwrap_or(0)
+            || self
+                .processing
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
         {
             return None;
         }
-        self.external_claim.store(true, Ordering::SeqCst);
         Some(MaintenanceClaim {
-            processing: self.processing.clone(),
-            external_claim: self.external_claim.clone(),
+            guard: ProcessingGuard(self.processing.clone()),
+            handoff,
         })
     }
 
@@ -269,22 +267,22 @@ impl Agent<AgentCtx> for MaintenanceAgent {
         let maintenance_input = serde_json::from_str::<MaintenanceInput>(&prompt)
             .map_err(|err| format!("invalid MaintenanceInput: {err}"))?;
 
-        // Prevent concurrent maintenance runs. A claim taken by
-        // `Space::maintenance` before settlement is inherited here instead of
-        // re-acquired, so the slot is held continuously across settlement.
-        if !self.external_claim.swap(false, Ordering::SeqCst)
-            && self
-                .processing
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                .is_err()
-        {
-            return Ok(AgentOutput {
-                content: "Maintenance cycle is already in progress.".to_string(),
-                ..Default::default()
-            });
-        }
-        let guard = ProcessingGuard(self.processing.clone());
+        let claim = self
+            .try_claim_processing()
+            .ok_or("Formation or Maintenance is already processing")?;
+        self.run_claimed(ctx, maintenance_input, claim).await
+    }
+}
 
+impl MaintenanceAgent {
+    pub(crate) async fn run_claimed(
+        &self,
+        ctx: AgentCtx,
+        maintenance_input: MaintenanceInput,
+        claim: MaintenanceClaim,
+    ) -> Result<AgentOutput, BoxError> {
+        let prompt = serde_json::to_string_pretty(&maintenance_input)?;
+        let MaintenanceClaim { guard, handoff } = claim;
         let caller = ctx.caller();
         let now_ms = unix_ms();
         // Persistence failure must not block the maintenance cycle itself.
@@ -317,6 +315,14 @@ impl Agent<AgentCtx> for MaintenanceAgent {
         conversation._id = id;
         self.active_conversation.store(id, Ordering::SeqCst);
         let conversation_guard = ConversationGuard(self.active_conversation.clone());
+
+        if let Some(id) = handoff {
+            let _admission = self.processing_gate.admission.lock();
+            self.processing_gate
+                .formation
+                .compare_exchange(id, 0, Ordering::SeqCst, Ordering::SeqCst)
+                .map_err(|_| "formation handoff owner changed")?;
+        }
 
         let agent = self.clone();
         let ctx_clone = ctx.clone();

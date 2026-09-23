@@ -4,7 +4,7 @@ use anda_core::BoxError;
 #[cfg(feature = "learning")]
 use futures::TryStreamExt;
 use futures::{StreamExt, stream::BoxStream};
-use object_store::{ObjectStore, ObjectStoreExt, PutMode, UpdateVersion, path::Path};
+use object_store::{ObjectStore, PutMode, path::Path};
 use serde::{Serialize, de::DeserializeOwned};
 use std::sync::Arc;
 
@@ -14,10 +14,7 @@ pub(crate) struct Journal {
     store: Arc<dyn ObjectStore>,
     prefix: Path,
 }
-pub(crate) struct Versioned<T> {
-    pub value: T,
-    pub(crate) version: UpdateVersion,
-}
+pub(crate) use crate::persisted::Versioned;
 
 impl Journal {
     pub fn new(store: Arc<dyn ObjectStore>, prefix: String) -> Self {
@@ -51,26 +48,13 @@ impl Journal {
         &self,
         key: &str,
     ) -> Result<Option<Versioned<T>>, BoxError> {
-        let result = match self.store.get(&self.path(key)).await {
-            Ok(result) => result,
-            Err(object_store::Error::NotFound { .. }) => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        if result.meta.size > MAX_BYTES as u64 {
-            return Err("learning journal object exceeds bound".into());
-        }
-        let version = UpdateVersion {
-            e_tag: result.meta.e_tag.clone(),
-            version: result.meta.version.clone(),
-        };
-        if version.e_tag.is_none() && version.version.is_none() {
-            return Err("learning journal requires conditional-update storage".into());
-        }
-        let bytes = result.bytes().await?;
-        Ok(Some(Versioned {
-            value: serde_json::from_slice(&bytes)?,
-            version,
-        }))
+        crate::persisted::read(
+            self.store.as_ref(),
+            &self.path(key),
+            MAX_BYTES as u64,
+            "learning journal",
+        )
+        .await
     }
 
     pub async fn create<T: Serialize + DeserializeOwned>(
@@ -97,30 +81,15 @@ impl Journal {
         value: &T,
         mode: PutMode,
     ) -> Result<(), BoxError> {
-        let bytes = serde_json::to_vec(value)?;
-        if bytes.len() > MAX_BYTES {
-            return Err("learning journal object exceeds bound".into());
-        }
-        // No timeout/select around storage mutations. A caller cancellation is
-        // detached at the runtime owner, so a write always runs to completion.
-        let result = self
-            .store
-            .put_opts(&self.path(key), bytes.clone().into(), mode.into())
-            .await;
-        // Even a durable PUT whose ACK was lost is resolved by exact readback;
-        // a different/newer value is never silently overwritten.
-        let stored = self.store.get(&self.path(key)).await?;
-        if stored.meta.size > MAX_BYTES as u64 {
-            return Err("learning journal readback exceeds bound".into());
-        }
-        if stored.bytes().await?.as_ref() != bytes {
-            return Err(result
-                .err()
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| "learning journal conditional-write conflict".into())
-                .into());
-        }
-        Ok(())
+        crate::persisted::put(
+            self.store.as_ref(),
+            &self.path(key),
+            value,
+            mode,
+            MAX_BYTES as u64,
+            "learning journal",
+        )
+        .await
     }
 
     /// One-time import of the v1 catalog, which admitted at most 32 jobs.

@@ -1076,3 +1076,7 @@ automatic/apply/rank switches. Parameters and approval have no empirical default
 Required constraints, native uncertainty, procedure eligibility and execution
 authority retain priority. Read the bilingual [utility guide](UTILITY_RUNTIME.md)
 and disabled [configuration template](utility.runtime.example.json).
+
+### Runtime limits and recovery
+
+Formation and Maintenance now share library-level writer admission, and model-call concurrency covers background work and compaction. Eviction retains failed-close owners and does not hold the global Space lock during database I/O. Self-test supports persisted 30-day retesting and bounds its actual host request plus requested output. See [execution limits](RUNTIME.md#execution-and-resource-limits) for provider-accounting and independent-runtime boundaries.

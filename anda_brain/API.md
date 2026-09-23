@@ -1561,3 +1561,30 @@ type TrustRuntimeStatus = {
   reason: string | null;
 };
 ```
+
+## Execution and resource limits
+
+Formation and Maintenance share one per-Space writer admission guard, including
+Maintenance's deterministic settlement. Explicit Rust/HTTP/MCP Maintenance is
+refused while Formation owns that guard; queued Formation resumes after Maintenance.
+Formation's threshold trigger transfers the guard before starting the next worker.
+
+`LLM_MAX_CONCURRENCY` bounds in-flight calls through Brain's model registry across
+Spaces, including background Formation/Maintenance, compaction, WikiDigest,
+self-test and shadow judges. HTTP/MCP request admission has a separate semaphore
+with the same configured capacity: excess requests still receive HTTP 429 (or the
+MCP busy error), while admitted model calls wait cancellably for a model slot.
+Explicit semantic-Watch and learning-provider bindings keep their separate configured
+budgets. This is a concurrency bound, not a total token or monetary budget.
+
+Space shutdown cancels model waits, stops background admission and drains admitted
+native settlement writes. A failed eviction retains its closing owner for retry;
+access to that Space can temporarily fail until closing completes. Other Spaces
+remain accessible while its database closes.
+
+Self-test records an independent `last_self_test_at` and can retest unused memories
+after 30 days. `self_test_token_budget` counts the actual host instructions/prompt
+with the pinned Recall tokenizer and reserves one quarter (at most 4096 tokens)
+for the requested output cap. Candidates that do not fit are not sent. Provider
+framing/tokenization may differ; unsupported output caps fail the diagnostic,
+and missing provider usage remains unknown. This is not a provider billing guarantee.

@@ -18,7 +18,7 @@ impl Space {
             return;
         }
         let space = self.clone();
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             match space.run_memory_self_test(unix_ms()).await {
                 Ok(Some(report)) => {
                     log::info!(
@@ -115,10 +115,11 @@ LIMIT {window}"#
         let mut candidates = Vec::new();
         for candidate in sampled {
             let usage = self.ledger.get(&candidate.id).await?;
-            if usage
-                .as_ref()
-                .is_none_or(|row| row.recall_count == 0 && row.self_test_count == 0)
-            {
+            if usage.as_ref().is_none_or(|row| {
+                row.recall_count == 0
+                    && (row.self_test_count == 0
+                        || now_ms.saturating_sub(row.last_self_test_at) >= SELF_TEST_RETEST_MS)
+            }) {
                 candidates.push(candidate);
             }
             if candidates.len() >= budget {
@@ -141,28 +142,10 @@ LIMIT {window}"#
             return Ok(None);
         }
 
-        // 2) One LLM call generates all probe queries. The token budget is
-        // enforced *before* the call by shrinking the candidate batch to fit
-        // (≈3 chars per token, conservative); the knob bounds real spend
-        // instead of warning after the fact.
-        let max_prompt_chars = (policy.self_test_token_budget as usize).saturating_mul(3);
-        while candidates.len() > 1
-            && serde_json::to_string(&candidates)
-                .map(|prompt| prompt.len() > max_prompt_chars)
-                .unwrap_or(false)
-        {
-            candidates.pop();
-        }
-        let output = assess::AssessContext::complete(
-            self,
-            anda_core::CompletionRequest {
-                instructions: SELF_TEST_INSTRUCTIONS.to_string(),
-                prompt: serde_json::to_string_pretty(&candidates).unwrap_or_default(),
-                effort: Some(anda_core::ModelEffort::Low),
-                ..Default::default()
-            },
-        )
-        .await?;
+        // Count the exact host request text with the pinned encoding. Provider
+        // framing/accounting can differ; this is not a provider billing quote.
+        let request = self_test_request(&mut candidates, policy.self_test_token_budget)?;
+        let output = assess::AssessContext::complete(self, request).await?;
         let queries: SelfTestQueries = assess::parse_json_payload(&output.content)?;
         let mut report = SelfTestReport {
             tested_at: now_ms,
@@ -301,6 +284,34 @@ LIMIT {window}"#
             assess::collect_entity_objects(result, &mut |_, _| found = true);
             found
         }))
+    }
+}
+
+/// Build one bounded request. A single oversized candidate is never sent.
+fn self_test_request(
+    candidates: &mut Vec<SelfTestCandidate>,
+    budget: u64,
+) -> Result<anda_core::CompletionRequest, BoxError> {
+    let budget = usize::try_from(budget)?;
+    let output_tokens = (budget / 4).clamp(1, 4096);
+    loop {
+        if candidates.is_empty() {
+            return Err("self-test candidate does not fit the token budget".into());
+        }
+        let request = anda_core::CompletionRequest {
+            instructions: SELF_TEST_INSTRUCTIONS.into(),
+            prompt: serde_json::to_string(candidates)?,
+            max_output_tokens: Some(output_tokens),
+            effort: Some(anda_core::ModelEffort::Low),
+            ..Default::default()
+        };
+        let text = serde_json::json!({"instructions":request.instructions,"prompt":request.prompt,
+            "max_output_tokens":request.max_output_tokens,"effort":request.effort})
+        .to_string();
+        if crate::recall_budget::count(&text)? + output_tokens <= budget {
+            return Ok(request);
+        }
+        candidates.pop();
     }
 }
 
@@ -457,4 +468,44 @@ fn self_test_task_request(candidate: &SelfTestCandidate, query: &str, now_ms: u6
 }"#,
         parameters,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(id: &str, name: String) -> SelfTestCandidate {
+        SelfTestCandidate {
+            id: id.into(),
+            seq: 1,
+            subject: "C-1".into(),
+            object: "C-2".into(),
+            subject_type: "Person".into(),
+            subject_name: name,
+            object_name: "tea".into(),
+        }
+    }
+
+    #[test]
+    fn self_test_request_counts_sent_text_and_reserves_output() {
+        let mut candidates = vec![
+            candidate("P-1", "Ada".into()),
+            candidate("P-2", "中文内容 ".repeat(5000)),
+        ];
+        let request = self_test_request(&mut candidates, 1000).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(request.max_output_tokens, Some(250));
+        let text = serde_json::json!({"instructions":request.instructions,"prompt":request.prompt,
+            "max_output_tokens":request.max_output_tokens,"effort":request.effort})
+        .to_string();
+        assert!(crate::recall_budget::count(&text).unwrap() + 250 <= 1000);
+        assert_eq!(
+            serde_json::from_str::<Vec<serde_json::Value>>(&request.prompt)
+                .unwrap()
+                .len(),
+            1
+        );
+        let mut oversized = vec![candidate("P-2", "中文内容 ".repeat(5000))];
+        assert!(self_test_request(&mut oversized, 1000).is_err());
+    }
 }

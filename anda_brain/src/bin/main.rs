@@ -108,12 +108,9 @@ struct Cli {
     #[arg(long, env = "HTTP_MAX_CONCURRENCY", default_value_t = 1024)]
     http_max_concurrency: usize,
 
-    /// Cap on concurrent LLM-billed requests (formation, recall,
-    /// recall_structured, maintenance, shadow_eval, wiki digest); excess is
-    /// shed with 429. Each such request can drive a full multi-turn model
-    /// round (recall may run for over a minute), so this bounds worst-case
-    /// model spend from anonymous callers on public spaces. The default is
-    /// loose enough for normal multi-tenant use.
+    /// Cap on actual model calls across Spaces, including background work and
+    /// compaction. Separately caps admitted HTTP/MCP model-driving requests;
+    /// excess requests receive 429, admitted calls wait for a model slot.
     #[arg(long, env = "LLM_MAX_CONCURRENCY", default_value_t = 64)]
     llm_max_concurrency: usize,
 
@@ -370,14 +367,8 @@ fn build_router(
     cli: &Cli,
     cancel_token: CancellationToken,
 ) -> Router<AppState> {
-    // Endpoints that can each drive a full multi-turn LLM round. They share
-    // a stricter concurrency cap so anonymous callers on public spaces
-    // cannot turn unbounded request concurrency into unbounded model spend.
-    // Default `LLM_MAX_CONCURRENCY=64` is loose: it never throttles normal
-    // multi-tenant traffic, it only bounds floods. The semaphore lives in
-    // the `AppState` because the MCP LLM tools (recall/maintenance) must
-    // drain the same budget instead of bypassing this cap up to the global
-    // HTTP limit.
+    // Request admission is separate from model permits: Formation and
+    // Maintenance return before their background completions finish.
     let llm_router = with_shared_concurrency_limit(
         Router::new()
             .route("/v1/{space_id}/formation", routing::post(post_formation))
@@ -398,7 +389,7 @@ fn build_router(
                 "/v1/{space_id}/wiki/digest",
                 routing::post(post_wiki_digest),
             ),
-        app_state.llm_semaphore().clone(),
+        app_state.llm_request_semaphore().clone(),
         StatusCode::TOO_MANY_REQUESTS,
     );
 

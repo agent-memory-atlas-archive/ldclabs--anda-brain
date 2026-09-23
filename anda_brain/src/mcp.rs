@@ -340,7 +340,7 @@ impl AndaBrainMcpServer {
     /// cannot bypass that cap. Fails fast like the HTTP 429 load-shed
     /// instead of queueing unbounded work.
     fn acquire_llm_permit(&self) -> Result<tokio::sync::SemaphorePermit<'_>, ErrorData> {
-        self.app.llm_semaphore().try_acquire().map_err(|_| {
+        self.app.llm_request_semaphore().try_acquire().map_err(|_| {
             ErrorData::invalid_request(
                 "too many concurrent model-driven requests, retry later",
                 None,

@@ -37,6 +37,10 @@ pub struct MemoryUsage {
     /// itself must not count as usage (plan guardrail 1).
     pub self_test_count: u64,
 
+    /// Receipt time of the last diagnostic test, independent of other usage.
+    #[serde(default)]
+    pub last_self_test_at: u64,
+
     /// Unix ms of the newest production recall that surfaced this entity.
     pub last_recalled_at: u64,
 
@@ -55,9 +59,8 @@ pub struct MemoryUsage {
     /// Nothing writes recall counts back any more — reading must not reinforce
     /// what it read (reference Recall policy §1, §32), so the settlement's
     /// reinforcement pass was removed and this ledger became pure
-    /// instrumentation. The two fields below survive because they are indexed
-    /// columns of a live collection and dropping them is a storage migration,
-    /// not because anything reads them.
+    /// instrumentation. The two fields below survive for stored-record
+    /// compatibility; no runtime index or write maintains them.
     pub flushed_recall_count: u64,
 
     /// Vestigial companion of `flushed_recall_count`; see its docs. (u64
@@ -77,9 +80,9 @@ pub struct UsageLedger {
 
 impl UsageLedger {
     pub async fn connect(db: &Arc<AndaDB>) -> Result<Self, DBError> {
-        // v2 adds the `dirty` flush flag.
+        // v3 adds an independent self-test timestamp; legacy counters stay readable.
         let mut schema = MemoryUsage::schema()?;
-        schema.with_version(2);
+        schema.with_version(3);
         let collection = db
             .open_or_create_collection(
                 schema,
@@ -89,7 +92,7 @@ impl UsageLedger {
                 },
                 async |collection| {
                     collection.create_btree_index_nx(&["entity"]).await?;
-                    collection.create_btree_index_nx(&["dirty"]).await?;
+                    collection.remove_btree_index(&["dirty"]).await?;
                     collection
                         .create_btree_index_nx(&["last_recalled_at"])
                         .await?;
@@ -139,7 +142,6 @@ impl UsageLedger {
                             BTreeMap::from([
                                 ("recall_count".to_string(), Fv::U64(row.recall_count + 1)),
                                 ("last_recalled_at".to_string(), Fv::U64(now_ms)),
-                                ("dirty".to_string(), Fv::U64(1)),
                                 ("updated_at".to_string(), Fv::U64(now_ms)),
                             ]),
                         )
@@ -151,7 +153,6 @@ impl UsageLedger {
                             entity: entity.clone(),
                             recall_count: 1,
                             last_recalled_at: now_ms,
-                            dirty: 1,
                             updated_at: now_ms,
                             ..Default::default()
                         })
@@ -221,6 +222,7 @@ impl UsageLedger {
                                     "self_test_count".to_string(),
                                     Fv::U64(row.self_test_count + 1),
                                 ),
+                                ("last_self_test_at".to_string(), Fv::U64(now_ms)),
                                 ("updated_at".to_string(), Fv::U64(now_ms)),
                             ]),
                         )
@@ -231,6 +233,7 @@ impl UsageLedger {
                         .add_from(&MemoryUsage {
                             entity: entity.clone(),
                             self_test_count: 1,
+                            last_self_test_at: now_ms,
                             updated_at: now_ms,
                             ..Default::default()
                         })

@@ -1508,3 +1508,27 @@ type TrustRuntimeStatus = {
   reason: string | null;
 };
 ```
+
+## 执行与资源限制
+
+Formation 与 Maintenance 共用每个 Space 的写入准入 guard，覆盖 Maintenance
+前置的确定性结算。Formation 持有 guard 时，显式 Rust/HTTP/MCP Maintenance
+请求会被拒绝；Maintenance 结束后恢复排队的 Formation。Formation 的阈值触发
+在启动下一个 worker 前移交 guard。
+
+`LLM_MAX_CONCURRENCY` 限制通过 Brain 模型注册表发起的跨 Space 在途模型调用，
+包括后台 Formation/Maintenance、上下文压缩、WikiDigest、自检和 shadow judge。
+HTTP/MCP 请求准入使用同容量但独立的 semaphore：超额请求仍返回 HTTP 429
+（或 MCP busy 错误），已准入的模型调用可以等待额度，等待可取消。显式绑定的
+语义 Watch 与 learning provider 继续使用各自配置的预算。这是并发限制，
+不是累计 token 或金额预算。
+
+Space 关闭会取消模型等待、停止后台准入并排空已准入的原生结算写入。
+驱逐关闭失败时保留原 owner 供重试；关闭完成前该 Space 的访问可能暂时失败。
+其数据库关闭期间，其他 Space 仍可访问。
+
+自检独立记录 `last_self_test_at`，未被使用的记忆在 30 天后可以复测。
+`self_test_token_budget` 使用 Recall 固定 tokenizer 计量实际宿主 instructions/prompt，
+并预留四分之一额度（最多 4096 tokens）作为请求的输出上限。放不下的候选不会发送。
+提供商封装和分词可能不同；不支持输出上限时该诊断失败，缺失的提供商 usage
+仍是未知值。这不构成提供商账单保证。

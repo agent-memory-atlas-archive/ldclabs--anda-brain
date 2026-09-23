@@ -16,6 +16,9 @@ struct BlockAfterPut {
     armed: AtomicBool,
     only_when_readonly: parking_lot::Mutex<Option<Weak<AndaDB>>>,
     entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    fail_next: AtomicBool,
+    reads: AtomicU64,
 }
 
 impl std::fmt::Display for BlockAfterPut {
@@ -47,10 +50,16 @@ impl ObjectStore for BlockAfterPut {
         let block = phase_matches
             && path.as_ref().contains(self.path.lock().as_str())
             && self.armed.swap(false, Ordering::SeqCst);
+        if block && self.fail_next.swap(false, Ordering::SeqCst) {
+            return Err(object_store::Error::Generic {
+                store: "close-test",
+                source: std::io::Error::other("injected close failure").into(),
+            });
+        }
         let result = self.inner.put_opts(path, payload, options).await?;
         if block {
             self.entered.notify_one();
-            std::future::pending::<()>().await;
+            self.release.notified().await;
         }
         Ok(result)
     }
@@ -63,6 +72,7 @@ impl ObjectStore for BlockAfterPut {
         self.inner.put_multipart_opts(path, options).await
     }
     async fn get_opts(&self, path: &Path, options: GetOptions) -> StoreResult<GetResult> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
         self.inner.get_opts(path, options).await
     }
     fn delete_stream(
@@ -361,4 +371,112 @@ async fn close_captures_an_active_submitted_formation_before_the_guard_is_droppe
     );
     assert!(reopened.restart_formation(SELF_USER_ID, id).await.is_err());
     reopened.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn warm_space_load_does_not_repeat_directory_reads() {
+    let (app, space, store) = fixture("warm_discovery").await;
+    let before = store.reads.load(Ordering::SeqCst);
+    for _ in 0..10 {
+        let loaded = app
+            .load_space_with("warm_discovery", false, false)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&space, &loaded));
+    }
+    assert_eq!(store.reads.load(Ordering::SeqCst), before);
+    space.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_eviction_retains_owner_until_close_retry_succeeds() {
+    let (app, space, store) = fixture("eviction_failure").await;
+    space
+        .db
+        .set_extension_from("review_close_marker".into(), "retained");
+    let entry = app
+        .spaces
+        .read()
+        .await
+        .get("eviction_failure")
+        .unwrap()
+        .clone();
+    entry.last_access_ms.store(0, Ordering::Relaxed);
+    let owner = Arc::downgrade(&space);
+    drop(space);
+    store.fail_next.store(true, Ordering::SeqCst);
+    store.arm("eviction_failure/");
+    assert!(
+        !app.try_evict_idle_space("eviction_failure", &entry, unix_ms(), 1)
+            .await
+    );
+    assert!(entry.closing.load(Ordering::Acquire));
+    assert!(owner.upgrade().is_some());
+    assert!(app.load_space("eviction_failure", false).await.is_err());
+    assert!(
+        app.try_evict_idle_space("eviction_failure", &entry, unix_ms(), 1)
+            .await
+    );
+    drop(entry);
+    assert!(owner.upgrade().is_none());
+    let reopened = app
+        .load_space_with("eviction_failure", false, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened
+            .db
+            .get_extension_as::<String>("review_close_marker")
+            .as_deref(),
+        Some("retained")
+    );
+    reopened.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn slow_eviction_does_not_hold_the_map_lock_or_allow_a_second_owner() {
+    let (app, space, store) = fixture("eviction_slow").await;
+    let other = crate::testkit::create_loaded_space(&app, "eviction_other").await;
+    space
+        .db
+        .set_extension_from("review_close_marker".into(), true);
+    let entry = app
+        .spaces
+        .read()
+        .await
+        .get("eviction_slow")
+        .unwrap()
+        .clone();
+    entry.last_access_ms.store(0, Ordering::Relaxed);
+    drop(space);
+    store.arm("eviction_slow/");
+    let evict_app = app.clone();
+    let eviction = tokio::spawn(async move {
+        evict_app
+            .try_evict_idle_space("eviction_slow", &entry, unix_ms(), 1)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), store.entered.notified())
+        .await
+        .unwrap();
+    let loaded = tokio::time::timeout(
+        Duration::from_secs(1),
+        app.load_space_with("eviction_other", false, false),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(Arc::ptr_eq(&loaded, &other));
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            app.load_space_with("eviction_slow", false, false)
+        )
+        .await
+        .unwrap()
+        .is_err()
+    );
+    store.release.notify_one();
+    assert!(eviction.await.unwrap());
+    other.close().await.unwrap();
 }

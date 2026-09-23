@@ -198,10 +198,11 @@ pub fn pack_ranked(
             })
             .then_with(|| left.id.cmp(&right.id))
     });
-    let mut kept: Vec<MemoryItem> = ordered
+    let selected: BTreeSet<&str> = selected_ids.iter().map(String::as_str).collect();
+    let mut kept: Vec<&MemoryItem> = ordered
         .iter()
         .filter(|item| item.priority <= Priority::Warning)
-        .map(|item| (**item).clone())
+        .copied()
         .collect();
     let mut serialized = serialize_packet(budget, items, &kept, &coverage, false)?;
     if serialized.tokens > budget.max_tokens as usize {
@@ -212,10 +213,10 @@ pub fn pack_ranked(
     }
 
     for item in ordered {
-        if item.priority <= Priority::Warning || !selected_ids.contains(&item.id) {
+        if item.priority <= Priority::Warning || !selected.contains(item.id.as_str()) {
             continue;
         }
-        kept.push(item.clone());
+        kept.push(item);
         // Coverage can grow when a formerly entirely omitted channel becomes
         // partial. Recount the complete candidate instead of subtracting token
         // estimates or reserving a fixed number of metadata tokens.
@@ -292,12 +293,14 @@ fn normalized(mut coverage: Coverage) -> Coverage {
     coverage
 }
 
-fn delivery_coverage(items: &[MemoryItem], kept: &[MemoryItem], original: &Coverage) -> Coverage {
+fn delivery_coverage(items: &[MemoryItem], kept: &[&MemoryItem], original: &Coverage) -> Coverage {
+    let kept_ids: BTreeSet<&str> = kept.iter().map(|item| item.id.as_str()).collect();
+    let kept_channels: BTreeSet<Channel> = kept.iter().map(|item| item.channel).collect();
     let mut coverage = original.clone();
     for item in items {
-        if !kept.iter().any(|kept| kept.id == item.id) {
+        if !kept_ids.contains(item.id.as_str()) {
             coverage.omitted.push(item.channel);
-            if kept.iter().any(|kept| kept.channel == item.channel) {
+            if kept_channels.contains(&item.channel) {
                 coverage.partial.push(item.channel);
             }
         }
@@ -305,7 +308,7 @@ fn delivery_coverage(items: &[MemoryItem], kept: &[MemoryItem], original: &Cover
     // A host-reported omission remains true even if some new content from the
     // same channel fits. Never remove its history during selection.
     for channel in &coverage.omitted {
-        if kept.iter().any(|item| item.channel == *channel) {
+        if kept_channels.contains(channel) {
             coverage.partial.push(*channel);
         }
     }
@@ -315,22 +318,33 @@ fn delivery_coverage(items: &[MemoryItem], kept: &[MemoryItem], original: &Cover
 fn serialize_packet(
     budget: &RecallBudget,
     items: &[MemoryItem],
-    kept: &[MemoryItem],
+    kept: &[&MemoryItem],
     coverage: &Coverage,
     insufficient: bool,
 ) -> Result<SerializedPacket, BoxError> {
-    let packet = MemoryPacket {
-        format: PACKET_FORMAT.into(),
+    // Borrow the selected JSON instead of deep-cloning it at every admission.
+    // Field order matches MemoryPacket so the token boundary is unchanged.
+    #[derive(Serialize)]
+    struct PacketView<'a> {
+        format: &'static str,
+        status: &'static str,
+        tokenizer: &'static str,
+        token_limit: u32,
+        items: &'a [&'a MemoryItem],
+        coverage: Coverage,
+        semantic_complete: bool,
+        action_ready: bool,
+    }
+    let packet = PacketView {
+        format: PACKET_FORMAT,
         status: if insufficient {
             "budget_insufficient"
         } else {
             "bounded"
-        }
-        .into(),
-        failed_reason: None,
-        tokenizer: TOKENIZER.into(),
+        },
+        tokenizer: TOKENIZER,
         token_limit: budget.max_tokens,
-        items: kept.to_vec(),
+        items: kept,
         coverage: delivery_coverage(items, kept, coverage),
         semantic_complete: false,
         action_ready: false,

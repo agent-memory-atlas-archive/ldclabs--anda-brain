@@ -1,6 +1,7 @@
 //! BM25 candidates, document authorization and citation expansion.
 
 use super::*;
+use futures::{StreamExt, TryStreamExt};
 
 impl WikiService {
     /// One-call BM25 retrieval over the chunk plane. Visibility (current
@@ -158,18 +159,19 @@ impl WikiService {
             actor: String::new(),
             labels: labels.map(<[String]>::to_vec),
         };
-        let mut visible = std::collections::BTreeMap::new();
-        for row in &rows {
-            if visible.contains_key(&row.doc_id) {
-                continue;
-            }
-            let doc = match self.doc_record(row.doc_id).await {
-                Ok(doc) => Some(doc),
-                Err(WikiError::NotFound(_)) => None,
-                Err(err) => return Err(err),
-            };
-            visible.insert(row.doc_id, doc);
-        }
+        let doc_ids: std::collections::BTreeSet<_> = rows.iter().map(|row| row.doc_id).collect();
+        let visible: BTreeMap<_, _> = futures::stream::iter(doc_ids)
+            .map(|id| async move {
+                let doc = match self.doc_record(id).await {
+                    Ok(doc) => Some(doc),
+                    Err(WikiError::NotFound(_)) => None,
+                    Err(error) => return Err(error),
+                };
+                Ok::<_, WikiError>((id, doc))
+            })
+            .buffered(8)
+            .try_collect()
+            .await?;
         rows.retain(|row| {
             visible
                 .get(&row.doc_id)
@@ -228,15 +230,17 @@ impl WikiService {
         core: Vec<WikiChunkRecord>,
         expand: usize,
     ) -> Result<Vec<WikiHit>, WikiError> {
-        let mut layouts = BTreeMap::new();
-        for row in &core {
-            if let std::collections::btree_map::Entry::Vacant(entry) = layouts.entry(row.version_id)
-            {
-                let version = self.version_record(row.version_id).await?;
+        let versions: std::collections::BTreeSet<_> =
+            core.iter().map(|row| row.version_id).collect();
+        let layouts: BTreeMap<_, _> = futures::stream::iter(versions)
+            .map(|id| async move {
+                let version = self.version_record(id).await?;
                 let plan = chunk_markdown(&version.content);
-                entry.insert((version, plan));
-            }
-        }
+                Ok::<_, WikiError>((id, (version, plan)))
+            })
+            .buffered(8)
+            .try_collect()
+            .await?;
         let mut hits = Vec::with_capacity(core.len());
         for row in &core {
             let (version, plan) = &layouts[&row.version_id];

@@ -192,6 +192,7 @@ impl AppState {
             clock: self.clock.clone(),
             automatic: false,
             llm_semaphore: self.llm_semaphore.clone(),
+            llm_request_semaphore: self.llm_request_semaphore.clone(),
             ed25519_pubkeys: self.ed25519_pubkeys.clone(),
             management: self.management.clone(),
             app_name: self.app_name.clone(),

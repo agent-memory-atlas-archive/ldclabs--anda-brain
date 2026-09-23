@@ -17,6 +17,8 @@ pub(crate) mod kip_reference;
 pub mod learning;
 pub mod runtime_api;
 
+mod model_budget;
+mod persisted;
 mod runtime;
 #[cfg(feature = "experiments")]
 pub use space::experiments;

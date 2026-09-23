@@ -4,6 +4,14 @@ All notable changes to the Anda Brain project.
 
 ## [0.12.1] — 2026-09-23
 
+### Runtime correctness and bounded work
+
+- Formation and Maintenance now share atomic writer admission, including settlement and automatic handoff. Maintenance claims transfer by ownership without leaked Arc references. Compaction consumes the configured model-turn allowance before another call can start.
+- Model-call concurrency covers background work, compaction, WikiDigest and diagnostic judges; HTTP/MCP request admission remains separately bounded. Closing a Space cancels model waits and tracks remaining background orchestration, while admitted native settlement writes drain before database recovery and close.
+- Eviction retains a failed-close owner for retry and closes outside the global Space map lock. Warm Space loads reuse completed attention discovery. Formation queries indexed pending candidates instead of reading every numeric conversation id, and queue read errors are no longer skipped.
+- Self-test stores its own last-tested timestamp for 30-day retesting, counts the actual host request with the pinned tokenizer and reserves a requested output cap. This does not guarantee provider billing/tokenization, and absent usage stays unknown.
+- Conversation/Wiki page reads use bounded concurrency; Recall packets borrow selected content and use indexed membership while retaining exact final token checks. Conditional JSON persistence shares bounded readback code; the obsolete usage dirty index and writes are retired without deleting compatibility fields.
+
 ### Recoverable memory product contracts
 
 - Trusted Rust hosts can inspect Assertion-backed records and captured Evidence sources, prepare conditional corrections, suppress or purge a reviewed claim closure, and resume admitted changes after restart. Corrections append a new attributed claim; native history remains intact. Sources must match the captured Formation message or a confirmed correction receipt before they can authorize a managed change.

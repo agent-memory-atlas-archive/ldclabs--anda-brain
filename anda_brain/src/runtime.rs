@@ -138,6 +138,7 @@ impl DurableTasks {
 #[derive(Clone, Default)]
 pub(crate) struct RuntimeTasks {
     cancel: CancellationToken,
+    admission: Arc<parking_lot::Mutex<bool>>,
     tasks: TaskTracker,
     before_cancel: Arc<parking_lot::RwLock<Option<CancelHook>>>,
 }
@@ -152,6 +153,10 @@ impl RuntimeTasks {
     }
 
     pub fn spawn(&self, work: impl Future<Output = ()> + Send + 'static) {
+        let closing = self.admission.lock();
+        if *closing {
+            return;
+        }
         let cancel = self.cancel.clone();
         let before_cancel = self.before_cancel.clone();
         self.tasks.spawn(async move {
@@ -169,6 +174,8 @@ impl RuntimeTasks {
         if let Some(hook) = hook {
             hook();
         }
+        let mut closing = self.admission.lock();
+        *closing = true;
         self.cancel.cancel();
         self.tasks.close();
     }

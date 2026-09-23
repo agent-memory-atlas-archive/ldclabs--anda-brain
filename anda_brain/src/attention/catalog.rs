@@ -1,5 +1,5 @@
 use super::*;
-use object_store::{ObjectStore, ObjectStoreExt, PutMode, UpdateVersion, path::Path};
+use object_store::{ObjectStore, PutMode, path::Path};
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -15,10 +15,7 @@ pub(crate) struct Directory {
     pub tasks: crate::runtime::DurableTasks,
     pub(super) semantic_slots: Arc<tokio::sync::Semaphore>,
 }
-pub(crate) struct Versioned<T> {
-    pub value: T,
-    pub(crate) version: UpdateVersion,
-}
+pub(crate) use crate::persisted::Versioned;
 #[derive(Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Root {
@@ -59,25 +56,7 @@ impl Directory {
         &self,
         key: &str,
     ) -> Result<Option<Versioned<T>>, BoxError> {
-        let result = match self.store.get(&self.path(key)).await {
-            Ok(v) => v,
-            Err(object_store::Error::NotFound { .. }) => return Ok(None),
-            Err(e) => return Err(e.into()),
-        };
-        if result.meta.size > MAX_BYTES {
-            return Err("attention object exceeds bound".into());
-        }
-        let version = UpdateVersion {
-            e_tag: result.meta.e_tag.clone(),
-            version: result.meta.version.clone(),
-        };
-        if version.e_tag.is_none() && version.version.is_none() {
-            return Err("attention requires conditional-update storage".into());
-        }
-        Ok(Some(Versioned {
-            value: serde_json::from_slice(&result.bytes().await?)?,
-            version,
-        }))
+        crate::persisted::read(self.store.as_ref(), &self.path(key), MAX_BYTES, "attention").await
     }
     pub(crate) async fn put<T: Serialize>(
         &self,
@@ -85,23 +64,15 @@ impl Directory {
         value: &T,
         mode: PutMode,
     ) -> Result<(), BoxError> {
-        let bytes = serde_json::to_vec(value)?;
-        if bytes.len() as u64 > MAX_BYTES {
-            return Err("attention object exceeds bound".into());
-        }
-        let result = self
-            .store
-            .put_opts(&self.path(key), bytes.clone().into(), mode.into())
-            .await;
-        let saved = self.store.get(&self.path(key)).await?;
-        if saved.meta.size > MAX_BYTES || saved.bytes().await?.as_ref() != bytes {
-            return Err(result
-                .err()
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| "attention conditional-write conflict".into())
-                .into());
-        }
-        Ok(())
+        crate::persisted::put(
+            self.store.as_ref(),
+            &self.path(key),
+            value,
+            mode,
+            MAX_BYTES,
+            "attention",
+        )
+        .await
     }
     async fn root(&self) -> Result<Versioned<Root>, BoxError> {
         if self.read::<Root>("root").await?.is_none() {

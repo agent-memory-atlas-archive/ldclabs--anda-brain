@@ -717,8 +717,7 @@ impl RecallAgent {
 
                 match timeout(remaining, compact_runner_if_needed(&mut runner)).await {
                     Ok(Ok(true)) => {
-                        // A compaction that lands exactly on the turn limit is
-                        // caught by the check at the top of the next iteration.
+                        // Compaction is billed and consumes the same turn budget.
                         total_model_turns = total_model_turns.saturating_add(1);
                         accounted_runner_turns = runner.turns();
                         persisted_runner_history_len = 0;
@@ -727,6 +726,10 @@ impl RecallAgent {
                     Ok(Ok(false)) => {}
                     Ok(Err(err)) => break 'run Some(RecallFailure::Runner(err)),
                     Err(_) => break 'run Some(RecallFailure::Timeout),
+                }
+
+                if total_model_turns >= max_model_turns {
+                    break 'run Some(RecallFailure::TurnLimit);
                 }
 
                 let Some(remaining) = recall_time_remaining(started_at) else {
