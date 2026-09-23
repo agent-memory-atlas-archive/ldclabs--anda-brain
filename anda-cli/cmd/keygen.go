@@ -18,24 +18,25 @@ and public key as base64url-encoded CBOR (COSE Key format).
 Example:
   anda-cli keygen
   anda-cli keygen --json`,
-	Run: func(cmd *cobra.Command, args []string) {
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		privKey, err := ed25519.GenerateKey()
 		if err != nil {
-			exitError(fmt.Errorf("generate key: %w", err))
+			return fmt.Errorf("generate key: %w", err)
 		}
 
 		pubKey, err := ed25519.ToPublicKey(privKey)
 		if err != nil {
-			exitError(fmt.Errorf("derive public key: %w", err))
+			return fmt.Errorf("derive public key: %w", err)
 		}
 
 		privCBOR, err := key.MarshalCBOR(privKey)
 		if err != nil {
-			exitError(fmt.Errorf("marshal private key: %w", err))
+			return fmt.Errorf("marshal private key: %w", err)
 		}
 		pubCBOR, err := key.MarshalCBOR(pubKey)
 		if err != nil {
-			exitError(fmt.Errorf("marshal public key: %w", err))
+			return fmt.Errorf("marshal public key: %w", err)
 		}
 
 		privB64 := base64.RawURLEncoding.EncodeToString(privCBOR)
@@ -44,16 +45,18 @@ Example:
 
 		outputJSON, _ := cmd.Flags().GetBool("json")
 		if outputJSON {
-			printJSON(map[string]string{
+			if err := printJSON(cmd, map[string]string{
 				"kid":         kid.Base64(),
 				"private_key": privB64,
 				"public_key":  pubB64,
-			})
+			}); err != nil {
+				return err
+			}
 		} else {
-			fmt.Printf("Kid:         %s\n", kid.Base64())
-			fmt.Printf("Private Key: %s\n", privB64)
-			fmt.Printf("Public Key:  %s\n", pubB64)
+			_, err := fmt.Fprintf(cmd.OutOrStdout(), "Kid:         %s\nPrivate Key: %s\nPublic Key:  %s\n", kid.Base64(), privB64, pubB64)
+			return err
 		}
+		return nil
 	},
 }
 

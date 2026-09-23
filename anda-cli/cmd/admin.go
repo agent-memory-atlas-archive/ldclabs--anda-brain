@@ -15,13 +15,14 @@ var adminCmd = &cobra.Command{
 var createSpaceCmd = &cobra.Command{
 	Use:   "create-space",
 	Short: "Create a space",
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		user, _ := cmd.Flags().GetString("user")
 		sid, _ := cmd.Flags().GetString("space-id")
 		tier, _ := cmd.Flags().GetInt("tier")
 
 		if user == "" || sid == "" {
-			exitError(fmt.Errorf("--user and --space-id are required"))
+			return fmt.Errorf("--user and --space-id are required")
 		}
 
 		input := &api.CreateOrUpdateSpaceInput{
@@ -33,25 +34,23 @@ var createSpaceCmd = &cobra.Command{
 		client := newClient()
 		resp, err := client.CreateSpace(cmd.Context(), input)
 		if err != nil {
-			exitError(err)
+			return err
 		}
-		if resp.Error != nil {
-			exitError(resp.Error)
-		}
-		printJSON(resp.Result)
+		return printRPC(cmd, resp)
 	},
 }
 
 var updateTierCmd = &cobra.Command{
 	Use:   "update-tier",
 	Short: "Update space tier",
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		user, _ := cmd.Flags().GetString("user")
 		sid, _ := cmd.Flags().GetString("space-id")
 		tier, _ := cmd.Flags().GetInt("tier")
 
 		if user == "" || sid == "" {
-			exitError(fmt.Errorf("--user and --space-id are required"))
+			return fmt.Errorf("--user and --space-id are required")
 		}
 
 		input := &api.CreateOrUpdateSpaceInput{
@@ -63,12 +62,9 @@ var updateTierCmd = &cobra.Command{
 		client := newClient()
 		resp, err := client.UpdateSpaceTier(cmd.Context(), sid, input)
 		if err != nil {
-			exitError(err)
+			return err
 		}
-		if resp.Error != nil {
-			exitError(resp.Error)
-		}
-		printJSON(resp.Result)
+		return printRPC(cmd, resp)
 	},
 }
 

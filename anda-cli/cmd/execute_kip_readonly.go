@@ -30,50 +30,50 @@ Example:
 
   cat kip_request.json | anda-cli --space-id my_space --token $TOKEN execute-kip-readonly`,
 	Args: cobra.NoArgs,
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		requestJSON, _ := cmd.Flags().GetString("request")
 		requestFile, _ := cmd.Flags().GetString("file")
 
 		if requestJSON != "" && requestFile != "" {
-			exitError(fmt.Errorf("--request and --file cannot be used together"))
+			return fmt.Errorf("--request and --file cannot be used together")
 		}
 
 		raw, err := readKIPRequestInput(requestJSON, requestFile)
 		if err != nil {
-			exitError(err)
+			return err
 		}
 
 		input, err := readJSONObject[api.KipRequest](string(raw))
 		if err != nil {
-			exitError(fmt.Errorf("invalid request JSON: %w", err))
+			return fmt.Errorf("invalid request JSON: %w", err)
 		}
 		input.Command = strings.TrimSpace(input.Command)
 		if input.Command == "" && len(input.Operations) == 0 {
-			exitError(fmt.Errorf("invalid request JSON: either command or operations is required"))
+			return fmt.Errorf("invalid request JSON: either command or operations is required")
 		}
 		if input.Command != "" && len(input.Operations) > 0 {
-			exitError(fmt.Errorf("invalid request JSON: command and operations are mutually exclusive"))
+			return fmt.Errorf("invalid request JSON: command and operations are mutually exclusive")
 		}
 		if len(input.Operations) > 1 && input.Execution == nil {
-			exitError(fmt.Errorf("invalid request JSON: multiple operations require execution.mode"))
+			return fmt.Errorf("invalid request JSON: multiple operations require execution.mode")
 		}
 		if input.Execution != nil {
 			switch input.Execution.Mode {
 			case "independent", "sequence", "atomic":
 			default:
-				exitError(fmt.Errorf("invalid execution.mode %q", input.Execution.Mode))
+				return fmt.Errorf("invalid execution.mode %q", input.Execution.Mode)
 			}
 		}
 
 		client := newClient()
 		resp, err := client.ExecuteKIPReadonly(cmd.Context(), &input)
 		if err != nil {
-			exitError(err)
+			return err
 		}
-		printJSON(resp)
-		if err := resp.Failure(); err != nil {
-			exitError(err)
+		if err := printJSON(cmd, resp); err != nil {
+			return err
 		}
+		return resp.Failure()
 	},
 }
 
@@ -90,7 +90,10 @@ func readKIPRequestInput(requestJSON, requestFile string) ([]byte, error) {
 		return []byte(strings.TrimSpace(string(data))), nil
 	}
 
-	stat, _ := os.Stdin.Stat()
+	stat, err := os.Stdin.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("inspect stdin: %w", err)
+	}
 	if (stat.Mode() & os.ModeCharDevice) == 0 {
 		data, err := io.ReadAll(os.Stdin)
 		if err != nil {

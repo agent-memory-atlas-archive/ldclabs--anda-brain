@@ -403,6 +403,12 @@ curl -sX POST https://your-brain-host/v1/my_space_001/recall \
 
 For full CLI usage, please refer to [anda-cli/README.md](https://github.com/ldclabs/anda-brain/tree/main/anda-cli).
 
+The CLI preserves structured results and returns a nonzero exit status for reported
+execution failures. Batch checklists are bound to the endpoint, Space and shard;
+changed files are resubmitted, and `submitted` confirms queue acceptance only.
+Secret environment values are omitted from help text. Wiki exports can be imported
+directly; `wiki commit --input` requires all document fields inside that JSON.
+
 ```bash
 # Submit memory formation (JSON messages)
 anda-cli --space-id my_space --token $TOKEN formation \

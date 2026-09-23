@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -15,7 +14,7 @@ func callRPC[T any](ctx context.Context, c *Client, method, path string, input a
 		return nil, err
 	}
 	var response RpcResponse[T]
-	if err := json.Unmarshal(data, &response); err != nil {
+	if err := DecodeJSON(data, &response); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	return &response, nil

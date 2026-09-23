@@ -85,7 +85,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any) ([]b
 
 	if resp.StatusCode >= 400 {
 		var rpcErr RpcError
-		if json.Unmarshal(respBody, &rpcErr) == nil && rpcErr.Message != "" {
+		if DecodeJSON(respBody, &rpcErr) == nil && rpcErr.Message != "" {
 			return nil, &HTTPError{StatusCode: resp.StatusCode, RPC: &rpcErr}
 		}
 		return nil, &HTTPError{StatusCode: resp.StatusCode, Body: string(respBody)}
@@ -101,7 +101,7 @@ func (c *Client) GetInfo(ctx context.Context) (*ServiceInfo, error) {
 		return nil, err
 	}
 	var info ServiceInfo
-	if err := json.Unmarshal(data, &info); err != nil {
+	if err := DecodeJSON(data, &info); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	return &info, nil
@@ -109,41 +109,17 @@ func (c *Client) GetInfo(ctx context.Context) (*ServiceInfo, error) {
 
 // Formation submits a memory formation task.
 func (c *Client) Formation(ctx context.Context, input *FormationInput) (*RpcResponse[AgentOutput], error) {
-	data, err := c.doJSON(ctx, http.MethodPost, c.spacePath("/formation"), input)
-	if err != nil {
-		return nil, err
-	}
-	var resp RpcResponse[AgentOutput]
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-	return &resp, nil
+	return callRPC[AgentOutput](ctx, c, http.MethodPost, c.spacePath("/formation"), input)
 }
 
 // Recall queries memory with natural language.
 func (c *Client) Recall(ctx context.Context, input *RecallInput) (*RpcResponse[AgentOutput], error) {
-	data, err := c.doJSON(ctx, http.MethodPost, c.spacePath("/recall"), input)
-	if err != nil {
-		return nil, err
-	}
-	var resp RpcResponse[AgentOutput]
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-	return &resp, nil
+	return callRPC[AgentOutput](ctx, c, http.MethodPost, c.spacePath("/recall"), input)
 }
 
 // Maintenance triggers maintenance task.
 func (c *Client) Maintenance(ctx context.Context, input *MaintenanceInput) (*RpcResponse[AgentOutput], error) {
-	data, err := c.doJSON(ctx, http.MethodPost, c.spacePath("/maintenance"), input)
-	if err != nil {
-		return nil, err
-	}
-	var resp RpcResponse[AgentOutput]
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-	return &resp, nil
+	return callRPC[AgentOutput](ctx, c, http.MethodPost, c.spacePath("/maintenance"), input)
 }
 
 // ExecuteKIPReadonly executes a KIP request in read-only mode.
@@ -153,7 +129,7 @@ func (c *Client) ExecuteKIPReadonly(ctx context.Context, input *KipRequest) (*Ki
 		return nil, err
 	}
 	var resp KipResponse[any]
-	if err := json.Unmarshal(data, &resp); err != nil {
+	if err := DecodeJSON(data, &resp); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	return &resp, nil
@@ -161,44 +137,24 @@ func (c *Client) ExecuteKIPReadonly(ctx context.Context, input *KipRequest) (*Ki
 
 // GetOrInitUser gets or initializes a caller concept.
 func (c *Client) GetOrInitUser(ctx context.Context, input *GetOrInitUserInput) (*RpcResponse[Concept], error) {
-	data, err := c.doJSON(ctx, http.MethodPost, c.spacePath("/get_or_init_user"), input)
+	response, err := callRPC[Concept](ctx, c, http.MethodPost, c.spacePath("/get_or_init_user"), input)
 	if err != nil {
 		return nil, err
 	}
-
-	var resp RpcResponse[Concept]
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
+	// Preserve this method's existing Go error contract for library callers.
+	if response.Error != nil {
+		return nil, fmt.Errorf("RPC error: %w", response.Error)
 	}
-	if resp.Error != nil {
-		return nil, fmt.Errorf("RPC error: %s", resp.Error.Message)
-	}
-	return &resp, nil
+	return response, nil
 }
 
 // GetSpaceInfo returns space information.
 func (c *Client) GetSpaceInfo(ctx context.Context) (*RpcResponse[SpaceInfo], error) {
-	data, err := c.doJSON(ctx, http.MethodGet, c.spacePath("/info"), nil)
-	if err != nil {
-		return nil, err
-	}
-	var resp RpcResponse[SpaceInfo]
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-	return &resp, nil
+	return callRPC[SpaceInfo](ctx, c, http.MethodGet, c.spacePath("/info"), nil)
 }
 
 func (c *Client) GetFormationStatus(ctx context.Context) (*RpcResponse[FormationStatus], error) {
-	data, err := c.doJSON(ctx, http.MethodGet, c.spacePath("/formation_status"), nil)
-	if err != nil {
-		return nil, err
-	}
-	var resp RpcResponse[FormationStatus]
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-	return &resp, nil
+	return callRPC[FormationStatus](ctx, c, http.MethodGet, c.spacePath("/formation_status"), nil)
 }
 
 // GetConversation returns a single conversation.
@@ -211,15 +167,7 @@ func (c *Client) GetConversation(ctx context.Context, conversationID uint64, col
 	if len(params) > 0 {
 		path += "?" + params.Encode()
 	}
-	data, err := c.doJSON(ctx, http.MethodGet, path, nil)
-	if err != nil {
-		return nil, err
-	}
-	var resp RpcResponse[Conversation]
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-	return &resp, nil
+	return callRPC[Conversation](ctx, c, http.MethodGet, path, nil)
 }
 
 // GetConversationDelta returns incremental conversation updates since the given offsets.
@@ -239,15 +187,7 @@ func (c *Client) GetConversationDelta(ctx context.Context, conversationID uint64
 		path += "?" + params.Encode()
 	}
 
-	data, err := c.doJSON(ctx, http.MethodGet, path, nil)
-	if err != nil {
-		return nil, err
-	}
-	var resp RpcResponse[ConversationDelta]
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-	return &resp, nil
+	return callRPC[ConversationDelta](ctx, c, http.MethodGet, path, nil)
 }
 
 // ListConversations lists conversations with pagination.
@@ -267,41 +207,17 @@ func (c *Client) ListConversations(ctx context.Context, cursor string, limit int
 		path += "?" + params.Encode()
 	}
 
-	data, err := c.doJSON(ctx, http.MethodGet, path, nil)
-	if err != nil {
-		return nil, err
-	}
-	var resp RpcResponse[[]Conversation]
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-	return &resp, nil
+	return callRPC[[]Conversation](ctx, c, http.MethodGet, path, nil)
 }
 
 // ListSpaceTokens lists space tokens (management).
 func (c *Client) ListSpaceTokens(ctx context.Context) (*RpcResponse[[]SpaceToken], error) {
-	data, err := c.doJSON(ctx, http.MethodGet, c.spacePath("/management/space_tokens"), nil)
-	if err != nil {
-		return nil, err
-	}
-	var resp RpcResponse[[]SpaceToken]
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-	return &resp, nil
+	return callRPC[[]SpaceToken](ctx, c, http.MethodGet, c.spacePath("/management/space_tokens"), nil)
 }
 
 // AddSpaceToken adds a space token (management).
 func (c *Client) AddSpaceToken(ctx context.Context, input *AddSpaceTokenInput) (*RpcResponse[SpaceToken], error) {
-	data, err := c.doJSON(ctx, http.MethodPost, c.spacePath("/management/add_space_token"), input)
-	if err != nil {
-		return nil, err
-	}
-	var resp RpcResponse[SpaceToken]
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-	return &resp, nil
+	return callRPC[SpaceToken](ctx, c, http.MethodPost, c.spacePath("/management/add_space_token"), input)
 }
 
 // RevokeSpaceToken revokes a space token by its full value (management).
@@ -317,89 +233,33 @@ func (c *Client) RevokeSpaceTokenByName(ctx context.Context, name string) (*RpcR
 }
 
 func (c *Client) revokeSpaceToken(ctx context.Context, input RevokeSpaceTokenInput) (*RpcResponse[bool], error) {
-	data, err := c.doJSON(ctx, http.MethodPost, c.spacePath("/management/revoke_space_token"), input)
-	if err != nil {
-		return nil, err
-	}
-	var resp RpcResponse[bool]
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-	return &resp, nil
+	return callRPC[bool](ctx, c, http.MethodPost, c.spacePath("/management/revoke_space_token"), input)
 }
 
 // UpdateSpace updates space information (management).
 func (c *Client) UpdateSpace(ctx context.Context, input *UpdateSpaceInput) (*RpcResponse[bool], error) {
-	data, err := c.doJSON(ctx, http.MethodPatch, c.spacePath("/management/update_space"), input)
-	if err != nil {
-		return nil, err
-	}
-	var resp RpcResponse[bool]
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-	return &resp, nil
+	return callRPC[bool](ctx, c, http.MethodPatch, c.spacePath("/management/update_space"), input)
 }
 
 func (c *Client) RestartFormation(ctx context.Context, input *RestartFormationInput) (*RpcResponse[bool], error) {
-	data, err := c.doJSON(ctx, http.MethodPatch, c.spacePath("/management/restart_formation"), input)
-	if err != nil {
-		return nil, err
-	}
-	var resp RpcResponse[bool]
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-	return &resp, nil
+	return callRPC[bool](ctx, c, http.MethodPatch, c.spacePath("/management/restart_formation"), input)
 }
 
 func (c *Client) GetBYOK(ctx context.Context) (*RpcResponse[ModelConfig], error) {
-	data, err := c.doJSON(ctx, http.MethodGet, c.spacePath("/management/space_byok"), nil)
-	if err != nil {
-		return nil, err
-	}
-	var resp RpcResponse[ModelConfig]
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-	return &resp, nil
+	return callRPC[ModelConfig](ctx, c, http.MethodGet, c.spacePath("/management/space_byok"), nil)
 }
 
 func (c *Client) UpdateBYOK(ctx context.Context, input *ModelConfig) (*RpcResponse[bool], error) {
-	data, err := c.doJSON(ctx, http.MethodPatch, c.spacePath("/management/space_byok"), input)
-	if err != nil {
-		return nil, err
-	}
-	var resp RpcResponse[bool]
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-	return &resp, nil
+	return callRPC[bool](ctx, c, http.MethodPatch, c.spacePath("/management/space_byok"), input)
 }
 
 // CreateSpace creates a space (admin).
 func (c *Client) CreateSpace(ctx context.Context, input *CreateOrUpdateSpaceInput) (*RpcResponse[SpaceInfo], error) {
-	data, err := c.doJSON(ctx, http.MethodPost, "/admin/create_space", input)
-	if err != nil {
-		return nil, err
-	}
-	var resp RpcResponse[SpaceInfo]
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-	return &resp, nil
+	return callRPC[SpaceInfo](ctx, c, http.MethodPost, "/admin/create_space", input)
 }
 
 // UpdateSpaceTier updates space tier (admin).
 func (c *Client) UpdateSpaceTier(ctx context.Context, spaceID string, input *CreateOrUpdateSpaceInput) (*RpcResponse[SpaceTier], error) {
 	path := fmt.Sprintf("/admin/%s/update_space_tier", url.PathEscape(spaceID))
-	data, err := c.doJSON(ctx, http.MethodPost, path, input)
-	if err != nil {
-		return nil, err
-	}
-	var resp RpcResponse[SpaceTier]
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-	return &resp, nil
+	return callRPC[SpaceTier](ctx, c, http.MethodPost, path, input)
 }

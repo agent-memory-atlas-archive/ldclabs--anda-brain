@@ -7,32 +7,28 @@ import (
 var infoCmd = &cobra.Command{
 	Use:   "info",
 	Short: "Get space information",
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		client := newClient()
 		resp, err := client.GetSpaceInfo(cmd.Context())
 		if err != nil {
-			exitError(err)
+			return err
 		}
-		if resp.Error != nil {
-			exitError(resp.Error)
-		}
-		printJSON(resp.Result)
+		return printRPC(cmd, resp)
 	},
 }
 
 var formationStatusCmd = &cobra.Command{
 	Use:   "formation-status",
 	Short: "Get formation processing status",
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		client := newClient()
 		resp, err := client.GetFormationStatus(cmd.Context())
 		if err != nil {
-			exitError(err)
+			return err
 		}
-		if resp.Error != nil {
-			exitError(resp.Error)
-		}
-		printJSON(resp.Result)
+		return printRPC(cmd, resp)
 	},
 }
 

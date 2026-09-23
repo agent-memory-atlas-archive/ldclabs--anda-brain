@@ -2,26 +2,17 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/ldclabs/anda-brain/anda-cli/api"
-)
-
-const defaultBatchReportFileName = ".formation-batch-checklist.json"
-
-const (
-	batchStatusPending   = "pending"
-	batchStatusWorking   = "working"
-	batchStatusSucceeded = "succeeded"
-	batchStatusFailed    = "failed"
 )
 
 type fileFormationBatchOptions struct {
@@ -31,197 +22,186 @@ type fileFormationBatchOptions struct {
 	ReportPath   string
 	RetryFailed  bool
 	DryRun       bool
+	Force        bool
 	InputContext *api.InputContext
+	Output       io.Writer
 }
 
-type fileFormationChecklist struct {
-	RootDir   string                                  `json:"root_dir"`
-	Selector  string                                  `json:"selector"`
-	UpdatedAt string                                  `json:"updated_at"`
-	Entries   map[string]*fileFormationChecklistEntry `json:"entries"`
-}
-
-type fileFormationChecklistEntry struct {
-	Path         string `json:"path"`
-	Status       string `json:"status"`
-	Attempts     int    `json:"attempts"`
-	LastError    string `json:"last_error,omitempty"`
-	UpdatedAt    string `json:"updated_at"`
-	Conversation *int   `json:"conversation,omitempty"`
-}
-
-func runFileFormationBatch(ctx context.Context, client *api.Client, opts fileFormationBatchOptions) error {
+func runFileFormationBatch(ctx context.Context, client *api.Client, opts fileFormationBatchOptions) (runErr error) {
 	if strings.TrimSpace(opts.RootDir) == "" {
 		return fmt.Errorf("--batch-dir cannot be empty")
 	}
-
+	if client == nil && !opts.DryRun {
+		return fmt.Errorf("batch client is required")
+	}
+	if opts.Output == nil {
+		opts.Output = os.Stdout
+	}
+	logf := func(format string, args ...any) error {
+		_, err := fmt.Fprintf(opts.Output, format, args...)
+		return err
+	}
 	absRootDir, err := filepath.Abs(opts.RootDir)
 	if err != nil {
 		return fmt.Errorf("resolve batch dir: %w", err)
 	}
-
 	selector, err := resolveBatchSelector(opts.FileName, opts.Extension)
 	if err != nil {
 		return err
 	}
-
 	reportPath, err := resolveBatchReportPath(absRootDir, opts.ReportPath)
 	if err != nil {
 		return err
 	}
-
-	excludePaths := map[string]bool{
-		reportPath:          true,
-		reportPath + ".tmp": true,
-	}
-	targetFiles, err := findBatchFiles(absRootDir, selector, excludePaths)
+	files, err := findBatchFiles(absRootDir, selector, map[string]bool{
+		reportPath: true, reportPath + ".tmp": true, reportPath + ".jsonl": true,
+	})
 	if err != nil {
 		return err
 	}
-	if len(targetFiles) == 0 {
+	if len(files) == 0 {
 		return fmt.Errorf("no files matched selector %q under %q", selector, absRootDir)
 	}
-
 	checklist, err := loadFileFormationChecklist(reportPath, absRootDir, selector)
 	if err != nil {
 		return err
 	}
-	mergeChecklistEntries(checklist, absRootDir, targetFiles)
-	if err := saveFileFormationChecklist(reportPath, checklist); err != nil {
-		return err
-	}
-
-	total := len(targetFiles)
-	processed := 0
-	skipped := 0
-	wouldProcess := 0
-	succeeded := 0
-	failed := 0
-	if opts.InputContext == nil {
-		opts.InputContext = &api.InputContext{}
-	}
-
-	for idx, targetFile := range targetFiles {
-		if ctx.Err() != nil {
-			return ctx.Err()
+	if client != nil {
+		if err := checklist.bindTarget(client); err != nil {
+			return err
 		}
+	}
+	mergeChecklistEntries(checklist, absRootDir, files)
 
-		relPath, err := filepath.Rel(absRootDir, targetFile)
+	// A snapshot binds the target before any request. Only the changed entry
+	// is appended during submission; the final snapshot compacts that log.
+	var journal *formationJournal
+	if !opts.DryRun {
+		journal, err = openFormationJournal(reportPath, checklist)
 		if err != nil {
-			return fmt.Errorf("resolve relative path for %q: %w", targetFile, err)
+			return err
 		}
-
-		entry := checklist.Entries[relPath]
-		if !shouldProcessBatchEntry(entry, opts.RetryFailed) {
-			skipped++
-			fmt.Printf("[%d/%d] Skip %s (status=%s)\n", idx+1, total, relPath, entry.Status)
-			continue
+		defer func() { runErr = errors.Join(runErr, journal.close()) }()
+	}
+	submitted, failed, unresolved, skipped, wouldSubmit := 0, 0, 0, 0, 0
+	for idx, file := range files {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-
-		processed++
+		rel, err := filepath.Rel(absRootDir, file)
+		if err != nil {
+			return err
+		}
+		entry := checklist.Entries[rel]
+		content, readErr := os.ReadFile(file)
+		digest := ""
+		if readErr == nil {
+			digest = fmt.Sprintf("%x", sha256.Sum256(content))
+			if entry.Digest != "" && entry.Digest != digest {
+				entry.Status = batchStatusPending
+				entry.Conversation = nil
+			}
+			if !opts.Force && !shouldProcessBatchEntry(entry, opts.RetryFailed) {
+				skipped++
+				if entry.Status == batchStatusFailed || entry.Status == batchStatusWorking {
+					unresolved++
+				}
+				if err := logf("[%d/%d] Skip %s (status=%s)\n", idx+1, len(files), rel, entry.Status); err != nil {
+					return err
+				}
+				continue
+			}
+		}
 		if opts.DryRun {
-			wouldProcess++
-			fmt.Printf("[%d/%d] DRY  %s\n", idx+1, total, relPath)
+			if readErr != nil {
+				return fmt.Errorf("read %s: %w", rel, readErr)
+			}
+			wouldSubmit++
+			if err := logf("[%d/%d] DRY  %s\n", idx+1, len(files), rel); err != nil {
+				return err
+			}
 			continue
 		}
 
 		entry.Attempts++
+		entry.Digest = digest
 		entry.Status = batchStatusWorking
-		entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-		if err := saveFileFormationChecklist(reportPath, checklist); err != nil {
-			return err
-		}
-
-		content, err := os.ReadFile(targetFile)
-		if err != nil {
-			markBatchFormationFailed(entry, fmt.Sprintf("read file: %v", err))
-			if saveErr := saveFileFormationChecklist(reportPath, checklist); saveErr != nil {
-				return saveErr
-			}
-			failed++
-			fmt.Printf("[%d/%d] Fail %s: %v\n", idx+1, total, relPath, err)
-			continue
-		}
-
-		messages, err := parseMessagesInput(string(content))
-		if err != nil {
-			markBatchFormationFailed(entry, fmt.Sprintf("parse messages: %v", err))
-			if saveErr := saveFileFormationChecklist(reportPath, checklist); saveErr != nil {
-				return saveErr
-			}
-			failed++
-			fmt.Printf("[%d/%d] Fail %s: %v\n", idx+1, total, relPath, err)
-			continue
-		}
-
-		if err := validateMessageContentLength(messages); err != nil {
-			markBatchFormationFailed(entry, err.Error())
-			if saveErr := saveFileFormationChecklist(reportPath, checklist); saveErr != nil {
-				return saveErr
-			}
-			failed++
-			fmt.Printf("[%d/%d] Fail %s: %v\n", idx+1, total, relPath, err)
-			continue
-		}
-
-		inputContext := *opts.InputContext
-		if inputContext.Source == "" {
-			inputContext.Source = targetFile
-		}
-		input := &api.FormationInput{
-			Messages:  messages,
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
-			Context:   &inputContext,
-		}
-
-		resp, err := client.Formation(ctx, input)
-		if err != nil {
-			markBatchFormationFailed(entry, err.Error())
-			if saveErr := saveFileFormationChecklist(reportPath, checklist); saveErr != nil {
-				return saveErr
-			}
-			failed++
-			fmt.Printf("[%d/%d] Fail %s: %v\n", idx+1, total, relPath, err)
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			continue
-		}
-		if resp.Error != nil {
-			markBatchFormationFailed(entry, resp.Error.Error())
-			if saveErr := saveFileFormationChecklist(reportPath, checklist); saveErr != nil {
-				return saveErr
-			}
-			failed++
-			fmt.Printf("[%d/%d] Fail %s: %v\n", idx+1, total, relPath, resp.Error)
-			continue
-		}
-
-		entry.Status = batchStatusSucceeded
 		entry.LastError = ""
-		entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 		entry.Conversation = nil
-		if resp.Result != nil {
-			entry.Conversation = resp.Result.Conversation
-		}
-		if err := saveFileFormationChecklist(reportPath, checklist); err != nil {
+		if err := journal.record(entry); err != nil {
 			return err
 		}
-
-		succeeded++
-		fmt.Printf("[%d/%d] OK   %s\n", idx+1, total, relPath)
+		var output *api.AgentOutput
+		submitErr := readErr
+		if submitErr == nil {
+			output, submitErr = submitFormationFile(ctx, client, file, content, opts.InputContext)
+		}
+		if submitErr != nil {
+			entry.Status = batchStatusFailed
+			entry.LastError = submitErr.Error()
+			failed++
+		} else {
+			entry.Status = batchStatusSubmitted
+			entry.Conversation = output.Conversation
+			submitted++
+		}
+		// Persist the response before writing progress to a possibly closed pipe.
+		if err := journal.record(entry); err != nil {
+			return err
+		}
+		if submitErr != nil {
+			if err := logf("[%d/%d] Fail %s: %v\n", idx+1, len(files), rel, submitErr); err != nil {
+				return err
+			}
+		} else {
+			if err := logf("[%d/%d] Submitted %s (conversation=%d)\n", idx+1, len(files), rel, *entry.Conversation); err != nil {
+				return err
+			}
+		}
 	}
-
 	if opts.DryRun {
-		fmt.Printf("Batch dry-run done. total=%d matched=%d would_submit=%d skipped=%d checklist=%s\n", total, processed, wouldProcess, skipped, reportPath)
-		return nil
+		return logf("Batch dry-run done. total=%d would_submit=%d skipped=%d unresolved=%d\n", len(files), wouldSubmit, skipped, unresolved)
 	}
-
-	fmt.Printf("Batch done. total=%d processed=%d succeeded=%d failed=%d skipped=%d checklist=%s\n", total, processed, succeeded, failed, skipped, reportPath)
-	if failed > 0 {
-		return fmt.Errorf("batch finished with %d failures, see checklist %q", failed, reportPath)
+	if err := logf("Batch done. total=%d submitted=%d failed=%d unresolved=%d skipped=%d checklist=%s\n", len(files), submitted, failed, unresolved, skipped, reportPath); err != nil {
+		return err
+	}
+	if failed+unresolved > 0 {
+		return fmt.Errorf("batch has %d unresolved submissions; see checklist %q", failed+unresolved, reportPath)
 	}
 	return nil
+}
+
+func submitFormationFile(ctx context.Context, client *api.Client, file string, content []byte, inputContext *api.InputContext) (*api.AgentOutput, error) {
+	messages, err := parseMessagesInput(string(content))
+	if err != nil {
+		return nil, fmt.Errorf("parse messages: %w", err)
+	}
+	source := api.InputContext{}
+	if inputContext != nil {
+		source = *inputContext
+	}
+	if source.Source == "" {
+		source.Source = file
+	}
+	response, err := client.Formation(ctx, &api.FormationInput{
+		Messages: messages, Context: &source, Timestamp: time.Now().UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if response.Error != nil {
+		return nil, response.Error
+	}
+	if response.Result == nil {
+		return nil, fmt.Errorf("formation returned no result")
+	}
+	if err := response.Result.Failure(); err != nil {
+		return nil, err
+	}
+	if response.Result.Conversation == nil {
+		return nil, fmt.Errorf("formation returned no conversation ID")
+	}
+	return response.Result, nil
 }
 
 func resolveBatchSelector(fileName, extension string) (string, error) {
@@ -276,7 +256,7 @@ func findBatchFiles(rootDir, selector string, excludePaths map[string]bool) ([]s
 			}
 			return nil
 		}
-		if d.IsDir() {
+		if d.IsDir() || !d.Type().IsRegular() {
 			return nil
 		}
 		if excludePaths[path] {
@@ -290,7 +270,6 @@ func findBatchFiles(rootDir, selector string, excludePaths map[string]bool) ([]s
 	if err != nil {
 		return nil, fmt.Errorf("scan batch dir %q: %w", rootDir, err)
 	}
-	sort.Strings(files)
 	return files, nil
 }
 
@@ -304,98 +283,4 @@ func matchesBatchSelector(fileName, selector string) bool {
 		return strings.EqualFold(filepath.Ext(fileName), ext)
 	}
 	return false
-}
-
-func loadFileFormationChecklist(reportPath, expectedRootDir, expectedSelector string) (*fileFormationChecklist, error) {
-	data, err := os.ReadFile(reportPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return &fileFormationChecklist{
-				RootDir:  expectedRootDir,
-				Selector: expectedSelector,
-				Entries:  make(map[string]*fileFormationChecklistEntry),
-			}, nil
-		}
-		return nil, fmt.Errorf("read checklist %q: %w", reportPath, err)
-	}
-
-	var checklist fileFormationChecklist
-	if err := json.Unmarshal(data, &checklist); err != nil {
-		return nil, fmt.Errorf("parse checklist %q: %w", reportPath, err)
-	}
-	if checklist.Entries == nil {
-		checklist.Entries = make(map[string]*fileFormationChecklistEntry)
-	}
-	if checklist.RootDir == "" {
-		checklist.RootDir = expectedRootDir
-	}
-	if checklist.RootDir != expectedRootDir {
-		return nil, fmt.Errorf("checklist root_dir mismatch: expected %q, got %q", expectedRootDir, checklist.RootDir)
-	}
-	if checklist.Selector == "" {
-		checklist.Selector = expectedSelector
-	}
-	if checklist.Selector != expectedSelector {
-		return nil, fmt.Errorf("checklist selector mismatch: expected %q, got %q", expectedSelector, checklist.Selector)
-	}
-	return &checklist, nil
-}
-
-func saveFileFormationChecklist(reportPath string, checklist *fileFormationChecklist) error {
-	checklist.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-
-	if err := os.MkdirAll(filepath.Dir(reportPath), 0o755); err != nil {
-		return fmt.Errorf("create checklist directory: %w", err)
-	}
-
-	data, err := json.MarshalIndent(checklist, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal checklist: %w", err)
-	}
-
-	tmpPath := reportPath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
-		return fmt.Errorf("write checklist temp file: %w", err)
-	}
-	if err := os.Rename(tmpPath, reportPath); err != nil {
-		return fmt.Errorf("replace checklist file: %w", err)
-	}
-	return nil
-}
-
-func mergeChecklistEntries(checklist *fileFormationChecklist, rootDir string, targetFiles []string) {
-	for _, targetFile := range targetFiles {
-		relPath, err := filepath.Rel(rootDir, targetFile)
-		if err != nil {
-			continue
-		}
-		if _, exists := checklist.Entries[relPath]; exists {
-			continue
-		}
-		checklist.Entries[relPath] = &fileFormationChecklistEntry{
-			Path:      relPath,
-			Status:    batchStatusPending,
-			UpdatedAt: time.Now().UTC().Format(time.RFC3339),
-		}
-	}
-}
-
-func shouldProcessBatchEntry(entry *fileFormationChecklistEntry, retryFailed bool) bool {
-	if entry == nil {
-		return true
-	}
-	switch entry.Status {
-	case batchStatusSucceeded:
-		return false
-	case batchStatusFailed:
-		return retryFailed
-	default:
-		return true
-	}
-}
-
-func markBatchFormationFailed(entry *fileFormationChecklistEntry, errMsg string) {
-	entry.Status = batchStatusFailed
-	entry.LastError = errMsg
-	entry.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 }

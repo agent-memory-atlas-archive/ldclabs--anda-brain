@@ -15,7 +15,7 @@ Example:
   anda-cli recall "What are the user's preferences?"
   anda-cli recall --context-counterparty u1 "What happened in the last meeting?"`,
 	Args: cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		contextCounterparty, _ := cmd.Flags().GetString("context-counterparty")
 		if contextCounterparty == "" {
 			// Fall back to the deprecated alias.
@@ -53,24 +53,15 @@ Example:
 		if structured {
 			resp, err := client.RecallStructured(cmd.Context(), input)
 			if err != nil {
-				exitError(err)
+				return err
 			}
-			if resp.Error != nil {
-				exitError(resp.Error)
-			}
-			printJSON(resp.Result)
-			return
+			return printRPC(cmd, resp)
 		}
 		resp, err := client.Recall(cmd.Context(), input)
 		if err != nil {
-			exitError(err)
+			return err
 		}
-		if resp.Error != nil {
-			exitError(resp.Error)
-		}
-		if resp.Result != nil {
-			printJSON(resp.Result)
-		}
+		return printRPC(cmd, resp)
 	},
 }
 

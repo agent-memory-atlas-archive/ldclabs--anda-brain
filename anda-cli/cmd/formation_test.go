@@ -295,19 +295,8 @@ func TestRunFileFormationBatchDryRun(t *testing.T) {
 		t.Fatalf("runFileFormationBatch dry-run returned error: %v", err)
 	}
 
-	checklist, err := loadFileFormationChecklist(reportPath, root, "name:skill.md")
-	if err != nil {
-		t.Fatalf("load checklist returned error: %v", err)
-	}
-	entry, ok := checklist.Entries[filepath.Join("a", "Skill.md")]
-	if !ok {
-		t.Fatalf("expected checklist entry for a/Skill.md")
-	}
-	if entry.Attempts != 0 {
-		t.Fatalf("dry-run should not increment attempts, got %d", entry.Attempts)
-	}
-	if entry.Status != batchStatusPending {
-		t.Fatalf("dry-run should keep pending status, got %q", entry.Status)
+	if _, err := os.Stat(reportPath); !os.IsNotExist(err) {
+		t.Fatalf("dry run must not create or modify a checklist: %v", err)
 	}
 }
 

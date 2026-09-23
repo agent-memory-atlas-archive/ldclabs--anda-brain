@@ -16,7 +16,7 @@ Example:
   anda-cli --space-id my_space --token $TOKEN get-or-init-user principal_123
   anda-cli --space-id my_space --token $TOKEN get-or-init-user principal_123 --name Alice`,
 	Args: cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		name, _ := cmd.Flags().GetString("name")
 
 		input := &api.GetOrInitUserInput{
@@ -29,14 +29,9 @@ Example:
 		client := newClient()
 		resp, err := client.GetOrInitUser(cmd.Context(), input)
 		if err != nil {
-			exitError(err)
+			return err
 		}
-		if resp.Error != nil {
-			exitError(resp.Error)
-		}
-		if resp.Result != nil {
-			printJSON(resp.Result)
-		}
+		return printRPC(cmd, resp)
 	},
 }
 

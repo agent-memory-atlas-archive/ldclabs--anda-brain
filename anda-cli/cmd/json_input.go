@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/ldclabs/anda-brain/anda-cli/api"
 )
 
 // readJSONObject accepts inline JSON or @file and preserves omitted fields.
@@ -29,6 +31,7 @@ func readJSONObject[T any](input string) (T, error) {
 	}
 	decoder := json.NewDecoder(bytes.NewBufferString(trimmed))
 	decoder.DisallowUnknownFields()
+	decoder.UseNumber()
 	if err := decoder.Decode(&value); err != nil {
 		return value, fmt.Errorf("invalid JSON object: %w", err)
 	}
@@ -37,4 +40,14 @@ func readJSONObject[T any](input string) (T, error) {
 		return value, fmt.Errorf("JSON input must contain one object")
 	}
 	return value, nil
+}
+
+// Exports carry a docs summary in addition to the importable bundle. Accept
+// that one known field while continuing to reject misspelled input fields.
+func readWikiImport(input string) (api.WikiImportInput, error) {
+	value, err := readJSONObject[struct {
+		api.WikiImportInput
+		Docs *uint64 `json:"docs,omitempty"`
+	}](input)
+	return value.WikiImportInput, err
 }

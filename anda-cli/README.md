@@ -27,6 +27,16 @@ Configuration can be provided via flags or environment variables:
 | `--shard`    | `ANDA_SHARD`    | Shard index (`Shard-Id` header) for sharded setup | `0`                     |
 | `--timeout`  | `ANDA_TIMEOUT`  | HTTP request timeout in seconds                   | `120`                   |
 
+`--timeout` must be positive and `--shard` non-negative. Space commands require
+`--space-id` or `ANDA_SPACE_ID`. Secret environment values are resolved when the
+command runs and are never displayed as help defaults; explicit flags take precedence.
+
+Commands exit nonzero for HTTP/RPC errors and reported execution failures, including
+Recall `failed_reason`, per-entity forget errors and WikiDigest `failed` documents.
+The JSON result remains on stdout when it contains a business failure; diagnostics
+go to stderr. A successful Recall with `found: false` still exits zero. JSON numbers
+in KIP parameters/results, tool content and metadata retain their integer precision.
+
 **CWT command flags:**
 
 | Flag         | Env Variable        | Description                                                         | Default |
@@ -98,7 +108,7 @@ anda-cli --space-id my_space --token $TOKEN formation \
   --batch-dir ./docs \
   --batch-ext .md
 
-# Resume from checklist and retry only previously failed files
+# Resume pending/changed files and retry previously failed submissions
 anda-cli --space-id my_space --token $TOKEN formation \
   --batch-dir ./docs \
   --batch-ext .md \
@@ -110,11 +120,15 @@ anda-cli --space-id my_space --token $TOKEN formation \
   --batch-file-name Skill.md \
   --batch-report ./tmp/formation-batch-checklist.json
 
-# Dry run: only scan and print matched files, no formation submission
+# Dry run: scan and print eligible files without submissions or checklist writes
 anda-cli --space-id my_space --token $TOKEN formation \
   --batch-dir ./docs \
   --batch-ext .md \
   --batch-dry-run
+
+# Explicitly resubmit all matched files, including unchanged submissions
+anda-cli --space-id my_space --token $TOKEN formation \
+  --batch-dir ./docs --batch-ext .md --batch-force
 
 # Recall memory
 anda-cli --space-id my_space --token $TOKEN recall "What are the user's preferences?"
@@ -158,6 +172,28 @@ anda-cli --space-id my_space --token $TOKEN execute-kip-readonly --file ./kip_re
 # Execute read-only KIP request from stdin
 cat ./kip_request.json | anda-cli --space-id my_space --token $TOKEN execute-kip-readonly
 ```
+
+Batch Formation visits regular files in deterministic directory order. The checklist
+binds its root and selector to the API endpoint, Space ID and shard. Use a separate
+`--batch-report` when changing that target. Historical checklists with attempted
+submissions but no recorded target are refused; retain them for reference and choose
+a new report instead of assuming their files reached the current Space.
+
+Unchanged submitted files are skipped; SHA-256 content changes become new submissions.
+Changing context alone requires `--batch-force`, which deliberately resubmits every
+matched file and can create duplicate conversations. `submitted` means the server
+returned a conversation ID, not that background memory formation completed. Inspect
+that conversation with `conversations get` for its processing result. Failed or
+interrupted submissions remain visible in `unresolved`/`failed` counts and produce a
+nonzero exit status. `--batch-retry-failed` retries failed submissions; an interrupted
+`working` entry requires reconciliation and explicit `--batch-force` before resubmission.
+Transport failures can also occur after server acceptance, so inspect receipts before
+retrying them.
+
+During a run, `<report>.jsonl` appends individual status changes; it is replayed on
+restart and folded into the JSON checklist on normal return. Keep it with the report
+if a run was interrupted. Run only one batch at a time per report. Batch-only flags
+require `--batch-dir`. Formation size/token limits are enforced by the server.
 
 ### Space Info & Conversations
 
@@ -268,6 +304,9 @@ anda-cli --space-id my_space --token $TOKEN wiki commit \
   --file ./guide.md --title "Guide" --namespace docs --tags onboarding
 anda-cli --space-id my_space --token $TOKEN wiki commit --input @./commit.json
 
+# --input is a complete request and cannot be mixed with --file, --acl-label,
+# --doc-id, --parent-version, or other document fields; put them in the JSON.
+
 # In a commit JSON update, tags:[] clears tags and metadata:{} clears metadata
 
 anda-cli --space-id my_space --token $TOKEN wiki list --namespace docs --limit 20
@@ -284,6 +323,10 @@ anda-cli --space-id my_space --token $TOKEN wiki digest
 # OKF bundle JSON has an entries array of {path, content} objects
 anda-cli --space-id my_space --token $FULL_TOKEN wiki import --input @./bundle.json
 anda-cli --space-id my_space --token $FULL_TOKEN wiki export --namespace docs
+
+# Exported bundles can be imported directly, including their docs summary
+anda-cli --space-id my_space --token $FULL_TOKEN wiki export --namespace docs > bundle.json
+anda-cli --space-id my_space --token $FULL_TOKEN wiki import --input @bundle.json
 ```
 
 ### Admin (requires platform admin auth)

@@ -15,7 +15,8 @@ var maintenanceCmd = &cobra.Command{
 Example:
   anda-cli maintenance
   anda-cli maintenance --trigger on_demand --scope full`,
-	Run: func(cmd *cobra.Command, args []string) {
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		trigger, _ := cmd.Flags().GetString("trigger")
 		scope, _ := cmd.Flags().GetString("scope")
 
@@ -52,14 +53,9 @@ Example:
 		client := newClient()
 		resp, err := client.Maintenance(cmd.Context(), input)
 		if err != nil {
-			exitError(err)
+			return err
 		}
-		if resp.Error != nil {
-			exitError(resp.Error)
-		}
-		if resp.Result != nil {
-			printJSON(resp.Result)
-		}
+		return printRPC(cmd, resp)
 	},
 }
 

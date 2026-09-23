@@ -11,7 +11,7 @@ var probeCmd = &cobra.Command{
 	Use:   "probe <query>",
 	Short: "Check memory retrieval reachability without a model call",
 	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		input := &api.ProbeInput{Query: args[0]}
 		if cmd.Flags().Changed("limit") {
 			limit, _ := cmd.Flags().GetInt("limit")
@@ -19,9 +19,9 @@ var probeCmd = &cobra.Command{
 		}
 		response, err := newClient().Probe(cmd.Context(), input)
 		if err != nil {
-			exitError(err)
+			return err
 		}
-		printRPC(cmd, response)
+		return printRPC(cmd, response)
 	},
 }
 
@@ -29,12 +29,12 @@ var memoryStatusCmd = &cobra.Command{
 	Use:   "memory-status",
 	Short: "Get memory metrics and latest maintenance reports",
 	Args:  cobra.NoArgs,
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		response, err := newClient().GetMemoryStatus(cmd.Context())
 		if err != nil {
-			exitError(err)
+			return err
 		}
-		printRPC(cmd, response)
+		return printRPC(cmd, response)
 	},
 }
 
@@ -44,13 +44,13 @@ var memoryPinCmd = &cobra.Command{
 	Use:   "pin <entity>",
 	Short: "Pin or unpin a graph entity",
 	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		pinned, _ := cmd.Flags().GetBool("pinned")
 		response, err := newClient().PinMemory(cmd.Context(), &api.MemoryPinInput{Entity: args[0], Pinned: &pinned})
 		if err != nil {
-			exitError(err)
+			return err
 		}
-		printRPC(cmd, response)
+		return printRPC(cmd, response)
 	},
 }
 
@@ -58,13 +58,13 @@ var memoryForgetCmd = &cobra.Command{
 	Use:   "forget <entity> [entity...]",
 	Short: "Delete graph entities and report what was removed",
 	Args:  cobra.MinimumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		response, err := newClient().ForgetMemory(cmd.Context(), &api.MemoryForgetInput{Entities: args, DryRun: dryRun})
 		if err != nil {
-			exitError(err)
+			return err
 		}
-		printRPC(cmd, response)
+		return printRPC(cmd, response)
 	},
 }
 
@@ -72,14 +72,14 @@ var shadowEvalCmd = &cobra.Command{
 	Use:   "shadow-eval",
 	Short: "Compare a candidate memory policy on forked copies",
 	Args:  cobra.NoArgs,
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		policyArg, _ := cmd.Flags().GetString("policy")
 		if policyArg == "" {
-			exitError(fmt.Errorf("--policy is required"))
+			return fmt.Errorf("--policy is required")
 		}
 		policy, err := readJSONObject[api.MemoryPolicy](policyArg)
 		if err != nil {
-			exitError(fmt.Errorf("--policy: %w", err))
+			return fmt.Errorf("--policy: %w", err)
 		}
 		input := &api.ShadowEvalInput{Policy: policy}
 		if cmd.Flags().Changed("replay-sample") {
@@ -88,9 +88,9 @@ var shadowEvalCmd = &cobra.Command{
 		}
 		response, err := newClient().ShadowEval(cmd.Context(), input)
 		if err != nil {
-			exitError(err)
+			return err
 		}
-		printRPC(cmd, response)
+		return printRPC(cmd, response)
 	},
 }
 

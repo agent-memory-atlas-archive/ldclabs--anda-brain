@@ -37,15 +37,27 @@ type MemoryCitation struct {
 	CreatedAt  string   `json:"created_at,omitempty"`
 }
 
+type RecallReceiptRef struct {
+	ID     string             `json:"id"`
+	Digest string             `json:"digest"`
+	Scope  RecallReceiptScope `json:"scope"`
+}
+
+type RecallReceiptScope struct {
+	SpaceID       string `json:"space_id"`
+	SpaceInstance string `json:"space_instance"`
+}
+
 type RecallOutput struct {
-	Answer       string               `json:"answer"`
-	Found        bool                 `json:"found"`
-	Uncertainty  *float64             `json:"uncertainty,omitempty"`
-	Memories     []MemoryCitation     `json:"memories,omitempty"`
-	Conversation *uint64              `json:"conversation,omitempty"`
-	Usage        Usage                `json:"usage"`
-	FailedReason string               `json:"failed_reason,omitempty"`
-	MemoryBudget *RecallBudgetReceipt `json:"memory_budget,omitempty"`
+	RecallReceipt *RecallReceiptRef    `json:"recall_receipt,omitempty"`
+	Answer        string               `json:"answer"`
+	Found         bool                 `json:"found"`
+	Uncertainty   *float64             `json:"uncertainty,omitempty"`
+	Memories      []MemoryCitation     `json:"memories,omitempty"`
+	Conversation  *uint64              `json:"conversation,omitempty"`
+	Usage         Usage                `json:"usage"`
+	FailedReason  string               `json:"failed_reason,omitempty"`
+	MemoryBudget  *RecallBudgetReceipt `json:"memory_budget,omitempty"`
 }
 
 type RecallBudgetReceipt struct {
@@ -357,6 +369,7 @@ type WikiExportOutput struct {
 }
 
 type WikiDigestReport struct {
+	Failed           int   `json:"failed"`
 	Digested         int   `json:"digested"`
 	Facts            int   `json:"facts"`
 	Superseded       int   `json:"superseded"`

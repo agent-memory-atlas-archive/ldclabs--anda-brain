@@ -370,6 +370,11 @@ curl -sX POST https://your-brain-host/v1/my_space_001/recall \
 
 完整 CLI 用法请参考 [anda-cli/README.md](https://github.com/ldclabs/anda-brain/tree/main/anda-cli)。
 
+CLI 保留结构化结果，并在结果报告执行失败时返回非零退出码。批处理清单绑定目标服务、
+Space 和 shard；文件内容变化后会重新提交，`submitted` 仅表示服务端已接受入队。
+帮助文本不会显示环境变量中的密钥。Wiki 导出文件可直接重新导入；使用
+`wiki commit --input` 时，所有文档字段必须写在该 JSON 中。
+
 ```bash
 # 提交记忆生成（JSON 消息）
 anda-cli --space-id my_space --token $TOKEN formation \

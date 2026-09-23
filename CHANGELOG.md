@@ -4,6 +4,13 @@ All notable changes to the Anda Brain project.
 
 ## [0.12.1] — 2026-09-23
 
+### CLI correctness and batch performance
+
+- CLI help no longer exposes token, signing-key or provider-key environment values. Wiki JSON commits reject conflicting field flags, and exported bundles can be imported unchanged.
+- JSON decoding preserves large integers in dynamic payloads and tool error markers. Structured Recall receipts, WikiDigest failures, conversation continuation metadata and agent output details survive CLI output. Reported business failures retain their JSON report and return nonzero exit status.
+- Formation batch checklists bind the endpoint, Space and shard, detect changed content and retain unresolved failures. Submission receipts are labeled `submitted`; interrupted work requires explicit reconciliation before forced resubmission. Per-entry JSONL progress replaces repeated full-checklist rewrites, with restart replay and final JSON compaction. Dry runs do not write state.
+- Commands return errors through Cobra, propagate output failures and reject ignored arguments. RPC wrappers share decoding, the inaccurate client-only Formation token limit is removed, and the CLI reports the existing 0.12.1 release version. Regression tests cover actual command requests, outputs, exit status and batch restart behavior; no live model is required.
+
 ### Runtime correctness and bounded work
 
 - Formation and Maintenance now share atomic writer admission, including settlement and automatic handoff. Maintenance claims transfer by ownership without leaked Arc references. Compaction consumes the configured model-turn allowance before another call can start.

@@ -20,7 +20,7 @@ var (
 	timeoutSec int
 )
 
-const Version = "0.12.0"
+const Version = "0.12.1"
 
 func newClient() *api.Client {
 	client := api.NewClient(baseURL, spaceID, token)
@@ -31,39 +31,58 @@ func newClient() *api.Client {
 	return client
 }
 
-func printJSON(v any) {
-	data, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Println(string(data))
-}
-
-func exitError(err error) {
-	fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-	os.Exit(1)
+func printJSON(cmd *cobra.Command, v any) error {
+	encoder := json.NewEncoder(cmd.OutOrStdout())
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(v)
 }
 
 var rootCmd = &cobra.Command{
-	Use:     "anda-cli",
-	Short:   "CLI tool for Anda Brain API",
-	Long:    "A command-line interface for interacting with the Anda Brain memory service.",
-	Version: Version,
+	Use:           "anda-cli",
+	Short:         "CLI tool for Anda Brain API",
+	Long:          "A command-line interface for interacting with the Anda Brain memory service.",
+	Version:       Version,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		if timeoutSec <= 0 {
+			return fmt.Errorf("--timeout must be positive")
+		}
+		if shard < 0 {
+			return fmt.Errorf("--shard must be non-negative")
+		}
+		token = secretFlag(cmd, "token", "ANDA_TOKEN")
+		switch cmd.Name() {
+		case "keygen", "cwt", "status", "create-space", "update-tier", "completion", "bash", "zsh", "fish", "powershell":
+			return nil
+		}
+		if strings.TrimSpace(spaceID) == "" {
+			return fmt.Errorf("--space-id (or ANDA_SPACE_ID) is required")
+		}
+		return nil
+	},
 }
 
-func Execute() {
-	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
-	}
+func Execute() error {
+	return rootCmd.Execute()
 }
 
 func init() {
 	rootCmd.PersistentFlags().StringVar(&baseURL, "base-url", envOrDefault("ANDA_BASE_URL", api.DefaultBaseURL), "API base URL (env: ANDA_BASE_URL)")
 	rootCmd.PersistentFlags().StringVar(&spaceID, "space-id", os.Getenv("ANDA_SPACE_ID"), "Space ID (env: ANDA_SPACE_ID)")
-	rootCmd.PersistentFlags().StringVar(&token, "token", os.Getenv("ANDA_TOKEN"), "Auth token (env: ANDA_TOKEN)")
+	rootCmd.PersistentFlags().StringVar(&token, "token", "", "Auth token (env: ANDA_TOKEN)")
 	rootCmd.PersistentFlags().IntVar(&shard, "shard", envOrDefaultInt("ANDA_SHARD", 0), "Shard index sent as Shard-Id header for sharded deployments (env: ANDA_SHARD)")
 	rootCmd.PersistentFlags().IntVar(&timeoutSec, "timeout", envOrDefaultInt("ANDA_TIMEOUT", 120), "HTTP request timeout in seconds (env: ANDA_TIMEOUT)")
+}
+
+// Secret environment values must never become flag defaults: Cobra includes
+// defaults in help and usage text. An explicitly supplied flag always wins.
+func secretFlag(cmd *cobra.Command, name, env string) string {
+	if cmd.Flags().Changed(name) {
+		value, _ := cmd.Flags().GetString(name)
+		return value
+	}
+	return os.Getenv(env)
 }
 
 func envOrDefault(key, defaultVal string) string {

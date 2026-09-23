@@ -7,12 +7,25 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func printRPC[T any](cmd *cobra.Command, response *api.RpcResponse[T]) {
+func printRPC[T any](cmd *cobra.Command, response *api.RpcResponse[T]) error {
+	if response == nil {
+		return fmt.Errorf("empty RPC response")
+	}
 	if response.Error != nil {
-		exitError(response.Error)
+		return response.Error
 	}
-	printJSON(response.Result)
+	if err := printJSON(cmd, response.Result); err != nil {
+		return err
+	}
 	if response.NextCursor != "" {
-		fmt.Fprintf(cmd.ErrOrStderr(), "\nNext cursor: %s\n", response.NextCursor)
+		if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "\nNext cursor: %s\n", response.NextCursor); err != nil {
+			return err
+		}
 	}
+	if response.Result != nil {
+		if result, ok := any(response.Result).(interface{ Failure() error }); ok {
+			return result.Failure()
+		}
+	}
+	return nil
 }

@@ -703,6 +703,8 @@ export interface Conversation {
   usage: Usage;
   steering_messages?: string[];
   follow_up_messages?: string[];
+  child?: number;
+  extra?: unknown;
   ancestors?: number[];
 }
 

@@ -7,13 +7,14 @@ import (
 var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Get service information (name, version, sharding)",
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		client := newClient()
 		info, err := client.GetInfo(cmd.Context())
 		if err != nil {
-			exitError(err)
+			return err
 		}
-		printJSON(info)
+		return printJSON(cmd, info)
 	},
 }
 

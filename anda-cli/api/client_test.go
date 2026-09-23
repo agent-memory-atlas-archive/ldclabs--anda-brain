@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -143,7 +144,7 @@ func TestClientPreservesWikiConflictRetryData(t *testing.T) {
 		t.Fatalf("missing structured conflict: %v", err)
 	}
 	data, ok := httpErr.RPC.Data.(map[string]any)
-	if !ok || data["current_version"] != float64(12) {
+	if !ok || data["current_version"] != json.Number("12") {
 		t.Fatalf("retry data lost: %+v", httpErr.RPC.Data)
 	}
 }

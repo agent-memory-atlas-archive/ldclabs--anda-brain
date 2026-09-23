@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/ldclabs/anda-brain/anda-cli/api"
@@ -17,38 +16,37 @@ var managementCmd = &cobra.Command{
 var listTokensCmd = &cobra.Command{
 	Use:   "list-tokens",
 	Short: "List space tokens",
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		client := newClient()
 		resp, err := client.ListSpaceTokens(cmd.Context())
 		if err != nil {
-			exitError(err)
+			return err
 		}
-		if resp.Error != nil {
-			exitError(resp.Error)
-		}
-		printJSON(resp.Result)
+		return printRPC(cmd, resp)
 	},
 }
 
 var addTokenCmd = &cobra.Command{
 	Use:   "add-token",
 	Short: "Add a space token",
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		scope, _ := cmd.Flags().GetString("scope")
 		name, _ := cmd.Flags().GetString("name")
 		labels, _ := cmd.Flags().GetStringSlice("labels")
 		unlabeledOnly, _ := cmd.Flags().GetBool("unlabeled-only")
 		if scope != "read" && scope != "write" && scope != "*" {
-			exitError(fmt.Errorf("invalid scope: %s", scope))
+			return fmt.Errorf("invalid scope: %s", scope)
 		}
 		if name == "" {
-			exitError(fmt.Errorf("--name is required"))
+			return fmt.Errorf("--name is required")
 		}
 		if (cmd.Flags().Changed("labels") || unlabeledOnly) && scope != "read" {
-			exitError(fmt.Errorf("--labels and --unlabeled-only require --scope read: restricted tokens are read-only wiki viewers"))
+			return fmt.Errorf("--labels and --unlabeled-only require --scope read: restricted tokens are read-only wiki viewers")
 		}
 		if unlabeledOnly && cmd.Flags().Changed("labels") {
-			exitError(fmt.Errorf("--unlabeled-only and --labels are mutually exclusive"))
+			return fmt.Errorf("--unlabeled-only and --labels are mutually exclusive")
 		}
 
 		input := &api.AddSpaceTokenInput{
@@ -65,12 +63,9 @@ var addTokenCmd = &cobra.Command{
 		client := newClient()
 		resp, err := client.AddSpaceToken(cmd.Context(), input)
 		if err != nil {
-			exitError(err)
+			return err
 		}
-		if resp.Error != nil {
-			exitError(resp.Error)
-		}
-		printJSON(resp.Result)
+		return printRPC(cmd, resp)
 	},
 }
 
@@ -82,12 +77,12 @@ unique name via --name. list-tokens only echoes a display prefix of each
 token, so --name is the way to revoke a token whose full value was not
 saved at mint time. Provide exactly one of the two.`,
 	Args: cobra.MaximumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		name, _ := cmd.Flags().GetString("name")
 		hasToken := len(args) == 1 && args[0] != ""
 		hasName := name != ""
 		if hasToken == hasName {
-			exitError(fmt.Errorf("provide exactly one of <token> or --name"))
+			return fmt.Errorf("provide exactly one of <token> or --name")
 		}
 
 		client := newClient()
@@ -99,19 +94,17 @@ saved at mint time. Provide exactly one of the two.`,
 			resp, err = client.RevokeSpaceTokenByName(cmd.Context(), name)
 		}
 		if err != nil {
-			exitError(err)
+			return err
 		}
-		if resp.Error != nil {
-			exitError(resp.Error)
-		}
-		printJSON(resp.Result)
+		return printRPC(cmd, resp)
 	},
 }
 
 var updateSpaceCmd = &cobra.Command{
 	Use:   "update-space",
 	Short: "Update space information",
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		input := &api.UpdateSpaceInput{}
 		hasField := false
 
@@ -144,7 +137,7 @@ var updateSpaceCmd = &cobra.Command{
 			pairs, _ := cmd.Flags().GetStringSlice("wiki-acl-defaults")
 			defaults, err := parseACLDefaults(pairs)
 			if err != nil {
-				exitError(err)
+				return err
 			}
 			input.WikiACLDefaults = &defaults
 			hasField = true
@@ -153,86 +146,92 @@ var updateSpaceCmd = &cobra.Command{
 			value, _ := cmd.Flags().GetString("memory-policy")
 			policy, err := readJSONObject[api.MemoryPolicy](value)
 			if err != nil {
-				exitError(fmt.Errorf("--memory-policy: %w", err))
+				return fmt.Errorf("--memory-policy: %w", err)
 			}
 			input.MemoryPolicy = &policy
 			hasField = true
 		}
 
 		if !hasField {
-			exitError(fmt.Errorf("at least one update-space field is required"))
+			return fmt.Errorf("at least one update-space field is required")
 		}
 
 		client := newClient()
 		resp, err := client.UpdateSpace(cmd.Context(), input)
 		if err != nil {
-			exitError(err)
+			return err
 		}
 		if resp.Error != nil {
-			exitError(resp.Error)
+			return resp.Error
 		}
-		fmt.Println("Space updated successfully")
+		if _, err := fmt.Fprintln(cmd.OutOrStdout(), "Space updated successfully"); err != nil {
+			return err
+		}
+		return nil
 	},
 }
 
 var restartFormationCmd = &cobra.Command{
 	Use:   "restart-formation",
 	Short: "Restart a formation task (manager only)",
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		input := &api.RestartFormationInput{}
 
 		v, _ := cmd.Flags().GetUint64("conversation")
 		if v == 0 {
-			exitError(fmt.Errorf("--conversation is required"))
+			return fmt.Errorf("--conversation is required")
 		}
 
 		input.Conversation = &v
 		client := newClient()
 		resp, err := client.RestartFormation(cmd.Context(), input)
 		if err != nil {
-			exitError(err)
+			return err
 		}
 		if resp.Error != nil {
-			exitError(resp.Error)
+			return resp.Error
 		}
-		fmt.Println("Formation restarted successfully")
+		if _, err := fmt.Fprintln(cmd.OutOrStdout(), "Formation restarted successfully"); err != nil {
+			return err
+		}
+		return nil
 	},
 }
 
 var getBYOKCmd = &cobra.Command{
 	Use:   "get-byok",
 	Short: "Get BYOK (Bring Your Own Key) configuration (manager only)",
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		client := newClient()
 		resp, err := client.GetBYOK(cmd.Context())
 		if err != nil {
-			exitError(err)
+			return err
 		}
-		if resp.Error != nil {
-			exitError(resp.Error)
-		}
-		printJSON(resp.Result)
+		return printRPC(cmd, resp)
 	},
 }
 
 var updateBYOKCmd = &cobra.Command{
 	Use:   "update-byok",
 	Short: "Update BYOK (Bring Your Own Key) configuration (manager only)",
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		input := &api.ModelConfig{}
 
 		family, _ := cmd.Flags().GetString("family")
 		model, _ := cmd.Flags().GetString("model")
 		apiBase, _ := cmd.Flags().GetString("api-base")
-		apiKeyInput, _ := cmd.Flags().GetString("api-key")
+		apiKeyInput := secretFlag(cmd, "api-key", "ANDA_BYOK_API_KEY")
 
 		apiKey, err := resolveSecretInput(apiKeyInput)
 		if err != nil {
-			exitError(fmt.Errorf("resolve --api-key: %w", err))
+			return fmt.Errorf("resolve --api-key: %w", err)
 		}
 
 		if family == "" || model == "" || apiBase == "" || apiKey == "" {
-			exitError(fmt.Errorf("--family, --model, --api-base, and --api-key (or ANDA_BYOK_API_KEY) are required"))
+			return fmt.Errorf("--family, --model, --api-base, and --api-key (or ANDA_BYOK_API_KEY) are required")
 		}
 
 		input.Family = family
@@ -249,7 +248,7 @@ var updateBYOKCmd = &cobra.Command{
 			switch input.Effort {
 			case "minimal", "low", "medium", "high", "max":
 			default:
-				exitError(fmt.Errorf("invalid --effort %q", input.Effort))
+				return fmt.Errorf("invalid --effort %q", input.Effort)
 			}
 		}
 		input.BearerAuth, _ = cmd.Flags().GetBool("bearer-auth")
@@ -260,12 +259,15 @@ var updateBYOKCmd = &cobra.Command{
 		client := newClient()
 		resp, err := client.UpdateBYOK(cmd.Context(), input)
 		if err != nil {
-			exitError(err)
+			return err
 		}
 		if resp.Error != nil {
-			exitError(resp.Error)
+			return resp.Error
 		}
-		fmt.Println("BYOK configuration updated successfully")
+		if _, err := fmt.Fprintln(cmd.OutOrStdout(), "BYOK configuration updated successfully"); err != nil {
+			return err
+		}
+		return nil
 	},
 }
 
@@ -305,7 +307,7 @@ func init() {
 	updateBYOKCmd.Flags().String("family", "", "Model family (e.g. gemini, anthropic, openai, deepseek, mimo) (required)")
 	updateBYOKCmd.Flags().String("model", "", "Model name (required)")
 	updateBYOKCmd.Flags().String("api-base", "", "Model API base URL (required)")
-	updateBYOKCmd.Flags().String("api-key", os.Getenv("ANDA_BYOK_API_KEY"), "Model API key, or @file/path to a file containing it (required; env: ANDA_BYOK_API_KEY)")
+	updateBYOKCmd.Flags().String("api-key", "", "Model API key, or @file/path to a file containing it (required; env: ANDA_BYOK_API_KEY)")
 	updateBYOKCmd.Flags().Bool("disabled", false, "Whether the BYOK config is disabled")
 	updateBYOKCmd.Flags().String("label", "", "Model label")
 	updateBYOKCmd.Flags().String("effort", "", "Model reasoning effort: minimal, low, medium, high, max")

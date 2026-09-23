@@ -12,8 +12,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const maxMessageContentTokens = 100_000
-
 var formationCmd = &cobra.Command{
 	Use:   "formation",
 	Short: "Submit a memory formation task",
@@ -27,7 +25,8 @@ Example:
   anda-cli formation --messages '[{"role":"user","content":"Hello"},{"role":"assistant","content":"Hi there!"}]'
   anda-cli formation --file ./message.txt
   echo '[{"role":"user","content":"Hello"}]' | anda-cli formation`,
-	Run: func(cmd *cobra.Command, args []string) {
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		messagesJSON, _ := cmd.Flags().GetString("messages")
 		messagesFile, _ := cmd.Flags().GetString("file")
 		batchDir, _ := cmd.Flags().GetString("batch-dir")
@@ -36,6 +35,7 @@ Example:
 		batchReport, _ := cmd.Flags().GetString("batch-report")
 		batchRetryFailed, _ := cmd.Flags().GetBool("batch-retry-failed")
 		batchDryRun, _ := cmd.Flags().GetBool("batch-dry-run")
+		batchForce, _ := cmd.Flags().GetBool("batch-force")
 		contextUser, _ := cmd.Flags().GetString("context-counterparty")
 		contextAgent, _ := cmd.Flags().GetString("context-agent")
 		contextSource, _ := cmd.Flags().GetString("context-source")
@@ -45,7 +45,7 @@ Example:
 
 		if batchDir != "" {
 			if messagesJSON != "" || messagesFile != "" {
-				exitError(fmt.Errorf("--batch-dir cannot be used with --messages or --file"))
+				return fmt.Errorf("--batch-dir cannot be used with --messages or --file")
 			}
 
 			client := newClient()
@@ -56,34 +56,42 @@ Example:
 				ReportPath:   batchReport,
 				RetryFailed:  batchRetryFailed,
 				DryRun:       batchDryRun,
+				Force:        batchForce,
+				Output:       cmd.OutOrStdout(),
 				InputContext: ctx,
 			})
 			if err != nil {
-				exitError(err)
+				return err
 			}
-			return
+			return nil
+		}
+
+		for _, name := range []string{"batch-file-name", "batch-ext", "batch-report", "batch-retry-failed", "batch-dry-run", "batch-force"} {
+			if cmd.Flags().Changed(name) {
+				return fmt.Errorf("--%s requires --batch-dir", name)
+			}
 		}
 
 		var messages []api.Message
 
 		if messagesJSON != "" && messagesFile != "" {
-			exitError(fmt.Errorf("--messages and --file cannot be used together"))
+			return fmt.Errorf("--messages and --file cannot be used together")
 		}
 
 		if messagesJSON != "" {
 			var err error
 			messages, err = parseMessagesInput(messagesJSON)
 			if err != nil {
-				exitError(fmt.Errorf("parse messages input: %w", err))
+				return fmt.Errorf("parse messages input: %w", err)
 			}
 		} else if messagesFile != "" {
 			data, err := os.ReadFile(messagesFile)
 			if err != nil {
-				exitError(fmt.Errorf("read file %q: %w", messagesFile, err))
+				return fmt.Errorf("read file %q: %w", messagesFile, err)
 			}
 			messages, err = parseMessagesInput(string(data))
 			if err != nil {
-				exitError(fmt.Errorf("parse file input: %w", err))
+				return fmt.Errorf("parse file input: %w", err)
 			}
 
 			if ctx == nil {
@@ -92,23 +100,22 @@ Example:
 				ctx.Source = messagesFile
 			}
 		} else {
-			stat, _ := os.Stdin.Stat()
+			stat, err := os.Stdin.Stat()
+			if err != nil {
+				return fmt.Errorf("inspect stdin: %w", err)
+			}
 			if (stat.Mode() & os.ModeCharDevice) == 0 {
 				data, err := io.ReadAll(os.Stdin)
 				if err != nil {
-					exitError(fmt.Errorf("read stdin: %w", err))
+					return fmt.Errorf("read stdin: %w", err)
 				}
 				messages, err = parseMessagesInput(string(data))
 				if err != nil {
-					exitError(fmt.Errorf("parse stdin messages: %w", err))
+					return fmt.Errorf("parse stdin messages: %w", err)
 				}
 			} else {
-				exitError(fmt.Errorf("--messages or --file is required, or pipe input via stdin"))
+				return fmt.Errorf("--messages or --file is required, or pipe input via stdin")
 			}
-		}
-
-		if err := validateMessageContentLength(messages); err != nil {
-			exitError(err)
 		}
 
 		input := &api.FormationInput{
@@ -123,14 +130,9 @@ Example:
 		client := newClient()
 		resp, err := client.Formation(cmd.Context(), input)
 		if err != nil {
-			exitError(err)
+			return err
 		}
-		if resp.Error != nil {
-			exitError(resp.Error)
-		}
-		if resp.Result != nil {
-			printJSON(resp.Result)
-		}
+		return printRPC(cmd, resp)
 	},
 }
 
@@ -187,16 +189,6 @@ func validateMessages(messages []api.Message) error {
 	return nil
 }
 
-func validateMessageContentLength(messages []api.Message) error {
-	for idx, message := range messages {
-		contentTokens := message.Content.SizeBytes() / 3
-		if contentTokens > maxMessageContentTokens {
-			return fmt.Errorf("message[%d] content is %d tokens (estimated), exceeds %d-token limit", idx, contentTokens, maxMessageContentTokens)
-		}
-	}
-	return nil
-}
-
 // buildInputContext returns nil when every field is empty so the request
 // omits the context instead of sending an empty object.
 func buildInputContext(user, agent, source, topic string) *api.InputContext {
@@ -218,6 +210,7 @@ func init() {
 	formationCmd.Flags().String("batch-file-name", "", "Submit files with exact filename match (case-insensitive), e.g. Skill.md")
 	formationCmd.Flags().String("batch-ext", "", "Submit files by extension, e.g. .md or md")
 	formationCmd.Flags().String("batch-report", "", "Batch checklist JSON path (default: <batch-dir>/.formation-batch-checklist.json)")
+	formationCmd.Flags().Bool("batch-force", false, "Explicitly resubmit matched files, including unchanged submissions")
 	formationCmd.Flags().Bool("batch-retry-failed", false, "Retry files previously marked as failed in checklist")
 	formationCmd.Flags().Bool("batch-dry-run", false, "Dry run: scan and report matched files without submitting formation")
 	formationCmd.Flags().String("context-counterparty", "", "Context counterparty (e.g. user ID)")

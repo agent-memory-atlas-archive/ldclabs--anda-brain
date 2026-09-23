@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -28,48 +27,51 @@ Example:
   anda-cli cwt --key <base64url_private_key> --subject <user_id> --audience <space_id> --scope write
   anda-cli cwt --key ./private_key.txt --subject <user_id> --audience <space_id> --scope write
   anda-cli cwt --key <base64url_private_key> --subject <user_id> --audience "*" --scope "*" --expiration 3600`,
-	Run: func(cmd *cobra.Command, args []string) {
-		keyInput, _ := cmd.Flags().GetString("key")
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		keyInput := secretFlag(cmd, "key", "ANDA_CWT_KEY")
 		subject, _ := cmd.Flags().GetString("subject")
 		audience, _ := cmd.Flags().GetString("audience")
 		scope, _ := cmd.Flags().GetString("scope")
 		issuer, _ := cmd.Flags().GetString("issuer")
 		expSec, _ := cmd.Flags().GetInt64("expiration")
 
-		warnIfLikelyGlobExpanded(cmd, audience, scope)
+		if scope != "read" && scope != "write" && scope != "*" {
+			return fmt.Errorf("invalid --scope %q", scope)
+		}
 
 		if keyInput == "" {
-			exitError(fmt.Errorf("--key is required"))
+			return fmt.Errorf("--key is required")
 		}
 		if subject == "" {
-			exitError(fmt.Errorf("--subject is required"))
+			return fmt.Errorf("--subject is required")
 		}
 		if audience == "" {
-			exitError(fmt.Errorf("--audience is required"))
+			return fmt.Errorf("--audience is required")
 		}
 
 		keyData, err := readPrivateKeyData(keyInput)
 		if err != nil {
-			exitError(err)
+			return err
 		}
 
 		var privKey key.Key
 		if err := key.UnmarshalCBOR(keyData, &privKey); err != nil {
-			exitError(fmt.Errorf("unmarshal private key: %w", err))
+			return fmt.Errorf("unmarshal private key: %w", err)
 		}
 
 		if err := ed25519.CheckKey(privKey); err != nil {
-			exitError(fmt.Errorf("invalid Ed25519 key: %w", err))
+			return fmt.Errorf("invalid Ed25519 key: %w", err)
 		}
 
 		signer, err := privKey.Signer()
 		if err != nil {
-			exitError(fmt.Errorf("create signer: %w", err))
+			return fmt.Errorf("create signer: %w", err)
 		}
 
 		now := time.Now()
 		if expSec <= 0 {
-			expSec = 3600 // default 1 hour
+			return fmt.Errorf("--expiration must be positive")
 		}
 
 		claims := cwt.ClaimsMap{
@@ -86,29 +88,29 @@ Example:
 		msg := &cose.Sign1Message[cwt.ClaimsMap]{Payload: claims}
 		cwtData, err := msg.SignAndEncode(signer, nil)
 		if err != nil {
-			exitError(fmt.Errorf("sign CWT: %w", err))
+			return fmt.Errorf("sign CWT: %w", err)
 		}
 
 		tokenB64 := base64.RawURLEncoding.EncodeToString(cwtData)
 
 		outputJSON, _ := cmd.Flags().GetBool("json")
 		if outputJSON {
-			printJSON(map[string]any{
+			if err := printJSON(cmd, map[string]any{
 				"token":      tokenB64,
 				"subject":    subject,
 				"audience":   audience,
 				"scope":      scope,
 				"issued_at":  now.Unix(),
 				"expiration": now.Unix() + expSec,
-			})
+			}); err != nil {
+				return err
+			}
 		} else {
-			fmt.Printf("Token:      %s\n", tokenB64)
-			fmt.Printf("Subject:    %s\n", subject)
-			fmt.Printf("Audience:   %s\n", audience)
-			fmt.Printf("Scope:      %s\n", scope)
-			fmt.Printf("Issued At:  %s\n", now.UTC().Format(time.RFC3339))
-			fmt.Printf("Expires At: %s\n", now.Add(time.Duration(expSec)*time.Second).UTC().Format(time.RFC3339))
+			_, err := fmt.Fprintf(cmd.OutOrStdout(), "Token:      %s\nSubject:    %s\nAudience:   %s\nScope:      %s\nIssued At:  %s\nExpires At: %s\n",
+				tokenB64, subject, audience, scope, now.UTC().Format(time.RFC3339), time.Unix(now.Unix()+expSec, 0).UTC().Format(time.RFC3339))
+			return err
 		}
+		return nil
 	},
 }
 
@@ -210,39 +212,8 @@ func normalizeBase64Input(value string) string {
 	return strings.Join(strings.Fields(value), "")
 }
 
-func warnIfLikelyGlobExpanded(cmd *cobra.Command, audience, scope string) {
-	matches, err := filepath.Glob("*")
-	if err != nil || len(matches) == 0 {
-		return
-	}
-	isExpandedValue := func(value string) bool {
-		for _, m := range matches {
-			if value == m {
-				return true
-			}
-		}
-		return false
-	}
-
-	if cmd.Flags().Changed("audience") && audience != "" && audience != "*" && isExpandedValue(audience) {
-		fmt.Fprintf(
-			os.Stderr,
-			"Warning: --audience=%q looks like shell glob expansion. If you meant wildcard, use quoted '*' (for example: --audience '*').\n",
-			audience,
-		)
-	}
-
-	if cmd.Flags().Changed("scope") && scope != "" && scope != "*" && isExpandedValue(scope) {
-		fmt.Fprintf(
-			os.Stderr,
-			"Warning: --scope=%q looks like shell glob expansion. If you meant wildcard, use quoted '*' (for example: --scope '*').\n",
-			scope,
-		)
-	}
-}
-
 func init() {
-	cwtCmd.Flags().String("key", os.Getenv("ANDA_CWT_KEY"), "Ed25519 private key as base64/base64url-encoded CBOR, or @file/path to a file containing it (env: ANDA_CWT_KEY)")
+	cwtCmd.Flags().String("key", "", "Ed25519 private key as base64/base64url-encoded CBOR, or @file/path to a file containing it (env: ANDA_CWT_KEY)")
 	cwtCmd.Flags().String("subject", os.Getenv("ANDA_CWT_SUBJECT"), "Subject claim - user/principal ID (env: ANDA_CWT_SUBJECT)")
 	cwtCmd.Flags().String("audience", os.Getenv("ANDA_CWT_AUDIENCE"), "Audience claim - space ID or '*' (env: ANDA_CWT_AUDIENCE)")
 	cwtCmd.Flags().String("scope", envOrDefault("ANDA_CWT_SCOPE", "read"), "Scope claim: read, write, * (env: ANDA_CWT_SCOPE)")

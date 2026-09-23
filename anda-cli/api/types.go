@@ -135,6 +135,7 @@ type ToolOutputPart struct {
 	Type     ContentPartType `json:"type"`
 	Name     string          `json:"name"`
 	Output   any             `json:"output"`
+	IsError  *bool           `json:"isError,omitempty"`
 	CallID   *string         `json:"callId,omitempty"`
 	RemoteID *string         `json:"remoteId,omitempty"`
 }
@@ -218,7 +219,7 @@ func parseContentPart(raw json.RawMessage) (ContentPart, error) {
 			return nil, fmt.Errorf("invalid ContentPart")
 		}
 		var part TextPart
-		if err := json.Unmarshal(trimmed, &part); err != nil {
+		if err := DecodeJSON(trimmed, &part); err != nil {
 			return nil, fmt.Errorf("invalid ContentPart")
 		}
 		part.Type = ContentPartText
@@ -228,7 +229,7 @@ func parseContentPart(raw json.RawMessage) (ContentPart, error) {
 			return nil, fmt.Errorf("invalid ContentPart")
 		}
 		var part ReasoningPart
-		if err := json.Unmarshal(trimmed, &part); err != nil {
+		if err := DecodeJSON(trimmed, &part); err != nil {
 			return nil, fmt.Errorf("invalid ContentPart")
 		}
 		part.Type = ContentPartReasoning
@@ -238,7 +239,7 @@ func parseContentPart(raw json.RawMessage) (ContentPart, error) {
 			return nil, fmt.Errorf("invalid ContentPart")
 		}
 		var part FileDataPart
-		if err := json.Unmarshal(trimmed, &part); err != nil {
+		if err := DecodeJSON(trimmed, &part); err != nil {
 			return nil, fmt.Errorf("invalid ContentPart")
 		}
 		part.Type = ContentPartFileData
@@ -248,7 +249,7 @@ func parseContentPart(raw json.RawMessage) (ContentPart, error) {
 			return nil, fmt.Errorf("invalid ContentPart")
 		}
 		var part InlineDataPart
-		if err := json.Unmarshal(trimmed, &part); err != nil {
+		if err := DecodeJSON(trimmed, &part); err != nil {
 			return nil, fmt.Errorf("invalid ContentPart")
 		}
 		part.Type = ContentPartInlineData
@@ -258,7 +259,7 @@ func parseContentPart(raw json.RawMessage) (ContentPart, error) {
 			return nil, fmt.Errorf("invalid ContentPart")
 		}
 		var part ToolCallPart
-		if err := json.Unmarshal(trimmed, &part); err != nil {
+		if err := DecodeJSON(trimmed, &part); err != nil {
 			return nil, fmt.Errorf("invalid ContentPart")
 		}
 		part.Type = ContentPartToolCall
@@ -268,7 +269,7 @@ func parseContentPart(raw json.RawMessage) (ContentPart, error) {
 			return nil, fmt.Errorf("invalid ContentPart")
 		}
 		var part ToolOutputPart
-		if err := json.Unmarshal(trimmed, &part); err != nil {
+		if err := DecodeJSON(trimmed, &part); err != nil {
 			return nil, fmt.Errorf("invalid ContentPart")
 		}
 		part.Type = ContentPartToolOutput
@@ -278,7 +279,7 @@ func parseContentPart(raw json.RawMessage) (ContentPart, error) {
 			return nil, fmt.Errorf("invalid ContentPart")
 		}
 		var part ActionPart
-		if err := json.Unmarshal(trimmed, &part); err != nil {
+		if err := DecodeJSON(trimmed, &part); err != nil {
 			return nil, fmt.Errorf("invalid ContentPart")
 		}
 		part.Type = ContentPartAction
@@ -499,11 +500,17 @@ func (c MessageContent) Text() (string, bool) {
 }
 
 func (c MessageContent) FirstText() (string, bool) {
-	texts := c.textParts()
-	if len(texts) == 0 {
-		return "", false
+	for _, part := range c {
+		switch p := part.(type) {
+		case TextPart:
+			return p.Text, true
+		case *TextPart:
+			if p != nil {
+				return p.Text, true
+			}
+		}
 	}
-	return texts[0], true
+	return "", false
 }
 
 func (c MessageContent) textParts() []string {
@@ -638,7 +645,7 @@ type Concept struct {
 func (c *Concept) UnmarshalJSON(data []byte) error {
 	type known Concept
 	var value known
-	if err := json.Unmarshal(data, &value); err != nil {
+	if err := DecodeJSON(data, &value); err != nil {
 		return err
 	}
 	var fields map[string]json.RawMessage
@@ -743,11 +750,17 @@ type Usage struct {
 }
 
 type AgentOutput struct {
-	Content      string `json:"content"`
-	Conversation *int   `json:"conversation,omitempty"`
-	FailedReason string `json:"failed_reason,omitempty"`
-	Usage        *Usage `json:"usage,omitempty"`
-	Model        string `json:"model,omitempty"`
+	Thoughts     *string           `json:"thoughts,omitempty"`
+	ToolsUsage   map[string]Usage  `json:"tools_usage,omitempty"`
+	ToolCalls    []json.RawMessage `json:"tool_calls,omitempty"`
+	ChatHistory  []Message         `json:"chat_history,omitempty"`
+	Artifacts    []json.RawMessage `json:"artifacts,omitempty"`
+	Session      *string           `json:"session,omitempty"`
+	Content      string            `json:"content"`
+	Conversation *uint64           `json:"conversation,omitempty"`
+	FailedReason string            `json:"failed_reason,omitempty"`
+	Usage        *Usage            `json:"usage,omitempty"`
+	Model        string            `json:"model,omitempty"`
 }
 
 type ConversationStatus string
@@ -762,7 +775,7 @@ const (
 )
 
 type Conversation struct {
-	ID               int                `json:"_id"`
+	ID               uint64             `json:"_id"`
 	User             string             `json:"user"`
 	Label            *string            `json:"label,omitempty"`
 	Thread           string             `json:"thread,omitempty"`
@@ -777,18 +790,20 @@ type Conversation struct {
 	Usage            Usage              `json:"usage"`
 	SteeringMessages []string           `json:"steering_messages,omitempty"`
 	FollowUpMessages []string           `json:"follow_up_messages,omitempty"`
-	Ancestors        []int              `json:"ancestors,omitempty"`
+	Child            *uint64            `json:"child,omitempty"`
+	Extra            json.RawMessage    `json:"extra,omitempty"`
+	Ancestors        []uint64           `json:"ancestors,omitempty"`
 }
 
 type ConversationDelta struct {
-	ID           int                `json:"_id"`
+	ID           uint64             `json:"_id"`
 	Messages     []json.RawMessage  `json:"messages"`
 	Artifacts    []any              `json:"artifacts"`
 	Status       ConversationStatus `json:"status"`
 	Usage        Usage              `json:"usage"`
 	FailedReason *string            `json:"failed_reason,omitempty"`
 	UpdatedAt    int64              `json:"updated_at"`
-	Child        *int               `json:"child,omitempty"`
+	Child        *uint64            `json:"child,omitempty"`
 }
 
 type ServiceInfo struct {
@@ -843,6 +858,7 @@ func (item *KipOperation) UnmarshalJSON(data []byte) error {
 		var commandObject KipOperationObject
 		decoder := json.NewDecoder(bytes.NewReader(trimmed))
 		decoder.DisallowUnknownFields()
+		decoder.UseNumber()
 		if err := decoder.Decode(&commandObject); err != nil {
 			return fmt.Errorf("invalid kip command object: %w", err)
 		}

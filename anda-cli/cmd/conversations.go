@@ -15,23 +15,21 @@ var conversationsCmd = &cobra.Command{
 var listConversationsCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List conversations with pagination",
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		cursor, _ := cmd.Flags().GetString("cursor")
 		limit, _ := cmd.Flags().GetInt("limit")
+		if limit < 0 {
+			return fmt.Errorf("--limit must be non-negative")
+		}
 		collection, _ := cmd.Flags().GetString("collection")
 
 		client := newClient()
 		resp, err := client.ListConversations(cmd.Context(), cursor, limit, collection)
 		if err != nil {
-			exitError(err)
+			return err
 		}
-		if resp.Error != nil {
-			exitError(resp.Error)
-		}
-		printJSON(resp.Result)
-		if resp.NextCursor != "" {
-			fmt.Fprintf(cmd.ErrOrStderr(), "\nNext cursor: %s\n", resp.NextCursor)
-		}
+		return printRPC(cmd, resp)
 	},
 }
 
@@ -39,10 +37,10 @@ var getConversationCmd = &cobra.Command{
 	Use:   "get <conversation_id>",
 	Short: "Get a single conversation detail",
 	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		id, err := strconv.ParseUint(args[0], 10, 64)
 		if err != nil {
-			exitError(fmt.Errorf("invalid conversation ID: %w", err))
+			return fmt.Errorf("invalid conversation ID: %w", err)
 		}
 
 		collection, _ := cmd.Flags().GetString("collection")
@@ -50,12 +48,9 @@ var getConversationCmd = &cobra.Command{
 		client := newClient()
 		resp, err := client.GetConversation(cmd.Context(), id, collection)
 		if err != nil {
-			exitError(err)
+			return err
 		}
-		if resp.Error != nil {
-			exitError(resp.Error)
-		}
-		printJSON(resp.Result)
+		return printRPC(cmd, resp)
 	},
 }
 
@@ -63,16 +58,16 @@ var getConversationDeltaCmd = &cobra.Command{
 	Use:   "delta <conversation_id>",
 	Short: "Get incremental conversation updates",
 	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		id, err := strconv.ParseUint(args[0], 10, 64)
 		if err != nil {
-			exitError(fmt.Errorf("invalid conversation ID: %w", err))
+			return fmt.Errorf("invalid conversation ID: %w", err)
 		}
 
 		messagesOffset, _ := cmd.Flags().GetInt("messages-offset")
 		artifactsOffset, _ := cmd.Flags().GetInt("artifacts-offset")
 		if messagesOffset < 0 || artifactsOffset < 0 {
-			exitError(fmt.Errorf("offsets must be non-negative"))
+			return fmt.Errorf("offsets must be non-negative")
 		}
 
 		collection, _ := cmd.Flags().GetString("collection")
@@ -80,12 +75,9 @@ var getConversationDeltaCmd = &cobra.Command{
 		client := newClient()
 		resp, err := client.GetConversationDelta(cmd.Context(), id, messagesOffset, artifactsOffset, collection)
 		if err != nil {
-			exitError(err)
+			return err
 		}
-		if resp.Error != nil {
-			exitError(resp.Error)
-		}
-		printJSON(resp.Result)
+		return printRPC(cmd, resp)
 	},
 }
 

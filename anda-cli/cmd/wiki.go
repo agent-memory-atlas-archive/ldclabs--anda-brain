@@ -12,12 +12,12 @@ import (
 
 var wikiCmd = &cobra.Command{Use: "wiki", Short: "Manage versioned wiki documents and citations"}
 
-func wikiDocID(raw string) uint64 {
+func wikiDocID(raw string) (uint64, error) {
 	id, err := strconv.ParseUint(raw, 10, 64)
 	if err != nil || id == 0 {
-		exitError(fmt.Errorf("invalid document ID %q", raw))
+		return 0, fmt.Errorf("invalid document ID %q", raw)
 	}
-	return id
+	return id, nil
 }
 
 func wikiPageFlags(command *cobra.Command) {
@@ -25,43 +25,45 @@ func wikiPageFlags(command *cobra.Command) {
 	command.Flags().Int("limit", 0, "Page size")
 }
 
-func wikiPage(command *cobra.Command) (string, int) {
+func wikiPage(command *cobra.Command) (string, int, error) {
 	cursor, _ := command.Flags().GetString("cursor")
 	limit, _ := command.Flags().GetInt("limit")
 	if limit < 0 {
-		exitError(fmt.Errorf("--limit must be non-negative"))
+		return "", 0, fmt.Errorf("--limit must be non-negative")
 	}
-	return cursor, limit
+	return cursor, limit, nil
 }
 
 func wikiCommitCommand() *cobra.Command {
 	command := &cobra.Command{
 		Use: "commit", Short: "Create or update a wiki document", Args: cobra.NoArgs,
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			inputArg, _ := cmd.Flags().GetString("input")
 			file, _ := cmd.Flags().GetString("file")
 			var input api.WikiCommitInput
 			if inputArg != "" {
-				if file != "" {
-					exitError(fmt.Errorf("--input and --file are mutually exclusive"))
+				for _, name := range []string{"file", "title", "namespace", "slug", "tags", "clear-tags", "doc-id", "parent-version", "acl-label", "source-uri", "message"} {
+					if cmd.Flags().Changed(name) {
+						return fmt.Errorf("--input and --%s are mutually exclusive", name)
+					}
 				}
 				var err error
 				input, err = readJSONObject[api.WikiCommitInput](inputArg)
 				if err != nil {
-					exitError(err)
+					return err
 				}
 			} else {
 				if file == "" {
-					exitError(fmt.Errorf("--input or --file is required"))
+					return fmt.Errorf("--input or --file is required")
 				}
 				content, err := os.ReadFile(file)
 				if err != nil {
-					exitError(err)
+					return err
 				}
 				input.Content = string(content)
 				input.Title, _ = cmd.Flags().GetString("title")
 				if input.Title == "" {
-					exitError(fmt.Errorf("--title is required with --file"))
+					return fmt.Errorf("--title is required with --file")
 				}
 				input.Namespace, _ = cmd.Flags().GetString("namespace")
 				input.Slug, _ = cmd.Flags().GetString("slug")
@@ -72,7 +74,7 @@ func wikiCommitCommand() *cobra.Command {
 				clearTags, _ := cmd.Flags().GetBool("clear-tags")
 				if clearTags {
 					if cmd.Flags().Changed("tags") {
-						exitError(fmt.Errorf("--clear-tags and --tags are mutually exclusive"))
+						return fmt.Errorf("--clear-tags and --tags are mutually exclusive")
 					}
 					empty := []string{}
 					input.Tags = &empty
@@ -100,9 +102,9 @@ func wikiCommitCommand() *cobra.Command {
 			}
 			response, err := newClient().WikiCommit(cmd.Context(), &input)
 			if err != nil {
-				exitError(err)
+				return err
 			}
-			printRPC(cmd, response)
+			return printRPC(cmd, response)
 		},
 	}
 	command.Flags().String("input", "", "Full WikiCommitInput JSON or @file")
@@ -123,17 +125,20 @@ func wikiCommitCommand() *cobra.Command {
 func wikiListCommand() *cobra.Command {
 	command := &cobra.Command{
 		Use: "list", Short: "List wiki documents", Args: cobra.NoArgs,
-		Run: func(cmd *cobra.Command, args []string) {
-			cursor, limit := wikiPage(cmd)
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cursor, limit, err := wikiPage(cmd)
+			if err != nil {
+				return err
+			}
 			query := api.WikiListDocsQuery{Cursor: cursor, Limit: limit}
 			query.Namespace, _ = cmd.Flags().GetString("namespace")
 			query.Status, _ = cmd.Flags().GetString("status")
 			query.Tag, _ = cmd.Flags().GetString("tag")
 			response, err := newClient().WikiListDocs(cmd.Context(), query)
 			if err != nil {
-				exitError(err)
+				return err
 			}
-			printRPC(cmd, response)
+			return printRPC(cmd, response)
 		},
 	}
 	command.Flags().String("namespace", "", "Filter namespace")
@@ -146,7 +151,12 @@ func wikiListCommand() *cobra.Command {
 func wikiReadCommand() *cobra.Command {
 	command := &cobra.Command{
 		Use: "read <doc_id>", Short: "Read wiki content by version, section, or byte range", Args: cobra.ExactArgs(1),
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, idErr := wikiDocID(args[0])
+			if idErr != nil {
+				return idErr
+			}
+
 			query := api.WikiReadQuery{}
 			if cmd.Flags().Changed("version") {
 				v, _ := cmd.Flags().GetUint64("version")
@@ -156,21 +166,21 @@ func wikiReadCommand() *cobra.Command {
 			startChanged := cmd.Flags().Changed("start")
 			endChanged := cmd.Flags().Changed("end")
 			if startChanged != endChanged {
-				exitError(fmt.Errorf("--start and --end must be provided together"))
+				return fmt.Errorf("--start and --end must be provided together")
 			}
 			if query.Anchor != "" && startChanged {
-				exitError(fmt.Errorf("--anchor and byte range are mutually exclusive"))
+				return fmt.Errorf("--anchor and byte range are mutually exclusive")
 			}
 			if startChanged {
 				start, _ := cmd.Flags().GetUint64("start")
 				end, _ := cmd.Flags().GetUint64("end")
 				query.Start, query.End = &start, &end
 			}
-			response, err := newClient().WikiRead(cmd.Context(), wikiDocID(args[0]), query)
+			response, err := newClient().WikiRead(cmd.Context(), id, query)
 			if err != nil {
-				exitError(err)
+				return err
 			}
-			printRPC(cmd, response)
+			return printRPC(cmd, response)
 		},
 	}
 	command.Flags().Uint64("version", 0, "Historical version ID")
@@ -183,14 +193,18 @@ func wikiReadCommand() *cobra.Command {
 func wikiSearchCommand() *cobra.Command {
 	command := &cobra.Command{
 		Use: "search <query>", Short: "Search wiki passages", Args: cobra.ExactArgs(1),
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			input := &api.WikiSearchInput{Query: args[0]}
 			input.Namespaces, _ = cmd.Flags().GetStringSlice("namespaces")
 			input.Tags, _ = cmd.Flags().GetStringSlice("tags")
 			input.Mode, _ = cmd.Flags().GetString("mode")
 			docIDs, _ := cmd.Flags().GetStringSlice("doc-ids")
 			for _, raw := range docIDs {
-				input.DocIDs = append(input.DocIDs, wikiDocID(strings.TrimSpace(raw)))
+				id, err := wikiDocID(strings.TrimSpace(raw))
+				if err != nil {
+					return err
+				}
+				input.DocIDs = append(input.DocIDs, id)
 			}
 			if cmd.Flags().Changed("top-k") {
 				v, _ := cmd.Flags().GetInt("top-k")
@@ -202,9 +216,9 @@ func wikiSearchCommand() *cobra.Command {
 			}
 			response, err := newClient().WikiSearch(cmd.Context(), input)
 			if err != nil {
-				exitError(err)
+				return err
 			}
-			printRPC(cmd, response)
+			return printRPC(cmd, response)
 		},
 	}
 	command.Flags().StringSlice("namespaces", nil, "Namespaces to search")
@@ -219,29 +233,29 @@ func wikiSearchCommand() *cobra.Command {
 func wikiVerifyCommand() *cobra.Command {
 	command := &cobra.Command{
 		Use: "verify", Short: "Verify a wiki citation", Args: cobra.NoArgs,
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			inputArg, _ := cmd.Flags().GetString("input")
 			uri, _ := cmd.Flags().GetString("uri")
 			var input api.WikiVerifyInput
 			if inputArg != "" {
 				if uri != "" {
-					exitError(fmt.Errorf("--input and --uri are mutually exclusive"))
+					return fmt.Errorf("--input and --uri are mutually exclusive")
 				}
 				var err error
 				input, err = readJSONObject[api.WikiVerifyInput](inputArg)
 				if err != nil {
-					exitError(err)
+					return err
 				}
 			} else if uri != "" {
 				input.URI = uri
 			} else {
-				exitError(fmt.Errorf("--uri or --input is required"))
+				return fmt.Errorf("--uri or --input is required")
 			}
 			response, err := newClient().WikiVerify(cmd.Context(), &input)
 			if err != nil {
-				exitError(err)
+				return err
 			}
-			printRPC(cmd, response)
+			return printRPC(cmd, response)
 		},
 	}
 	command.Flags().String("uri", "", "wiki:// citation URI")
@@ -252,8 +266,11 @@ func wikiVerifyCommand() *cobra.Command {
 func wikiEventsCommand() *cobra.Command {
 	command := &cobra.Command{
 		Use: "events", Short: "List wiki audit events", Args: cobra.NoArgs,
-		Run: func(cmd *cobra.Command, args []string) {
-			cursor, limit := wikiPage(cmd)
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cursor, limit, err := wikiPage(cmd)
+			if err != nil {
+				return err
+			}
 			query := api.WikiEventsQuery{Cursor: cursor, Limit: limit}
 			query.Kind, _ = cmd.Flags().GetString("kind")
 			if cmd.Flags().Changed("doc-id") {
@@ -262,9 +279,9 @@ func wikiEventsCommand() *cobra.Command {
 			}
 			response, err := newClient().WikiEvents(cmd.Context(), query)
 			if err != nil {
-				exitError(err)
+				return err
 			}
-			printRPC(cmd, response)
+			return printRPC(cmd, response)
 		},
 	}
 	command.Flags().String("kind", "", "Event kind")
@@ -276,20 +293,20 @@ func wikiEventsCommand() *cobra.Command {
 func wikiImportCommand() *cobra.Command {
 	command := &cobra.Command{
 		Use: "import", Short: "Import an OKF bundle (requires full scope)", Args: cobra.NoArgs,
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			inputArg, _ := cmd.Flags().GetString("input")
 			if inputArg == "" {
-				exitError(fmt.Errorf("--input is required"))
+				return fmt.Errorf("--input is required")
 			}
-			input, err := readJSONObject[api.WikiImportInput](inputArg)
+			input, err := readWikiImport(inputArg)
 			if err != nil {
-				exitError(err)
+				return err
 			}
 			response, err := newClient().WikiImport(cmd.Context(), &input)
 			if err != nil {
-				exitError(err)
+				return err
 			}
-			printRPC(cmd, response)
+			return printRPC(cmd, response)
 		},
 	}
 	command.Flags().String("input", "", "WikiImportInput JSON or @file")
@@ -300,68 +317,85 @@ func init() {
 	wikiCmd.AddCommand(wikiCommitCommand(), wikiListCommand(), wikiReadCommand(), wikiSearchCommand(), wikiVerifyCommand(), wikiEventsCommand(), wikiImportCommand())
 	wikiCmd.AddCommand(&cobra.Command{
 		Use: "get <doc_id>", Short: "Get document metadata and table of contents", Args: cobra.ExactArgs(1),
-		Run: func(cmd *cobra.Command, args []string) {
-			response, err := newClient().WikiGetDoc(cmd.Context(), wikiDocID(args[0]))
-			if err != nil {
-				exitError(err)
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, idErr := wikiDocID(args[0])
+			if idErr != nil {
+				return idErr
 			}
-			printRPC(cmd, response)
+
+			response, err := newClient().WikiGetDoc(cmd.Context(), id)
+			if err != nil {
+				return err
+			}
+			return printRPC(cmd, response)
 		},
 	})
 	versions := &cobra.Command{
 		Use: "versions <doc_id>", Short: "List document versions", Args: cobra.ExactArgs(1),
-		Run: func(cmd *cobra.Command, args []string) {
-			cursor, limit := wikiPage(cmd)
-			response, err := newClient().WikiVersions(cmd.Context(), wikiDocID(args[0]), cursor, limit)
-			if err != nil {
-				exitError(err)
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, idErr := wikiDocID(args[0])
+			if idErr != nil {
+				return idErr
 			}
-			printRPC(cmd, response)
+
+			cursor, limit, err := wikiPage(cmd)
+			if err != nil {
+				return err
+			}
+			response, err := newClient().WikiVersions(cmd.Context(), id, cursor, limit)
+			if err != nil {
+				return err
+			}
+			return printRPC(cmd, response)
 		},
 	}
 	wikiPageFlags(versions)
 	wikiCmd.AddCommand(versions)
 	for _, action := range []string{"archive", "restore"} {
-		action := action
 		wikiCmd.AddCommand(&cobra.Command{
 			Use: action + " <doc_id>", Short: action + " a wiki document", Args: cobra.ExactArgs(1),
-			Run: func(cmd *cobra.Command, args []string) {
+			RunE: func(cmd *cobra.Command, args []string) error {
+				id, idErr := wikiDocID(args[0])
+				if idErr != nil {
+					return idErr
+				}
+
 				client := newClient()
 				var response *api.RpcResponse[api.WikiDocInfo]
 				var err error
 				if action == "archive" {
-					response, err = client.WikiArchive(cmd.Context(), wikiDocID(args[0]))
+					response, err = client.WikiArchive(cmd.Context(), id)
 				} else {
-					response, err = client.WikiRestore(cmd.Context(), wikiDocID(args[0]))
+					response, err = client.WikiRestore(cmd.Context(), id)
 				}
 				if err != nil {
-					exitError(err)
+					return err
 				}
-				printRPC(cmd, response)
+				return printRPC(cmd, response)
 			},
 		})
 	}
 	export := &cobra.Command{
 		Use: "export", Short: "Export an OKF namespace (requires full scope)", Args: cobra.NoArgs,
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			namespace, _ := cmd.Flags().GetString("namespace")
 			response, err := newClient().WikiExport(cmd.Context(), namespace)
 			if err != nil {
-				exitError(err)
+				return err
 			}
-			printRPC(cmd, response)
+			return printRPC(cmd, response)
 		},
 	}
 	export.Flags().String("namespace", "", "Namespace to export (default: default)")
 	wikiCmd.AddCommand(export)
 	wikiCmd.AddCommand(&cobra.Command{
 		Use: "digest", Short: "Digest pending wiki versions into memory", Args: cobra.NoArgs,
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			response, err := newClient().WikiDigest(cmd.Context())
 			if err != nil {
-				exitError(err)
+				return err
 			}
-			printRPC(cmd, response)
+			return printRPC(cmd, response)
 		},
 	})
 	rootCmd.AddCommand(wikiCmd)
