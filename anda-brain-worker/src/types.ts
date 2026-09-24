@@ -342,6 +342,14 @@ export interface MaintenanceAssessment {
    * `review_derived` SleepTask, not already stale.
    */
   revised_roots: RevisedRoot[]
+  /**
+   * A bounded batch of the Nexus exposure log since the last cycle (Spec
+   * §66.8): per element, how often recall returned it and a decision used it.
+   * The input for explicit, guarded reinforcement; it is not cognition.
+   */
+  exposures?: { element_id: string; retrieved: number; used: number; last_snapshot_seq: number }[]
+  /** More exposure entries remain for a later cycle. */
+  exposures_truncated?: boolean
 }
 
 export interface Usage {

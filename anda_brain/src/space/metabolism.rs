@@ -17,12 +17,13 @@ impl Space {
     ///
     /// A `quick` or `daydream` cycle takes no census of its own, so it reads
     /// the last full cycle's — which is why `audited_at` travels with it.
-    pub(super) async fn maintenance_assessment(
+    pub(crate) async fn maintenance_assessment(
         &self,
         current_settlement_error: Option<&str>,
     ) -> crate::types::MaintenanceAssessment {
         let audit: Option<SchemaAudit> = self.db.get_extension_as("schema_audit");
         let settlement = self.memory_settlement();
+        let (exposures, exposures_truncated) = self.exposure_batch().await;
         let settlement_errors =
             settlement_error_messages(settlement.as_ref(), current_settlement_error);
         crate::types::MaintenanceAssessment {
@@ -40,7 +41,71 @@ impl Space {
             revised_roots: settlement
                 .map(|report| report.revised_roots)
                 .unwrap_or_default(),
+            exposures,
+            exposures_truncated,
         }
+    }
+
+    /// The next bounded page of the exposure log, tallied per element, and
+    /// whether more remain. The cursor advances once the page is handed to a
+    /// cycle: reinforcement is a bounded, best-effort use of this signal, and
+    /// a lost page loses nothing but a reinforcement opportunity.
+    async fn exposure_batch(&self) -> (Vec<crate::types::ExposureTally>, bool) {
+        use anda_cognitive_nexus::{exposure::ExposureQuery, nexus::DEFAULT_SPACE};
+        const EXPOSURE_PAGE: usize = 500;
+        let cursor: Option<String> = self.db.get_extension_as("exposure_cursor");
+        let page = match self
+            .memory
+            .nexus()
+            .system_session()
+            .read_exposures(
+                DEFAULT_SPACE,
+                ExposureQuery {
+                    element_id: None,
+                    cursor: cursor.clone(),
+                    limit: Some(EXPOSURE_PAGE),
+                },
+            )
+            .await
+        {
+            Ok(page) => page,
+            Err(err) => {
+                log::warn!(target: "brain", space_id = self.id; "reading the exposure log failed: {err:?}");
+                return (vec![], false);
+            }
+        };
+        let mut tally: BTreeMap<String, crate::types::ExposureTally> = BTreeMap::new();
+        for record in page["records"].as_array().into_iter().flatten() {
+            let Some(id) = record["element_id"].as_str() else {
+                continue;
+            };
+            let entry =
+                tally
+                    .entry(id.to_string())
+                    .or_insert_with(|| crate::types::ExposureTally {
+                        element_id: id.to_string(),
+                        ..Default::default()
+                    });
+            match record["exposure"].as_str() {
+                Some("used") => entry.used += 1,
+                _ => entry.retrieved += 1,
+            }
+            entry.last_snapshot_seq = entry
+                .last_snapshot_seq
+                .max(record["snapshot_seq"].as_u64().unwrap_or(0));
+        }
+        // `cursor` is the position after the last delivered entry, so the
+        // next cycle reads only newer entries, full page or not.
+        if let Some(position) = page["cursor"].as_str()
+            && Some(position) != cursor.as_deref()
+        {
+            self.db
+                .set_extension_from("exposure_cursor".into(), position.to_string());
+        }
+        (
+            tally.into_values().collect(),
+            page["next_cursor"].is_string(),
+        )
     }
 
     /// The Space's sequence coordinate right now.

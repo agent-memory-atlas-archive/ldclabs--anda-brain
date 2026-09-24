@@ -722,6 +722,27 @@ pub struct MaintenanceAssessment {
     /// SleepTask; its currentness is the computed `_system.dependency_validity`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revised_roots: Vec<RevisedRoot>,
+
+    /// A bounded batch of the Nexus exposure log since the last cycle
+    /// (Spec §66.8): which elements recall returned (`retrieved`) and which a
+    /// decision used (`used`). The input for explicit, guarded reinforcement;
+    /// reading it changes nothing, and it is not cognition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exposures: Vec<ExposureTally>,
+
+    /// Set when more exposure entries remain for a later cycle.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exposures_truncated: bool,
+}
+
+/// One element's exposure since the last cycle.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+pub struct ExposureTally {
+    pub element_id: String,
+    pub retrieved: u64,
+    pub used: u64,
+    /// The newest snapshot the element was exposed at.
+    pub last_snapshot_seq: u64,
 }
 
 /// One Assertion an actor superseded, with what was derived from it.

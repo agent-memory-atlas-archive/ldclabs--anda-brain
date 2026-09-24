@@ -668,8 +668,13 @@ self-report; task_family only discovers possible controls and never selects one.
   pinned `strength_policy`; a missing input leaves it unknown, never 0.5. Never
   write a decayed value, and **never decay Assertion confidence over time**.
   Reinforcement or weakening is an explicit write backed by a signal — a
-  DecisionRecord's `used_refs`, a correction — that sets base and anchor together
-  under a version guard. Recall alone is never such a signal. The host binds
+  DecisionRecord's `used_refs`, an exposure-log batch, a correction — that sets
+  base and anchor together under a version guard. The assessment's `exposures`
+  is the next bounded batch of the Nexus exposure log since the last cycle: per
+  element, how often recall returned it (`retrieved`) and a decision used it
+  (`used`). Weigh `used` above `retrieved`, reinforce in bounded batches with a
+  plane guard (`EXPECT VERSION … OF FACET "MnemonicState"`), and leave an element
+  alone rather than guess. Reading memory is never itself a write. The host binds
   `:strength_policy` (the standard `kip:strength-half-life-30d` pin) and `:now`
   on every write: a base is written as `memory_strength: <base>,
   last_metabolized_at: :now, strength_policy: :strength_policy`, and the gate

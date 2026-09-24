@@ -448,6 +448,8 @@ export interface SkillSettlement {
 export interface MemorySettlementReport {
   settled_at: number;
   revised_roots?: unknown[];
+  exposures?: { element_id: string; retrieved: number; used: number; last_snapshot_seq: number }[]; // 曝光日志的下一批（Spec §66.8）：强化的输入
+  exposures_truncated?: boolean;
   new_corrections: number;
   watches: WatchSettlement;
   commitments: { due: number; raised: number; error?: string }; // 以 commitment_review Activity 提起的到期 Commitment

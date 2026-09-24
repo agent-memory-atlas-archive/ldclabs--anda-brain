@@ -135,6 +135,11 @@ sibling `anda-db` and `anda` checkouts and the Worker links the sibling kip-do.
   RecallPlans are retained for `detail: "evidence"`, which reads the pinned element
   versions. `attention` and a minimal `resume` return the scoped attention page.
   Returned elements are logged as `retrieved` in the Nexus exposure log.
+- The Maintenance assessment gains `exposures` (with `exposures_truncated`): the
+  next bounded batch of the exposure log since the last cycle, tallied per
+  element as `retrieved` / `used` counts, with a persisted cursor so a batch is
+  counted once. It is the input for explicit, guarded reinforcement; the usage
+  ledger stays an observation. Both Maintenance contracts say so.
 - Formation and Recall prompt contracts gain the intent, scope, constraint and
   repair rules; the reference halves are unchanged. Product `Misrecorded` still
   fails `unsupported_capability` and points at the `revise` path.

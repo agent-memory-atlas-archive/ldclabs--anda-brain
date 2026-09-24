@@ -436,13 +436,43 @@ export class AndaBrain extends KipDatabase<Env> {
   maintenanceAssessment(): MaintenanceAssessment {
     this.ensureInitialized()
     const kv = this.ctx.storage.kv
-    return assess(
+    const assessment = assess(
       (operation) => this.run(operation),
       this.nexus.store.currentSeq(this.nexus.space),
       {
         revisedRoots: kv.get<RevisedRoot[]>(REVISED_ROOTS_KEY) ?? [],
       },
     )
+    return { ...assessment, ...this.exposureBatch() }
+  }
+
+  /**
+   * The next bounded page of the exposure log, tallied per element. The
+   * cursor advances once the page is handed to a cycle: reinforcement is a
+   * best-effort use of this signal (mirrors the Rust `exposure_batch`).
+   */
+  private exposureBatch(): Pick<MaintenanceAssessment, 'exposures' | 'exposures_truncated'> {
+    const key = 'anda-brain:memory:v1:exposure_cursor'
+    const cursor = this.ctx.storage.kv.get<string>(key)
+    let page: JsonMap
+    try {
+      page = this.nexus.systemSession().readExposures({ ...(cursor ? { cursor } : {}), limit: 500 })
+    } catch (error) {
+      console.warn('reading the exposure log failed', error)
+      return {}
+    }
+    const tally = new Map<string, { element_id: string; retrieved: number; used: number; last_snapshot_seq: number }>()
+    for (const record of (page.records as JsonMap[] | undefined) ?? []) {
+      const id = record.element_id
+      if (typeof id !== 'string') continue
+      const entry = tally.get(id) ?? { element_id: id, retrieved: 0, used: 0, last_snapshot_seq: 0 }
+      if (record.exposure === 'used') entry.used += 1
+      else entry.retrieved += 1
+      entry.last_snapshot_seq = Math.max(entry.last_snapshot_seq, typeof record.snapshot_seq === 'number' ? record.snapshot_seq : 0)
+      tally.set(id, entry)
+    }
+    if (typeof page.cursor === 'string' && page.cursor !== cursor) this.ctx.storage.kv.put(key, page.cursor)
+    return tally.size ? { exposures: [...tally.values()], exposures_truncated: typeof page.next_cursor === 'string' } : {}
   }
 
   /**

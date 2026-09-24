@@ -207,6 +207,11 @@ describe('Memory Interface', () => {
     const rule = action.result.items.find((item: any) => item.role === 'constraint')
     expect(rule?.text).toContain('Fridays')
     expect(action.result.coverage.channels.constraints).toBe('complete')
+    // What recall returned reaches the next Maintenance cycle once.
+    const stub = env.BRAIN.getByName(space) as unknown as { maintenanceAssessment(): Promise<Record<string, any>> }
+    const assessment = await stub.maintenanceAssessment()
+    expect(assessment.exposures?.some((tally: any) => tally.retrieved > 0)).toBe(true)
+    expect((await stub.maintenanceAssessment()).exposures).toBeUndefined()
 
     ai.push({ commands: [] }, { answer: 'x', found: false, uncertainty: 1 })
     const tiny = await memory(runtime, space, { operation: 'recall', scope: { task_ref: 'release' }, budget: { max_output_tokens: 20 }, input: { query: 'deploy?', mode: 'action' } })

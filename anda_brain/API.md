@@ -502,6 +502,8 @@ export interface SkillSettlement {
 export interface MemorySettlementReport {
   settled_at: number;
   revised_roots?: unknown[];
+  exposures?: { element_id: string; retrieved: number; used: number; last_snapshot_seq: number }[]; // next bounded exposure-log batch (Spec §66.8): the reinforcement input
+  exposures_truncated?: boolean;
   new_corrections: number;
   watches: WatchSettlement;
   commitments: { due: number; raised: number; error?: string }; // due Commitments raised as commitment_review Activities

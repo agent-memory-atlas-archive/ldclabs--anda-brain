@@ -963,6 +963,16 @@ async fn recall_surfaces_scoped_constraints_within_budget_and_expands_its_basis(
         .expect("the unasked constraint surfaces");
     assert!(rule.text.contains("Fridays"));
     assert_eq!(brief.coverage.channels.constraints, ChannelState::Complete);
+    // What recall returned reaches the next Maintenance cycle as an exposure
+    // batch — once; the cycle after reads only newer entries.
+    let assessment = f.space.maintenance_assessment(None).await;
+    assert!(
+        assessment.exposures.iter().any(|tally| tally.retrieved > 0),
+        "{:?}",
+        assessment.exposures
+    );
+    let again = f.space.maintenance_assessment(None).await;
+    assert!(again.exposures.is_empty());
 
     // Other tasks do not inherit it.
     f.script.push(Step::Final("ok".into()));
