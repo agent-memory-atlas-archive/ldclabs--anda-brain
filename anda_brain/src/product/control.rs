@@ -10,7 +10,7 @@ use std::{collections::BTreeSet, sync::Arc};
 
 pub const SOURCE_KEY: &str = "memory_product_source";
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceIdentity {
     pub key: String,

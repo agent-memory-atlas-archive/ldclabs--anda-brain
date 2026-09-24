@@ -2,10 +2,20 @@
 
 Guidance for coding agents working in this repository.
 
-## Scope
+## Agent Workflow
 
-These instructions apply to the whole repository unless a more specific
-`AGENTS.md` exists in a subdirectory.
+- Work independently as the current agent. Do not spawn or delegate work to
+  subagents.
+- Before editing, run `git status --short`, confirm the current branch, and
+  inspect existing diffs in the files you intend to change. Preserve the user's
+  existing work; do not overwrite or revert unrelated files or changes.
+- Use `rg` for search and focused reads before editing. Do not assume module
+  boundaries from filenames alone.
+- Before committing, review the final diff and stage only the files or hunks
+  belonging to the requested task.
+- At completion, briefly summarize the changes, the checks actually run and
+  their results, and any checks not run or blocked. Never report an unrun check
+  as passing. When committing, include the branch and commit ID in the summary.
 
 ## Project Overview
 
@@ -30,8 +40,9 @@ those and a matching `anda_engine` are published, `Cargo.toml` patches the sibli
 verify one type identity with Cargo metadata.
 KIP v2 has not been deployed. Use fresh v2 Spaces for current acceptance;
 do not add pre-release old-data migration work (including 2.1.0-draft Spaces)
-unless explicitly requested. Keep normal restart, eviction and unresolved-write
-recovery fully tested.
+unless explicitly requested. The one requested exception is the standalone
+`tools/migrate-draft-space` (2.1.0-draft Space → 2.0.0 Nexus); keep it out of the
+library. Keep normal restart, eviction and unresolved-write recovery fully tested.
 
 ## Repository Layout
 
@@ -114,6 +125,11 @@ recovery fully tested.
   engine has) and `anda-brain-worker/README.md` is the authority on which. Its
   prompts are vendored under `anda-brain-worker/assets/` and inlined by
   `pnpm run codegen:prompts`.
+- `anda_brain/conformance/`: the KIP harness adapter (`adapter.mjs`) and the
+  script that runs the scenarios it exercises without a model provider.
+- `tools/migrate-draft-space/`: a standalone crate (outside the workspace) that
+  links the 0.13 and 0.14 engines to move a 2.1.0-draft Space onto a fresh
+  2.0.0 Nexus; see its README.
 - `deploy/`, `anda-brain-demo/`, `anda-cli/`: deployment
   and integration material. Do not change these unless the task is explicitly
   about them.

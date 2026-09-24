@@ -45,7 +45,9 @@ mod sources;
 mod tests;
 
 pub(crate) use intake::{FormationTrace, INTENT_KEY, IntentState, MemoryIntent};
-pub use sources::{SourceKind, SourceOrder, StageSourceInput, StagedSource, StagedSourceRef};
+pub use sources::{
+    HostSource, SourceKind, SourceOrder, StageSourceInput, StagedSource, StagedSourceRef,
+};
 
 /// Where this binding keeps its private orchestration state: staged sources,
 /// idempotency keys, receipts, retained recall bases and erasure plans.

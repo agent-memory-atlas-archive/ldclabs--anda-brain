@@ -294,6 +294,14 @@ bases and erasure plans. Native facts stay in the Nexus.
   transcripts, usage-ledger rows, the probe cache) are checked before `completed`.
   Suppressed source keys join the product source exclusions, so neither Formation
   nor staging re-admits the bytes.
+- **A trusted Rust host stages under its own identity.** An embedding host (Anda
+  Bot) calls `Space::stage_host_memory_source` with a `HostSource`: its product
+  source identity and Formation context travel with the handle. Formation records
+  the host identity joined by the handle's own keys, so the host's product deletion
+  and a Memory Interface forget both suppress the source; an excluded identity is
+  refused with `SourceAdmissionError::Suppressed` before anything is stored.
+  `Space::memory_receipt_state` returns a receipt's progress with the Formation
+  conversation it started. Neither is reachable over HTTP or MCP.
 
 The Worker keeps the same records in Durable Object storage. Its Formation finishes
 inside the request, so its receipts are `available` or `failed` when the request

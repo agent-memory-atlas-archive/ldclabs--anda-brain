@@ -7,6 +7,11 @@
 //! binds no key, so a secret is never stored merely to issue a handle. A
 //! handle is scoped to the caller that staged it, and the staging key makes a
 //! retry resolve to the same handle.
+//!
+//! A trusted Rust host that embeds this Brain may stage with a [`HostSource`]:
+//! its own product source identity and Formation context travel with the
+//! handle, so its product deletion keeps covering what an observe forms.
+//! Neither HTTP nor MCP can supply one.
 use super::*;
 use anda_core::Message;
 use object_store::PutMode;
@@ -71,6 +76,17 @@ pub struct StagedSourceRef {
     pub captured_at: String,
 }
 
+/// What a trusted embedding host attaches to a source it stages (see the
+/// module docs). Formation takes its context, and its identity joins the
+/// handle's own, so a forget of either suppresses the source.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostSource {
+    pub identity: crate::product::SourceIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<crate::types::InputContext>,
+}
+
 /// A staged source as retained.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -87,6 +103,8 @@ pub struct StagedSource {
     pub order: Option<SourceOrder>,
     #[serde(default)]
     pub erased: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostSource>,
 }
 
 /// A source an intent cites, resolved for this caller.
@@ -99,6 +117,32 @@ pub(crate) struct ResolvedSource {
     pub order: Option<SourceOrder>,
     /// Set when the handle is an already captured Evidence element.
     pub evidence: Option<String>,
+    pub host: Option<HostSource>,
+}
+
+impl ResolvedSource {
+    /// The product identity Formation records for this source: the handle's
+    /// own keys, joined under a trusted host's identity when it staged one.
+    pub(crate) fn identity(&self) -> crate::product::SourceIdentity {
+        let own = [
+            format!("memory-source:{}", self.source_ref),
+            format!("memory-source-digest:{}", self.digest),
+        ];
+        match &self.host {
+            Some(host) => {
+                let mut identity = host.identity.clone();
+                identity.parents.extend(own);
+                identity
+            }
+            None => {
+                let [key, digest] = own;
+                crate::product::SourceIdentity {
+                    key,
+                    parents: vec![digest],
+                }
+            }
+        }
+    }
 }
 
 /// What a message's role makes it, as an Evidence class (Formation §7).
@@ -131,6 +175,38 @@ impl Space {
         self: &Arc<Self>,
         namespace: &str,
         input: StageSourceInput,
+    ) -> Result<StagedSourceRef, KipError> {
+        self.stage(namespace, input, None).await
+    }
+
+    /// Stages a source for a trusted embedding host, carrying its product
+    /// identity and Formation context (see the module docs). A source that
+    /// identity excludes fails with [`SourceAdmissionError::Suppressed`],
+    /// which the host already handles for its product ingest.
+    ///
+    /// [`SourceAdmissionError::Suppressed`]: crate::product::SourceAdmissionError::Suppressed
+    pub async fn stage_host_memory_source(
+        self: &Arc<Self>,
+        namespace: &str,
+        input: StageSourceInput,
+        host: HostSource,
+    ) -> Result<StagedSourceRef, BoxError> {
+        // The handle's two keys join the host's parents.
+        if host.identity.parents.len() > 14 {
+            return Err("invalid memory source identity".into());
+        }
+        host.identity.validate()?;
+        if !self.product_source_allowed(&host.identity) {
+            return Err(crate::product::SourceAdmissionError::Suppressed.into());
+        }
+        Ok(self.stage(namespace, input, Some(host)).await?)
+    }
+
+    async fn stage(
+        self: &Arc<Self>,
+        namespace: &str,
+        input: StageSourceInput,
+        host: Option<HostSource>,
     ) -> Result<StagedSourceRef, KipError> {
         if input.idempotency_key.is_empty() || input.idempotency_key.len() > 1024 {
             return Err(KipError::invalid_request_envelope(
@@ -206,7 +282,10 @@ impl Space {
             if existing.namespace != namespace {
                 return Err(KipError::not_found_or_not_visible("source not found"));
             }
-            if existing.source_digest != digest || existing.order != input.order {
+            if existing.source_digest != digest
+                || existing.order != input.order
+                || existing.host != host
+            {
                 return Err(KipError::new(
                     KipErrorCode::IdempotencyConflict,
                     "this staging key was used for different source bytes",
@@ -228,6 +307,7 @@ impl Space {
             captured_at: captured_at.clone(),
             order: input.order,
             erased: false,
+            host,
         };
         journal
             .put(&path, &staged, PutMode::Create)
@@ -281,6 +361,7 @@ impl Space {
                 observed_at: staged.observed_at,
                 order: staged.order,
                 evidence: None,
+                host: staged.host,
             });
         }
         let not_found = || KipError::not_found_or_not_visible("source not found");
@@ -310,6 +391,7 @@ impl Space {
             },
             order: None,
             evidence: Some(id.to_string()),
+            host: None,
         })
     }
 
@@ -332,6 +414,9 @@ impl Space {
             let mut staged = stored.value;
             staged.messages.clear();
             staged.erased = true;
+            if let Some(host) = &mut staged.host {
+                host.context = None;
+            }
             if journal
                 .put(&path, &staged, PutMode::Update(stored.version))
                 .await

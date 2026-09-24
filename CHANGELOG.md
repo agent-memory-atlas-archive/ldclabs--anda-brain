@@ -144,6 +144,26 @@ sibling `anda-db` and `anda` checkouts and the Worker links the sibling kip-do.
   repair rules; the reference halves are unchanged. Product `Misrecorded` still
   fails `unsupported_capability` and points at the `revise` path.
 
+- Trusted Rust hosts stage with `Space::stage_host_memory_source` and a
+  `HostSource` (their product source identity and Formation context), so an
+  embedding host's product deletion keeps covering what an observe forms; an
+  excluded identity fails `SourceAdmissionError::Suppressed`.
+  `Space::memory_receipt_state` returns a receipt's progress and its Formation
+  conversation. Neither is exposed over HTTP or MCP. Anda Bot uses both.
+
+### Draft-Space migration
+
+- `tools/migrate-draft-space` (a standalone crate linking the 0.13 and 0.14
+  engines) moves a Space written under the `cognitive-memory` 2.1.0 draft onto a
+  fresh 2.0.0 Nexus in the same database: every element in any storage state is
+  exported, references move to 2.0.0, each draft `Preference` becomes the option
+  kind the owner chooses (a draft-vocabulary type), the written `derived_from`
+  lineage becomes its `extraction` Activity, and the Nexus collections are rebuilt
+  and imported in transaction-sized chunks with ids, keys, archived states and the
+  self Concept preserved. The host's own collections and extensions stay. On a copy
+  of the Anda Bot database it rebuilt 14,655 elements with no id change and a
+  matching census; see its README for what is not carried.
+
 ### Maintenance of copied material
 
 - Reference halves, the Worker's verbatim cards and the reference supplement were
@@ -151,6 +171,12 @@ sibling `anda-db` and `anda` checkouts and the Worker links the sibling kip-do.
   and Validated Learning companions and the common schema.
 - The default Recall `context_tokens` rises from 32768 to 49152: the static Recall
   prefix alone is about 28k tokens after the synchronization.
+
+### Fixes
+
+- The usage ledger's `last_self_test_at` (added after 0.12.1) is optional, so a
+  Space created by 0.12.1 opens again: a schema upgrade may only add optional
+  fields, and the required one refused the `memory_usage` collection.
 
 ### Known limits
 
@@ -160,8 +186,12 @@ sibling `anda-db` and `anda` checkouts and the Worker links the sibling kip-do.
   not declared. `resume` has no WorkingState; a Formation pass interrupted by a
   close is reported `failed` with an unknown outcome and not re-run; recording
   repair needs the extraction's source held inline; Recall transcripts are scrubbed
-  by scanning every stored Recall conversation. The KIP conformance adapter's
-  real-model run is not recorded here.
+  by scanning every stored Recall conversation.
+- `anda_brain/conformance/adapter.mjs` is a KIP harness engine adapter: it drives
+  a real `anda_brain` process over the HTTP binding against a controlled model
+  that forms nothing. KIP2-MIF-002, KIP2-MIF-005 and KIP2-REL-013 pass through the
+  KIP runner (mechanism evidence); the other MIF/REL vectors depend on what a model
+  extracts and were not run (no live provider run is recorded here).
 - A promoted draft does not yet re-key existing Propositions (anda-db N6b):
   `ENSURE PROPOSITION` after a promotion may create a second tuple for one written
   under the draft. Capsule import mapping is not exposed by this service.

@@ -390,6 +390,129 @@ async fn staged_sources_are_idempotent_owned_and_admitted_first() {
 }
 
 #[tokio::test]
+async fn a_trusted_host_stages_under_its_own_identity_and_context() {
+    let f = fixture("mi_host_source").await;
+    f.script.write(&prefers(
+        "dark",
+        "ColorScheme",
+        "2026-01-01T00:00:00.000Z",
+        false,
+    ));
+    f.script.done();
+    let host = HostSource {
+        identity: crate::product::SourceIdentity {
+            key: "bot/conversation/7".into(),
+            parents: vec!["bot/session/a".into()],
+        },
+        context: Some(crate::types::InputContext {
+            counterparty: Some("alice-counterparty".into()),
+            ..Default::default()
+        }),
+    };
+    let input = |text: &str| StageSourceInput {
+        messages: vec![Message {
+            role: "user".into(),
+            content: vec![text.to_string().into()],
+            ..Default::default()
+        }],
+        observed_at: Some("2026-01-01T00:00:00.000Z".into()),
+        kind: SourceKind::Message,
+        order: None,
+        idempotency_key: "window:7:0".into(),
+    };
+    let staged = f
+        .space
+        .stage_host_memory_source(NS, input("I prefer dark mode"), host.clone())
+        .await
+        .unwrap();
+    // The host's attachment is part of the key's meaning.
+    let conflict = f
+        .space
+        .stage_host_memory_source(
+            NS,
+            input("I prefer dark mode"),
+            HostSource {
+                context: None,
+                ..host.clone()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        conflict.downcast_ref::<KipError>().map(|e| e.code),
+        Some(KipErrorCode::IdempotencyConflict)
+    );
+
+    let response = f
+        .space
+        .memory_request(
+            NS,
+            false,
+            request(
+                "observe",
+                Some("window:7:0"),
+                None,
+                json!({"source_ref": staged.source_ref}),
+            ),
+        )
+        .await;
+    let receipt = response.receipt.unwrap().receipt_ref;
+    assert_eq!(
+        wait_available(&f.space, &receipt).await.phase,
+        Phase::Available
+    );
+    let (progress, conversation) = f.space.memory_receipt_state(NS, &receipt).await.unwrap();
+    assert_eq!(progress.phase, Phase::Available);
+    // Formation records the host's identity, joined by the handle's keys,
+    // and receives the host's context.
+    let conversation = f
+        .space
+        .memory
+        .get_conversation(conversation.unwrap())
+        .await
+        .unwrap();
+    let source: crate::product::SourceIdentity = serde_json::from_value(
+        conversation.extra.as_ref().unwrap()[crate::product::control::SOURCE_KEY].clone(),
+    )
+    .unwrap();
+    assert_eq!(source.key, "bot/conversation/7");
+    assert_eq!(
+        source.parents,
+        vec![
+            "bot/session/a".to_string(),
+            format!("memory-source:{}", staged.source_ref),
+            format!("memory-source-digest:{}", staged.source_digest),
+        ]
+    );
+    assert!(
+        serde_json::to_string(&conversation.messages)
+            .unwrap()
+            .contains("alice-counterparty")
+    );
+
+    // Once the host's product deletion excludes its identity, a new source
+    // under it is refused before anything is stored.
+    f.space
+        .suppress_sources(&std::collections::BTreeSet::from([
+            "bot/conversation/7".to_string()
+        ]))
+        .await
+        .unwrap();
+    let mut later = input("I now prefer light mode");
+    later.idempotency_key = "window:7:1".into();
+    let refused = f
+        .space
+        .stage_host_memory_source(NS, later, host)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        refused.downcast_ref::<crate::product::SourceAdmissionError>(),
+        Some(crate::product::SourceAdmissionError::Suppressed)
+    ));
+    f.space.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn observe_is_recorded_before_it_is_formed_and_replays_across_restart() {
     let f = fixture("mi_observe").await;
     let gate = Arc::new(tokio::sync::Notify::new());

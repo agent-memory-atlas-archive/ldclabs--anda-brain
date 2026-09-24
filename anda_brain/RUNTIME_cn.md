@@ -211,6 +211,12 @@ Memory Interface（`POST /v1/{space_id}/memory`，见 [API](API_cn.md#memory-int
 - **遗忘先核实再报告。** ErasurePlan 由 Nexus 依据实际存储校验，宿主副本（暂存字节、Formation 与
   Recall 会话记录、使用账本行、探测缓存）在报告 `completed` 之前逐项核实。被抑制的来源键并入
   产品来源排除，Formation 与暂存都不会再接纳这些字节。
+- **受信的 Rust 宿主以自己的身份暂存。** 内嵌 Brain 的宿主（Anda Bot）调用
+  `Space::stage_host_memory_source` 并传入 `HostSource`：它的产品来源身份与 Formation 上下文随
+  句柄一起保存。Formation 记录的是宿主身份再并入句柄自己的键，所以宿主的产品删除与 Memory
+  Interface 的 forget 都能抑制该来源；已被排除的身份在存储任何内容之前以
+  `SourceAdmissionError::Suppressed` 拒绝。`Space::memory_receipt_state` 返回回执进度及其启动的
+  Formation 会话。两者都不能通过 HTTP 或 MCP 访问。
 
 Worker 在 Durable Object 存储中保存同样的记录。它的 Formation 在请求内完成，所以请求返回时回执
 已是 `available` 或 `failed`；请求一直没有回报结果的回执，十分钟后读为 `failed`（`OutcomeUnknown`）。

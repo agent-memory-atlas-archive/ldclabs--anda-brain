@@ -38,8 +38,10 @@ pub struct MemoryUsage {
     pub self_test_count: u64,
 
     /// Receipt time of the last diagnostic test, independent of other usage.
+    /// Optional: v3 added it, and a schema upgrade may only add optional
+    /// fields, so a v2 ledger (Brain 0.12.1) keeps opening.
     #[serde(default)]
-    pub last_self_test_at: u64,
+    pub last_self_test_at: Option<u64>,
 
     /// Unix ms of the newest production recall that surfaced this entity.
     pub last_recalled_at: u64,
@@ -233,7 +235,7 @@ impl UsageLedger {
                         .add_from(&MemoryUsage {
                             entity: entity.clone(),
                             self_test_count: 1,
-                            last_self_test_at: now_ms,
+                            last_self_test_at: Some(now_ms),
                             updated_at: now_ms,
                             ..Default::default()
                         })
@@ -475,5 +477,71 @@ impl MissCache {
             }
         }
         Ok(cleared)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anda_db::database::DBConfig;
+
+    /// The ledger row as Brain 0.12.1 stored it (schema v2).
+    #[derive(Debug, Clone, Default, Serialize, Deserialize, AndaDBSchema)]
+    struct MemoryUsageV2 {
+        _id: u64,
+        entity: String,
+        recall_count: u64,
+        self_test_count: u64,
+        last_recalled_at: u64,
+        correction_count: u64,
+        last_corrected_at: u64,
+        flushed_recall_count: u64,
+        dirty: u64,
+        updated_at: u64,
+    }
+
+    #[tokio::test]
+    async fn a_v2_ledger_upgrades_in_place() {
+        let store = Arc::new(object_store::memory::InMemory::new());
+        let config = DBConfig {
+            name: "ledger_upgrade".into(),
+            ..Default::default()
+        };
+        let db = Arc::new(AndaDB::create(store.clone(), config.clone()).await.unwrap());
+        let mut schema = MemoryUsageV2::schema().unwrap();
+        schema.with_version(2);
+        let v2 = db
+            .open_or_create_collection(
+                schema,
+                CollectionConfig {
+                    name: "memory_usage".to_string(),
+                    description: "Memory usage ledger (recall/correction counters)".to_string(),
+                },
+                async |collection| collection.create_btree_index_nx(&["entity"]).await,
+            )
+            .await
+            .unwrap();
+        v2.add_from(&MemoryUsageV2 {
+            entity: "C:7".into(),
+            self_test_count: 1,
+            updated_at: 1,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        db.close().await.unwrap();
+
+        let db = Arc::new(AndaDB::open(store, config).await.unwrap());
+        let ledger = UsageLedger::connect(&db).await.unwrap();
+        let row = ledger.get("C:7").await.unwrap().unwrap();
+        assert_eq!(row.self_test_count, 1);
+        assert_eq!(row.last_self_test_at, None);
+        ledger
+            .record_self_test(&BTreeSet::from(["C:7".to_string()]), 42)
+            .await
+            .unwrap();
+        let row = ledger.get("C:7").await.unwrap().unwrap();
+        assert_eq!((row.self_test_count, row.last_self_test_at), (2, Some(42)));
+        db.close().await.unwrap();
     }
 }

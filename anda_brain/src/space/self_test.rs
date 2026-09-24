@@ -118,7 +118,8 @@ LIMIT {window}"#
             if usage.as_ref().is_none_or(|row| {
                 row.recall_count == 0
                     && (row.self_test_count == 0
-                        || now_ms.saturating_sub(row.last_self_test_at) >= SELF_TEST_RETEST_MS)
+                        || now_ms.saturating_sub(row.last_self_test_at.unwrap_or(0))
+                            >= SELF_TEST_RETEST_MS)
             }) {
                 candidates.push(candidate);
             }

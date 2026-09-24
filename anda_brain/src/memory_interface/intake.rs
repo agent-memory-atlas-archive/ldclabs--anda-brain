@@ -772,6 +772,19 @@ impl Space {
         }))
     }
 
+    /// A receipt's current progress and the Formation conversation it
+    /// started, for a trusted embedding host that links its own records to
+    /// the native conversation.
+    pub async fn memory_receipt_state(
+        self: &Arc<Self>,
+        namespace: &str,
+        receipt_ref: &str,
+    ) -> Result<(wire::Progress, Option<u64>), KipError> {
+        let record = self.intake_record(namespace, receipt_ref).await?;
+        let (progress, record) = self.settled(&record).await?;
+        Ok((progress, record.conversation))
+    }
+
     /// Settles the receipt a finished Formation conversation carries.
     pub(crate) async fn settle_memory_conversation(
         self: &Arc<Self>,
@@ -1047,17 +1060,13 @@ impl Space {
         source: &sources::ResolvedSource,
         intent: MemoryIntent,
     ) -> Result<(), KipError> {
-        let identity = crate::product::SourceIdentity {
-            key: format!("memory-source:{}", source.source_ref),
-            parents: vec![format!("memory-source-digest:{}", source.digest)],
-        };
         let input = crate::types::FormationInput {
             messages: source.messages.clone(),
-            context: None,
+            context: source.host.as_ref().and_then(|host| host.context.clone()),
             timestamp: Some(source.observed_at.clone()),
         };
         let output = self
-            .ingest_memory_intent(SELF_USER_ID, input, identity, &intent)
+            .ingest_memory_intent(SELF_USER_ID, input, source.identity(), &intent)
             .await
             .map_err(kip_error)?;
         record.conversation = output.conversation;

@@ -3888,7 +3888,7 @@ async fn self_test_retests_after_horizon_and_preserves_counts_after_reopen() {
     for id in ids {
         let usage = reopened.ledger.get(&id).await.unwrap().unwrap();
         assert_eq!(usage.self_test_count, 2);
-        assert_eq!(usage.last_self_test_at, after);
+        assert_eq!(usage.last_self_test_at, Some(after));
         assert_eq!(usage.recall_count, 0);
     }
     reopened.close().await.unwrap();
