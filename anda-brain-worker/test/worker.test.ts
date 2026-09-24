@@ -28,9 +28,8 @@ class FakeAi implements AiBinding {
 const FORMATION_PLAN = `MUTATE {
   UPSERT CONCEPT ?alice { MATCH {type: "Person", key: "alice"} SET FIELDS { name: "Alice" } }
   CREATE CONCEPT ?concise {
-    TYPE "Preference"
+    TYPE "AnswerStyle"
     NAME "Alice concise answers"
-    SET ATTRIBUTES { preference_class: "communication" }
     SET FACET "MnemonicState" { memory_strength: 0.8, salience: 0.6 }
   }
   CREATE EVIDENCE ?e {
@@ -59,7 +58,7 @@ describe('Anda Brain Worker', () => {
     const space = uniqueSpace('formation_reference')
     const ai = new FakeAi([
       { types: [], predicates: [], commands: [], summary: '', references: [{ document: 'syntax', section: 'kml', offset: 0 }] },
-      { types: [], predicates: [], commands: [FORMATION_PLAN], summary: 'Stored after checking syntax.' },
+      { types: ['AnswerStyle'], predicates: [], commands: [FORMATION_PLAN], summary: 'Stored after checking syntax.' },
     ])
     const response = await post(testEnv(ai), space, 'formation', {
       messages: [{ role: 'user', content: 'Please keep your answers concise.' }],
@@ -79,7 +78,7 @@ describe('Anda Brain Worker', () => {
     const runtime = testEnv(
       new FakeAi([
         {
-          types: [],
+          types: ['AnswerStyle'],
           predicates: [],
           commands: [FORMATION_PLAN],
           summary: 'Stored Alice’s response-style preference.',
@@ -105,7 +104,7 @@ describe('Anda Brain Worker', () => {
 
     const recalled = await post(runtime, space, 'execute_kip_readonly', {
       command:
-        'FIND(?c.name, ?c.attributes) WHERE { ?c CONCEPT {type: "Preference"} } LIMIT 5',
+        'FIND(?c.name, ?c.attributes) WHERE { ?c CONCEPT {type: "AnswerStyle"} } LIMIT 5',
     })
     expect(recalled.status).toBe(200)
     expect(JSON.stringify(await recalled.json())).toContain('Alice concise answers')
@@ -118,15 +117,14 @@ describe('Anda Brain Worker', () => {
     // not pass through model-generated text on the way in (§88.12).
     const said = 'Please keep answers concise — I mean it, ≤ 3 sentences.'
     const plan = {
-      types: [],
+      types: ['AnswerStyle'],
       predicates: [],
       commands: [
         `MUTATE {
           UPSERT CONCEPT ?alice { MATCH {type: "Person", key: "alice"} SET FIELDS { name: "Alice" } }
           CREATE CONCEPT ?concise {
-            TYPE "Preference"
+            TYPE "AnswerStyle"
             NAME "Alice concise answers"
-            SET ATTRIBUTES { preference_class: "communication" }
           }
           ASSERT ?a (?alice, "prefers", ?concise) {
             by: ?alice, mode: "stated", confidence: 0.95, evidence: :msg1
@@ -354,10 +352,11 @@ describe('Anda Brain Worker', () => {
   it('lets formation correct a claim by superseding it', async () => {
     const space = uniqueSpace('correction')
     const runtime = testEnv(new FakeAi([]))
+    await declareTypes(space, ['ColorScheme'])
     const setup = await post(runtime, space, 'execute_kip', {
       command: `MUTATE {
         UPSERT CONCEPT ?alice { MATCH {type: "Person", key: "alice"} }
-        CREATE CONCEPT ?dark { TYPE "Preference" NAME "Dark mode" }
+        CREATE CONCEPT ?dark { TYPE "ColorScheme" NAME "Dark mode" }
         ENSURE PROPOSITION ?p (?alice, "prefers", ?dark)
         CREATE ASSERTION ?a {
           SET FIELDS { proposition: ?p, asserted_by: ?alice, stance: "support", mode: "stated" }
@@ -412,14 +411,15 @@ describe('Anda Brain Worker', () => {
       new FakeAi([
         // A planned SEARCH is a read like any other: it has to carry a LIMIT
         // to survive the gate, and it runs beside the grounding lookup.
-        { commands: ['SEARCH COGNITION "Alice" LIMIT 5'] },
+        { commands: ['SEARCH CONCEPT "Alice" LIMIT 5'] },
         { answer: 'Alice prefers concise answers.', found: true, uncertainty: 0.05 },
       ]),
     )
 
+    await declareTypes(space, ['AnswerStyle'])
     await post(runtime, space, 'execute_kip', {
       command:
-        'CREATE CONCEPT ?c { TYPE "Preference" NAME "Alice concise answers" }',
+        'CREATE CONCEPT ?c { TYPE "AnswerStyle" NAME "Alice concise answers" }',
     })
 
     const response = await post(runtime, space, 'recall_structured', {
@@ -434,7 +434,7 @@ describe('Anda Brain Worker', () => {
     // than an opaque id.
     expect(body.result.memories[0]).toMatchObject({
       name: 'Alice concise answers',
-      type: 'Preference',
+      type: 'AnswerStyle',
     })
     expect(body.result.memories[0].entity).toMatch(/^C-\d+$/)
     expect(body.result.diagnostics.kip_commands).toBe(2)
@@ -499,8 +499,9 @@ describe('Anda Brain Worker', () => {
   it('grounds a Chinese question on a Chinese memory', async () => {
     const space = uniqueSpace('cjk')
     const runtime = testEnv(new FakeAi([]))
+    await declareTypes(space, ['DisplayMode'])
     await post(runtime, space, 'execute_kip', {
-      command: 'CREATE CONCEPT ?c { TYPE "Preference" NAME :name }',
+      command: 'CREATE CONCEPT ?c { TYPE "DisplayMode" NAME :name }',
       parameters: { name: '深色模式' },
     })
 
@@ -513,7 +514,7 @@ describe('Anda Brain Worker', () => {
     expect(body.result.found).toBe(true)
     expect(body.result.memories[0]).toMatchObject({
       name: '深色模式',
-      type: 'Preference',
+      type: 'DisplayMode',
     })
   })
 
@@ -868,7 +869,7 @@ describe('Anda Brain Worker', () => {
     expect(identity).toContain('C-')
   })
 
-  it('metabolizes memory strength and reports the change', async () => {
+  it('reports an explicit strength write as a change', async () => {
     const space = uniqueSpace('maintenance-update')
     const runtime = testEnv(
       new FakeAi([
@@ -878,16 +879,17 @@ describe('Anda Brain Worker', () => {
           commands: [
             `UPDATE ?c
              SET FACET "MnemonicState" { memory_strength: 0.5 }
-             WHERE { ?c CONCEPT {type: "Preference", name: "Alice style"} }
+             WHERE { ?c CONCEPT {type: "AnswerStyle", name: "Alice style"} }
              LIMIT 1`,
           ],
           summary: 'Metabolized one preference.',
         },
       ]),
     )
+    await declareTypes(space, ['AnswerStyle'])
     await post(runtime, space, 'execute_kip', {
       command: `CREATE CONCEPT ?c {
-        TYPE "Preference"
+        TYPE "AnswerStyle"
         NAME "Alice style"
         SET FACET "MnemonicState" { memory_strength: 0.9 }
       }`,
@@ -915,13 +917,17 @@ describe('Anda Brain Worker', () => {
     expect(invalidRole.status).toBe(400)
   })
 
-  it('normalizes external timestamps and captures malformed ones at receipt time', async () => {
+  it('canonicalizes external timestamps and refuses unreadable ones', async () => {
+    for (const timestamp of ['2026', 'not a timestamp', '2026-02-30T00:00:00Z', '2026-08-20T08:00:00.123456+08:00']) {
+      const refused = await post(testEnv(new FakeAi([])), uniqueSpace('timestamp-refused'), 'formation', {
+        messages: [{role: 'user', content: 'Original message.'}], timestamp,
+      })
+      expect(refused.status, timestamp).toBe(400)
+    }
     for (const [timestamp, expected] of [
       ['2026-08-20T00:00:00Z', '2026-08-20T00:00:00.000Z'],
-      [' 2026-08-20T08:00:00.123456+08:00 ', '2026-08-20T00:00:00.123Z'],
-      ['2026', undefined],
-      ['not a timestamp', undefined],
-      ['2026-02-30T00:00:00Z', undefined],
+      [' 2026-08-20T08:00:00.123000+08:00 ', '2026-08-20T00:00:00.123Z'],
+      [undefined, undefined],
     ] as const) {
       const runtime = testEnv(new FakeAi([{
         types: [], predicates: [], summary: 'captured',
@@ -930,7 +936,7 @@ describe('Anda Brain Worker', () => {
       const space = uniqueSpace('timestamp-compatible')
       const before = Date.now()
       const written = await post(runtime, space, 'formation', {
-        messages: [{role: 'user', content: 'Original message.'}], timestamp,
+        messages: [{role: 'user', content: 'Original message.'}], ...(timestamp ? { timestamp } : {}),
       })
       expect(written.status, await written.text()).toBe(200)
       const read = await post(runtime, space, 'execute_kip_readonly', {
@@ -986,6 +992,10 @@ describe('Anda Brain Worker', () => {
       '2026-08-20T00:00:00.000Z',
     )
     expect(system?.content).toContain('Reference Anda Brain Formation Policy')
+    // Each captured message's observation time is what a claim writes as `at`.
+    expect(JSON.parse(user!.content).captured_evidence).toEqual([
+      {key:'msg1', evidence_class:'user_statement', observed_at:'2026-08-20T00:00:00.000Z'},
+    ])
     expect(system?.content).toContain('Anda Brain Worker deployment contract')
     expect(system?.content).toContain('### 5. Runtime Envelope')
     expect(user?.content).toContain('remember-newest-turn')
@@ -1087,4 +1097,11 @@ function failingReadBrain(): BrainRpc {
     stats: unsupported,
     vocabulary: unsupported,
   } as unknown as BrainRpc
+}
+
+/** Publishes option kinds into the Space's own vocabulary package: the Profile
+ * has no `Preference` type, and an option is typed by its kind. */
+async function declareTypes(space: string, types: string[]): Promise<void> {
+  await (env.BRAIN.getByName(space) as unknown as { declareSymbols(t: string[], p: string[]): Promise<unknown> })
+    .declareSymbols(types, [])
 }

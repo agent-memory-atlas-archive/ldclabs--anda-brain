@@ -329,6 +329,26 @@ pub async fn get_memory_status(
     Ok(ct.response(RpcResponse::success(rt)))
 }
 
+/// GET /v1/{space_id}/memory/attention?attention_cursor=...&limit=...
+///
+/// Attention recall (KIP Memory Interface §4): the Watches that fired and the
+/// Commitments Maintenance found due, after the cursor the caller kept.
+/// Read-only, and an item grants nothing.
+pub async fn get_memory_attention(
+    State(app): State<AppState>,
+    AppPath(space_id): AppPath<String>,
+    AppQuery(input): AppQuery<AttentionRecallInput>,
+    Accept(ct, _): Accept,
+    HeaderVals(token, sharding): HeaderVals,
+) -> Result<impl IntoResponse, AppError> {
+    let space = read_lenient(&app, &space_id, &token, sharding, unix_ms()).await?;
+    let rt = space
+        .recall_attention(input)
+        .await
+        .map_err(AppError::bad_request)?;
+    Ok(ct.response(RpcResponse::success(rt)))
+}
+
 /// POST /v1/{space_id}/management/shadow_eval
 ///
 /// On-demand shadow evaluation (memory evolution plan, M11): compares a
@@ -2406,10 +2426,7 @@ mod tests {
             .await,
         )
         .await;
-        assert_eq!(
-            user["result"]["schema_ref"],
-            "kip://profiles/cognitive-memory@2.1.0/Person"
-        );
+        assert_eq!(user["result"]["schema_ref"], profile!("Person"));
         assert_eq!(user["result"]["key"], "external-user-1");
     }
 

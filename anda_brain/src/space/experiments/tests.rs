@@ -423,9 +423,13 @@ async fn virtual_time_changes_belief_and_expiry_without_changing_auth_time() {
     let run = Experiment::create(&app(), MemoryMode::Persistent, identity(), NOW)
         .await
         .unwrap();
+    {
+        let guard = run.run.lock().await;
+        crate::testkit::declare_types(&guard.as_ref().unwrap().space, &["AnswerStyle"]).await;
+    }
     command(&run, format!(r#"MUTATE {{
         CREATE CONCEPT ?s {{TYPE "Person" NAME "Alice"}}
-        CREATE CONCEPT ?o {{TYPE "Preference" NAME "short answers"}}
+        CREATE CONCEPT ?o {{TYPE "AnswerStyle" NAME "short answers"}}
         ASSERT ?a (?s,"prefers",?o) {{by:?s,mode:"stated",confidence:1,valid:{{from:"{}",until:"{}"}}}}
         SET RETENTION ?o {{expires_at:"{}"}}
     }}"#, kip::timestamp(NOW-1000), kip::timestamp(NOW+1000), kip::timestamp(NOW+1000))).await;

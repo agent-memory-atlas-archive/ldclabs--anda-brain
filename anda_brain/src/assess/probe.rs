@@ -173,7 +173,6 @@ pub fn probe_observation(
                 let projection: Projection = serde_json::from_value(row.clone())?;
                 if projection.basis.is_none()
                     || projection.policy.is_none()
-                    || projection.temporal.is_none()
                     || projection
                         .slot_status
                         .is_some_and(|status| status != projection.status)

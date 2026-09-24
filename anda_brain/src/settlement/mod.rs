@@ -12,19 +12,11 @@ use std::future::Future;
 
 use crate::{
     kip,
-    types::{ArmedWatch, Dependent, MemoryPolicy, RevisedRoot, SkillSettlement, WatchSettlement},
+    types::{ArmedWatch, Dependent, RevisedRoot, SkillSettlement, WatchSettlement},
 };
 
 /// Per-command row limit for bulk settlement passes.
 pub(crate) const SETTLEMENT_BATCH_LIMIT: usize = 500;
-
-/// Upper bound of decay batches per settlement (500 × 20 = 10k links).
-const SETTLEMENT_MAX_BATCHES: usize = 20;
-
-/// `MnemonicState.memory_strength` assumed for a Concept that has never been
-/// metabolized. The Facet's members are all optional, so the metabolism has to
-/// supply a baseline before it can decay one.
-const DEFAULT_MEMORY_STRENGTH: f64 = 0.5;
 
 /// The `retention.retention_class` a pinned memory carries.
 ///
@@ -89,71 +81,6 @@ async fn read(port: &impl RunKip, request: Request) -> Result<Response, String> 
         Ok(response) => Err(kip::error_message(&response)),
         Err(err) => Err(err.to_string()),
     }
-}
-
-/// What the bulk disuse metabolism did this cycle.
-#[derive(Debug, Default)]
-pub(crate) struct DecayPass {
-    /// Concepts whose `MnemonicState.memory_strength` was decayed.
-    pub decayed: u64,
-    /// Set when the pass stopped early — decay did not complete this cycle.
-    pub error: Option<String>,
-}
-
-/// Bulk disuse metabolism: decays `MnemonicState.memory_strength` — how
-/// available a memory should be — and never Assertion confidence. A fact
-/// nobody asked about lately is no less credible, and KIP 2.0 forbids letting
-/// time erode a stance (Profile: "Do not decay epistemic confidence merely
-/// because a fact has not been recalled recently"). A failing pass degrades —
-/// the surrounding passes still run — but it must page an operator rather than
-/// vanish into a debug log.
-///
-/// The cadence is `min_interval_ms`, enforced inside the sweep's own
-/// `last_metabolized_at` filter, not the cycle scope. Gating on the `full`
-/// scope as well used to look like caution and was a hole: full cycles are
-/// scheduled every 168 formations, so a Space forming slowly went months
-/// without metabolizing while `BrainMaintenance.md` §A.1 told the model the
-/// sweep had already run and not to do it by hand. With the interval doing the
-/// throttling, a scope that has nothing due costs one query that matches no
-/// rows and breaks on the first batch.
-pub(crate) async fn metabolize(
-    port: &impl RunKip,
-    policy: &MemoryPolicy,
-    now_ms: u64,
-    min_interval_ms: u64,
-) -> DecayPass {
-    let mut pass = DecayPass::default();
-    // Every input is loop-invariant, so the command is too: the batch cursor
-    // is the graph's own `last_metabolized_at` filter, not anything this
-    // builder carries.
-    let request = decay_request(policy, now_ms, min_interval_ms);
-    for _ in 0..SETTLEMENT_MAX_BATCHES {
-        let response = match port.run_kip(request.clone(), false).await {
-            Ok(response) if kip::succeeded(&response) => response,
-            Ok(response) => {
-                pass.error = Some(kip::error_message(&response));
-                break;
-            }
-            Err(err) => {
-                pass.error = Some(err.to_string());
-                break;
-            }
-        };
-        let updated = kip::changed(&response, "update");
-        pass.decayed += updated;
-        if updated < SETTLEMENT_BATCH_LIMIT as u64 {
-            break;
-        }
-    }
-    if let Some(error) = &pass.error {
-        log::error!(
-            target: "brain",
-            space_id = port.space_id();
-            "memory-strength metabolism failed — disuse decay is NOT running \
-             (graph past the full-scan engine cap?): {error}"
-        );
-    }
-    pass
 }
 
 /// One Assertion an actor has revised, as the correction scan reads it.
@@ -311,7 +238,7 @@ pub(crate) async fn sweep_watches(port: &impl RunKip) -> WatchSettlement {
     for row in rows {
         let Some(_) = row.generation else {
             report.deferred += 1;
-            report.error = Some("legacy Watch has no WatchState and cannot be re-armed in place; after reviewing its observation gap, create a CognitiveMemory 2.1 replacement, reconnect structural references, then archive the legacy record".into());
+            report.error = Some("armed Watch has no WatchState; review its observation gap and re-arm it through the host".into());
             continue;
         };
         // Text (including a text member combined with structured selectors)
@@ -482,42 +409,6 @@ pub(crate) fn skill_settlement() -> SkillSettlement {
     }
 }
 
-/// Weekly disuse changes accessibility only, never Assertion confidence.
-fn decay_request(policy: &MemoryPolicy, now_ms: u64, min_interval_ms: u64) -> Request {
-    let parameters = serde_json::Map::from_iter([
-        ("baseline".to_string(), Json::from(DEFAULT_MEMORY_STRENGTH)),
-        (
-            "factor".to_string(),
-            Json::from(policy.memory_strength_decay_factor),
-        ),
-        ("floor".to_string(), Json::from(policy.decay_floor)),
-        ("now".to_string(), Json::from(kip::timestamp(now_ms))),
-        (
-            "metabolized_before".to_string(),
-            Json::from(kip::timestamp(now_ms.saturating_sub(min_interval_ms))),
-        ),
-        ("pinned".to_string(), Json::from(PINNED_RETENTION_CLASS)),
-        ("limit".to_string(), Json::from(SETTLEMENT_BATCH_LIMIT)),
-    ]);
-    kip::request_with(
-        r#"UPDATE ?c
-SET FACET "MnemonicState" {
-  memory_strength: CLAMP(MUL(COALESCE(?c.facets["MnemonicState"].memory_strength, :baseline), :factor), :floor, 1.0),
-  last_metabolized_at: :now
-}
-WHERE {
-  ?c CONCEPT {}
-  NOT { ?c CONCEPT {type: "SleepTask"} }
-  NOT { ?c CONCEPT {type: "Watch"} }
-  FILTER(IS_NULL(?c.retention.retention_class) || ?c.retention.retention_class != :pinned)
-  FILTER(IS_NULL(?c.facets["MnemonicState"].last_metabolized_at) || ?c.facets["MnemonicState"].last_metabolized_at < :metabolized_before)
-  FILTER(IS_NULL(?c.facets["MnemonicState"].memory_strength) || ?c.facets["MnemonicState"].memory_strength > :floor)
-}
-LIMIT :limit"#,
-        parameters,
-    )
-}
-
 /// Reads the rows of the correction-discovery scan —
 /// `FIND(?a.id, ?a._system.space_seq, ?a.asserted_by, ?a.proposition,
 /// ?a.lifecycle.superseded_by)`.
@@ -626,72 +517,8 @@ mod tests {
         }
     }
 
-    /// A committed mutation that moved `count` rows under `op`.
-    fn changed(op: &str, count: usize) -> Response {
-        Response::ok(json!({
-            "changes": (0..count).map(|_| json!({"op": op})).collect::<Vec<_>>()
-        }))
-    }
-
     fn failed(message: &str) -> Response {
         Response::failed(KipError::new(KipErrorCode::InternalError, message))
-    }
-
-    #[tokio::test]
-    async fn metabolism_pages_until_a_batch_comes_back_short() {
-        let port = FakeKip::new([(
-            "MnemonicState",
-            vec![
-                changed("update", SETTLEMENT_BATCH_LIMIT),
-                changed("update", SETTLEMENT_BATCH_LIMIT),
-                changed("update", 7),
-            ],
-        )]);
-        let pass = metabolize(&port, &MemoryPolicy::default(), 1_000, 0).await;
-
-        assert_eq!(pass.decayed, SETTLEMENT_BATCH_LIMIT as u64 * 2 + 7);
-        assert!(pass.error.is_none());
-        // A short batch ends the pass: no fourth command was issued.
-        assert_eq!(port.seen().len(), 3);
-        // Decay is a write, whatever it decays.
-        assert_eq!(port.wrote().len(), 3);
-    }
-
-    #[tokio::test]
-    async fn a_failing_metabolism_reports_what_it_managed_and_stops() {
-        let port = FakeKip::new([(
-            "MnemonicState",
-            vec![
-                changed("update", SETTLEMENT_BATCH_LIMIT),
-                failed("scan cap"),
-            ],
-        )]);
-        let pass = metabolize(&port, &MemoryPolicy::default(), 1_000, 0).await;
-
-        // The batch that did land is still reported — a degraded cycle, not a
-        // cycle that did nothing.
-        assert_eq!(pass.decayed, SETTLEMENT_BATCH_LIMIT as u64);
-        assert!(pass.error.unwrap().contains("scan cap"));
-        assert_eq!(port.seen().len(), 2);
-    }
-
-    #[tokio::test]
-    async fn the_metabolism_never_runs_past_its_batch_ceiling() {
-        // A graph that always answers "a full page" would page forever
-        // without the ceiling.
-        let port = FakeKip::new([(
-            "MnemonicState",
-            (0..SETTLEMENT_MAX_BATCHES + 5)
-                .map(|_| changed("update", SETTLEMENT_BATCH_LIMIT))
-                .collect(),
-        )]);
-        let pass = metabolize(&port, &MemoryPolicy::default(), 1_000, 0).await;
-
-        assert_eq!(port.seen().len(), SETTLEMENT_MAX_BATCHES);
-        assert_eq!(
-            pass.decayed,
-            (SETTLEMENT_MAX_BATCHES * SETTLEMENT_BATCH_LIMIT) as u64
-        );
     }
 
     /// The correction cursor advances only over coordinates it read whole.

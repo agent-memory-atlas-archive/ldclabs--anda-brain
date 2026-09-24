@@ -13,10 +13,10 @@ type RecallBudget struct {
 // omit members so the server can apply its compiled defaults.
 type MemoryPolicy struct {
 	Version                   *uint32       `json:"version,omitempty"`
-	MemoryStrengthDecayFactor *float64      `json:"memory_strength_decay_factor,omitempty"`
+	MemoryStrengthDecayFactor *float64      `json:"memory_strength_decay_factor,omitempty"` // Deprecated: nothing reads it.
 	RecallReinforcement       *float64      `json:"recall_reinforcement,omitempty"`
 	CorrectionPenalty         *float64      `json:"correction_penalty,omitempty"`
-	DecayFloor                *float64      `json:"decay_floor,omitempty"`
+	DecayFloor                *float64      `json:"decay_floor,omitempty"` // Deprecated: nothing reads it.
 	StaleEventThresholdDays   *uint32       `json:"stale_event_threshold_days,omitempty"`
 	UnconsolidatedMaxBacklog  *uint32       `json:"unconsolidated_max_backlog,omitempty"`
 	OrphanMaxCount            *uint32       `json:"orphan_max_count,omitempty"`
@@ -121,7 +121,6 @@ type MemoryMetrics struct {
 	SelfTestGrounded   uint64  `json:"self_test_grounded"`
 	ReencodeTasks      uint64  `json:"reencode_tasks"`
 	Corrections        uint64  `json:"corrections"`
-	Decayed            uint64  `json:"decayed"`
 	UncertaintyReports uint64  `json:"uncertainty_reports"`
 	UncertaintySum     float64 `json:"uncertainty_sum"`
 	ForgottenEntities  uint64  `json:"forgotten_entities"`

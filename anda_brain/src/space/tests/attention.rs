@@ -284,11 +284,12 @@ async fn r2_disabled_registrations_and_isolated_hosts_never_autoload() {
 async fn r2_native_expiry_schedules_revalidation_without_a_cognitive_write() {
     let app = runtime_app(Arc::new(InMemory::new()), fast_policy());
     let space = create_loaded_space(&app, "r2_expiry").await;
+    declare_types(&space, &["AnswerStyle"]).await;
     space.attention().register_work().await.unwrap();
     let until = unix_ms() + 10_000;
     seed_kip(&space, kip::request_with(r#"MUTATE {
       CREATE CONCEPT ?person {TYPE "Person" NAME "Expiry actor"}
-      CREATE CONCEPT ?pref {TYPE "Preference" NAME "Short preference"}
+      CREATE CONCEPT ?pref {TYPE "AnswerStyle" NAME "Short preference"}
       ENSURE PROPOSITION ?p (?person,"prefers",?pref)
       CREATE ASSERTION ?a {SET FIELDS {proposition:?p,asserted_by:?person,stance:"support",mode:"stated",confidence:0.9,valid_time:{until: :until}}}
     }"#,kip::param("until",kip::timestamp(until)))).await;

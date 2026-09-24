@@ -119,11 +119,15 @@ async fn fixture_with_automatic(
     let other_context=created_ref(&space,r#"CREATE CONCEPT ?item {TYPE "Event" NAME "home" SET ATTRIBUTES {summary:"another domain"}}"#,Default::default()).await;
     let mut claims = vec![];
     let mut propositions = vec![];
-    for n in 0..3 {
+    // One option kind per fact: `prefers` is functional within a kind, and
+    // these claims must stay independent rather than succeed each other.
+    let kinds = ["FactKindA", "FactKindB", "FactKindC"];
+    declare_types(&space, &kinds).await;
+    for (n, kind) in kinds.iter().enumerate() {
         let object = created_ref(
             &space,
-            r#"CREATE CONCEPT ?item {TYPE "Preference" NAME :name}"#,
-            kip::param("name", format!("fact-{n}")),
+            r#"CREATE CONCEPT ?item {TYPE :kind NAME :name}"#,
+            serde_json::from_value(json!({"kind":kind,"name":format!("fact-{n}")})).unwrap(),
         )
         .await;
         let p = created_ref(

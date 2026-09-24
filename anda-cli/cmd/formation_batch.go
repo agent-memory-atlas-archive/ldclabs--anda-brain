@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/ldclabs/anda-brain/anda-cli/api"
 )
@@ -24,7 +23,10 @@ type fileFormationBatchOptions struct {
 	DryRun       bool
 	Force        bool
 	InputContext *api.InputContext
-	Output       io.Writer
+	// Timestamp is the validated source time for every file, or empty for the
+	// server's receipt time.
+	Timestamp string
+	Output    io.Writer
 }
 
 func runFileFormationBatch(ctx context.Context, client *api.Client, opts fileFormationBatchOptions) (runErr error) {
@@ -134,7 +136,7 @@ func runFileFormationBatch(ctx context.Context, client *api.Client, opts fileFor
 		var output *api.AgentOutput
 		submitErr := readErr
 		if submitErr == nil {
-			output, submitErr = submitFormationFile(ctx, client, file, content, opts.InputContext)
+			output, submitErr = submitFormationFile(ctx, client, file, content, opts.InputContext, opts.Timestamp)
 		}
 		if submitErr != nil {
 			entry.Status = batchStatusFailed
@@ -171,7 +173,7 @@ func runFileFormationBatch(ctx context.Context, client *api.Client, opts fileFor
 	return nil
 }
 
-func submitFormationFile(ctx context.Context, client *api.Client, file string, content []byte, inputContext *api.InputContext) (*api.AgentOutput, error) {
+func submitFormationFile(ctx context.Context, client *api.Client, file string, content []byte, inputContext *api.InputContext, timestamp string) (*api.AgentOutput, error) {
 	messages, err := parseMessagesInput(string(content))
 	if err != nil {
 		return nil, fmt.Errorf("parse messages: %w", err)
@@ -184,7 +186,7 @@ func submitFormationFile(ctx context.Context, client *api.Client, file string, c
 		source.Source = file
 	}
 	response, err := client.Formation(ctx, &api.FormationInput{
-		Messages: messages, Context: &source, Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Messages: messages, Context: &source, Timestamp: timestamp,
 	})
 	if err != nil {
 		return nil, err

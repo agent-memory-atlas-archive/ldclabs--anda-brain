@@ -40,6 +40,10 @@ Example:
 		contextAgent, _ := cmd.Flags().GetString("context-agent")
 		contextSource, _ := cmd.Flags().GetString("context-source")
 		contextTopic, _ := cmd.Flags().GetString("context-topic")
+		timestamp, err := sourceTimestamp(cmd.Flags().Lookup("timestamp").Value.String())
+		if err != nil {
+			return err
+		}
 
 		ctx := buildInputContext(contextUser, contextAgent, contextSource, contextTopic)
 
@@ -59,6 +63,7 @@ Example:
 				Force:        batchForce,
 				Output:       cmd.OutOrStdout(),
 				InputContext: ctx,
+				Timestamp:    timestamp,
 			})
 			if err != nil {
 				return err
@@ -120,7 +125,7 @@ Example:
 
 		input := &api.FormationInput{
 			Messages:  messages,
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Timestamp: timestamp,
 		}
 
 		if ctx != nil {
@@ -217,5 +222,24 @@ func init() {
 	formationCmd.Flags().String("context-agent", "", "Context agent")
 	formationCmd.Flags().String("context-source", "", "Context source")
 	formationCmd.Flags().String("context-topic", "", "Context topic")
+	formationCmd.Flags().String("timestamp", "", "When the conversation happened (RFC 3339); formed claims use it as asserted_at. Default: the server's receipt time")
 	rootCmd.AddCommand(formationCmd)
+}
+
+// sourceTimestamp validates a source observation time and returns its
+// millisecond UTC spelling, the only one KIP accepts. An empty value stays
+// empty so the server uses its own receipt time.
+func sourceTimestamp(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return "", fmt.Errorf("--timestamp must be an RFC 3339 instant: %w", err)
+	}
+	if parsed.Nanosecond()%int(time.Millisecond) != 0 {
+		return "", fmt.Errorf("--timestamp is finer than milliseconds")
+	}
+	return parsed.UTC().Format("2006-01-02T15:04:05.000Z"), nil
 }

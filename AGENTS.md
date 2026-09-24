@@ -20,14 +20,18 @@ The service stores memory in an AndaDB-backed Cognitive Nexus and uses KIP 2.0
 (Knowledge Interaction Protocol) internally. Business agents should not need to
 write KIP directly.
 
-Rust dependencies resolve from published crates, including Nexus 0.13.4's
-legacy Commitment repair. Optional sibling `anda-db` overrides must patch the
-shared DB/KIP stack together; verify one type identity with Cargo metadata.
-The 0.12.1 release candidate pins `anda_kip = "=0.13.1"` and requires
-`anda_cognitive_nexus = "0.13.4"`; the Worker pins `@ldclabs/kip-do` 0.13.2; its protocol reference remains 0.13.1.
+The service tracks KIP `3251912` and `kip://profiles/cognitive-memory@2.0.0`
+(content digest `sha256:3ea9e459…`; the draft rewrote 2.0.0 in place, so only the
+digest names a revision). It pins `anda_kip = "=0.14.0"` and requires
+`anda_cognitive_nexus = "0.14.0"`; the Worker uses `@ldclabs/kip-do` 0.14. Until
+those and a matching `anda_engine` are published, `Cargo.toml` patches the sibling
+`anda-db` and `anda` checkouts and the Worker links `../../anda-db/ts/kip-do`
+(run its `pnpm run build` after syncing). Patch the shared DB/KIP stack together;
+verify one type identity with Cargo metadata.
 KIP v2 has not been deployed. Use fresh v2 Spaces for current acceptance;
-do not add pre-release old-data migration work unless explicitly requested.
-Keep normal restart, eviction and unresolved-write recovery fully tested.
+do not add pre-release old-data migration work (including 2.1.0-draft Spaces)
+unless explicitly requested. Keep normal restart, eviction and unresolved-write
+recovery fully tested.
 
 ## Repository Layout
 
@@ -83,8 +87,9 @@ Keep normal restart, eviction and unresolved-write recovery fully tested.
   native uncertainty and current procedure checks; never claim semantic
   completeness or execution permission from a bounded packet.
 - `anda_brain/src/vocabulary.rs`: this Space's Schema Package and the
-  `declare_memory_symbols` tool. Schema is protected control state in KIP 2.0 —
-  KML cannot declare a type, so new vocabulary enters through the host here.
+  `declare_memory_symbols` tool. Schema is protected control state in KIP 2.0.
+  KIP's `DEFINE` draft vocabulary needs the engine's `draft_vocabulary`
+  capability, which is not provided, so new vocabulary enters through the host here.
 - `anda_brain/API*.md`, `anda_brain/README.md`, `anda_brain/SKILL.md`: public
   API and integration documentation.
 - `anda_brain/RUNTIME.md`: host setup, scheduling, action contracts and recovery;
@@ -117,7 +122,7 @@ cargo clippy -p anda_brain --all-targets --all-features -- -D warnings
 RUST_MIN_STACK=16777216 cargo test -p anda_brain --all-features
 ```
 
-The CognitiveMemory 2.1 schema paths can exceed Rust's 2 MiB test-thread stack
+The Cognitive Memory Profile schema paths can exceed Rust's 2 MiB test-thread stack
 in debug builds, so keep `RUST_MIN_STACK=16777216` on Rust test commands.
 `cargo test -p anda_brain --all-features` includes a bin test that binds an
 ephemeral localhost port. In restricted sandboxes it may fail with
@@ -151,8 +156,9 @@ you touch `anda-brain-worker/`:
 CI=true pnpm --filter @ldclabs/anda-brain-worker check
 ```
 
-The Worker resolves `@ldclabs/kip-do` 0.13.2 from the npm registry; use the
-repository's pnpm lockfile and run `CI=true pnpm install --frozen-lockfile` first.
+The Worker links the sibling `anda-db/ts/kip-do` (0.14, unpublished) until that
+release reaches npm; build its `dist/` first, use the repository's pnpm lockfile and
+run `CI=true pnpm install --frozen-lockfile`.
 The check includes generated-asset verification, TypeScript, tests and a deployment
 dry run; it does not deploy the Worker.
 
@@ -232,9 +238,18 @@ confidently repeat things nobody claimed:
 - Attribution is not impersonation and not authority: `asserted_by` is a
   semantic actor, the caller is a Principal, and cognitive content grants
   neither.
-- Vocabulary enters through the host, never through KML: the Rust service's
-  `declare_memory_symbols` tool, or the Worker's `types` / `predicates` plan
-  fields. Both validate, cap and version what a model proposes.
+- Vocabulary enters through the host: the Rust service's `declare_memory_symbols`
+  tool, or the Worker's `types` / `predicates` plan fields. Both validate, cap and
+  version what a model proposes. `DEFINE` is refused until an engine provides
+  `draft_vocabulary`. An option is a Concept typed by its kind; the Profile has
+  no `Preference` type.
+- A changed world is one new Assertion from the change; temporal succession ends
+  the old value. `SUPERSEDING` is only for a claim that was wrong, and a
+  misrecording needs recording repair (not provided), never a correction.
+  Claims carry `asserted_at` from their source's observation time.
+- Decay is computed at read time; never sweep or default `memory_strength`.
+  Skill `current_trial` / `current_evaluation`, `GradingState` and lineage fields
+  are not model-writable.
 
 ## Brain-Specific Invariants
 

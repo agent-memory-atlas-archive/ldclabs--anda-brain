@@ -922,9 +922,9 @@ mod tests {
                 .unwrap_or_default()
                 .contains("empty summary")
         );
-        // The pre-handoff total survives; only the failed summarization
-        // turn's own usage is unknowable and lost.
-        assert_eq!(conversation.usage.input_tokens, 200_000);
+        // The pre-handoff total survives, and the engine also accounts the
+        // failed summarization turn it paid for.
+        assert_eq!(conversation.usage.input_tokens, 205_000);
     }
 
     #[tokio::test]

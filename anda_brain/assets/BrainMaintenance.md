@@ -1,7 +1,5 @@
 # KIP 2.0 Brain — Memory Maintenance
 
-**[English](./BrainMaintenance.md) | [中文](./BrainMaintenance_CN.md)**
-
 ## Status
 
 **Reference Anda Brain Maintenance / Metabolism Policy**
@@ -58,14 +56,14 @@ Maintenance may be granted read/search/project/maintain/archive/retention/merge 
 {
   "trigger": "scheduled",
   "scope": "full",
-  "timestamp": "2026-08-14T03:00:00Z",
+  "timestamp": "2026-08-14T03:00:00.000Z",
   "budgets": {
     "max_elements_reviewed": 5000,
     "max_writes": 500,
     "max_transactions": 100
   },
   "parameters": {
-    "memory_strength_decay_factor": 0.97,
+    "strength_policy": {"artifact_ref": "policy:half-life-30d", "content_digest": "sha256:..."},
     "event_archive_after_days": 30,
     "skill_review_after_days": 14
   }
@@ -194,7 +192,6 @@ MUTATE {
     SET ATTRIBUTES {summary: :summary}
     SET FACET "MnemonicState" {memory_strength: 0.7, salience: 0.8}
     SET STRUCTURAL {
-      ("derived_from", :source_experience)
       ("about", :deployment_topic)
     }
   }
@@ -217,7 +214,7 @@ MUTATE {
 }
 ```
 
-Then mark the source consolidated with `consolidated_to` so the next cycle does not re-derive it. The causal claim is an Assertion with Evidence behind it, asserted by the maintenance actor in `inferred` mode — `evidence:` cites Evidence elements, never the Experience Concept they were observed in. Step order alone is never causality, and a Predicate you cannot find in the Schema Environment is never to be invented — `DESCRIBE` first, and let a domain package supply what the Profile does not.
+The consolidation Activity's inputs make the source read as consolidated: its computed `consolidated_to` now names the Insight, so the next cycle can skip it, and the Insight's computed `derived_from` names its sources. The causal claim is an Assertion with Evidence behind it, asserted by the maintenance actor in `inferred` mode — `evidence:` cites Evidence elements, never the Experience Concept they were observed in. Step order alone is never causality, and a Predicate you cannot find in the Schema Environment is never to be invented — `DESCRIBE` first, and let a domain package supply what the Profile does not.
 
 # 10. Repetition
 
@@ -233,7 +230,7 @@ success + counterexample
 same procedure across different contexts
 ```
 
-Compile applicability, preconditions, procedure, success criteria, failure modes, and counterexamples into a `proposed` Skill + its admission bet in `MnemonicState.utility` + procedural Activity. Attach the required `task_family` to the immutable revision: it selects candidate consequences, while TrialRecord explicitly freezes comparable baseline attempts/outcomes. Refuse to compile a pattern no stream could prove wrong (store it as an Insight instead). `GradingState` is absent until the first validated EvaluationRecord; ungraded proposed/trialed Skills remain recallable as unproven candidates. Do not grant executable authority.
+Compile applicability, preconditions, procedure, success criteria, failure modes, and counterexamples into a `proposed` Skill + its admission bet in `MnemonicState.utility` + procedural Activity. Attach the required `task_family` to the immutable revision: it selects candidate consequences, while TrialRecord explicitly freezes comparable baseline attempts/outcomes. Refuse to compile a pattern no stream could prove wrong (store it as an Insight instead). The computed `GradingState` view is absent until the first validated EvaluationRecord; ungraded proposed/trialed Skills remain recallable as unproven candidates. `compiled_from` and `compiled_by` are computed from the compilation Activity below; never write them. Do not grant executable authority.
 
 ```prolog
 MUTATE {
@@ -250,8 +247,6 @@ MUTATE {
     SET ATTRIBUTES {task_family: "deploy/pre-flight", procedure: :procedure, behavior_digest: :behavior_digest}
     SET STRUCTURAL {
       ("revision_of", ?skill)
-      ("compiled_from", :experience_a)
-      ("compiled_from", :experience_b)
     }
   }
   CREATE ACTIVITY ?compilation {
@@ -271,46 +266,38 @@ Contrast before compiling: compare successful against failed Experiences to find
 
 # 12. Skill Lifecycle Verdicts
 
-The lifecycle `proposed → trialed → adopted → revoked` moves only by deterministic verdict over graded Outcome Evidence under the Skill's `task_family` (Profile §14, Spec §15.7): your role is to schedule the verdict, run the deterministic rule, and record the result as a `lifecycle_verdict` Activity plus one guarded UPDATE (Spec F.6) — never to promote on judgment, and never to count an actor's own success report as an outcome.
+The lifecycle `proposed → trialed → adopted → revoked` moves only by deterministic verdict over graded Outcome Evidence under the Skill's `task_family` (Profile §14, Spec §15.7), and only where the deployment implements the [Validated Learning companion](Validated-Learning.md); without it, Skills stay `proposed` and unproven, and Maintenance may only withdraw them. Your role is to schedule the verdict, run the deterministic rule, and record the result as a `lifecycle_verdict` Activity plus one guarded UPDATE (Validated Learning §7) — never to promote on judgment, and never to count an actor's own success report as an outcome.
 
-Verdict discipline: the treatment set is the outcomes linked, through an `outcome_observation` Activity, to an `action_gate` decision that applied the Skill; the baseline is the explicit comparable attempt set frozen in immutable TrialRecord, selected by TrialState — an outcome that merely shares the `task_family` never counts. Adoption is comparative (better than it was going, against that basis) and provisional (the stream keeps grading; demote to re-trial on degradation); revocation is never harder than adoption, and one high-severity matching-condition failure may suffice; re-entry after revocation starts a new trial identity and selects its immutable TrialRecord through TrialState. Outcomes retain their preassigned attempt/trial/revision even when they arrive late. Count independent attempts, not Evidence observations; verify metric, window, missingness and comparability before adoption (Consistency §5–§6).
+Verdict discipline: the treatment set is the outcomes linked, through an `outcome_observation` Activity, to an `action_gate` decision that applied the Skill; the baseline is the explicit comparable attempt set frozen in the immutable TrialRecord that `current_trial` selects — an outcome that merely shares the `task_family` never counts. Adoption is comparative (better than it was going, against that basis) and provisional (the stream keeps grading; demote to re-trial on degradation); revocation is never harder than adoption, and one high-severity matching-condition failure may suffice; re-entry after revocation starts a new trial identity and selects its immutable TrialRecord through `current_trial`. Outcomes retain their preassigned attempt/trial/revision even when they arrive late. Count independent attempts, not Evidence observations; verify metric, window, missingness and comparability before adoption (Validated Learning §3–§6).
 
-Legal cognitive actions besides the verdict itself include `GradingState` tallies and `MnemonicState.utility` revisions, a revised Skill artifact, failure-mode annotations and counterexample linkage. Narrowed applicability or changed recovery/procedure creates a new SkillRevision; it is not an in-place behavior edit. Authority changes require Governance.
+Legal cognitive actions besides the verdict itself include pointing `current_evaluation` at it (the GradingState view follows), `MnemonicState.utility` revisions, a revised Skill artifact, failure-mode annotations and counterexample linkage. Narrowed applicability or changed recovery/procedure creates a new SkillRevision; it is not an in-place behavior edit. Authority changes require Governance.
 
 # 13. Mnemonic Metabolism
 
-Generic disuse acts on `MnemonicState.memory_strength`, not Assertion confidence.
+Generic disuse acts on `MnemonicState.memory_strength`, not Assertion confidence — and it acts by computation, not by writes. `memory_strength` is the last written base, `last_metabolized_at` its anchor and `strength_policy` a pinned policy (for example a half-life); the engine computes `effective_strength` whenever a read is evaluated (Spec §59.1, Profile §6.1). There is no decay sweep, and a missing base, anchor or policy leaves strength unknown — never fill it with a default.
 
-Example policy formula:
+Maintenance writes a new base only on an explicit signal:
 
 ```text
-new_strength = clamp(old_strength × decay + salience protection + explicit reinforcement)
+use           a DecisionRecord's used_refs, or an exposure-log batch (Spec §66.8)
+salience      protection for Commitments, identity, major failures, adopted Skills
+correction    a corrected or retracted root may weaken what was built on it
 ```
 
 `MnemonicState.utility` is calibrated under the same discipline: explicitly, on outcomes — a memory a briefing drew on that helped, a bet that never paid out — never as a side effect of reading. Follow the outcome to its attempt and decision; only actual used_refs are candidates for utility calibration. Record the attribution method and uncertainty. A retrieved memory or co-applied revision does not automatically inherit the entire outcome's causal credit. It is the mnemonic twin of outcome-driven trust calibration (Spec §22.6).
 
-Apply it with `UPDATE ... SET FACET "MnemonicState" { ... }` over a bounded `WHERE` + `LIMIT` sweep (Spec §58), using `CLAMP`/`MUL` update expressions and `EXPECT VERSION` for read-modify-write. Stamp `MnemonicState.last_metabolized_at` in the same statement so a replayed sweep cannot decay the same element twice.
-
-The formula is implementation-specific. Read frequency is not a required protocol signal.
-
-Sweep in bounded batches, one type at a time, stamping `last_metabolized_at` in the same statement so a replay cannot decay the same element twice:
+Reinforce in bounded batches, writing base and anchor together under a plane guard; the new base comes from the current `effective_strength` and your policy:
 
 ```prolog
-UPDATE ?element
+UPDATE :element_id
 SET FACET "MnemonicState" {
-  memory_strength: CLAMP(MUL(?element.facets["MnemonicState"].memory_strength, :decay_factor), 0, 1),
+  memory_strength: :reinforced_strength,
   last_metabolized_at: :cycle_start
 }
-WHERE {
-  ?element {type: "Event"}
-  FILTER(?element.facets["MnemonicState"].memory_strength > 0.05)
-  FILTER(IS_NULL(?element.facets["MnemonicState"].last_metabolized_at) || ?element.facets["MnemonicState"].last_metabolized_at < :cycle_start)
-  FILTER(IS_NULL(?element.facets["MnemonicState"].salience) || ?element.facets["MnemonicState"].salience < :protection_threshold)
-}
-LIMIT 500
+EXPECT VERSION :mnemonic_version OF FACET "MnemonicState"
 ```
 
-Bind `:cycle_start` **once** per cycle and reuse it across re-runs and crash retries; re-run a shard until fewer than `LIMIT` elements are affected. The floor keeps the sweep converging.
+Bind `:cycle_start` **once** per cycle and reuse it across retries. The formula is implementation-specific; read frequency is not a required protocol signal. GradingState and the lineage fields are computed views: rebuild nothing, write nothing there.
 
 # 14. Salience Protection
 
@@ -378,7 +365,7 @@ LIMIT 20
 
 # 17. Commitment and Watch Review
 
-Review pending, due-soon, overdue, blocked, fulfilled, and cancelled Commitments. Due time passing does not automatically delete/archive. High-impact pending Commitments remain recallable despite low mnemonic strength.
+Review pending, due-soon, overdue, blocked, fulfilled, and cancelled Commitments. Due time passing does not automatically delete/archive. High-impact pending Commitments remain recallable despite low mnemonic strength. A due Commitment with no Watch reaches attention only through this review: record a `commitment_review` Activity whose `inputs` name the Commitments found due; that commit's `space_seq` is the `raised_seq` of the `commitment_due` attention item (Profile §5.7, Memory Interface §4).
 
 ```prolog
 FIND(?commitment.id, ?commitment.name, ?commitment.attributes.due_at, ?commitment.attributes.status)
@@ -432,7 +419,7 @@ MUTATE {
 }
 ```
 
-Cite what the digest drew on in the refresh Activity's `inputs` and link them from the digest through `derived_from` (replacing last cycle's links) — without the Activity lineage the digest is invisible to `LIST DEPENDENTS` when one of those roots is later revised. Stamp the `basis_seq` it was actually built at, and let it say so when it is behind: a digest that admits its age is honest; one that looks current and isn't is a lie.
+Cite what the digest drew on in the refresh Activity's `inputs`; the digest's computed `derived_from` follows from them — without that Activity lineage the digest is invisible to `LIST DEPENDENTS` when one of those roots is later revised. Stamp the `basis_seq` it was actually built at, and let it say so when it is behind: a digest that admits its age is honest; one that looks current and isn't is a lie.
 
 # 19. Imported / Quarantined Cognition
 
@@ -489,7 +476,7 @@ Evidence purge is especially sensitive: removing counter-Evidence may silently s
 
 Payload purge (`PURGE PAYLOAD`, Spec §60.6) is the narrower instrument: it destroys Evidence bytes while preserving the record, digest, citations, and provenance role. Prefer it when the goal is byte minimization after digestion rather than removing the evidence event; it still requires purge authority, confirmation, and the legal-hold check.
 
-Semantic forgetting uses the ErasurePlan contract (Consistency §8), covering semantic copies, compiled summaries, replay inputs and controlled indexes/backups. Payload purge alone cannot satisfy "forget this fact"; incomplete/held coverage is partial/blocked.
+Semantic forgetting uses the ErasurePlan contract (Spec §60.7), covering semantic copies, compiled summaries, replay inputs and controlled indexes/backups. Payload purge alone cannot satisfy "forget this fact"; incomplete/held coverage is partial/blocked.
 
 # 24. Cleanup Candidates
 
@@ -519,22 +506,17 @@ Consolidation/reflection uses Activity provenance: semantic_consolidation, proce
 
 Cite the epistemic inputs actually relied on — the Evidence and Assertions, not only the containing Experience — in the consolidation Activity's `inputs`. That lineage is what `LIST DEPENDENTS` traverses when a root is later revised.
 
-After a supersession, retraction, or Evidence correction, walk `LIST DEPENDENTS` on the revised root and flag derived artifacts with `DerivationState {status: "stale"}`, queuing `review_derived` SleepTasks for the non-trivial ones. `stale` is a review flag: it never retracts, hides, or archives the artifact by itself, and a runtime never auto-retracts derived cognition because a root moved (Spec §57.5).
+After a supersession, retraction, or Evidence correction, walk `LIST DEPENDENTS` on the revised root and queue `review_derived` SleepTasks for the affected artifacts. The engine has already made them `needs_review` through computed `_system.dependency_validity`: there is no flag to write, and nothing is retracted, hidden or archived because a root moved (Spec §57.5).
 
 ```prolog
 LIST DEPENDENTS :revised_root DEPTH 2 LIMIT 100
-```
-
-```prolog
-UPDATE :insight_id
-SET FACET "DerivationState" {status: "stale"}
 ```
 
 Read `_system.dependency_validity` before using derived cognition; the engine computes it immediately, even when this review has not run. Page and traverse the complete affected closure, checkpointing the watermark; DEPTH 2 / LIMIT 100 is a first page, never completion. Revalidation records a new DependencyBasis on a dependency_validation Activity with the exact output version. New epistemic premises require a new Assertion.
 
 # 29. Transaction Discipline
 
-Use atomic Transactions for new Assertion + supersession + Activity, Skill + compiled_from + Activity, lifecycle_verdict Activity + guarded Skill UPDATE, Evidence correction + revised Assertion, and identity merge transition. Use preconditions for read-modify-write.
+Use atomic Transactions for new Assertion + supersession + Activity, Skill + SkillRevision + compilation Activity, lifecycle_verdict Activity + guarded Skill UPDATE, Evidence correction + revised Assertion, and identity merge transition. Use preconditions for read-modify-write.
 
 # 30. Concurrency
 
@@ -659,7 +641,8 @@ never grants permissions beyond this deployment's tools and host constraints.
 
 ## A.1 Active contract and capability boundary
 
-Use KIP 2.0 with `kip://profiles/cognitive-memory@2.1.0`. The live Primer
+Use KIP 2.0 with `kip://profiles/cognitive-memory@2.0.0` (the revision is named
+by its content digest; the reference alone does not identify it). The live Primer
 provides identities, Schema and engine capabilities. Installed types do not
 advertise this Brain's interfaces. This deployment exposes the existing Brain
 API and raw KIP; it does not advertise the optional five-intent Memory Interface,
@@ -670,20 +653,25 @@ explicit host configuration. Read `skills.runtime` in the settlement report and
 `memory_runtime` status for the installed runtime; never infer readiness from
 compiled types. Procedures remain **unproven** until independently qualified. Do not
 create or update TrialRecord, EvaluationRecord, AttemptRecord, OutcomeRecord,
-GradingState or TrialState through a model plan. The runtime rejects those writes.
+the computed GradingState, a Skill's `current_trial` / `current_evaluation`, or
+the computed lineage fields (`derived_from`, `compiled_from`, `compiled_by`,
+`consolidated_to`) through a model plan. The runtime rejects those writes.
 Ordinary attributed feedback remains Evidence, including agent_statement for
 self-report; task_family only discovers possible controls and never selects one.
 
 ## A.2 What settlement actually did
 
-- Mnemonic metabolism runs on every cycle, at most weekly per Concept. It changes
-  accessibility only: **never decay Assertion confidence over time**. Check errors
-  in the settlement report before claiming a pass completed. Do not repeat decay.
-  SleepTask and Watch are exempt from this bulk sweep: their operational state
-  changes require native leases/generations and explicit version guards.
+- There is no disuse sweep. Decay is computed, not written: strength is derived at
+  read time from `memory_strength` (base), `last_metabolized_at` (anchor) and a
+  pinned `strength_policy`; a missing input leaves it unknown, never 0.5. Never
+  write a decayed value, and **never decay Assertion confidence over time**.
+  Reinforcement or weakening is an explicit write backed by a signal — a
+  DecisionRecord's `used_refs`, a correction — that sets base and anchor together
+  under a version guard. Recall alone is never such a signal.
 - Correction discovery supplies revised roots and bounded LIST DEPENDENTS results.
   A truncated walk remains incomplete. Nexus computes recursive dependency validity
-  at read time; stored DerivationState is a review record and cannot override it.
+  at read time (`_system.dependency_validity`); queue a re-derivation review as a
+  `review_derived` SleepTask. There is no stored derivation state.
 - Structured Watch advancement uses Nexus's protected API with the current overall
   version and arm_generation. WatchState retains consumed_seq and the authorization
   view. Silence fires only after complete authorized deadline coverage. A matched
@@ -707,6 +695,13 @@ self-report; task_family only discovers possible controls and never selects one.
   a Watch. Configuration changes require reviewed migration, never automatic re-arm.
 - The former family-success-rate Skill rule does not run. The report's
   `skills.unsupported_reason` explains why no validated evaluation was performed.
+- Attention reaches the business agent only through a commit. A fired Watch is
+  already raised by its `watch_fire` Activity. For pending Commitments that are
+  due and have no Watch, record one `commitment_review` Activity whose `inputs`
+  name exactly those Commitments; that commit raises them as `commitment_due`
+  attention. Do not re-raise a Commitment an earlier review already named unless
+  something changed, and do not transition its status just because `due_at`
+  passed.
 
 ## A.3 Cognitive work and valid records
 
@@ -717,8 +712,9 @@ behavior and revision_of. Create both directions in one MUTATE. Compute the
 behavior digest over every revision attribute except behavior_digest with the host
 facility below. Never improvise a digest or change behavior on an existing revision.
 A new revision is unproven; changing an existing Skill's current_revision requires
-CAS, proposed status and cleared current trial/grading caches through a configured
-host workflow. Do not modify old evaluated Skills through this model plan.
+CAS, proposed status and cleared `current_trial` / `current_evaluation` pointers
+through a configured host workflow. Do not modify old evaluated Skills through
+this model plan.
 
 DependencyBasis must name the inputs actually read, exact versions and the actual
 ProjectionBasis. Do not stamp a summary with assessment.space_seq merely because
@@ -733,10 +729,6 @@ call re-read _system.version. Commit terminal state and outputs in one MUTATE wi
 that version guard, retaining LeaseState. A stale/expired lease cannot complete.
 Create Watch as disarmed without WatchState, then explicitly arm it using the host
 facility. Review observation gaps before re-arming; it starts a new generation.
-An existing `@2.0.0/Watch` or `@2.0.0/SleepTask` cannot gain 2.1 runtime state in
-place because its exact schema_ref is immutable. Create a 2.1 replacement, copy
-the required semantic attributes and structural references, verify those links,
-then archive the legacy record. Do not reuse its lineage-scoped key.
 Do not hand-write WatchState, LeaseState, matched, consumed_seq or Watch status.
 Fired Watches are attention, never permission. Read existing decision records before
 recording another; do not infer acknowledgement, disarm or external action from a
@@ -761,7 +753,8 @@ The assessment includes actual space_seq, correction candidates, predicate censu
 source correction counts, armed/fired Watches, and any incomplete dependent walks.
 Source correction counts are audit statistics, not protected trust weights and
 not a reason by themselves to reduce confidence in a new claim.
-Full cycles also sweep validity/retention expiry. Respect holds and reported errors.
+Full cycles also archive records whose retention expired; a claim's validity
+window is computed at read time and never swept. Respect holds and reported errors.
 Formation resumes after the maintenance single-flight slot is released.
 
 - execute_kip: bounded KQL/KML/META subject to A.4 and the record gate.

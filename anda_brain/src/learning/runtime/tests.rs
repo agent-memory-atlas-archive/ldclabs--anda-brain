@@ -99,7 +99,7 @@ mod anda_brain_fixture {
         let behavior = json!({"task_family":"tool_workflow.precondition.v1","procedure":procedure});
         let seeded=command(&nexus,&format!(r#"MUTATE {{
             CREATE CONCEPT ?p {{TYPE "Person" NAME "p3 fixture"}}
-            CREATE CONCEPT ?v {{TYPE "Preference" NAME "bounded dispatch"}}
+            CREATE CONCEPT ?v {{TYPE "Insight" NAME "bounded dispatch" SET ATTRIBUTES {{summary:"bounded dispatch"}}}}
             ENSURE PROPOSITION ?fact (?p,"prefers",?v)
             CREATE CONCEPT ?s {{TYPE "Skill" SET ATTRIBUTES {{skill_class:"workflow",summary:"bounded workflow",status:"proposed"}} SET STRUCTURAL {{("current_revision",?r)}}}}
             CREATE CONCEPT ?r {{TYPE "SkillRevision" SET ATTRIBUTES {{task_family:"tool_workflow.precondition.v1",procedure:{},behavior_digest:"{}"}} SET STRUCTURAL {{("revision_of",?s)}}}}
@@ -439,7 +439,7 @@ async fn forged_cross_space_early_conflicting_and_unknown_outcomes_cannot_add_su
     )
     .await;
     assert_eq!(
-        rows[0]["facets"]["kip://profiles/cognitive-memory@2.1.0/OutcomeRecord"]["outcome_status"],
+        rows[0]["facets"][profile!("OutcomeRecord")]["outcome_status"],
         "unknown"
     );
     space.close().await.unwrap();

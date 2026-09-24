@@ -459,10 +459,13 @@ async fn legacy_runtime_and_learning_state_cannot_acquire_native_standing() {
 async fn old_optional_values_and_interrupted_tasks_remain_auditable() {
     let store = seed(
         &[
+            // `outcome_status` is an enum on the Profile's Event: an
+            // out-of-range 1.x value is dropped from the attributes and kept
+            // in the LegacyRecord.
             (
-                "Preference",
+                "Event",
                 "strength",
-                json!({"strength":2.0,"legacy":{"user":"kept"}}),
+                json!({"summary":"old event","outcome_status":"great","legacy":{"user":"kept"}}),
             ),
             (
                 "SleepTask",
@@ -474,8 +477,8 @@ async fn old_optional_values_and_interrupted_tasks_remain_auditable() {
     )
     .await;
     let nexus = open(store).await.unwrap();
-    assert_eq!(read(&nexus, r#"FIND(?c.attributes.strength, ?c.facets["LegacyRecord"].record.attributes.strength, ?c.attributes.legacy.user) WHERE { ?c CONCEPT {key: "strength"} }"#).await,
-        json!([[null,2.0,"kept"]]));
+    assert_eq!(read(&nexus, r#"FIND(?c.attributes.outcome_status, ?c.facets["LegacyRecord"].record.attributes.outcome_status, ?c.attributes.legacy.user) WHERE { ?c CONCEPT {key: "strength"} }"#).await,
+        json!([[null,"great","kept"]]));
     assert_eq!(read(&nexus, r#"FIND(?c.attributes.status, ?c.facets["LegacyRecord"].record.attributes.status) WHERE { ?c CONCEPT {key: "interrupted"} }"#).await,
         json!([["blocked","in_progress"]]));
 }
@@ -575,7 +578,10 @@ async fn terminal_legacy_tasks_remain_auditable_after_restart_without_a_lease() 
             );
             assert!(
                 row["facets"]
-                    .get("kip://profiles/cognitive-memory@2.1.0/LeaseState")
+                    .get(format!(
+                        "{}/LeaseState",
+                        anda_cognitive_nexus::profiles::COGNITIVE_MEMORY_REF
+                    ))
                     .is_none()
             );
             nexus.close().await.unwrap();

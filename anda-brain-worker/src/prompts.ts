@@ -12,6 +12,7 @@
  */
 
 import { BRAIN_CAPABILITIES } from './cognitive.js'
+import { capturedEvidence } from './kip.js'
 import type { AiMessage } from './ai.js'
 import {
   BRAIN_FORMATION,
@@ -48,6 +49,8 @@ export function formationMessages(
         stage: 'formation',
         timestamp,
         ...(input.timestamp && input.timestamp !== timestamp ? { source_timestamp: input.timestamp } : {}),
+        // Each claim's `at` is its cited message's observed_at (Spec §13.2).
+        captured_evidence: capturedEvidence(input.messages, timestamp),
         context: input.context ?? {},
         primer,
         messages: input.messages,

@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     assess, kip,
     space::Space,
-    testkit::{app_state_core, create_loaded_space},
+    testkit::{app_state_core, create_loaded_space, declare_types},
 };
 use anda_engine::model::Models;
 use serde_json::json;
@@ -82,13 +82,14 @@ async fn retract(space: &Space, assertion: &str) {
 #[tokio::test]
 async fn real_projection_preserves_insufficient_uncertain_contested_and_rejected() {
     let space = space("assess_belief").await;
+    declare_types(&space, &["ColorScheme"]).await;
     write(
         &space,
         kip::request(
             r#"MUTATE {
         CREATE CONCEPT ?alice { TYPE "Person" NAME "Alice" SET FIELDS {key: "assess_alice"} }
         CREATE CONCEPT ?bob { TYPE "Person" NAME "Bob" SET FIELDS {key: "assess_bob"} }
-        CREATE CONCEPT ?dark { TYPE "Preference" NAME "Dark" SET FIELDS {key: "assess_dark"} }
+        CREATE CONCEPT ?dark { TYPE "ColorScheme" NAME "Dark" SET FIELDS {key: "assess_dark"} }
         ENSURE PROPOSITION ?p (?alice, "prefers", ?dark)
     }"#,
         ),

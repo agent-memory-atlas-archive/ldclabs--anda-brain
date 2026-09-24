@@ -1,6 +1,6 @@
 use super::*;
+use crate::PROFILE;
 use crate::recall_receipt::RecallReceiptRef;
-const PROFILE: &str = "kip://profiles/cognitive-memory@2.1.0/";
 
 pub(super) fn usable(row: &Json) -> bool {
     if row

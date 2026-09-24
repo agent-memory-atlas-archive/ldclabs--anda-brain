@@ -7,9 +7,9 @@ import type { AndaBrain } from '../src/brain.js'
 import type { BrainRpc, Env, FormationInput } from '../src/types.js'
 
 const auth = systemAuth()
-const plan = { types: [], predicates: [], summary: 'stored', commands: [`MUTATE {
+const plan = { types: ['WritingStyle'], predicates: [], summary: 'stored', commands: [`MUTATE {
   UPSERT CONCEPT ?person {MATCH {type:"Person",key:"${SYSTEM_PRINCIPAL}"} SET FIELDS {name:"owner"}}
-  CREATE CONCEPT ?preference {TYPE "Preference" NAME "old preference"}
+  CREATE CONCEPT ?preference {TYPE "WritingStyle" NAME "old preference"}
   ASSERT ?claim (?person,"prefers",?preference) {by:?person,mode:"stated",evidence: :msg1}
 }`] }
 type Brain = { [K in keyof AndaBrain]: AndaBrain[K] extends (...args: infer A) => infer R ? (...args: A) => Promise<Awaited<R>> : never }
@@ -39,6 +39,18 @@ describe('recoverable memory product', () => {
     await rejects(brain.productRecords(anonymousAuth()), 'unauthorized')
   })
 
+  it('refuses a misrecording and records a world change beside the old value', async () => {
+    const {brain, record} = await seed()
+    await rejects(brain.productPrepare(auth,{operation_id:'misheard',record_id:record.id,expected_revision:record.revision,kind:'misrecorded'}), 'unsupported_capability')
+    const preview = await brain.productPrepare(auth,{operation_id:'changed',record_id:record.id,expected_revision:record.revision,kind:'world_change',new_value:'new habit'})
+    const done = await brain.productCommit(auth,'changed',preview.preview_digest)
+    expect(done.state,JSON.stringify(done)).toBe('confirmed')
+    // Succession ends the old value; nothing supersedes or retracts it.
+    expect((await brain.productRecord(auth,record.id)).status).toBe('active')
+    const replacement = await brain.productRecord(auth,done.replacement_record!)
+    expect(replacement).toMatchObject({object_label:'new habit',status:'active',valid_from:null})
+  })
+
   it('requires exact reviewed scope, preserves claim history, and binds correction source', async () => {
     const {brain, record, input} = await seed()
     const request = {operation_id:'correction',record_id:record.id,expected_revision:record.revision,kind:'correct' as const,new_value:'new preference'}
@@ -52,7 +64,11 @@ describe('recoverable memory product', () => {
     expect(done.state,JSON.stringify(done)).toBe('confirmed')
     const replacement = await brain.productRecord(auth,done.replacement_record!)
     expect(replacement.object_label).toBe('new preference')
-    expect((await brain.productRecord(auth,record.id)).status).toBe('retracted')
+    // The corrected interval is kept: the old claim's missing start becomes
+    // `{latest: <its asserted_at>}`, never the correction time.
+    expect(JSON.parse(replacement.valid_from!)).toEqual({latest:record.asserted_at})
+    // §14.2: the same actor's correction supersedes the wrong claim.
+    expect((await brain.productRecord(auth,record.id)).status).toBe('superseded')
     expect(await brain.productCorrectionSource(auth,replacement.sources[0]!)).toBe('new preference')
     expect(await brain.productCorrectionSource(auth,{...replacement.sources[0]!,payload_digest:'fake'})).toBeNull()
     expect(await brain.productCommit(auth,'correction',preview.preview_digest)).toEqual(done)
@@ -165,7 +181,7 @@ describe('recoverable memory product', () => {
   it('caps record pages at the current native max_results constraint', async () => {
     const {brain,record} = await seed()
     const second = await brain.executeKip(`MUTATE {
-      CREATE CONCEPT ?another {TYPE "Preference" NAME "another preference"}
+      CREATE CONCEPT ?another {TYPE "WritingStyle" NAME "another preference"}
       ASSERT ?claim (:subject, :predicate, ?another) {by: :actor,mode:"stated"}
     }`,{subject:record.subject,predicate:record.predicate,actor:{id:record.actor_id}})
     expect(second.status,JSON.stringify(second)).toBe('succeeded')
@@ -298,7 +314,7 @@ describe('recoverable memory product', () => {
     const {brain,record} = await seed()
     const forged = await brain.executeKip(`MUTATE {
       CREATE EVIDENCE ?fake {CLIENT KEY :key SET FIELDS {evidence_class:"user_statement",payload:"fabricated",observed_at:"2026-09-20T00:00:00.000Z"}}
-      CREATE CONCEPT ?value {TYPE "Preference" NAME "fabricated preference"}
+      CREATE CONCEPT ?value {TYPE "WritingStyle" NAME "fabricated preference"}
       ASSERT ?claim (:actor,"prefers",?value) {by: :actor,mode:"stated",evidence:?fake}
     }`,{key:record.sources[0]!.origin+':99',actor:{id:record.actor_id!}})
     expect(forged.status).toBe('succeeded')

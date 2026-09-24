@@ -366,9 +366,9 @@ impl UtilityRuntime {
         digests.retain(|id, _| {
             samples.iter().any(|s| s.evidence_digests.contains_key(id)) || excluded.contains_key(id)
         });
-        let old = row.as_ref().and_then(|r| {
-            r["facets"]["kip://profiles/cognitive-memory@2.1.0/MnemonicState"]["utility"].as_f64()
-        });
+        let old = row
+            .as_ref()
+            .and_then(|r| r["facets"][profile!("MnemonicState")]["utility"].as_f64());
         let prior = c.parameters.as_ref().and_then(|p| p.initial_utility);
         let n = samples.iter().map(|s| s.independent_samples).sum::<usize>();
         let effect = (!samples.is_empty()).then(|| {
@@ -425,7 +425,7 @@ impl UtilityRuntime {
             None
         };
         if let Some(row) = &row
-            && row["schema_ref"] == "kip://profiles/cognitive-memory@2.1.0/SkillRevision"
+            && row["schema_ref"] == profile!("SkillRevision")
             && !self.current_revision(row).await?
         {
             reason = Some("revision_is_not_current_or_eligible");
@@ -562,12 +562,11 @@ impl UtilityRuntime {
             };
             let row = full_read(&self.nexus.system_session(), &p.id).await?;
             if semantic_digest(&row)? != p.content_digest
-                || row["facets"]["kip://profiles/cognitive-memory@2.1.0/MnemonicState"]["utility"]
-                    != json!(value)
+                || row["facets"][profile!("MnemonicState")]["utility"] != json!(value)
             {
                 continue;
             }
-            if row["schema_ref"] == "kip://profiles/cognitive-memory@2.1.0/SkillRevision"
+            if row["schema_ref"] == profile!("SkillRevision")
                 && !self.current_revision(&row).await?
             {
                 continue;

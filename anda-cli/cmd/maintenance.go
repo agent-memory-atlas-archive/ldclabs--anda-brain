@@ -21,7 +21,7 @@ Example:
 		scope, _ := cmd.Flags().GetString("scope")
 
 		input := &api.MaintenanceInput{
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Timestamp: time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
 		}
 		if trigger != "" {
 			input.Trigger = trigger
@@ -63,7 +63,8 @@ func init() {
 	maintenanceCmd.Flags().String("trigger", "", "Trigger type: scheduled, threshold, on_demand (default: on_demand)")
 	maintenanceCmd.Flags().String("scope", "", "Scope: full, quick, daydream (default: daydream)")
 	maintenanceCmd.Flags().Int("stale-event-threshold-days", 0, "Per-run stale event threshold (1-365)")
-	maintenanceCmd.Flags().Float64("memory-strength-decay-factor", 0, "Per-run accessibility decay factor (0,1]")
+	maintenanceCmd.Flags().Float64("memory-strength-decay-factor", 0, "Deprecated: decay is computed by the engine; the server ignores it")
+	_ = maintenanceCmd.Flags().MarkDeprecated("memory-strength-decay-factor", "decay is computed by the engine; the server ignores it")
 	maintenanceCmd.Flags().Int("unconsolidated-max-backlog", 0, "Per-run unconsolidated backlog limit (1-10000)")
 	maintenanceCmd.Flags().Int("orphan-max-count", 0, "Per-run orphan limit (1-10000)")
 	rootCmd.AddCommand(maintenanceCmd)

@@ -304,7 +304,7 @@ export async function maintainMemory(
   try {
     run = await brain.beginMaintenance(epoch, deadline.expiresAt)
     const timestamp = observationTimestamp(input.timestamp, Date.now())
-    const settlement = await brain.settleMemory(Date.parse(timestamp), input.parameters?.memory_strength_decay_factor, run, epoch)
+    const settlement = await brain.settleMemory(Date.parse(timestamp), run, epoch)
     const [snapshot, assessment, primerResult] = await Promise.all([
       brain.maintenanceSnapshot(epoch, run), brain.maintenanceAssessment(), brain.describePrimer(),
     ])

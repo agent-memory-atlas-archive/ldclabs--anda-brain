@@ -16,7 +16,7 @@
           "configuration_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
           "control_domain": "your-independent-instrument-domain"
         },
-        "predicate_ref": "kip://profiles/cognitive-memory@2.1.0/prefers",
+        "predicate_ref": "kip://profiles/cognitive-memory@2.0.0/prefers",
         "context_ref": "C-1",
         "task_family": "your.source-facts.v1",
         "environment_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",

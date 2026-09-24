@@ -10,39 +10,43 @@
 
 每个 `space_id` 映射到一个独立的 SQLite Durable Object。KIP 图谱、原子事务和模式包由 `@ldclabs/kip-do` 提供；自然语言规划和答案合成使用 Workers AI。
 
-批量代谢跳过 SleepTask/Watch 运行记录，避免违反其版本守卫而让整批代谢失败。
-失败通过 settlement.decay_error 报告，维护模型会收到实际 settlement。
+不再有批量代谢：记忆强度在读取时按基值、锚点与钉住的策略计算，settlement 不写强度。
+维护模型会收到实际 settlement。
 
-## KIP 2.0 / CognitiveMemory 2.1 更新
+## KIP 2.0 更新
 
-Rust 使用已发布的 `anda_kip`、Cognitive Nexus 和 AndaDB 0.13；Worker 使用
-已发布的 `@ldclabs/kip-do` 0.13。Skill 行为保存为不可变的
-`SkillRevision`；Watch 进度和任务租约通过 Nexus 的受保护接口维护。旧的 family
-成功率晋升规则已移除；未配置独立观察者、冻结试验和可重放评估时，程序候选保持未验证，
-`skills.unsupported_reason` 明确报告该边界。现有 Brain API 保持可用；这两个适配器
-**未声明支持**可选的五意图 Memory Interface 或 `memory_*` 能力包。详见
-[同步说明](../docs/kip-v2-cognitive-sync.md)。
+本 Worker 对齐 KIP `3251912` 与 `kip://profiles/cognitive-memory@2.0.0`（修订
+`sha256:3ea9e459…`，只能靠摘要区分修订），使用 `@ldclabs/kip-do` 0.14。用 2.1.0 草案
+激活过的 Space 不做迁移。世界变化记为一条新 Assertion，由时序继承结束旧值；主张的
+`at` 取所引用消息的观察时间；选项按类别定型，Profile 没有 `Preference` 类型；衰减在
+读取时计算；新增 `GET /v1/{space}/memory/attention` 注意力召回。Skill 行为保存为不可变的
+`SkillRevision`，并用 `current_trial` / `current_evaluation` 指针；Watch 进度和任务租约
+通过 Nexus 的受保护接口维护。旧的 family 成功率晋升规则已移除；未配置独立观察者、冻结
+试验和可重放评估时，程序候选保持未验证，`skills.unsupported_reason` 明确报告该边界。现有
+Brain API 保持可用；这两个适配器**未声明支持**可选的五意图 Memory Interface 或
+`memory_*` 能力包。
 
 ## KIP 2.0 意味着什么
 
 1.x 把含义、信念、证据、来源和模式塞在同一张图里；2.0 把它们分开，而其余区别都来自同一条：**一个 Proposition 存在，不等于它为真**。落到这个 Worker 上：
 
-- 一条事实是「truth-neutral 的 Proposition」加上「携带某个 actor 立场、模式、置信度与 Evidence 的 Assertion」。更正是**新增一条 Assertion 并 SUPERSEDE**，绝不改写原有记录。
-- 永远不要随时间衰减 Assertion 的 confidence。衰减的是 `MnemonicState.memory_strength`，那是可及性，不是真假。
+- 一条事实是「truth-neutral 的 Proposition」加上「携带某个 actor 立场、模式、置信度与 Evidence 的 Assertion」。主张写错了是**新增一条 Assertion 并 SUPERSEDE**；世界变了是**从变化时刻起的一条新 Assertion**，由时序继承结束旧值。两者都绝不改写原有记录。
+- 永远不要随时间衰减 Assertion 的 confidence。衰减在读取时由 `MnemonicState` 的基值、锚点与钉住的策略计算，那是可及性，不是真假。
 - 元素 id 形如 `C-7`、`P-11`、`A-3`、`E-2`、`X-1`。
-- **Schema 是受保护的控制状态：KML 不能声明类型。** 新词汇经由宿主进入，见下文。
+- **Schema 是受保护的控制状态。** kip-do 未提供 `draft_vocabulary`，`DEFINE` 会被拒绝；新词汇经由宿主进入，见下文。
 
-## 依赖：已发布的 kip-do 0.13
+## 依赖：kip-do 0.14
 
-`@ldclabs/kip-do` 0.13 从 npm registry 安装，版本由仓库的
-`pnpm-lock.yaml` 固定。无需同级 `anda-db` 检出或构建本地 `kip-do`：
+`@ldclabs/kip-do` 0.14 发布到 npm 之前，`package.json` 链接同级
+`anda-db/ts/kip-do`。它的入口是 `dist/`，所以同步 anda-db 后先在那边构建：
 
 ```bash
+(cd ../anda-db/ts/kip-do && pnpm run build)
 pnpm install --frozen-lockfile
 pnpm --filter @ldclabs/anda-brain-worker check
 ```
 
-普通安装、测试和部署不需要同级 `anda-db` 检出。主动刷新 vendored KIP
+发布后改回 registry 版本，普通安装、测试和部署即不再需要同级检出。主动刷新 vendored KIP
 提示资产时，`sync:assets` 默认使用同级源码；也可用 `ANDA_KIP_SOURCE` 指向
 已下载的 `anda_kip` crate 目录，按发布版本同步。
 
@@ -64,7 +68,8 @@ pnpm --filter @ldclabs/anda-brain-worker check
 | 记录 Watch | 显式接收者绑定、原生推进与取消；无后台 inbox |
 | 预算化 Recall / 学习运行时 | 未实现；非空 Recall `budget` 显式拒绝，学习就绪保持不可用 |
 | 自动周期维护 | 未实现；由调用方或 Cron Trigger 调用 maintenance |
-| 确定性 settlement（代谢 / Nexus Watch 推进 / 更正发现） | 保留，见下节 |
+| 确定性 settlement（Nexus Watch 推进 / 更正发现） | 保留，见下节；不扫盘衰减 |
+| 注意力召回（`GET memory/attention`） | 保留，按提起提交的 `raised_seq` 排序，游标由调用方保存 |
 | 全文检索（`SEARCH`） | 保留，keyword 模式，见「检索」一节 |
 | 派生闭包（`LIST DEPENDENTS`） | 保留，`DEPTH` 上限 8；runtime 在 settlement 里替模型走：每条新 superseded 的 Assertion 带着它的 dependents 进 `assessment.revised_roots` |
 | 保留期（`SET RETENTION`） | 引擎已实现，maintenance 可以写；但没有到期清扫，Rust 服务两样都有 |
@@ -73,10 +78,11 @@ pnpm --filter @ldclabs/anda-brain-worker check
 
 ## 确定性 settlement 与受保护操作
 
-每次 maintenance 在模型调用前执行记忆强度代谢、更正发现和结构化 Watch 推进。
-代谢只修改 `MnemonicState.memory_strength`，默认每周乘以 0.95、下限 0.3，绝不衰减
-Assertion confidence。读取不强化记忆。
-本次 `parameters.memory_strength_decay_factor` 会覆盖默认因子，并实际作用于确定性代谢；例如 `1` 保持强度不变。
+每次 maintenance 在模型调用前执行更正发现和结构化 Watch 推进。没有衰减扫盘：强度在
+读取时由基值、锚点与钉住的 `strength_policy` 计算，缺失即未知，绝不衰减 Assertion
+confidence。读取不强化记忆。`parameters.memory_strength_decay_factor` 已弃用，仍做范围
+校验但不生效。到期且没有 Watch 的 Commitment 由 Maintenance 写一条 `commitment_review`
+Activity 提起为注意力。
 更正扫描通过 `(space_seq, assertion_id)` 继续分页，同一事务超过 20 条也不会丢弃尾部。
 响应中的 `settlement.corrections.incomplete` 表示尚未证明 backlog 已读完；`cursor_after_id`
 在需要从事务内部继续时出现。发现进度不表示模型已处理这些更正。
@@ -93,7 +99,8 @@ Skill 保持稳定身份，行为放入不可变 SkillRevision，current_revisio
 可在同一 MUTATE 创建。旧的 family 成功率规则已删除：family 仅用于寻找可比较样本，
 不能自动选定基线。未配置独立观察者、冻结 TrialRecord、重放材料和受保护评估策略时，
 程序候选保持未验证，`settlement.skills.unsupported_reason` 说明未运行评估；旧计数
-字段仍为零。模型不能写学习记录、WatchState 或 LeaseState。
+字段仍为零。模型不能写学习记录、WatchState、LeaseState、Skill 的 `current_trial` /
+`current_evaluation`，也不能写计算得出的 GradingState 与血缘字段。
 
 模型计划可选两个宿主字段（普通 HTTP 请求形状不变）：
 
@@ -206,12 +213,12 @@ Formation、Maintenance、Recall 规划及回答阶段均支持查阅。查阅�
 digest 或运行时动作。最终结果省略 `references` 或使用 `[]`，才会进入原有校验及执行流程。
 查阅不会读取图谱、更新快照、扩展权限，也不构成记忆证据或变更覆盖。
 
-`@ldclabs/kip-do` 锁定为 `0.13.2`；协议参考独立锁定为 Cargo 中的 `anda_kip = 0.13.1`。
+`@ldclabs/kip-do` 暂时链接同级 0.14（未发布）；协议参考独立锁定为 Cargo 中的 `anda_kip = 0.14.0`。
 生成检查验证协议 pin、各参考文件 SHA-256 与生成文件；引擎补丁版本不改变协议资料来源。
 从仓库根目录刷新资源：
 
 ```bash
-ANDA_KIP_SOURCE=/path/to/published/anda_kip-0.13.1 node scripts/sync-kip-reference.mjs --worker
+ANDA_KIP_SOURCE=/path/to/anda_kip-0.14.0 node scripts/sync-kip-reference.mjs --worker
 pnpm --filter @ldclabs/anda-brain-worker run codegen:prompts
 ```
 
@@ -260,15 +267,16 @@ curl http://localhost:8787/v1/alice/formation \
   }'
 ```
 
-Formation / Maintenance 的 `timestamp` 接受带时区偏移及不同小数精度的 RFC 3339，
-宿主统一转为 `YYYY-MM-DDTHH:mm:ss.SSSZ`。无法解析或缺省时使用本次请求的接收时间，
-不会因为时间戳格式而拒绝消息；Formation 规划上下文保留原始时间戳文本。
+Formation / Maintenance 的 `timestamp` 接受任意时区偏移、最多毫秒精度的 RFC 3339，
+宿主统一转为 `YYYY-MM-DDTHH:mm:ss.SSSZ`；无法解析或精度超过毫秒时返回 400，不会被悄悄
+替换。缺省时使用本次请求的接收时间。消息自带的 `timestamp`（Unix 毫秒）是该条消息的
+观察时间；规划上下文的 `captured_evidence` 列出每个 `:msgN` 的观察时间，模型据此写主张的 `at`。
 
 `context.counterparty` 是 Concept 的 **key**（不可变身份），不是 name（可变标签）。宿主会在规划前确保该 Person 存在，并保留已有显示名称。
 
 `context.source` 是线程/渠道来源，不是消息去重键。Evidence 身份由完整输入、上下文和时间戳的摘要确定；
 同一 source 的后续消息不会复用旧消息的 Evidence。要重试同一观察，应保持消息、上下文及显式 `timestamp`
-不变且可解析；省略或无法解析 timestamp 时，每个请求获得新的观察时间。此规则只保证 Evidence 的身份，不表示整份模型写入计划
+不变；省略 timestamp 时，每个请求获得新的观察时间。此规则只保证 Evidence 的身份，不表示整份模型写入计划
 具备请求级 exactly-once 语义。
 
 Formation 只能写认知：`CREATE CONCEPT`、`UPSERT CONCEPT`、`ENSURE PROPOSITION`、`CREATE EVIDENCE / ASSERTION / ACTIVITY`、`ASSERT`，以及用于更正和自身 Activity 的 `TRANSITION`——状态限于 `retracted` / `superseded` / `corrected` / `running` / `completed` / `failed` / `cancelled`。`TRANSITION ... TO "archived"`、`TO "tombstoned"` 以及 `UPDATE`、`PURGE`、`MERGE CONCEPT` 会在 Durable Object 内被拒绝。状态必须写成字面量：闸门读不到的参数化状态一律拒绝，否则「六条语句合并成一条 `TRANSITION`」就等于给 Formation 开了一条以绑定值 tombstone 的路。
@@ -309,7 +317,15 @@ Maintenance 可以使用受限的维护 KML，学习和运行时 Facet 由宿主
 
 `SET RETENTION` 引擎已实现，maintenance 可以写保留期类别和 `expires_at`；被拒的只有 `legal_hold` 这一个成员，两个方向都拒——法务保留会挡住所有人的擦除，不是模型读一张快照就该做的决定。到期清扫本身 Worker 没有，写下的 `expires_at` 要靠调用方或 Rust 服务去执行。
 
-请求参数：`memory_strength_decay_factor`、`stale_event_threshold_days`、`unconsolidated_max_backlog`（兼容旧名 `unsorted_max_backlog`）、`orphan_max_count`——与 Rust 服务的 `MaintenanceParameters` 逐字段对齐。没有 `confidence_decay_factor`：2.0 禁止随时间衰减 Assertion 置信度。
+请求参数：`stale_event_threshold_days`、`unconsolidated_max_backlog`（兼容旧名 `unsorted_max_backlog`）、`orphan_max_count`——与 Rust 服务的 `MaintenanceParameters` 逐字段对齐；已弃用的 `memory_strength_decay_factor` 仍被接受并校验 (0, 1]，但不生效。没有 `confidence_decay_factor`：2.0 禁止随时间衰减 Assertion 置信度。
+
+### 注意力召回
+
+`GET /v1/{space}/memory/attention?attention_cursor=attention:41&limit=20` 返回游标之后
+已触发的 Watch（`watch_fired`）与到期的 Commitment（`commitment_due`），按提起它们的
+`watch_fire` / `commitment_review` Activity 的 `space_seq`（`raised_seq`）排序，并返回新的
+`attention_cursor`。游标由调用方在取走条目后保存，不会过期；缺省或 `attention:-1` 表示从头
+读起。读取不改变记忆，条目不授予任何权限。与 Rust 服务的同名接口形状一致。
 
 ### 显式图谱擦除
 

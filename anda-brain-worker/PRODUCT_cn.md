@@ -30,18 +30,22 @@ Formation 在调用模型前注册 `formation:sha256:…` 观察身份。默认�
 
 `productPrepare(auth, {operation_id, record_id, expected_revision, kind, new_value?})`
 保存有效期十分钟的预览。操作 id 为 1–128 个 ASCII 字母、数字、`_` 或 `-`。
-`kind` 为 `correct`、`suppress` 或 `delete`，回执包含精确的带版本目标列表、排除来源、
-范围和 `preview_digest`。
+`kind` 为 `correct`、`world_change`、`misrecorded`、`suppress` 或 `delete`，回执包含
+精确的带版本目标列表、排除来源、范围和 `preview_digest`。`misrecorded`（Brain 记下了
+调用者从未说过的话）需要 recording repair，kip-do 未提供，因此返回
+`unsupported_capability`，绝不写成更正或世界变化。
 
 `productCommit(auth, operation_id, preview_digest)` 重查记录、来源闭包和当前权限。
 相同操作/输入的重试恢复同一结果，改变输入会冲突。
 `productChange(auth, operation_id)` 查询状态；`productDiscard(auth, operation_id)`
 废弃未提交预览并清除其内容副本。过期或废弃预览不能提交。
 
-更正要求记录是 active 的 support Assertion，且 actor key 等于已验证调用者的 principal id。
-仅接受当前 Schema 支持的 Concept 值记录；`new_value` 非空白且最多 8192 UTF-8 字节。
-一个原生 `MUTATE` 撤回旧主张，创建新的用户 Evidence、带类型的值、归属明确的 Assertion
-与来源 Activity；不会覆盖 Assertion，也不会把其他 actor 的证言当作调用者的新陈述。
+更正与世界变化都要求记录是 active 的 support Assertion，且 actor key 等于已验证调用者的
+principal id。仅接受当前 Schema 支持的 Concept 值记录；`new_value` 非空白且最多 8192 UTF-8
+字节。一个原生 `MUTATE` 创建新的用户 Evidence、带类型的值、归属明确的 Assertion 与来源
+Activity。`correct` 的新 Assertion supersede 旧主张并保留其世界时间区间（缺失的起点写成
+`{latest: <原 asserted_at>}`）；`world_change` 的新 Assertion 从现在开始，由时序继承结束
+旧值，旧值保持 active。不会覆盖 Assertion，也不会把其他 actor 的证言当作调用者的新陈述。
 
 抑制归档、删除清除已审阅闭包：Proposition、Assertion、引用的 Evidence 和记录的反向依赖，
 最多 128 个元素。共享 Evidence 会扩大范围，其来源身份会出现在预览。包含 Concept 的闭包、

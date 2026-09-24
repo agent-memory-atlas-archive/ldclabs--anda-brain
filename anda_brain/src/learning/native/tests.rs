@@ -49,7 +49,7 @@ async fn setup_with_store(storage: Arc<InMemory>) -> Fixture {
         &nexus,
         r#"MUTATE {
         CREATE CONCEPT ?p {TYPE "Person" NAME "Test actor"}
-        CREATE CONCEPT ?v {TYPE "Preference" NAME "Test preference"}
+        CREATE CONCEPT ?v {TYPE "Insight" NAME "Test lesson" SET ATTRIBUTES {summary:"Test lesson"}}
         ENSURE PROPOSITION ?fact (?p,"prefers",?v)
     }"#,
     )
@@ -559,7 +559,9 @@ async fn committed_outcome_is_read_only_recoverable_after_policy_and_write_revoc
             GrantDraft {
                 space_id: DEFAULT_SPACE.into(),
                 grantee_principal: OBSERVER.into(),
-                actions: vec!["read_history".into()],
+                // A transaction description only shows changes to elements
+                // the caller may still read.
+                actions: vec!["read".into(), "read_history".into()],
                 ..Default::default()
             },
             SYSTEM_PRINCIPAL,

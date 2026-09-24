@@ -31,7 +31,7 @@ fn verifier_digest(plan: &PairedTrialPlan) -> String {
 }
 
 const OBSERVER: &str = "kip:principal:independent-verifier";
-const PROFILE: &str = "kip://profiles/cognitive-memory@2.1.0/";
+use crate::PROFILE;
 
 async fn command(executor: &impl Executor, text: &str) -> Json {
     let response = anda_kip::execute_request(executor, &Request::single(text)).await;
@@ -163,7 +163,7 @@ async fn paired_trial_replays_a_real_protected_adoption_transaction() {
         &nexus,
         r#"MUTATE {
         CREATE CONCEPT ?p {TYPE "Person" NAME "Test actor"}
-        CREATE CONCEPT ?v {TYPE "Preference" NAME "Test preference"}
+        CREATE CONCEPT ?v {TYPE "Insight" NAME "Test lesson" SET ATTRIBUTES {summary:"Test lesson"}}
         ENSURE PROPOSITION ?fact (?p,"prefers",?v)
     }"#,
     )
@@ -393,11 +393,8 @@ async fn paired_trial_replays_a_real_protected_adoption_transaction() {
             let mutation = format!(
                 r#"MUTATE {{
             CREATE ACTIVITY ?v {{SET FIELDS {{activity_class:"lifecycle_verdict",status:"completed"}} SET FACET "EvaluationRecord" {evaluation} SET STRUCTURAL {{("inputs","{revision}") ("inputs","{trial_ref}") ("outputs","{skill}")}}}}
-            UPDATE "{skill}" SET ATTRIBUTES {{status:"{to}"}} SET FACET "TrialState" {{revision_ref:"{revision}",trial_ref:"{trial_ref}"}} SET FACET "GradingState" {{revision_ref:"{revision}",evaluation_ref:?v,success_count:{},failure_count:{},graded_count:{}}} EXPECT VERSION {version}
-        }}"#,
-                if round == 0 { attempt_refs.len() } else { 0 },
-                if round == 0 { 0 } else { attempt_refs.len() },
-                attempt_refs.len()
+            UPDATE "{skill}" SET ATTRIBUTES {{status:"{to}"}} SET STRUCTURAL {{("current_trial","{trial_ref}") ("current_evaluation",?v)}} EXPECT VERSION {version}
+        }}"#
             );
             if to == "adopted" {
                 let forged = mutation.replace("\"effect\":1.0", "\"effect\":0.9");

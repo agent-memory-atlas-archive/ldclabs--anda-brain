@@ -51,7 +51,7 @@ pub(crate) fn semantic_digest(row: &Json) -> Result<String, BoxError> {
     if let Some(map) = row.as_object_mut() {
         map.remove("_system");
         if let Some(facets) = map.get_mut("facets").and_then(Json::as_object_mut) {
-            facets.remove("kip://profiles/cognitive-memory@2.1.0/MnemonicState");
+            facets.remove(profile!("MnemonicState"));
         }
         if map
             .get("facets")

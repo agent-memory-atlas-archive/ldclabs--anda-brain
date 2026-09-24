@@ -17,7 +17,7 @@ async fn review_seed_wiki_fact(
         .get_as::<WikiVersionRecord>(created.version.id)
         .await
         .unwrap();
-    let mut item = fact(("Person", "alice"), "prefers", ("Preference", "dark_mode"));
+    let mut item = fact(("Person", "alice"), "prefers", ("ColorScheme", "dark_mode"));
     item.citation = citation_uri("test_space", doc._id, version._id, 0, version.size);
     digest
         .ensure_vocabulary(std::slice::from_ref(&item))

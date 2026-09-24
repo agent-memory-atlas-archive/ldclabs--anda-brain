@@ -89,6 +89,11 @@ anda-cli --space-id my_space --token $TOKEN formation \
 anda-cli --space-id my_space --token $TOKEN formation \
   --file ./message.txt
 
+# Say when the conversation happened; formed claims use it as asserted_at
+# (omit it and the server uses its receipt time)
+anda-cli --space-id my_space --token $TOKEN formation \
+  --file ./message.txt --timestamp 2026-09-22T08:15:00+08:00
+
 # Or pipe from stdin
 echo '[{"role":"user","content":"Hello"}]' | \
   anda-cli --space-id my_space --token $TOKEN formation
@@ -156,7 +161,8 @@ anda-cli --space-id my_space --token $TOKEN memory forget C-7
 anda-cli --space-id my_space --token $TOKEN maintenance
 anda-cli --space-id my_space --token $TOKEN maintenance --trigger on_demand --scope full
 anda-cli --space-id my_space --token $TOKEN maintenance \
-  --memory-strength-decay-factor 0.95 --unconsolidated-max-backlog 50
+  --unconsolidated-max-backlog 50
+# --memory-strength-decay-factor is deprecated: decay is computed by the engine
 
 # Execute a single read-only KIP command
 anda-cli --space-id my_space --token $TOKEN execute-kip-readonly \

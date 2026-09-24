@@ -140,3 +140,18 @@ pub(crate) fn signed_token(
         .unwrap();
     ByteBufB64(sign1.to_vec().unwrap()).to_string()
 }
+
+/// Declares Concept types in the Space's own vocabulary package.
+///
+/// The Cognitive Memory Profile has no `Preference` type: an option someone
+/// prefers is a Concept typed by its kind (Profile §5.5, Spec §20.15), and a
+/// kind no installed package names enters through the host's vocabulary.
+pub(crate) async fn declare_types(space: &crate::space::Space, types: &[&str]) {
+    crate::vocabulary::DeclareSymbolsTool::new(space.memory.clone())
+        .declare(&crate::vocabulary::DeclareSymbolsArgs {
+            types: types.iter().map(|name| name.to_string()).collect(),
+            predicates: vec![],
+        })
+        .await
+        .unwrap();
+}

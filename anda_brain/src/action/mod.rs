@@ -22,7 +22,7 @@ pub(crate) use inbox::Inspection;
 pub use service::ActionRuntime;
 
 const FORMAT: &str = "anda-brain:action-v1";
-const PROFILE: &str = "kip://profiles/cognitive-memory@2.1.0/";
+use crate::PROFILE;
 
 /// Code-only installation. The callbacks and all destinations belong to the
 /// host. Never deserialize these from a model tool request.

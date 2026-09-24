@@ -22,7 +22,7 @@ use std::{
 
 const HOST: &str = "kip:principal:r3-host";
 const RECIPIENT: &str = "kip:principal:r3-recipient";
-const PROFILE: &str = "kip://profiles/cognitive-memory@2.1.0/";
+use crate::PROFILE;
 fn auth(id: &str) -> AuthContext {
     let mut a = AuthContext::principal(id);
     a.auth_method = "trusted-test-authentication".into();
@@ -217,7 +217,8 @@ async fn setup_store(
         Default::default(),
     )
     .await;
-    let anchor=created_ref(&space,r#"MUTATE {CREATE CONCEPT ?preference {TYPE "Preference" NAME "known coordinate"} ENSURE PROPOSITION ?item (:target,"prefers",?preference)}"#,kip::param("target",target.clone())).await;
+    declare_types(&space, &["Coordinate"]).await;
+    let anchor=created_ref(&space,r#"MUTATE {CREATE CONCEPT ?preference {TYPE "Coordinate" NAME "known coordinate"} ENSURE PROPOSITION ?item (:target,"prefers",?preference)}"#,kip::param("target",target.clone())).await;
     *p.context.lock().unwrap() = Some(ContextRequest {
         recall_receipt: None,
         anchor,

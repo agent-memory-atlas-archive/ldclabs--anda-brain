@@ -44,9 +44,30 @@ pub fn timestamp(now_ms: u64) -> String {
     rfc3339_datetime(now_ms).unwrap_or_else(rfc3339_datetime_now)
 }
 
-/// Adapt a caller's observation time to the protocol without rejecting their
-/// conversation. Unusable input falls back to its durable receipt time, so a
-/// retry captures the same observation rather than a new wall-clock instant.
+/// Validates a caller's observation time at the API boundary and returns its
+/// canonical millisecond UTC spelling (Spec §6.5). An RFC 3339 instant in
+/// another offset or with fewer fraction digits names the same instant and is
+/// canonicalized; an unparseable value or sub-millisecond precision is refused
+/// rather than replaced, because the instant is the claim's start key.
+pub(crate) fn source_timestamp(value: &str) -> Result<String, String> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(value.trim())
+        .map_err(|_| format!("timestamp {value:?} is not an RFC 3339 instant"))?;
+    if parsed.timestamp_subsec_nanos() % 1_000_000 != 0 {
+        return Err(format!(
+            "timestamp {value:?} is finer than milliseconds; KIP timestamps are millisecond UTC"
+        ));
+    }
+    let canonical = parsed
+        .to_utc()
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    anda_kip::timestamp::parse(&canonical, "timestamp").map_err(|err| err.to_string())?;
+    Ok(canonical)
+}
+
+/// The observation time of a stored formation input. New input is validated
+/// by [`source_timestamp`] on submission; a stored value that cannot be read
+/// falls back to its durable receipt time, so a retry captures the same
+/// observation rather than a new wall-clock instant.
 pub(crate) fn observation_timestamp(value: Option<&str>, received_at: u64) -> String {
     value
         .and_then(|value| chrono::DateTime::parse_from_rfc3339(value.trim()).ok())
@@ -203,6 +224,34 @@ pub const MAX_GATED_SELECTION: u64 = 20;
 /// Matches `MAX_INGESTED_MESSAGES` in the Worker's `src/kip.ts`.
 pub const MAX_INGESTED_MESSAGES: usize = 16;
 
+/// When one captured message was observed: its own millisecond timestamp when
+/// the caller sent one, else the batch's observation time. This is what an
+/// Assertion citing the message writes as `at` (Spec §13.2).
+pub(crate) fn message_observed_at(message: &Message, batch_observed_at: &str) -> String {
+    message
+        .timestamp
+        .and_then(rfc3339_datetime)
+        .unwrap_or_else(|| batch_observed_at.to_string())
+}
+
+/// The captured messages' Evidence keys and observation times, for the model
+/// to set `at` on the claims it forms from them.
+pub(crate) fn observation_manifest(ingest: &IngestContext) -> String {
+    ingest
+        .evidence
+        .iter()
+        .map(|entry| {
+            format!(
+                ":{} {} observed_at {}",
+                entry.key,
+                entry.evidence_class,
+                entry.observed_at.as_deref().unwrap_or("unknown")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// What a message's role makes it, as an Evidence class (Formation §7).
 ///
 /// A transcript is not one observation. Who said a thing is part of what was
@@ -263,7 +312,7 @@ pub fn observation_ingest(
             key: format!("msg{}", index + 1),
             evidence_class: evidence_class(&message.role).to_string(),
             payload: serde_json::to_value(message).ok(),
-            observed_at: Some(observed_at.to_string()),
+            observed_at: Some(message_observed_at(message, observed_at)),
             client_key: Some(format!("{origin}:{}", start + index + 1)),
             source_actor: source_actor
                 .filter(|_| message.role == "user")
@@ -387,9 +436,35 @@ fn operation_parameters(request: &Request, index: usize) -> Option<Map<String, J
     }
 }
 
+/// Facets a model plan cannot write: validated learning records and protected
+/// runtime state belong to host bindings, and `GradingState` is a computed view
+/// of the Skill's `current_evaluation`.
+const PROTECTED_FACETS: [&str; 7] = [
+    "TrialRecord",
+    "EvaluationRecord",
+    "OutcomeRecord",
+    "AttemptRecord",
+    "GradingState",
+    "WatchState",
+    "LeaseState",
+];
+
+/// Structural fields a model plan cannot write: the Skill's learning pointers
+/// move only with the host's trial and verdict transactions, and the lineage
+/// fields are computed from Activity provenance.
+const PROTECTED_STRUCTURAL: [&str; 6] = [
+    "current_trial",
+    "current_evaluation",
+    "derived_from",
+    "compiled_from",
+    "compiled_by",
+    "consolidated_to",
+];
+
 /// Model plans do not own protected runtime or validated learning records.
-/// Inspect AST facet positions only: quoted source text containing these words
-/// is ordinary Evidence. Parameterized facet names must resolve before execution.
+/// Inspect AST facet and structural positions only: quoted source text
+/// containing these words is ordinary Evidence. Parameterized names must
+/// resolve before execution.
 fn unsupported_cognitive_write(
     command: &Command,
     parameters: Option<&Map<String, Json>>,
@@ -399,25 +474,39 @@ fn unsupported_cognitive_write(
         return None;
     };
     let mut facets = Vec::new();
+    let mut structural = Vec::new();
     for clause in &statement.clauses {
         match clause {
             MutationClause::CreateConcept(c) => {
-                facets.extend(c.set_facets.iter().map(|f| &f.facet))
+                facets.extend(c.set_facets.iter().map(|f| &f.facet));
+                structural.extend(c.set_structural.iter().flatten().map(|e| &e.field));
             }
             MutationClause::UpsertConcept(c) => {
                 facets.extend(c.set_facets.iter().map(|f| &f.facet));
                 facets.extend(c.unset_facets.iter().map(|f| &f.facet));
+                structural.extend(c.set_structural.iter().flatten().map(|e| &e.field));
+                structural.extend(c.unset_structural.iter().flatten().map(|e| &e.field));
             }
             MutationClause::CreateEvidence(c)
             | MutationClause::CreateAssertion(c)
             | MutationClause::CreateActivity(c) => {
-                facets.extend(c.set_facets.iter().map(|f| &f.facet))
+                facets.extend(c.set_facets.iter().map(|f| &f.facet));
+                structural.extend(c.set_structural.iter().flatten().map(|e| &e.field));
+            }
+            MutationClause::Transition(t) => {
+                structural.extend(t.set_structural.iter().flatten().map(|e| &e.field));
             }
             MutationClause::Update(c) => {
                 for action in &c.actions {
                     match action {
                         UpdateAction::SetFacet(f) => facets.push(&f.facet),
                         UpdateAction::UnsetFacet(f) => facets.push(&f.facet),
+                        UpdateAction::SetStructural(edges) => {
+                            structural.extend(edges.iter().map(|e| &e.field))
+                        }
+                        UpdateAction::UnsetStructural(edges) => {
+                            structural.extend(edges.iter().map(|e| &e.field))
+                        }
                         _ => {}
                     }
                 }
@@ -425,28 +514,33 @@ fn unsupported_cognitive_write(
             _ => {}
         }
     }
+    let resolve = |symbol: &SymbolRef| match symbol {
+        SymbolRef::Name(name) => Some(name.clone()),
+        SymbolRef::Param(name) => parameters
+            .and_then(|p| p.get(name))
+            .and_then(Json::as_str)
+            .map(str::to_string),
+    };
+    let local = |name: &str| name.rsplit('/').next().unwrap_or(name).to_string();
     for facet in facets {
-        let name = match facet {
-            SymbolRef::Name(name) => Some(name.as_str()),
-            SymbolRef::Param(name) => parameters.and_then(|p| p.get(name)).and_then(Json::as_str),
-        };
-        let Some(name) = name else {
+        let Some(name) = resolve(facet) else {
             return Some("model facet names must resolve before execution".into());
         };
-        if [
-            "TrialRecord",
-            "EvaluationRecord",
-            "OutcomeRecord",
-            "AttemptRecord",
-            "TrialState",
-            "GradingState",
-            "WatchState",
-            "LeaseState",
-        ]
-        .contains(&name.rsplit('/').next().unwrap_or(name))
-        {
+        if PROTECTED_FACETS.contains(&local(&name).as_str()) {
             return Some(format!(
-                "{name} requires a configured host learning/runtime binding; it cannot be authored by a model plan"
+                "{name} requires a configured host learning/runtime binding or is computed by \
+                 Nexus; it cannot be authored by a model plan"
+            ));
+        }
+    }
+    for field in structural {
+        let Some(name) = resolve(field) else {
+            return Some("model structural field names must resolve before execution".into());
+        };
+        if PROTECTED_STRUCTURAL.contains(&local(&name).as_str()) {
+            return Some(format!(
+                "{name} is moved by host learning transactions or computed from Activity \
+                 provenance; it cannot be authored by a model plan"
             ));
         }
     }
@@ -510,6 +604,7 @@ fn cognition_refusal(command: &Command, parameters: Option<&Map<String, Json>>) 
             MutationClause::Purge(_) => "PURGE",
             MutationClause::PurgePayload(_) => "PURGE PAYLOAD",
             MutationClause::MergeConcept(_) => "MERGE CONCEPT",
+            MutationClause::Define(_) => "DEFINE",
         };
 
         return Some(format!(
@@ -979,6 +1074,44 @@ mod tests {
     }
 
     #[test]
+    fn source_timestamps_are_canonicalized_or_refused() {
+        assert_eq!(
+            source_timestamp("2026-09-22T08:00:00+08:00").unwrap(),
+            "2026-09-22T00:00:00.000Z"
+        );
+        assert_eq!(
+            source_timestamp("2026-09-22T00:00:00.5Z").unwrap(),
+            "2026-09-22T00:00:00.500Z"
+        );
+        assert!(source_timestamp("yesterday").is_err());
+        assert!(source_timestamp("2026-09-22T00:00:00.000123Z").is_err());
+    }
+
+    #[test]
+    fn a_message_timestamp_is_its_own_observation_time() {
+        let mut timed = said("user", "I moved to Berlin.");
+        timed.timestamp = Some(1_758_499_200_000);
+        let ingest = observation_ingest(
+            &[said("user", "hi"), timed],
+            "2026-09-24T00:00:00.000Z",
+            "o",
+            None,
+        )
+        .unwrap();
+        let times: Vec<_> = ingest
+            .evidence
+            .iter()
+            .map(|e| e.observed_at.as_deref().unwrap())
+            .collect();
+        assert_eq!(
+            times,
+            ["2026-09-24T00:00:00.000Z", "2025-09-22T00:00:00.000Z"]
+        );
+        let manifest = observation_manifest(&ingest);
+        assert!(manifest.contains(":msg2 user_statement observed_at 2025-09-22T00:00:00.000Z"));
+    }
+
+    #[test]
     fn each_message_is_its_own_observation() {
         let messages = [
             said("user", "I always prefer dark mode."),
@@ -1111,26 +1244,33 @@ mod tests {
 
     #[test]
     fn model_learning_and_runtime_facets_are_rejected_by_ast_position() {
-        for facet in [
-            "TrialRecord",
-            "EvaluationRecord",
-            "AttemptRecord",
-            "OutcomeRecord",
-            "TrialState",
-            "GradingState",
-            "WatchState",
-            "LeaseState",
-        ] {
+        for facet in PROTECTED_FACETS {
             for command in [
                 format!(r#"CREATE ACTIVITY ?a {{ SET FACET "{facet}" {{ x:1 }} }}"#),
                 format!(
-                    r#"UPDATE "C-1" UNSET FACET "kip://profiles/cognitive-memory@2.1.0/{facet}" {{ x }}"#
+                    r#"UPDATE "C-1" UNSET FACET "{}{facet}" {{ x }}"#,
+                    crate::PROFILE
                 ),
                 r#"UPDATE "C-1" SET FACET :facet { x:1 }"#.to_string(),
             ] {
                 let ast = anda_kip::parse_kip(&command).unwrap();
                 assert!(
                     unsupported_cognitive_write(&ast, Some(&param("facet", facet))).is_some(),
+                    "{command}"
+                );
+            }
+        }
+        for field in PROTECTED_STRUCTURAL {
+            for command in [
+                format!(r#"UPDATE "C-1" SET STRUCTURAL {{ ("{field}", "C-2") }}"#),
+                format!(r#"UPDATE "C-1" UNSET STRUCTURAL {{ ("{field}", "C-2") }}"#),
+                format!(
+                    r#"UPSERT CONCEPT ?s {{ MATCH {{type:"Skill", key:"s"}} SET STRUCTURAL {{ ("{field}", "C-2") }} }}"#
+                ),
+            ] {
+                let ast = anda_kip::parse_kip(&command).unwrap();
+                assert!(
+                    unsupported_cognitive_write(&ast, None).is_some(),
                     "{command}"
                 );
             }

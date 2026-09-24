@@ -17,11 +17,34 @@ The opt-in `experiments` feature adds isolated host runs, consistent snapshots, 
 The [offline Eval API and CLI have been retired](anda_brain/README.md#offline-regression-and-instance-configuration). MIB now owns the migrated product regressions. Runtime policies belong to each Space; deployment prompts use immutable host configuration with the compiled KIP reference preserved.
 
 
-## KIP 2.0 / CognitiveMemory 2.1 update
+## KIP 2.0 update
 
-Rust uses published Nexus 0.13.4 and compatible DB/KIP packages, including the
-legacy migration corrections;
-the Worker uses published `@ldclabs/kip-do` 0.13. Skill behavior is an
+This release tracks KIP `3251912` and the Cognitive Memory Profile
+`kip://profiles/cognitive-memory@2.0.0` (revision `sha256:3ea9e459…`; the draft
+rewrote 2.0.0 in place, so only the digest names the revision). Rust builds on
+`anda_kip` / `anda_cognitive_nexus` 0.14 and the Worker on `@ldclabs/kip-do` 0.14.
+Spaces activated under the earlier 2.1.0 draft are not migrated; use new Spaces.
+KIP 1.x Spaces still upgrade automatically.
+
+- **World time.** A changed world is one new Assertion from the change; temporal
+  succession ends the older value, which keeps answering for its time.
+  Supersession is only for a claim that was wrong. Formation writes each claim's
+  `asserted_at` from the observation time of the message it cites; a message's
+  own `timestamp` is its observation time. An unparseable request `timestamp`
+  is now rejected (400) instead of silently becoming the receipt time.
+- **Options are typed by kind.** The Profile has no `Preference` type: an option
+  is a Concept typed by its kind (`ColorScheme`, `Editor`), declared through the
+  Space's vocabulary package when needed, and `prefers` is functional within one kind.
+- **Decay is computed.** No settlement sweep writes `memory_strength`; the engine
+  derives strength from base, anchor and a pinned policy, and a missing value is
+  unknown. `memory_strength_decay_factor` is deprecated and ignored.
+- **Attention recall.** `GET /v1/{space_id}/memory/attention` returns fired Watches
+  and due Commitments ordered by the commit that raised them, with a cursor the
+  caller keeps. Maintenance raises a due Commitment with a `commitment_review` Activity.
+- **Learning pointers.** Skills point at their `current_trial` / `current_evaluation`;
+  `GradingState` and lineage fields are computed and never written.
+
+Skill behavior is an
 immutable `SkillRevision`; Watch progress and task leases use protected Nexus
 operations. The former family-rate Skill promotion rule has been removed. Without
 configured independent observers, frozen trials and replayable evaluations,
@@ -29,8 +52,7 @@ procedures remain unproven and `skills.unsupported_reason` reports the limitatio
 Existing Brain endpoints remain available. The optional five-intent Memory Interface
 and its `memory_*` bundles are **not advertised** by these adapters.
 
-Formation normalizes RFC 3339 observation times and falls back to receipt time
-for invalid strings. Rust Markdown submissions receive the same captured Evidence
+Rust Markdown submissions receive the same captured Evidence
 as structured messages, and existing counterparty display names are preserved
 when no name is supplied. The Rust forget endpoint accepts explicit Evidence and
 Activity IDs as well as Concepts, Propositions and Assertions, subject to native
@@ -185,7 +207,7 @@ This is Anda Brain's most core differentiator—inspired by neuroscience. The hu
 
 The system scans unprocessed event nodes in the graph and performs **Essence Extraction**:
 
-- **Single-Event Consolidation**: An Event recording "Alice said she likes dark themes" is consolidated into a persistent Concept node of type `Preference`, with a `prefers` relationship to Alice. The original Event is marked as "consolidated".
+- **Single-Event Consolidation**: An Event recording "Alice said she likes dark themes" is consolidated into Alice's `prefers` claim about a `ColorScheme` option ("dark"), with the Event as its Evidence. A consolidation Activity records the Event as its input.
 - **Cross-Event Pattern Extraction**—The most crucial step. A single dialogue fragment might seem insignificant, but aggregating multiple related events reveals higher-order patterns that no single event could express:
   - Alice mentioned salmon, sea urchin, and sushi in three different conversations → Extracted pattern: "Prefers Japanese cuisine".
   - Alice always asks about cost before features in multiple project discussions → Extracted pattern: "Decision tendency: Cost-first".

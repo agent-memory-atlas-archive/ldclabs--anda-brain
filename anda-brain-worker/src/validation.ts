@@ -62,22 +62,18 @@ export function parseMaintenanceInput(value: unknown): MaintenanceInput {
   let parameters: MaintenanceInput['parameters']
   if (body.parameters !== undefined) {
     const raw = object(body.parameters, '`parameters` must be an object')
-    // There is deliberately no `confidence_decay_factor`. KIP 2.0 forbids
-    // decaying an Assertion's confidence over time: a fact nobody has asked
-    // about in a month is no less credible. What `memory_strength_decay_factor`
-    // paces is `MnemonicState.memory_strength`, which is accessibility, not
-    // truth. The Rust service accepts the old name as an alias; this one does
-    // not accept it at all, because there is no stored history here to keep
-    // compatible with.
+    // `memory_strength_decay_factor` is deprecated and ignored: decay is
+    // computed from a pinned strength policy at read time (Spec §59.1), so no
+    // sweep applies a factor. It is still range-checked, as in the Rust
+    // service, so a caller sending it is neither rejected nor misled. There is
+    // deliberately no `confidence_decay_factor`: KIP 2.0 forbids decaying an
+    // Assertion's confidence over time.
     //
     // The names match `anda_brain`'s `MaintenanceParameters` field for field,
     // including its `unsorted_max_backlog` alias for `unconsolidated_max_backlog`:
     // two products documented as one API have to accept one request body.
+    boundedFraction(raw.memory_strength_decay_factor, 'memory_strength_decay_factor')
     parameters = {
-      memory_strength_decay_factor: boundedFraction(
-        raw.memory_strength_decay_factor,
-        'memory_strength_decay_factor',
-      ),
       stale_event_threshold_days: boundedInteger(
         raw.stale_event_threshold_days,
         'stale_event_threshold_days',
@@ -325,18 +321,28 @@ function optionalString(value: unknown, name: string, max: number): string | und
   return requiredString(value, name, max)
 }
 
+/**
+ * A caller's observation time, validated at the API boundary: an RFC 3339
+ * instant in any offset with at most millisecond precision, returned in the
+ * canonical millisecond UTC spelling (Spec §6.5). Anything else is refused
+ * rather than replaced — the instant becomes each formed claim's start key.
+ */
 function optionalTimestamp(value: unknown): string | undefined {
-  return optionalString(value, 'timestamp', 64)
+  const text = optionalString(value, 'timestamp', 64)
+  if (text === undefined) return undefined
+  const canonical = canonicalTimestamp(text)
+  if (canonical === undefined) {
+    throw new ValidationError('`timestamp` must be an RFC 3339 instant with at most millisecond precision')
+  }
+  return canonical
 }
 
-/** Adapt external observation time; a malformed spelling must not lose input. */
-export function observationTimestamp(value: string | undefined, receivedAt: number): string {
-  const timestamp = value?.trim() ?? ''
-  const match = /^(\d{4})-(\d{2})-(\d{2})[Tt ](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$/.exec(timestamp)
-  const fallback = () => new Date(receivedAt).toISOString()
-  if (!match) return fallback()
-
-  const [, yearText, monthText, dayText, hourText, minuteText, secondText] = match
+function canonicalTimestamp(value: string): string | undefined {
+  const timestamp = value.trim()
+  const match = /^(\d{4})-(\d{2})-(\d{2})[Tt ](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(?:[Zz]|[+-]\d{2}:\d{2})$/.exec(timestamp)
+  if (!match) return undefined
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, fraction] = match
+  if (fraction !== undefined && /[^0]/.test(fraction.slice(3))) return undefined
   const year = Number(yearText)
   const month = Number(monthText)
   const day = Number(dayText)
@@ -356,10 +362,15 @@ export function observationTimestamp(value: string | undefined, receivedAt: numb
     second > 59 ||
     !Number.isFinite(instant)
   ) {
-    return fallback()
+    return undefined
   }
   const normalized = new Date(instant).toISOString()
-  return normalized.length === 24 ? normalized : fallback()
+  return normalized.length === 24 ? normalized : undefined
+}
+
+/** The observation time of validated input; missing uses the receipt time. */
+export function observationTimestamp(value: string | undefined, receivedAt: number): string {
+  return (value === undefined ? undefined : canonicalTimestamp(value)) ?? new Date(receivedAt).toISOString()
 }
 
 /**

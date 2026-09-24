@@ -2,6 +2,7 @@ import type { SourceIdentity } from './product.js'
 import type { RuntimeOperation } from './cognitive.js'
 import type { KipResult } from '@ldclabs/kip-do'
 import type { IngestContext, KipExecution, KipOperation } from './kip.js'
+import type { AttentionRecall, AttentionRecallInput } from './attention.js'
 
 export type JsonObject = Record<string, unknown>
 
@@ -61,9 +62,10 @@ export interface BrainRpc {
   maintenanceSnapshot(epoch: number, run: string): Promise<KipResult[]>
   acknowledgeCorrections(ids: string[], epoch: number): Promise<void>
   maintenanceAssessment(): Promise<MaintenanceAssessment>
-  settleMemory(nowMs: number, decayFactor?: number, run?: string, epoch?: number): Promise<SettlementReport>
+  settleMemory(nowMs: number, run?: string, epoch?: number): Promise<SettlementReport>
   stats(): Promise<BrainStats>
   vocabulary(): Promise<DeclaredVocabulary>
+  recallAttention(input: AttentionRecallInput): Promise<AttentionRecall>
 }
 
 export interface BrainStats {
@@ -125,7 +127,6 @@ export interface MaintenanceInput {
   scope?: 'full' | 'quick' | 'daydream'
   timestamp?: string
   parameters?: {
-    memory_strength_decay_factor?: number
     stale_event_threshold_days?: number
     unconsolidated_max_backlog?: number
     orphan_max_count?: number
@@ -236,11 +237,7 @@ export interface SkillSettlement {
 
 /** What the deterministic settlement did before the cycle's completion. */
 export interface SettlementReport {
-  /** A failed metabolism is not an empty successful sweep. */
-  decay_error?: string
   settled_at: string
-  /** Concepts whose `MnemonicState.memory_strength` the bulk sweep decayed. */
-  decayed: number
   watches: WatchSettlement
   skills: SkillSettlement
   corrections: CorrectionScan
@@ -273,8 +270,8 @@ export interface MaintenanceAssessment {
    * Assertions an actor superseded since the last cycle, each with the
    * cognition derived from it — the derivation review's input (§57.5). The
    * runtime walks `LIST DEPENDENTS` so the cycle does not have to guess which
-   * artifacts a revised root fed; a listed dependent is a candidate for
-   * `DerivationState {status: "stale"}`, not already stale.
+   * artifacts a revised root fed; a listed dependent is a candidate for a
+   * `review_derived` SleepTask, not already stale.
    */
   revised_roots: RevisedRoot[]
 }
@@ -305,7 +302,12 @@ export interface MutationPlan {
   summary: string
 }
 
-export interface RecallPlan {
+/**
+ * The model's read-only query plan for one Recall. Not KIP's `RecallPlan`, the
+ * pinned selector/method/scope plan of the Memory Interface, which this Worker
+ * does not implement.
+ */
+export interface RecallReadPlan {
   commands: string[]
 }
 

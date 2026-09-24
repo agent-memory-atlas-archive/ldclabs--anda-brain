@@ -23,7 +23,7 @@ export { AndaBrain }
 
 const MAX_BODY_BYTES = 256 * 1024
 const SPACE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
-const GET_ONLY = new Set(['info', 'formation_status', 'vocabulary'])
+const GET_ONLY = new Set(['info', 'formation_status', 'vocabulary', 'memory/attention'])
 const POST_ACTIONS = new Set([
   'formation',
   'memory/forget',
@@ -85,6 +85,20 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       }
       if (action === 'vocabulary') {
         return ok(await brain.vocabulary())
+      }
+      if (action === 'memory/attention') {
+        const cursor = url.searchParams.get('attention_cursor') ?? undefined
+        const limitText = url.searchParams.get('limit')
+        const limit = limitText === null ? undefined : Number(limitText)
+        try {
+          return ok(await brain.recallAttention({
+            ...(cursor === undefined ? {} : { attention_cursor: cursor }),
+            ...(limit === undefined ? {} : { limit }),
+          }))
+        } catch (error) {
+          if (error instanceof Error && /attention (cursor|limit)/.test(error.message)) throw new ValidationError(error.message)
+          throw error
+        }
       }
       return ok({
         formation_processing: false,

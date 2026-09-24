@@ -11,7 +11,7 @@ Attempt 和原生租约分派接入同一调度器。默认不安装生产执行
 详见[运行时接入与恢复](RUNTIME_cn.md)。Space fork 不能复制原生运行身份。内部 `memory_runtime/status` 只读当前
 配置，不领取任务或授予权限；现有 HTTP payload 和 token scopes 保持兼容。
 
-批量记忆强度代谢跳过 SleepTask/Watch 运行记录；宿主结算错误通过
+不再有批量记忆强度衰减：强度在读取时按钉住的策略计算（KIP Spec §59.1）。宿主结算错误通过
 assessment.settlement_errors 提供给维护模型。
 
 <a id="trusted-host-memory-product-contracts"></a>
@@ -20,7 +20,13 @@ assessment.settlement_errors 提供给维护模型。
 
 Rust `product` 模块提供由 Assertion 支撑的 `MemoryRecord`、稳定修订、明确的立场/语义生命周期/存储状态，以及 Evidence 的 typed 来源引用。`Space::product_records`、`product_record`、`product_source` 不负责终端用户认证；嵌入宿主在返回记录、预览、派生 ID 或来源引用前必须检查所有者及来源权限。摘要匹配证明来源关联，不证明推断正确。
 
-`Space::ingest_product` 接收有界、可信的 `SourceIdentity`，包含父会话/会话链标识，自然语言输入不能指定它。`product_prepare`、`product_commit`、`product_change`、`product_discard` 按 caller/operation 保存不可变请求，绑定修订、预览摘要及十分钟有效期。更正撤回旧 Assertion，创建新声明、用户更正 Evidence 和 Activity；不改写原 Concept 名称，也不伪造跨 Proposition 的 supersession。反向更正是新的条件操作。
+`Space::ingest_product` 接收有界、可信的 `SourceIdentity`，包含父会话/会话链标识，自然语言输入不能指定它。`product_prepare`、`product_commit`、`product_change`、`product_discard` 按 caller/operation 保存不可变请求，绑定修订、预览摘要及十分钟有效期。`ChangeKind` 指明变更写入哪一种历史（KIP Spec §14.2、Memory Interface §4）：
+
+- `Correct`：调用者自己的主张写错了。新主张带用户陈述 Evidence，supersede 旧 Assertion，并保留其原有的世界时间区间（缺失的起点写成 `{latest: <原 asserted_at>}`），由 `belief_revision` Activity 记录；旧 Assertion 状态为 `superseded`。
+- `WorldChange`：世界变了。从现在起写一条新主张，时序继承结束旧值；旧值保持 `active`，仍回答它所在时段的问题。
+- `Misrecorded`：Brain 记下了调用者从未说过的话。这需要 recording repair，本部署不提供，因此 prepare 返回 `unsupported_capability`，绝不写成更正或世界变化。
+
+以上都不改写原 Concept 名称，也不伪造跨 Proposition 的 supersession。撤销是新的条件变更。
 
 `Suppress` 归档，`Delete` 清除已声明的有界集合：选定 Proposition/Assertions、引用输入及已记录的反向依赖。未知来源、Concept 级联、保留约束和超过 128 项的集合会被拒绝。写入前先持久接受来源排除与处理 epoch；原生任务不因 API 等待者取消而丢失，Space 重载开放前会恢复已接受操作。旧 Formation/Maintenance/Notes 写入被版本栅栏拦截。变更清空处理 Notes 和 miss cache、停止向新上下文注入旧处理历史，并限制自动 KIP 读取当前 active 数据；可信所有者审计接口保持独立。Recall 返回上下文前重新核对捕获的 epoch。
 
@@ -48,14 +54,15 @@ Anda Bot 当前通过同级临时 patch 使用这些合同。改用已发布的 
 - 大多数业务接口都会返回 RPC 包装后的结构体：`RpcResponse<T>`
 - MCP 客户端可使用内置的支持流式传输的 HTTP MCP 端点：`/mcp/<space_id>`，也可以使用本地 stdio server：`anda_brain mcp --space-id <space_id> [local|aws]`
 
-CognitiveMemory 2.1 对齐说明：现有 JSON/CBOR/Markdown 请求和鉴权保持兼容；没有新增
-五意图 Memory Interface 或标准 after barrier。conversation id 不是处理回执。
+KIP `3251912` / `cognitive-memory@2.0.0` 对齐说明：鉴权与 JSON/CBOR/Markdown 协商保持
+兼容；新增 `GET /v1/{space_id}/memory/attention`；settlement 报告移除衰减字段与
+`retention.expired_assertions`（衰减与主张到期在读取时计算）；`memory_strength_decay_factor`
+弃用；无法解析的 formation `timestamp` 返回 400。没有新增五意图 Memory Interface 或
+标准 after barrier。conversation id 不是处理回执。
 维护报告 `skills` 新增可选 `unsupported_reason`，说明没有配置可信学习管线，旧计数
 保持零。Watch 的 `disarmed` 兼容字段也统计 Nexus 的 expired；文本 Watch 无已配置的语义求值器时保持 deferred。
 模型生成的 Formation 请求不得覆盖宿主捕获的 ingest 或 msgN 绑定；学习/runtime Facet
 写入返回 UnsupportedCapability。原始管理 KIP 仍接受符合 Nexus 契约的受权写入。
-使用精确 `@2.0.0` schema_ref 的旧 Watch/SleepTask 不能原地改成 2.1，需要显式创建、
-重连并核验替代记录后再归档旧记录。
 
 ---
 
@@ -103,7 +110,7 @@ export interface Message {
 export interface FormationInput {
   messages: Message[]; // 至少包含一条非空消息（否则 400）
   context?: InputContext;
-  timestamp?: string; // RFC 3339；统一为 UTC 毫秒格式，无效或缺省时使用接收时间
+  timestamp?: string; // RFC 3339；规范为 UTC 毫秒格式；无法解析或精度超过毫秒返回 400；缺省时使用接收时间
 }
 
 export interface RecallInput {
@@ -115,15 +122,15 @@ export interface RecallInput {
 export interface RecallBudget {
   tokenizer?: 'o200k_base@tiktoken-rs-0.12.0';
   max_tokens?: number; // 1–65536；显式启用后的默认值为 4096
-  context_tokens?: number; // 1–131072；默认 32768；整次规划输入规范序列化的累计上限
+  context_tokens?: number; // 1–131072；默认 49152；整次规划输入规范序列化的累计上限
 }
 
 export interface MemoryPolicy {
   version?: number;
-  memory_strength_decay_factor?: number;
+  memory_strength_decay_factor?: number; // 已弃用；仅为兼容已保存策略保留，不生效
   recall_reinforcement?: number; // retained for stored-policy compatibility; inert
   correction_penalty?: number; // retained for stored-policy compatibility; inert
-  decay_floor?: number;
+  decay_floor?: number; // 已弃用；仅为兼容已保存策略保留，不生效
   stale_event_threshold_days?: number;
   unconsolidated_max_backlog?: number;
   orphan_max_count?: number;
@@ -216,7 +223,6 @@ export interface MemoryMetrics {
   self_test_grounded: number;
   reencode_tasks: number;
   corrections: number;
-  decayed: number;
   uncertainty_reports: number;
   uncertainty_sum: number;
   forgotten_entities: number;
@@ -251,17 +257,13 @@ export interface SkillSettlement {
 export interface MemorySettlementReport {
   settled_at: number;
   revised_roots?: unknown[];
-  decayed: number;
-  decay_ran: boolean;
   new_corrections: number;
   watches: WatchSettlement;
   skills: SkillSettlement;
-  decay_error?: string;
   correction_scan_error?: string;
   correction_scan_incomplete: boolean;
   correction_scan_through_seq: number;
-  retention: {
-    expired_assertions: number;
+  retention: { // 保留期已到的记录；主张有效期在读取时计算
     archived: number;
     held: number;
     refused: number;
@@ -311,7 +313,7 @@ export interface MemoryStatus {
 
 export interface MaintenanceParameters {
   stale_event_threshold_days?: number; // [1, 365]
-  memory_strength_decay_factor?: number; // (0, 1]；旧名 confidence_decay_factor 仍被接受
+  memory_strength_decay_factor?: number; // 已弃用并被忽略；仍校验 (0, 1]；旧名 confidence_decay_factor 仍被接受
   unconsolidated_max_backlog?: number; // [1, 10000]；旧名 unsorted_max_backlog 仍被接受
   orphan_max_count?: number; // [1, 10000]
 }
@@ -861,7 +863,7 @@ MCP 只读 KIP 工具使用 `commands`，并为批量读取补上 independent �
 - 作用：提交记忆写入任务
 - 鉴权：SpaceToken/CWT `write`
 - 请求体：`FormationInput`（Markdown 模式下也允许原始字符串）
-- 观察时间接受带时区偏移和不同小数精度的 RFC 3339，统一为 `YYYY-MM-DDTHH:mm:ss.SSSZ`。无效或缺省的时间戳使用已保存的会话创建时间，重试沿用同一回退时间，并保留原始输入。Markdown 原文按一条 user 消息原样捕获，同样提供 `:msg1` Evidence 绑定。
+- 观察时间接受任意时区偏移、最多毫秒精度的 RFC 3339 时刻，规范为 `YYYY-MM-DDTHH:mm:ss.SSSZ`；无法解析或精度超过毫秒的值直接拒绝（400），不会被替换。缺省时使用已保存的会话创建时间，重试沿用同一回退时间。消息自带的 `timestamp`（Unix 毫秒）是该条消息的观察时间。Formation 按所引用消息的观察时间写入每条主张的 `asserted_at`，而不是 Formation 运行的时间（KIP Spec §13.2）。Markdown 原文按一条 user 消息原样捕获，同样提供 `:msg1` Evidence 绑定。
 - 响应（JSON/CBOR）：`RpcResponse<AgentOutput>`
 - 响应（Markdown）：`string`（仅返回 `AgentOutput.content`）
 
@@ -928,7 +930,7 @@ RPC/MCP 传输副本不属于这些范围。不根据模型名猜编码，也不
 
 ### POST `/v1/{space_id}/memory/pin`
 
-- 作用：固定或取消固定一个图谱实体；固定后其记忆强度不参与闲置衰减。
+- 作用：固定或取消固定一个图谱实体（`pinned` 保留类别，不参与保留期归档）。
 - 鉴权：SpaceToken/CWT `write`
 - 请求体：`MemoryPinInput`；`pinned` 默认 `true`。
 - 响应：`RpcResponse<MemoryPinOutput>`
@@ -942,6 +944,38 @@ RPC/MCP 传输副本不属于这些范围。不根据模型名猜编码，也不
 
 接受显式的 Concept（`C-*`）、Proposition（`P-*`）、Assertion（`A-*`）、Evidence（`E-*`）和 Activity（`X-*`）ID，包括保存消息原文的 Evidence。原生 legal hold 和引用检查仍然生效，成功清除后保留已擦除身份桩。计数分别报告各类被清除记录，包含级联删除。此操作清除所选图谱记录；已保存的会话、wiki 文档及外部副本各有独立生命周期。
 引用已清除元素的产品预览会在报告成功前清理；预览清理失败会写入该实体的错误字段。
+
+### GET `/v1/{space_id}/memory/attention`
+
+- 作用：注意力召回（KIP Memory Interface §4）：返回调用方所保存游标之后，已触发的 Watch 与 Maintenance 判定到期的 Commitment。
+- 鉴权：SpaceToken/CWT `read`；公开空间允许匿名读取。
+- 查询参数：`AttentionRecallInput`——`attention_cursor`（可选）、`limit`（1–50 条提起记录，默认 20）。
+- 响应：`RpcResponse<AttentionRecall>`，保持 JSON/CBOR/Markdown 协商。游标或 limit 无效返回 400。
+
+```ts
+export interface AttentionRecallInput {
+  attention_cursor?: string; // "attention:<n>"；缺省或 "attention:-1" 表示从第一次提起开始
+  limit?: number; // 1–50；默认 20
+}
+
+export interface AttentionRecall {
+  items: AttentionItem[]; // 按 raised_seq 排序
+  attention_cursor: string; // "attention:<已交付的最大 raised_seq>"；取走条目后由调用方保存
+  complete: boolean; // 输入游标之后的所有提起是否都已读完
+}
+
+export interface AttentionItem {
+  ref: string; // 被提起的 Watch 或 Commitment
+  kind: 'watch_fired' | 'commitment_due';
+  summary: string;
+  raised_seq: number; // watch_fire / commitment_review Activity 的 space_seq
+  due_at?: string;
+  target_refs: string[]; // Watch 的 `watches` 目标，或该 Commitment
+  priority?: number;
+}
+```
+
+每个条目都由一次提交提起：`watch_fire` Activity，或 Maintenance 在其中列出到期 Commitment 的 `commitment_review` Activity；仅仅过了 `due_at` 不会提起任何条目。读取不改变记忆，游标不会过期，调用方取走条目后自行保存。条目不授予任何权限：据此行动仍须经过 action gate 与 Governance。它与有身份的运行时收件箱（`GET /v1/{space_id}/attention`，按 action gate 的 wake 记录分页）相互独立。
 
 ### GET `/v1/{space_id}/memory_status`
 

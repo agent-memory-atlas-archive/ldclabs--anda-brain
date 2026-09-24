@@ -23,8 +23,8 @@ metadata:
 
 # 🧠 Anda Brain
 
-This skill targets the Rust **Anda Brain 0.12.1** service with KIP 2.0,
-CognitiveMemory 2.1, published Nexus 0.13.4 and KIP 0.13.1. The Cloudflare Worker uses a
+This skill targets the Rust **Anda Brain 0.12.1** service with KIP 2.0 (`3251912`),
+`cognitive-memory@2.0.0`, Nexus 0.14 and KIP 0.14. The Cloudflare Worker uses a
 separate engine and does not acquire these Rust runtime capabilities automatically.
 Check the deployed service and its configuration before choosing an optional path.
 
@@ -110,7 +110,7 @@ Use Anda Brain when your agent needs to:
 - **Persist knowledge across sessions** — user preferences, facts, decisions, relationships, events
 - **Recall previous context** — what happened before, what the user said, what decisions were made
 - **Share memory across agents** — multiple agents can read/write to the same space
-- **Maintain memory health** — consolidate old events, deduplicate facts, decay stale knowledge
+- **Maintain memory health** — consolidate old events, deduplicate facts, review stale knowledge
 
 The service handles all the complexity of knowledge graph management. Your agent just sends messages and asks questions in natural language.
 
@@ -141,7 +141,7 @@ The Formation agent extracts three types of memory from conversations:
 
 The underlying knowledge graph consists of:
 
-- **Concept Nodes** — Entities with a type and name (e.g., `{type: "Person", name: "Alice"}`, `{type: "Preference", name: "dark_mode"}`)
+- **Concept Nodes** — Entities with a type and name (e.g., `{type: "Person", name: "Alice"}`, `{type: "ColorScheme", name: "dark_mode"}`; an option is typed by its kind)
 - **Proposition Links** — Directed relationships between concepts (e.g., `(Alice, "prefers", dark_mode)`)
 
 ---
@@ -312,11 +312,13 @@ Content-Type: application/json
 | `context.agent` | `string` | No | Calling agent identifier |
 | `context.source` | `string` | No | Identifier of the source of the current interaction content |
 | `context.topic` | `string` | No | Conversation topic |
-| `timestamp` | `string` | No (recommended) | RFC 3339; normalized to UTC milliseconds, invalid/missing uses receipt time |
+| `timestamp` | `string` | No (recommended) | RFC 3339 instant, canonicalized to UTC milliseconds; unparseable or sub-millisecond is 400; missing uses receipt time |
 
-Timestamp spelling never discards a conversation: offsets and fractional precision
-are normalized, and an unusable string falls back to the durable conversation
-creation time. Retries keep that fallback and the original input. In Markdown
+Send the time the conversation actually happened: formed claims take it as their
+`asserted_at`, the start key of temporal succession. A message's own `timestamp`
+(Unix ms) overrides it for that message. Offsets and up to millisecond precision
+are canonicalized; an unparseable value is rejected rather than replaced, and a
+missing one uses the durable conversation creation time. In Markdown
 mode, raw text is captured verbatim as one user message with the usual `:msg1`
 Evidence binding. Resolving an existing counterparty without `name` preserves its
 display name; an explicitly supplied name still updates it.
@@ -337,7 +339,7 @@ conversation; use the stored conversation/restart path when retrying existing wo
 
 - Include the `context` field whenever possible — it helps the encoder associate knowledge correctly
 - Send complete conversation segments, not individual messages
-- Include timestamps to enable proper temporal reasoning
+- Include timestamps (the time things were said, not the time you submit) so a late submission never overrides newer memory
 - The `name` field in messages helps distinguish between multiple users in the same conversation
 
 ---
@@ -379,7 +381,7 @@ Note: `result.content` is the primary contract. Additional fields may vary by mo
 
 **Optional budget mode (Rust service):** add `budget` with the fixed tokenizer
 `o200k_base@tiktoken-rs-0.12.0`, `max_tokens` (1–65536), and `context_tokens`
-(1–131072). An explicit empty object defaults to 4096 output / 32768 cumulative
+(1–131072). An explicit empty object defaults to 4096 output / 49152 cumulative
 normalized planning-input tokens. `memory_policy.recall_budget` can enforce
 ceilings; omitting the request budget cannot disable that policy.
 
@@ -637,6 +639,12 @@ If `ED25519_PUBKEYS` is empty, core local MCP memory tools can omit tokens; runt
 4. Retry unresolved writes with the same event key/body and fresh authentication.
    Changed content under the same key conflicts. A deadline timeout is not consent;
    unknown delivery requires target reconciliation, not blind resending.
+
+Attention recall is a separate, read-only view: `GET /v1/{space_id}/memory/attention`
+with `attention_cursor` (optional) and `limit` (1–50) returns fired Watches
+(`watch_fired`) and due Commitments (`commitment_due`) ordered by `raised_seq`,
+plus a new `attention_cursor`. Keep that cursor after taking the items and pass it
+next time; it never expires, and reading changes nothing. An item grants nothing.
 
 These routes use structured JSON/CBOR POST bodies and JSON/CBOR/Markdown responses.
 Runtime credentials are mandatory even on public/local Spaces. Configuration is

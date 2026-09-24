@@ -4,7 +4,7 @@ use super::*;
 use anda_cognitive_nexus::{content_digest, nexus::DEFAULT_SPACE};
 use serde_json::{Value, json};
 
-const PROFILE: &str = "kip://profiles/cognitive-memory@2.1.0/";
+use crate::PROFILE;
 const LIMIT: usize = 256;
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 
@@ -88,10 +88,10 @@ async fn audit(space: &Space, limit: usize, max_bytes: usize) -> Result<Procedur
                 json!({"id":row["id"], "lifecycle":row["lifecycle"],
                     "record":row["facets"][format!("{PROFILE}{facet}")]})
             } else {
+                // `current_trial` / `current_evaluation` are in `structural`;
+                // GradingState is a computed view of the latter.
                 json!({"id":row["id"],"name":row["name"],"lifecycle":row["lifecycle"],
-                    "attributes":row["attributes"],"structural":row["structural"],
-                    "trial":row["facets"][format!("{PROFILE}TrialState")],
-                    "grade":row["facets"][format!("{PROFILE}GradingState")]})
+                    "attributes":row["attributes"],"structural":row["structural"]})
             };
             let size = serde_json::to_vec(&projected)?.len();
             if size > max_bytes.saturating_sub(bytes) {
@@ -109,20 +109,23 @@ async fn audit(space: &Space, limit: usize, max_bytes: usize) -> Result<Procedur
                 .into(),
         );
     }
+    let pointer = |row: &Value, field: &str| {
+        row["structural"][format!("{PROFILE}{field}")]
+            .as_array()
+            .filter(|v| v.len() == 1)
+            .and_then(|v| reference(&v[0]))
+    };
     let skills = projections["skills"]
         .iter()
         .map(|row| ProcedureAuditSkill {
             skill_ref: row["id"].as_str().unwrap_or_default().into(),
-            revision_ref: row["structural"][format!("{PROFILE}current_revision")]
-                .as_array()
-                .filter(|v| v.len() == 1)
-                .and_then(|v| reference(&v[0])),
+            revision_ref: pointer(row, "current_revision"),
             status: row["attributes"]["status"]
                 .as_str()
                 .unwrap_or("unknown")
                 .into(),
-            evaluation_ref: reference(&row["grade"]["evaluation_ref"]),
-            trial_ref: reference(&row["trial"]["trial_ref"]),
+            evaluation_ref: pointer(row, "current_evaluation"),
+            trial_ref: pointer(row, "current_trial"),
             recommendation_allowed: None,
         })
         .collect();

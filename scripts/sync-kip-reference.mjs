@@ -26,6 +26,7 @@ const contents = files.map(file => [file, readFileSync(join(source, file))])
 for (const file of [...files, 'KIPSyntax.md', 'profiles/CognitiveMemoryProfile-2.0.md',
   'brain/KIPRecall.md', 'brain/KIPFormation.md', 'brain/KIPMaintenance.md',
   'Cognitive-Consistency.md', 'Memory-Interface.md', 'brain/MemoryInterface.md',
+  'brain/Brain-Runtime.md', 'brain/Validated-Learning.md', 'schemas/kip-common.schema.json',
   'schemas/kip-projection.schema.json', 'schemas/kip-memory.schema.json',
   'schemas/kip-cognitive-records.schema.json', 'schemas/kip-element.schema.json',
   'schemas/kip-schema-package.schema.json']) {
@@ -44,7 +45,9 @@ if (process.argv.includes('--worker')) {
     'KIPSyntax.md': 'syntax', 'profiles/CognitiveMemoryProfile-2.0.md': 'profile',
     'brain/KIPRecall.md': 'recall', 'brain/KIPFormation.md': 'formation', 'brain/KIPMaintenance.md': 'maintenance',
     'Cognitive-Consistency.md': 'consistency', 'Memory-Interface.md': 'memory-interface',
-    'brain/MemoryInterface.md': 'memory-interface-card', 'schemas/kip-projection.schema.json': 'schema-projection',
+    'brain/MemoryInterface.md': 'memory-interface-card', 'brain/Brain-Runtime.md': 'brain-runtime',
+    'brain/Validated-Learning.md': 'validated-learning', 'schemas/kip-common.schema.json': 'schema-common',
+    'schemas/kip-projection.schema.json': 'schema-projection',
     'schemas/kip-memory.schema.json': 'schema-memory', 'schemas/kip-cognitive-records.schema.json': 'schema-records',
     'schemas/kip-element.schema.json': 'schema-element', 'schemas/kip-schema-package.schema.json': 'schema-package',
   }

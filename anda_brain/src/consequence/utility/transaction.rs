@@ -37,9 +37,7 @@ impl UtilityRuntime {
                     && activity.origin["_kip_runtime"]["output_versions"][id]
                         == row["_system"]["version"]
                     && activity.outputs.iter().any(|v| v == id || v["id"] == id)
-                    && let Some(basis) = activity
-                        .facets
-                        .get("kip://profiles/cognitive-memory@2.1.0/DependencyBasis")
+                    && let Some(basis) = activity.facets.get(profile!("DependencyBasis"))
                 {
                     full_read(&self.nexus.system_session(), reference).await?;
                     return Ok(Some((reference.clone(), basis.clone())));
@@ -64,8 +62,7 @@ impl UtilityRuntime {
         if let Some(activity) = kip::ok_result(&response)
             .and_then(|r| r.as_array())
             .and_then(|a| a.first())
-            && let Some(basis) =
-                activity["facets"].get("kip://profiles/cognitive-memory@2.1.0/DependencyBasis")
+            && let Some(basis) = activity["facets"].get(profile!("DependencyBasis"))
         {
             return Ok(Some((
                 activity["id"]
@@ -127,7 +124,7 @@ impl UtilityRuntime {
             // No row/plane version changes when the input is unchanged. This
             // lets the same native transaction reject a correction racing the
             // utility write, without adding metadata to Evidence/Assertions.
-            let held = &view["facets"]["kip://profiles/cognitive-memory@2.1.0/OutcomeRecord"];
+            let held = &view["facets"][profile!("OutcomeRecord")];
             let action = if let Some(key) = held["observation_key"].as_str() {
                 format!(
                     "SET FACET \"OutcomeRecord\" {{observation_key:{}}}",

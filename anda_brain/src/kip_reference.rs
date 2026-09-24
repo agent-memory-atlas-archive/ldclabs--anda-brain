@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::sync::LazyLock;
 
-const VERSION: &str = "0.13.1";
+const VERSION: &str = "0.14.0";
 const PAGE_BYTES: usize = 8192;
 
 pub(crate) const INSTRUCTIONS: &str = "# Embedded KIP references\n\
@@ -76,6 +76,16 @@ static DOCUMENTS: LazyLock<Vec<Document>> = LazyLock::new(|| {
             anda_kip::MEMORY_AGENT_CARD
         ),
         doc!(
+            "brain-runtime",
+            "brain/Brain-Runtime.md (brain/KIP-2.0-Brain-Runtime.md)",
+            anda_kip::BRAIN_RUNTIME
+        ),
+        doc!(
+            "validated-learning",
+            "brain/Validated-Learning.md (brain/KIP-2.0-Validated-Learning.md)",
+            anda_kip::VALIDATED_LEARNING
+        ),
+        doc!(
             "specification",
             "SPECIFICATION.md (KIP-2.0-SPECIFICATION.md)",
             include_str!("../assets/kip-reference/SPECIFICATION.md")
@@ -114,6 +124,11 @@ static DOCUMENTS: LazyLock<Vec<Document>> = LazyLock::new(|| {
             "schema-response",
             "schemas/kip-response.schema.json",
             include_str!("../assets/kip-reference/schemas/kip-response.schema.json")
+        ),
+        doc!(
+            "schema-common",
+            "schemas/kip-common.schema.json",
+            anda_kip::COMMON_SCHEMA
         ),
         doc!(
             "schema-projection",
@@ -362,6 +377,9 @@ mod tests {
             "schema-request",
             "schema-response",
             "memory-interface",
+            "brain-runtime",
+            "validated-learning",
+            "schema-common",
         ] {
             assert!(DOCUMENTS.iter().any(|d| d.id == id));
         }

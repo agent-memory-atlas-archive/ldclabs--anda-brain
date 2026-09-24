@@ -17,7 +17,7 @@ const MAX_CALLS_PER_TURN: usize = 4;
 const MAX_ROWS: usize = 32;
 const MAX_BYTES: usize = 1024 * 1024;
 const SELECT: &str = "select_recall_items";
-const PROFILE: &str = "kip://profiles/cognitive-memory@2.1.0/";
+use crate::PROFILE;
 const ALL_CHANNELS: [Channel; 7] = [
     Channel::Primer,
     Channel::Notes,

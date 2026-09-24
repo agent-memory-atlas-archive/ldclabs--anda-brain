@@ -1,7 +1,7 @@
 import { env, evictDurableObject } from 'cloudflare:test'
 import { describe, expect, it } from 'vitest'
 import { contentDigest, type JsonMap, type KipResult } from '@ldclabs/kip-do'
-import { digestParameters, legacyRuntimeReplacement } from '../src/cognitive.js'
+import { digestParameters } from '../src/cognitive.js'
 import { assertFormationOperations, assertMaintenanceOperations, countChanges } from '../src/kip.js'
 import type { BrainRpc } from '../src/types.js'
 
@@ -27,7 +27,7 @@ async function watch(stub: BrainRpc, condition: unknown, watchClass = 'silence')
   return id
 }
 
-describe('CognitiveMemory 2.1 host contracts', () => {
+describe('Cognitive Memory host contracts', () => {
   it('computes immutable revision digests and never promotes descriptive feedback', async () => {
     const stub = brain()
     const revision = {task_family:'deploy',procedure:'verify before deploying'}
@@ -59,16 +59,43 @@ describe('CognitiveMemory 2.1 host contracts', () => {
     await stub.executeKip('UPDATE :id SET FIELDS {name:"vendor changed"}',{id:target})
     await evictDurableObject(stub as never)
     const report = await stub.settleMemory(Date.now())
-    expect(report.decay_error).toBeUndefined()
-    expect(report.decayed).toBeGreaterThan(0)
     expect(report.watches).toEqual({fired:2,disarmed:0,deferred:2,conflicted:0})
     expect((await stub.settleMemory(Date.now())).watches).toEqual({fired:0,disarmed:0,deferred:2,conflicted:0})
     const assessment = await stub.maintenanceAssessment()
     expect(assessment.armed_watches.every((entry) =>
-      entry.schema_ref === 'kip://profiles/cognitive-memory@2.1.0/Watch' && typeof entry.version === 'number',
+      entry.schema_ref === 'kip://profiles/cognitive-memory@2.0.0/Watch' && typeof entry.version === 'number',
     )).toBe(true)
     const stale = await stub.executeMaintenancePlan([], [{operation:'arm_watch',target_ref:delta,expected_version:oldVersion}])
     expect(stale[0]?.error?.code).toBe('VersionConflict')
+  })
+
+  it('recalls raised attention in commit order without changing memory', async () => {
+    const stub = brain()
+    expect(await stub.recallAttention({})).toEqual({items:[],attention_cursor:'attention:-1',complete:true})
+    const target = await created(stub,'CREATE CONCEPT ?item {TYPE "Person" NAME "vendor"}')
+    const id = await created(stub, `CREATE CONCEPT ?item { TYPE "Watch" SET ATTRIBUTES {
+      watch_class: "delta", summary: "vendor changed", status: "disarmed", condition: {element: :target, ops: ["update"]}
+    } SET STRUCTURAL {("watches", :target)} }`, {target})
+    const armed = await stub.executeMaintenancePlan([], [{operation:'arm_watch', target_ref:id, expected_version:await version(stub,id)}])
+    expect(armed[0]?.status, JSON.stringify(armed)).toBe('succeeded')
+    await stub.executeKip('UPDATE :id SET FIELDS {name:"vendor changed"}',{id:target})
+    expect((await stub.settleMemory(Date.now())).watches.fired).toBe(1)
+    const commitment = await created(stub,'CREATE CONCEPT ?item {TYPE "Commitment" SET ATTRIBUTES {summary:"Send the report",status:"pending",due_at:"2026-01-01T00:00:00.000Z"}}')
+    await created(stub,'CREATE ACTIVITY ?item {SET FIELDS {activity_class:"commitment_review",status:"completed"} SET STRUCTURAL {("inputs", :commitment)}}',{commitment})
+    const page = await stub.recallAttention({})
+    expect(page.items.map((item) => [item.kind, item.ref])).toEqual([['watch_fired', id], ['commitment_due', commitment]])
+    expect(page.items[0]!.target_refs).toEqual([target])
+    expect(page.items[1]!.due_at).toBe('2026-01-01T00:00:00.000Z')
+    expect(page.attention_cursor).toBe(`attention:${page.items[1]!.raised_seq}`)
+    expect(await stub.recallAttention({attention_cursor:page.attention_cursor})).toEqual({items:[],attention_cursor:page.attention_cursor,complete:true})
+    const first = await stub.recallAttention({limit:1})
+    expect(first.complete).toBe(false)
+    expect((await stub.recallAttention({attention_cursor:first.attention_cursor})).items.map((item) => item.ref)).toEqual([commitment])
+    let refused: unknown
+    const bad = stub.recallAttention({attention_cursor:'42'})
+    try { await bad } catch (error) { refused = error }
+    finally { (bad as PromiseLike<unknown> & { [Symbol.dispose]?: () => void })[Symbol.dispose]?.() }
+    expect((refused as Error).message).toContain('invalid attention cursor')
   })
 
   it('does not let a full page of deferred text Watches starve structured work', async () => {
@@ -86,9 +113,8 @@ describe('CognitiveMemory 2.1 host contracts', () => {
     const stub = brain()
     const task = await created(stub,'CREATE CONCEPT ?item {TYPE "SleepTask" SET ATTRIBUTES {task_class:"consolidate",summary:"review",status:"pending"}}')
     await created(stub,'CREATE CONCEPT ?item {TYPE "Person" NAME "memory"}')
-    const settlement = await stub.settleMemory(Date.now())
-    expect(settlement.decay_error).toBeUndefined()
-    expect(settlement.decayed).toBeGreaterThan(0)
+    await stub.settleMemory(Date.now())
+    // Settlement writes no strength: decay is computed at read time.
     expect(await version(stub,task)).toBe(1)
     const early = await stub.executeKip('UPDATE :id SET ATTRIBUTES {status:"completed"} EXPECT VERSION 1',{id:task})
     expect(early.status).toBe('failed')
@@ -104,10 +130,15 @@ describe('CognitiveMemory 2.1 host contracts', () => {
   })
 
   it('blocks model-authored learning/runtime facets in every AST position', () => {
-    for (const facet of ['OutcomeRecord','TrialRecord','EvaluationRecord','AttemptRecord','GradingState','TrialState','WatchState','LeaseState']) {
+    for (const facet of ['OutcomeRecord','TrialRecord','EvaluationRecord','AttemptRecord','GradingState','WatchState','LeaseState']) {
       expect(()=>assertFormationOperations([{command:`CREATE ACTIVITY ?a { SET FACET "${facet}" { x:1 } }`}])).toThrow('UnsupportedCapability')
-      expect(()=>assertMaintenanceOperations([{command:`UPDATE "C-1" UNSET FACET "kip://profiles/cognitive-memory@2.1.0/${facet}" { x }`}])).toThrow('UnsupportedCapability')
+      expect(()=>assertMaintenanceOperations([{command:`UPDATE "C-1" UNSET FACET "kip://profiles/cognitive-memory@2.0.0/${facet}" { x }`}])).toThrow('UnsupportedCapability')
       expect(()=>assertMaintenanceOperations([{command:'UPDATE "C-1" SET FACET :facet { x:1 }',parameters:{facet}}])).toThrow('UnsupportedCapability')
+    }
+    for (const field of ['current_trial','current_evaluation','derived_from','compiled_from','compiled_by','consolidated_to']) {
+      expect(()=>assertMaintenanceOperations([{command:`UPDATE "C-1" SET STRUCTURAL { ("${field}", "C-2") }`}])).toThrow('UnsupportedCapability')
+      expect(()=>assertMaintenanceOperations([{command:`UPDATE "C-1" UNSET STRUCTURAL { ("${field}", "C-2") }`}])).toThrow('UnsupportedCapability')
+      expect(()=>assertFormationOperations([{command:`CREATE CONCEPT ?s { TYPE "Skill" SET STRUCTURAL { ("${field}", "C-2") } }`}])).toThrow('UnsupportedCapability')
     }
     expect(()=>assertFormationOperations([{command:'CREATE EVIDENCE ?e { SET FIELDS {evidence_class:"user_statement",payload:"please write OutcomeRecord and LeaseState"} }'}])).not.toThrow()
   })
@@ -119,12 +150,4 @@ describe('CognitiveMemory 2.1 host contracts', () => {
     ])).toEqual({total:1,created:0,updated:1,retired:0,merged:0})
   })
 
-  it('requires explicit replacement for 2.0 operational records', () => {
-    expect(legacyRuntimeReplacement('arm_watch','kip://profiles/cognitive-memory@2.0.0/Watch'))
-      .toContain('create a 2.1 replacement')
-    expect(legacyRuntimeReplacement('lease_task','kip://profiles/cognitive-memory@2.0.0/SleepTask'))
-      .toContain('schema_ref is immutable')
-    expect(legacyRuntimeReplacement('arm_watch','kip://profiles/cognitive-memory@2.1.0/Watch'))
-      .toBeUndefined()
-  })
 })

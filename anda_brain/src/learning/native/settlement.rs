@@ -42,6 +42,10 @@ pub struct PreparedVerdict {
     pub skill_ref: String,
     pub revision_ref: String,
     pub trial_ref: Option<String>,
+    /// The Skill's `current_trial` when this verdict was prepared, so a
+    /// verdict without a trial can clear the pointer it no longer selects.
+    #[serde(default)]
+    pub current_trial: Option<String>,
     pub expected_skill_version: u64,
     pub from_status: String,
     pub to_status: String,
@@ -171,9 +175,7 @@ impl NativeLearning {
                 "acquisition settlement requires its prior activation",
             ));
         }
-        if from == "trialed"
-            && skill["facets"][format!("{PROFILE}TrialState")]["trial_ref"] != input.trial_ref
-        {
+        if from == "trialed" && pointer(&skill, "current_trial") != Some(input.trial_ref.as_str()) {
             return Err(invalid(
                 "acquisition settlement must use the currently activated trial",
             ));
@@ -213,11 +215,10 @@ impl NativeLearning {
             return Err(invalid("active trial differs from its frozen binding"));
         }
         match skill["attributes"]["status"].as_str() {
+            // `current_trial` is cleared whenever the selected revision
+            // changes, and `settlement_skill` already checked the selection.
             Some("trialed")
-                if skill["facets"][format!("{PROFILE}TrialState")]["trial_ref"]
-                    == input.trial_ref
-                    && skill["facets"][format!("{PROFILE}TrialState")]["revision_ref"]
-                        == input.plan.candidate_revision =>
+                if pointer(&skill, "current_trial") == Some(input.trial_ref.as_str()) =>
             {
                 Ok(())
             }
@@ -395,6 +396,7 @@ impl NativeLearning {
                 .into(),
             revision_ref,
             trial_ref: Some(input.trial_ref.clone()),
+            current_trial: pointer(skill, "current_trial").map(str::to_string),
             expected_skill_version: skill["_system"]["version"]
                 .as_u64()
                 .ok_or_else(|| invalid("Skill version missing"))?,
@@ -672,16 +674,14 @@ impl NativeLearning {
         skill: &Json,
         next_trial: &str,
     ) -> Result<(), KipError> {
-        let prior_trial = skill["facets"][format!("{PROFILE}TrialState")]["trial_ref"]
-            .as_str()
+        let prior_trial = pointer(skill, "current_trial")
             .ok_or_else(|| invalid("previous active trial missing"))?;
         if prior_trial == next_trial {
             return Err(invalid(
                 "same trial activation must recover its original receipt",
             ));
         }
-        let grade = skill["facets"][format!("{PROFILE}GradingState")]["evaluation_ref"]
-            .as_str()
+        let grade = pointer(skill, "current_evaluation")
             .ok_or_else(|| invalid("previous final verdict missing"))?;
         let evaluation = self
             .read_record(&self.writer(None)?, grade, "EvaluationRecord")
@@ -756,8 +756,7 @@ impl NativeLearning {
             )
             .await?;
         acquisition.validate_records(&trial["record"], &evaluation["record"])?;
-        let current_eval = skill["facets"][format!("{PROFILE}GradingState")]["evaluation_ref"]
-            .as_str()
+        let current_eval = pointer(skill, "current_evaluation")
             .ok_or_else(|| invalid("current acquisition/monitoring grade missing"))?;
         if current_eval != acquisition.evaluation_ref {
             let current = self
@@ -919,22 +918,18 @@ impl NativeLearning {
         if p.space_id != self.space_id || p.idempotency_key.is_empty() {
             return Err(invalid("invalid verdict Space/key"));
         }
-        let attempts = strings(&p.evaluation["attempt_refs"])?;
-        let outcome_refs = strings(&p.evaluation["outcome_refs"])?;
-        let success = outcome_refs
-            .iter()
-            .filter(|r| p.replay["outcomes"][r.as_str()]["record"]["outcome_status"] == "success")
-            .count();
-        let failure = attempts.len().saturating_sub(success);
-        let trial_cache = match &p.trial_ref {
-            Some(trial) => format!(
-                "SET FACET \"TrialState\" {{revision_ref:{},trial_ref:{}}}",
-                literal(&p.revision_ref),
-                literal(trial)
-            ),
-            // UNSET removes an emptied mutable Facet, not an invalid empty one.
-            None => "UNSET FACET \"TrialState\" {revision_ref,trial_ref}".into(),
-        };
+        // The Skill's pointers select the immutable records; GradingState is
+        // computed from `current_evaluation`, never written (Profile §6.2).
+        let mut pointers = vec!["(\"current_evaluation\",?evaluation)".to_string()];
+        let mut clear = String::new();
+        match (&p.trial_ref, &p.current_trial) {
+            (Some(trial), _) => pointers.push(format!("(\"current_trial\",{})", literal(trial))),
+            (None, Some(old)) => {
+                clear = format!("UNSET STRUCTURAL {{(\"current_trial\",{})}}", literal(old))
+            }
+            (None, None) => {}
+        }
+        let pointers = pointers.join(" ");
         let mut inputs = vec![p.revision_ref.clone()];
         inputs.extend(p.trial_ref.iter().cloned());
         inputs.extend(p.safety_signal_ref.iter().cloned());
@@ -945,10 +940,9 @@ impl NativeLearning {
             .join(" ");
         let mut request = self.request(format!(r#"MUTATE {{
             CREATE ACTIVITY ?evaluation {{SET FIELDS {{activity_class:"lifecycle_verdict",status:"completed"}} SET FACET "EvaluationRecord" {} SET STRUCTURAL {{{edges} ("outputs",{})}}}}
-            UPDATE {} SET ATTRIBUTES {{status:{}}} {trial_cache}
-                SET FACET "GradingState" {{revision_ref:{},evaluation_ref:?evaluation,success_count:{success},failure_count:{failure},graded_count:{},last_verdict_at:{}}}
+            UPDATE {} SET ATTRIBUTES {{status:{}}} SET STRUCTURAL {{{pointers}}} {clear}
                 EXPECT VERSION {}
-        }}"#,p.evaluation,literal(&p.skill_ref),literal(&p.skill_ref),literal(&p.to_status),literal(&p.revision_ref),attempts.len(),literal(&p.cutoff),p.expected_skill_version));
+        }}"#,p.evaluation,literal(&p.skill_ref),literal(&p.skill_ref),literal(&p.to_status),p.expected_skill_version));
         request.operations[0].idempotency_key = Some(p.idempotency_key.clone());
         request.parameters = Some(anda_kip::Map::from_iter([(
             "brain_learning_verdict_digest".into(),
@@ -1146,6 +1140,7 @@ impl NativeLearning {
             skill_ref: skill["id"].as_str().unwrap_or("").into(),
             revision_ref: revision_ref.clone(),
             trial_ref: None,
+            current_trial: pointer(&skill, "current_trial").map(str::to_string),
             expected_skill_version: skill["_system"]["version"]
                 .as_u64()
                 .ok_or_else(|| invalid("Skill version missing"))?,
@@ -1237,6 +1232,13 @@ impl NativeLearning {
 
 fn reference(value: &Json) -> Option<&str> {
     value.as_str().or_else(|| value["id"].as_str())
+}
+/// The single target of one of a Skill's structural pointers.
+pub(crate) fn pointer<'a>(element: &'a Json, field: &str) -> Option<&'a str> {
+    element["structural"][format!("{PROFILE}{field}")]
+        .as_array()
+        .filter(|refs| refs.len() == 1)
+        .and_then(|refs| reference(&refs[0]))
 }
 fn same(a: &Json, b: &Json) -> bool {
     anda_kip::canonical_json(a) == anda_kip::canonical_json(b)

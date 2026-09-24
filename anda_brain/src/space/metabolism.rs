@@ -248,61 +248,28 @@ impl Space {
             .collect())
     }
 
-    /// Deterministic memory metabolism (plan M2/M3), run before each
+    /// Deterministic memory settlement (plan M2/M3), run before each
     /// maintenance cycle. The passes themselves live in [`crate::settlement`],
     /// behind its `RunKip` port; this is what a Space owes them and what it
     /// does with what they decide:
     ///
-    /// 1. **Bulk disuse metabolism** (every scope, rate-limited to
-    ///    `DECAY_MIN_INTERVAL_MS` by the sweep's own `last_metabolized_at`
-    ///    filter): the Phase-7 decay the Maintenance prompt used to run by
-    ///    hand. Pinned Concepts are exempt. It decays
-    ///    `MnemonicState.memory_strength`, never Assertion confidence.
-    /// 2. **Correction discovery** (every scope): newly superseded links are
+    /// 1. **Correction discovery** (every scope): newly superseded links are
     ///    recorded in the ledger and aggregated per asserting actor into the
     ///    `source_reliability` extension. The scan is the settlement's; the
     ///    ledger and the extension are this Space's, so it applies them here.
-    /// 3. **Watch expiry** and the **Skill lifecycle** (every scope), then
+    /// 2. **Watch expiry** and the **Skill lifecycle** (every scope), then
     ///    **retention expiry and the schema census** (`full` scope).
     ///
-    /// Nothing here reads the usage ledger back into the graph: see the body
-    /// for why recall no longer reinforces what it touched.
-    #[cfg(any(test, feature = "experiments"))]
+    /// There is no disuse sweep. Decay is computed, not written: the engine
+    /// derives `MnemonicState.effective_strength` from the stored base, its
+    /// anchor and a pinned `strength_policy` when a read is evaluated, and a
+    /// missing input leaves strength unknown (Profile §6.1, §18; Spec §59.1).
+    /// Nothing here reads the usage ledger back into the graph either: see
+    /// the body for why recall does not reinforce what it touched.
     pub(super) async fn settle_memory_metabolism(
         &self,
         scope: MaintenanceScope,
         now_ms: u64,
-    ) -> Result<MemorySettlementReport, BoxError> {
-        self.settle_memory_metabolism_with(scope, now_ms, DECAY_MIN_INTERVAL_MS)
-            .await
-    }
-
-    /// [`Self::settle_memory_metabolism`] with control over the decay rate
-    /// limit. Shadow forks pass `0`: they inherit the live space's
-    /// `decay_applied_at` stamps, and under the weekly gate both forks would
-    /// settle identically whenever the live space decayed within the window
-    /// — every comparison of decay knobs would be a systematic tie.
-    pub(super) async fn settle_memory_metabolism_with(
-        &self,
-        scope: MaintenanceScope,
-        now_ms: u64,
-        decay_min_interval_ms: u64,
-    ) -> Result<MemorySettlementReport, BoxError> {
-        self.settle_memory_metabolism_using(
-            scope,
-            now_ms,
-            decay_min_interval_ms,
-            self.memory_policy(),
-        )
-        .await
-    }
-
-    pub(super) async fn settle_memory_metabolism_using(
-        &self,
-        scope: MaintenanceScope,
-        now_ms: u64,
-        decay_min_interval_ms: u64,
-        policy: MemoryPolicy,
     ) -> Result<MemorySettlementReport, BoxError> {
         let _guard = self.settlement_lock.lock().await;
         let mut report = MemorySettlementReport {
@@ -327,13 +294,7 @@ impl Space {
         // self-test which memories have never been exercised, still feeds
         // `entities_recalled` and the correction rate, and still supplies the
         // scenario miner. What it no longer does is close a loop back into
-        // cognitive state. Reading is now observed and not rewarded — which is
-        // also why a recalled Concept is no longer spared the sweep below.
-        report.decay_ran = true;
-        let decay = settlement::metabolize(self, &policy, now_ms, decay_min_interval_ms).await;
-        report.decayed = decay.decayed;
-        report.decay_error = decay.error;
-
+        // cognitive state. Reading is observed and not rewarded.
         let after = self
             .db
             .get_extension_as::<settlement::CorrectionCursor>("correction_cursor")
@@ -434,7 +395,6 @@ impl Space {
 
         self.bump_metrics(|metrics| {
             metrics.corrections += report.new_corrections;
-            metrics.decayed += report.decayed;
         });
         // Refresh the cached graph counters `memory_status` serves (M12:
         // readers never pay heavy queries).
@@ -451,18 +411,12 @@ impl Space {
 
     /// Acts on what this Space's own retention said should stop being kept.
     ///
-    /// Two passes over two different clocks, in this order:
-    ///
-    /// 1. **Lapsed claims.** An Assertion whose `valid_time.until` has passed
-    ///    is marked `expired` (§14.3) — a lifecycle state the Cognitive Memory
-    ///    Profile names and that nothing produced until the engine gained this
-    ///    call. A projection still admits it at a coordinate its window
-    ///    covered, so `FOR TIME` in the past does not lose every claim that has
-    ///    since lapsed.
-    /// 2. **Lapsed records.** An element whose `retention.expires_at` has
-    ///    passed is archived: out of ordinary recall, still readable, still
-    ///    referenced. Tombstone would withdraw it from use and purge would
-    ///    destroy it, and neither is what an expiry date asked for.
+    /// An element whose `retention.expires_at` has passed is archived: out of
+    /// ordinary recall, still readable, still referenced. Tombstone would
+    /// withdraw it from use and purge would destroy it, and neither is what an
+    /// expiry date asked for. A claim whose `valid_time.until` has passed is a
+    /// different clock and is not touched: its expiry is computed at read time
+    /// (§14.3), so `FOR TIME` in the past still sees it.
     ///
     /// Purge is deliberately not reachable from here. §19.3 makes erasure
     /// high-impact with its own reference policy, and running it over a set the
@@ -491,22 +445,9 @@ impl Space {
             session
         };
 
-        // The two passes are independent — different clocks, and different
-        // permissions (`expire_lapsed_assertions` needs the Assertion write,
-        // `sweep_expired` needs `manage_retention` at Space scope) — so one
-        // failing must not silently cancel the other. Letting it would leave a
-        // report of one error and four zeros, which reads as "nothing had
-        // lapsed" rather than "the record sweep never ran".
-        let mut errors: Vec<String> = Vec::new();
-
-        match session
-            .expire_lapsed_assertions(DEFAULT_SPACE, settlement::SETTLEMENT_BATCH_LIMIT)
-            .await
-        {
-            Ok(expired) => report.expired_assertions = expired.len() as u64,
-            Err(err) => errors.push(format!("expiring lapsed claims: {err}")),
-        }
-
+        // A claim whose `valid_time` closed is not swept: KIP 2.0 computes that
+        // at read time (§14.3) and stores no `expired` status. This pass only
+        // archives records whose own retention lapsed.
         match session
             .sweep_expired(
                 DEFAULT_SPACE,
@@ -521,11 +462,7 @@ impl Space {
                 report.refused = sweep.refused as u64;
                 report.remaining = sweep.remaining as u64;
             }
-            Err(err) => errors.push(format!("archiving lapsed records: {err}")),
-        }
-
-        if !errors.is_empty() {
-            report.error = Some(errors.join("; "));
+            Err(err) => report.error = Some(format!("archiving lapsed records: {err}")),
         }
         report
     }

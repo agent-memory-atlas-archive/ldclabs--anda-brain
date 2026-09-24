@@ -147,7 +147,7 @@ async fn references_are_budgeted_planning_context_never_memory_or_coverage() {
 async fn readonly_model_batches_use_the_schema_without_an_execution_field() {
     let args = json!({"operations":[
         "FIND(?c.id) WHERE {?c CONCEPT {type:\"Person\"}} LIMIT 1",
-        "FIND(?c.id) WHERE {?c CONCEPT {type:\"Preference\"}} LIMIT 1"
+        "FIND(?c.id) WHERE {?c CONCEPT {type:\"Insight\"}} LIMIT 1"
     ]});
     let (_, space, _) = setup(
         "readonly_batch_contract",
@@ -535,7 +535,7 @@ async fn long_real_evidence_notes_and_history_are_removed_atomically_before_the_
     assert_ne!(written.is_error, Some(true));
     space.recall.history.write().push_back(Document::from_text(
         "large-history",
-        &"历史不表示当前有效。 ".repeat(20_000),
+        "历史不表示当前有效。 ".repeat(20_000),
     ));
 
     let output = space
@@ -589,7 +589,7 @@ async fn long_real_evidence_notes_and_history_are_removed_atomically_before_the_
 
 #[tokio::test]
 async fn model_tool_injection_and_too_many_calls_cannot_execute_a_native_write() {
-    let write = r#"CREATE CONCEPT ?bad {TYPE "Preference" NAME "injected-budget-write"}"#;
+    let write = r#"CREATE CONCEPT ?bad {TYPE "Insight" NAME "injected-budget-write" SET ATTRIBUTES {summary:"injected"}}"#;
     let scenarios = [
         ("p5_forbidden_tool", vec![tool("execute_kip", write)], true),
         (
@@ -611,7 +611,7 @@ async fn model_tool_injection_and_too_many_calls_cannot_execute_a_native_write()
             .unwrap();
         let packet = check_output(&output, 65_536).unwrap();
         let response = space.execute_kip_readonly(kip::request(
-            r#"FIND(?c) WHERE {?c CONCEPT {type:"Preference",name:"injected-budget-write"}} LIMIT 5"#,
+            r#"FIND(?c) WHERE {?c CONCEPT {type:"Insight",name:"injected-budget-write"}} LIMIT 5"#,
         )).await.unwrap();
         assert!(kip::succeeded(&response));
         assert!(

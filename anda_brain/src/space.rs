@@ -126,6 +126,7 @@ pub struct AppState {
 }
 
 mod attention;
+mod attention_recall;
 #[cfg(feature = "experiments")]
 pub mod experiments;
 mod hooks;
@@ -538,7 +539,6 @@ fn settlement_error_messages(
     stored
         .map(|report| {
             [
-                ("decay", &report.decay_error),
                 ("corrections", &report.correction_scan_error),
                 ("watches", &report.watches.error),
                 ("skills", &report.skills.error),
@@ -832,9 +832,17 @@ impl Space {
     async fn ingest_with_source(
         &self,
         user: Principal,
-        input: StringOr<FormationInput>,
+        mut input: StringOr<FormationInput>,
         source: Option<crate::product::SourceIdentity>,
     ) -> Result<AgentOutput, BoxError> {
+        // The observation time becomes every formed claim's start key, so an
+        // unreadable one is refused here instead of silently becoming the
+        // receipt time (Spec §6.5, §13.2).
+        if let StringOr::Value(input) = &mut input
+            && let Some(timestamp) = &input.timestamp
+        {
+            input.timestamp = Some(crate::kip::source_timestamp(timestamp)?);
+        }
         if !self.product_control.available() {
             return Err(crate::product::SourceAdmissionError::Busy.into());
         }
@@ -1170,9 +1178,6 @@ impl Space {
         // not a behavior change (plan module M-P).
         let mut effective_policy = self.memory_policy();
         if let Some(parameters) = &input.parameters {
-            if let Some(value) = parameters.memory_strength_decay_factor {
-                effective_policy.memory_strength_decay_factor = value;
-            }
             if let Some(value) = parameters.stale_event_threshold_days {
                 effective_policy.stale_event_threshold_days = value;
             }
@@ -1188,12 +1193,7 @@ impl Space {
         // the agent assesses an already-settled graph. Settlement failures
         // degrade the cycle, never abort it.
         let settlement_error = match self
-            .settle_memory_metabolism_using(
-                input.scope,
-                self.clock.now_ms(),
-                DECAY_MIN_INTERVAL_MS,
-                effective_policy,
-            )
+            .settle_memory_metabolism(input.scope, self.clock.now_ms())
             .await
         {
             Ok(report) => {
@@ -2231,11 +2231,6 @@ const SETTLEMENT_KIP_TIMEOUT: Duration = Duration::from_secs(30);
 /// while it still matters, and long enough that a mostly-idle Space costs one
 /// model call a day.
 const MAINTENANCE_MAX_INTERVAL_MS: u64 = 24 * 3_600 * 1_000;
-
-/// Bulk decay is a weekly-rate process (the factor is documented per week in
-/// BrainMaintenance.md); links decayed more recently than this are skipped,
-/// so daily maintenance cannot over-decay.
-const DECAY_MIN_INTERVAL_MS: u64 = 7 * 24 * 3_600 * 1_000;
 
 /// The `key` of the Concept this brain treats as its semantic self (§5.6).
 ///

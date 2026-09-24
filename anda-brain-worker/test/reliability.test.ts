@@ -18,9 +18,9 @@ const auth = systemAuth()
 
 it('excludes suppressed records before structural joins, id reads and aggregation', async () => {
   const brain = makeBrain()
-  await formMemory(runtime(async () => ({response:{...empty, commands:[`MUTATE {
+  await formMemory(runtime(async () => ({response:{...empty, types:['WritingStyle'], commands:[`MUTATE {
     UPSERT CONCEPT ?person {MATCH {type:"Person",key:"${SYSTEM_PRINCIPAL}"}}
-    CREATE CONCEPT ?value {TYPE "Preference" NAME "old preference"}
+    CREATE CONCEPT ?value {TYPE "WritingStyle" NAME "old preference"}
     ASSERT ?claim (?person,"prefers",?value) {by:?person,mode:"stated",evidence: :msg1}
   }`]}})), brain as unknown as BrainRpc, {messages:[{role:'user',content:'private source text'}]})
   const record = (await brain.productRecords(auth)).records[0]!
@@ -44,7 +44,7 @@ it('excludes suppressed records before structural joins, id reads and aggregatio
   expect(fresh.status).toBe('succeeded')
   expect(JSON.stringify(await brain.executeAgentRead([{command:'FIND(?e.payload) WHERE {?e EVIDENCE {}} LIMIT 20'}],epoch))).toContain('current source')
   const formed = await formMemory(runtime(async () => ({response:{...empty,commands:[`MUTATE {
-    CREATE CONCEPT ?value {TYPE "Preference" NAME "fresh preference"}
+    CREATE CONCEPT ?value {TYPE "WritingStyle" NAME "fresh preference"}
     UPSERT CONCEPT ?person {MATCH {type:"Person",key:"${SYSTEM_PRINCIPAL}"}}
     ASSERT ?claim (?person,"prefers",?value) {by:?person,mode:"stated",evidence: :msg1}
   }`]}})),brain as unknown as BrainRpc,{messages:[{role:'user',content:'fresh independent observation'}]}) as any
@@ -62,9 +62,10 @@ it('excludes suppressed records before structural joins, id reads and aggregatio
 it('retains correction pages through model failure and eviction until explicitly acknowledged', async () => {
   const brain = makeBrain()
   expect((await brain.settleMemory(Date.now())).corrections.revised_roots).toEqual([])
+  await brain.declareSymbols(['WritingStyle'],[])
   const seed = await brain.executeKip(`MUTATE {
     CREATE CONCEPT ?person {TYPE "Person" NAME "Actor"}
-    CREATE CONCEPT ?value {TYPE "Preference" NAME "Preference"}
+    CREATE CONCEPT ?value {TYPE "WritingStyle" NAME "Plain"}
     ASSERT ?old (?person,"prefers",?value) {by:?person,mode:"stated"}
     ASSERT ?replacement (?person,"prefers",?value) {by:?person,mode:"stated"}
   }`)
@@ -139,11 +140,11 @@ it('provides Event content, versions and the live primer to maintenance',async()
 
 it('groups predicate counts in one query and bounds snapshot candidates before KQL', async () => {
   const brain = makeBrain()
-  await brain.declareSymbols([],Array.from({length:16},(_,i)=>`relation_${i}`))
+  await brain.declareSymbols(['WritingStyle'],Array.from({length:16},(_,i)=>`relation_${i}`))
   await runInDurableObject(brain as never,(instance)=>{
     const nexus = (instance as unknown as {nexus:CognitiveNexus}).nexus
     const original = nexus.execute.bind(nexus)
-    for(let i=0;i<100;i++) original(`CREATE CONCEPT ?c {TYPE "Preference" NAME "memory ${i}"}`)
+    for(let i=0;i<100;i++) original(`CREATE CONCEPT ?c {TYPE "WritingStyle" NAME "memory ${i}"}`)
     const all = nexus.store.all.bind(nexus.store)
     const calls: {table:string;count:number}[] = []
     nexus.store.all = ((...args: Parameters<typeof all>) => {
@@ -271,9 +272,9 @@ it('never executes a late Formation response after its deadline', async () => {
   const ai = runtime(() => new Promise(resolve=>{release=resolve}))
   ai.AI_TIMEOUT_MS='100'
   await expect(formMemory(ai,brain as unknown as BrainRpc,{messages:[{role:'user',content:'late input'}]})).rejects.toMatchObject({code:'model_timeout'})
-  release?.({response:{...empty,commands:['CREATE CONCEPT ?late {TYPE "Preference" NAME "late write"}']}})
+  release?.({response:{...empty,commands:['CREATE CONCEPT ?late {TYPE "Person" NAME "late write"}']}})
   await Promise.resolve()
-  const result = await brain.executeKip('FIND(?p) WHERE {?p CONCEPT {type:"Preference"}} LIMIT 20')
+  const result = await brain.executeKip('FIND(?p) WHERE {?p CONCEPT {type:"Person",name:"late write"}} LIMIT 20')
   expect(result.result).toEqual([])
 })
 
@@ -287,9 +288,9 @@ it('does not classify a provider message containing a processing code as a confl
 
 it('aggregates erasure cleanup and scrubs every preview page, including expired drafts', async () => {
   const brain = makeBrain()
-  await formMemory(runtime(async()=>({response:{...empty,commands:[`MUTATE {
+  await formMemory(runtime(async()=>({response:{...empty,types:['WritingStyle'],commands:[`MUTATE {
     UPSERT CONCEPT ?person {MATCH {type:"Person",key:"${SYSTEM_PRINCIPAL}"}}
-    CREATE CONCEPT ?value {TYPE "Preference" NAME "old"}
+    CREATE CONCEPT ?value {TYPE "WritingStyle" NAME "old"}
     ASSERT ?claim (?person,"prefers",?value) {by:?person,mode:"stated",evidence: :msg1}
   }`]}})),brain as unknown as BrainRpc,{messages:[{role:'user',content:'source'}]})
   const record = (await brain.productRecords(auth)).records[0]!

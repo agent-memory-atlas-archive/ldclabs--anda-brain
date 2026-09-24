@@ -92,6 +92,31 @@ export type { IngestContext }
  * source remains semantic provenance; attribution still lives in `asserted_by`
  * on the Assertion.
  */
+/**
+ * When one captured message was observed: its own millisecond timestamp when
+ * the caller sent one, else the batch's observation time. This is what an
+ * Assertion citing the message writes as `at` (Spec §13.2).
+ */
+export function messageObservedAt(message: Message, batchAt: string): string {
+  if (typeof message.timestamp !== 'number') return batchAt
+  const date = new Date(message.timestamp)
+  const text = Number.isFinite(date.getTime()) ? date.toISOString() : ''
+  return text.length === 24 ? text : batchAt
+}
+
+/** The captured window's Evidence keys and observation times, for the model's `at`. */
+export function capturedEvidence(
+  messages: readonly Message[],
+  batchAt: string,
+): { key: string; evidence_class: string; observed_at: string }[] {
+  const start = Math.max(0, messages.length - MAX_INGESTED_MESSAGES)
+  return messages.slice(start).map((message, index) => ({
+    key: `msg${index + 1}`,
+    evidence_class: EVIDENCE_CLASS[message.role] ?? 'message',
+    observed_at: messageObservedAt(message, batchAt),
+  }))
+}
+
 export function observationIngest(
   operations: readonly KipOperation[],
   messages: readonly Message[],
@@ -110,7 +135,7 @@ export function observationIngest(
     key: `msg${index + 1}`,
     evidence_class: EVIDENCE_CLASS[message.role] ?? 'message',
     payload: message as unknown as Json,
-    observed_at: observed.at,
+    observed_at: messageObservedAt(message, observed.at),
     client_key: `${observed.origin}:${start + index + 1}`,
     ...(observed.sourceActor === undefined || message.role !== 'user'
       ? {}
@@ -725,25 +750,52 @@ function integer(value: unknown): number | undefined {
     : undefined
 }
 
-/** Check facet AST positions, never words inside captured source payloads. */
+/** Facets a model plan cannot write: learning records and runtime state belong
+ * to host bindings, and `GradingState` is a computed view of `current_evaluation`. */
+const PROTECTED_FACETS = ['TrialRecord', 'EvaluationRecord', 'OutcomeRecord', 'AttemptRecord',
+  'GradingState', 'WatchState', 'LeaseState']
+
+/** Structural fields a model plan cannot write: the Skill's learning pointers
+ * move only with host trial/verdict transactions, and lineage is computed. */
+const PROTECTED_STRUCTURAL = ['current_trial', 'current_evaluation', 'derived_from',
+  'compiled_from', 'compiled_by', 'consolidated_to']
+
+/** Check facet and structural AST positions, never words inside captured source payloads. */
 function assertCognitiveRecords(clause: MutationClause, parameters?: JsonMap): void {
   const body = Object.values(clause)[0] as Record<string, unknown>
   const facets: unknown[] = []
+  const structural: unknown[] = []
   for (const key of ['set_facets', 'unset_facets']) {
     const entries = body[key]
     if (Array.isArray(entries)) for (const entry of entries) facets.push(entry.facet)
   }
+  for (const key of ['set_structural', 'unset_structural']) {
+    const entries = body[key]
+    if (Array.isArray(entries)) for (const entry of entries) structural.push(entry.field)
+  }
   if (Array.isArray(body.actions)) for (const action of body.actions) {
     if ('SetFacet' in action) facets.push(action.SetFacet.facet)
     if ('UnsetFacet' in action) facets.push(action.UnsetFacet.facet)
+    for (const key of ['SetStructural', 'UnsetStructural']) {
+      if (key in action && Array.isArray(action[key])) for (const edge of action[key]) structural.push(edge.field)
+    }
+  }
+  const resolve = (value: unknown): unknown => {
+    const symbol = value as { Name?: string; Param?: string }
+    return symbol.Name ?? (symbol.Param ? parameters?.[symbol.Param] : undefined)
   }
   for (const facet of facets) {
-    const symbol = facet as { Name?: string; Param?: string }
-    const name = symbol.Name ?? (symbol.Param ? parameters?.[symbol.Param] : undefined)
+    const name = resolve(facet)
     if (typeof name !== 'string') throw new Error('model facet names must resolve before execution')
-    if (['TrialRecord', 'EvaluationRecord', 'OutcomeRecord', 'AttemptRecord', 'TrialState',
-      'GradingState', 'WatchState', 'LeaseState'].includes(localName(name))) {
-      throw new Error(`UnsupportedCapability: ${name} requires a configured host learning/runtime binding; it cannot be authored by a model plan`)
+    if (PROTECTED_FACETS.includes(localName(name))) {
+      throw new Error(`UnsupportedCapability: ${name} requires a configured host learning/runtime binding or is computed by the engine; it cannot be authored by a model plan`)
+    }
+  }
+  for (const field of structural) {
+    const name = resolve(field)
+    if (typeof name !== 'string') throw new Error('model structural field names must resolve before execution')
+    if (PROTECTED_STRUCTURAL.includes(localName(name))) {
+      throw new Error(`UnsupportedCapability: ${name} is moved by host learning transactions or computed from Activity provenance; it cannot be authored by a model plan`)
     }
   }
 }

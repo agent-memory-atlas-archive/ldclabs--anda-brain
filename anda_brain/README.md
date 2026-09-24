@@ -8,15 +8,14 @@ Business agents interact entirely through natural language and a REST API — no
 
 Anda Brain is designed to be **self-hosted** (the hosted cloud service has been discontinued). For a complete agent built on Anda Brain, see [Anda Bot](https://github.com/ldclabs/anda-bot).
 
-SleepTask and Watch are exempt from bulk mnemonic decay because all operational
-record updates require version guards. Failed host passes reach the model in
-assessment.settlement_errors.
+Operational SleepTask and Watch updates require version guards. Failed host
+passes reach the model in assessment.settlement_errors.
 
 ## Trusted host memory product contracts (v0.12.1)
 
 The Rust `product` module provides Assertion-backed `MemoryRecord` projections, stable native revisions, explicit stance/lifecycle/storage state and typed Evidence source references. `Space::product_records`, `product_record` and `product_source` do not authenticate a user. The embedding host must enforce owner/source visibility before returning any record, preview, dependent identifier or source quote. A matching source digest is provenance, not proof that an inference is correct.
 
-`Space::ingest_product` accepts a bounded, trusted `SourceIdentity` with parent conversation/session keys. Natural-language input cannot set that identity. `product_prepare`, `product_commit`, `product_change` and `product_discard` implement caller/operation-scoped immutable requests, fixed revision/preview digests and ten-minute previews. Corrections retract the old Assertion and create a new claim with a user-statement Evidence and correction Activity; they never rewrite a Concept label or create an illegal cross-Proposition supersession. Undo is another conditional correction.
+`Space::ingest_product` accepts a bounded, trusted `SourceIdentity` with parent conversation/session keys. Natural-language input cannot set that identity. `product_prepare`, `product_commit`, `product_change` and `product_discard` implement caller/operation-scoped immutable requests, fixed revision/preview digests and ten-minute previews. `Correct` supersedes the caller's wrong claim with a new one that keeps the corrected world interval; `WorldChange` adds one claim from now and lets temporal succession end the old value; `Misrecorded` is refused (`unsupported_capability`) because recording repair is not available. Each writes a user-statement Evidence and an Activity; none rewrites a Concept label or creates an illegal cross-Proposition supersession. Undo is another conditional change.
 
 `Suppress` archives and `Delete` purges the declared bounded closure: selected Proposition/Assertions, cited inputs and recorded referrers. Unknown sources, Concept cascades, retention holds and closures above 128 elements are rejected. A durable source exclusion and processing epoch are admitted before mutation; tracked native work survives a cancelled API waiter and resumes before a reloaded Space is exposed. Stale Formation/Maintenance/Notes writes are fenced. Managed changes clear processing Notes and miss caches, stop old processor histories from entering new contexts and restrict automatic KIP readers to current active state. Trusted owner audit APIs remain distinct. Recall rechecks its captured epoch before returning context.
 
@@ -32,10 +31,17 @@ Removal does not erase an embedding application's original chat/files/logs/backu
 Anda Bot currently consumes these contracts through a temporary sibling patch. Replace it with the published 0.12.1 crate before removing the patch, while keeping the shared registry DB/KIP/Core type identity. No empirical learning improvement or full cost accounting is implied by these mechanism tests.
 
 
-## KIP 2.0 / CognitiveMemory 2.1 update
+## KIP 2.0 update
 
-Rust uses published `anda_kip`, Cognitive Nexus and AndaDB 0.13 packages;
-the Worker uses published `@ldclabs/kip-do` 0.13. Skill behavior is an
+The service tracks KIP `3251912` and `kip://profiles/cognitive-memory@2.0.0`
+(revision `sha256:3ea9e459…`; only the digest names the revision). Rust uses
+`anda_kip`, Cognitive Nexus and AndaDB 0.14; the Worker uses `@ldclabs/kip-do`
+0.14. Spaces activated under the earlier 2.1.0 draft are not migrated. A changed
+world is one new Assertion and temporal succession ends the old value; claims
+carry `asserted_at` from their source's observation time; options are Concepts
+typed by their kind (the Profile has no `Preference` type); decay is computed
+at read time rather than swept; Skills point at `current_trial` /
+`current_evaluation`. Skill behavior is an
 immutable `SkillRevision`; Watch progress and task leases use protected Nexus
 operations. The former family-rate Skill promotion rule has been removed. Without
 configured independent observers, frozen trials and replayable evaluations,
@@ -171,8 +177,8 @@ Consolidates, prunes, and optimizes the knowledge graph during scheduled or on-d
 4. **Procedural consolidation** — Compare successful and failed Experiences and compile an unproven Skill with an immutable SkillRevision. Its task_family identifies comparison candidates; only a configured trial/evaluation pipeline can confer validated standing.
 5. **Identity review** — Review `same_as` suspicions, then `MERGE CONCEPT`, which is non-destructive: the source survives as merged historical identity.
 6. **Contradiction and derivation review** — Different actors' disagreement coexists; only an actor's own revision supersedes. After a revision, the settlement walks `LIST DEPENDENTS` and hands the agent each revised root with its dependents (`assessment.revised_roots`); the agent flags what no longer holds `stale`.
-7. **Mnemonic metabolism** — run by the runtime settlement before the cycle, not by the agent: `MnemonicState.memory_strength * decay_factor` on Concepts due for it. Never `confidence`; a fact nobody has asked about lately is no less credible. `salience` and `utility` stay with the agent — the sweep cannot make a per-memory judgement.
-8. **Commitments and Watches** — Review outstanding obligations and attention. Nexus advances structured Watches under generation/CAS/coverage checks; prose conditions remain deferred without a semantic evaluator. No model completion attests change-stream consumption. See the Watch contract below.
+7. **Mnemonic metabolism** — decay is computed, not written: the engine derives strength at read time from `memory_strength` (base), `last_metabolized_at` (anchor) and a pinned `strength_policy`, and a missing input is unknown. The agent writes a new base only on an explicit signal (a decision's `used_refs`, a correction). Never `confidence`; a fact nobody has asked about lately is no less credible.
+8. **Commitments and Watches** — Review outstanding obligations and attention. A due Commitment without a Watch is raised to attention by one `commitment_review` Activity whose inputs name it. Nexus advances structured Watches under generation/CAS/coverage checks; prose conditions remain deferred without a semantic evaluator. No model completion attests change-stream consumption. See the Watch contract below.
 9. **SelfModel and WorkingState refresh** — Consolidate identity from evidence rather than from the latest conversation, and rebuild the digest the next waking session resumes from, stamped with the `basis_seq` it was built at.
 10. **Retention review** — Decide what should carry an expiry and write it with `SET RETENTION`; the full settlement's sweep is what makes that write mean something. See "Retention expiry" below.
 
@@ -193,28 +199,25 @@ Skill lifecycle transitions require the explicitly configured protected host eva
 
 **Memory policy:** each space carries an evolvable `MemoryPolicy` (stored in
 the `memory_policy` extension, set via `update_space`) that holds the numeric
-knobs of memory behavior — decay factor and floor, stale-event threshold,
-backlog targets, and (from later phases) self-test and recall parameters.
+knobs of memory behavior — stale-event threshold, backlog targets, and (from
+later phases) self-test and recall parameters. The former decay factor and
+floor are still accepted for stored-policy compatibility but nothing reads them.
 Maintenance cycles without explicit `parameters` run under the space's
 policy; an absent policy means the compiled-in defaults, so setting nothing
 changes nothing. The policy is the evolution genome of
 `docs/memory_evolution_plan_cn.md` (module M-P).
 
-**Mnemonic metabolism:** before each maintenance cycle the runtime runs a
-deterministic settlement that decays `MnemonicState.memory_strength` on
-Concepts due for it, stamping `last_metabolized_at`. Pinned Concepts are
-exempt. Every cycle sweeps; what paces it is the sweep's own weekly
-`last_metabolized_at` filter, not the cycle scope, because scope decides how
-much *cognitive* work a cycle does and gating metabolism on `full` as well
-meant a Space forming slowly went months without any. Newly superseded
-Assertions are recorded as corrections and aggregated per asserting actor into
-the `source_reliability` extension; full cycles also refresh the per-predicate
-census. Both reach the Maintenance prompt as its `assessment` block. What
-decays is `MnemonicState.memory_strength` — how *available* a memory should be
-— and never an Assertion's confidence: KIP 2.0 forbids letting time erode a
-stance, because a fact nobody has asked about in a month is no less credible.
-The LLM maintenance agent no longer runs bulk metabolism itself. The last
-settlement report is stored in the `memory_settlement` extension.
+**Deterministic settlement:** before each maintenance cycle the runtime
+records newly superseded Assertions as corrections and aggregates them per
+asserting actor into the `source_reliability` extension; full cycles also
+refresh the per-predicate census and archive records whose retention expired.
+Both reach the Maintenance prompt as its `assessment` block. There is no disuse
+sweep: decay is computed from base, anchor and a pinned strength policy when a
+read is evaluated (KIP Spec §59.1, Profile §6.1, §18), so idle memory costs no
+writes, and a missing strength is unknown rather than a 0.5 default. Nothing
+ever decays an Assertion's confidence: a fact nobody has asked about in a month
+is no less credible. The last settlement report is stored in the
+`memory_settlement` extension.
 
 **Reading does not reinforce.** Every completed recall still records which
 graph entities it surfaced, into an off-graph usage ledger (`memory_usage`
@@ -238,8 +241,7 @@ call the internal `memory_runtime` tool with `arm_watch`, its exact id and curre
 bounded authorized change page using the current overall version and generation.
 Silence requires complete coverage through the deadline; a matching silence Watch
 ends as `expired`, counted in the legacy `disarmed` report field. Native advancement
-atomically commits `fired`, a `watch_fire` Activity and a protected wake in Nexus
-0.13.1. Its response retains status/coverage/receipt and identifies the fire and
+atomically commits `fired`, a `watch_fire` Activity and a protected wake in Nexus. Its response retains status/coverage/receipt and identifies the fire and
 wake. Repeated native requests replay the same receipt; silence uses a fixed
 deadline sequence. An independent, bounded scheduler now discovers registered
 Spaces through a persistent directory, resumes after eviction/restart, and uses the
@@ -262,15 +264,16 @@ replay and purge follow native Artifact permissions. See
 [SEMANTIC_WATCH_RUNTIME.md](SEMANTIC_WATCH_RUNTIME.md) and
 [semantic.runtime.example.json](semantic.runtime.example.json).
 A completed maintenance model call never advances a
-Space-wide consumption watermark. Old Watches without WatchState need a reviewed
-CognitiveMemory 2.1 replacement; the scheduler never auto-rearms them. Firing grants no external authority.
+Space-wide consumption watermark. An armed Watch without WatchState needs a reviewed
+re-arm; the scheduler never auto-rearms it. Firing grants no external authority.
 
 **Procedural candidates remain unproven.** `Skill.current_revision` selects an
 immutable `SkillRevision` whose `revision_of` points back to the Skill. Both can be
 created atomically. The internal `memory_runtime` tool computes the canonical
 SHA-256 digest of all revision attributes except `behavior_digest`; Nexus verifies it.
 No model plan can write TrialRecord, EvaluationRecord, AttemptRecord, OutcomeRecord,
-TrialState or GradingState. Same-family outcomes are merely comparison candidates;
+the computed GradingState, a Skill's `current_trial` / `current_evaluation`, or the
+computed lineage fields. Same-family outcomes are merely comparison candidates;
 no automatic baseline or grade is inferred. Settlement preserves the historical
 counter fields at zero because Full Maintenance does not execute business trials.
 `skills.unsupported_reason` explains the boundary, while configured deployments
@@ -393,15 +396,10 @@ default. `memory_runtime/status` reports current configuration. Runtime
 authentication, tool capabilities and evaluator code never
 come from model-generated content.
 
-Operational records written against CognitiveMemory 2.0 cannot be armed or leased
-in place: their exact `schema_ref` is immutable. Maintenance must create a 2.1
-replacement, reconnect and verify its structural references, and only then archive
-the legacy Watch or SleepTask. The runtime returns this migration instruction before
-calling the protected operation.
 
 **Current basis matters.** Recall loads a fresh Primer because policy, trust and
-identity can change independently of vocabulary. A stored WorkingState/DerivationState
-or bare `basis_seq` cannot override computed dependency validity. Derived refreshes
+identity can change independently of vocabulary. A stored WorkingState or bare
+`basis_seq` cannot override computed dependency validity. Derived refreshes
 must retain their actual read pins, context and ProjectionBasis; incomplete coverage
 or unavailable replay material remains explicit. Every Formation, Recall and
 Maintenance model call includes the complete `anda_kip::KIP_SYNTAX`, Cognitive
@@ -428,18 +426,19 @@ counts these calls and their planning input against its existing limits; referen
 pages never become memory packet items or attest retrieval coverage. The legacy
 `memory_runtime` syntax operation remains available to writing agents.
 
-The reference supplement is pinned to `anda_kip =0.13.1`; public crate constants
+The reference supplement is pinned to `anda_kip =0.14.0`; public crate constants
 are reused instead of copied. To refresh the supplementary files, set
 `ANDA_KIP_SOURCE` to the matching published crate directory and run
 `node scripts/sync-kip-reference.mjs` (or `--check` to verify without writing).
 The generated manifest records source hashes, and tests check both the supplement
 and exported crate documents against it. Do not hand-edit these reference assets.
 
-**Retention expiry:** a full settlement also acts on the two clocks that say
-when something should stop being kept, which are not the same clock. An
-Assertion whose `valid_time.until` has passed is marked `expired` (§14.3) —
-not retracted and not superseded, because nobody withdrew it and nothing
-replaced it. An element whose `retention.expires_at` has passed is archived:
+**Retention expiry:** two clocks say when something should stop being kept,
+and they are not the same clock. An Assertion whose `valid_time.until` has
+passed is `expired` for a read at a later time — computed when the read is
+evaluated (§14.3), never stored and never swept, so `FOR TIME` in the past
+still sees it. A full settlement acts on the other clock: an element whose
+`retention.expires_at` has passed is archived:
 out of ordinary recall, still readable, still referenced. Purge is
 deliberately unreachable from here — erasure over a set nobody enumerated is
 the largest irreversible action this service can take, and a scheduled cycle
@@ -454,11 +453,11 @@ The explicit forget endpoint accepts all five KIP element kinds (`C-*`, `P-*`,
 purged kind and retains per-entity refusals such as legal holds. It erases selected
 graph records; conversation, wiki and external copies retain their own lifecycles.
 
-> **Known scale ceiling:** the bulk decay, correction discovery, and
-> self-test sampling passes use unconstrained full-scan KQL, and the engine
-> caps full-scan solutions at 65,536 regardless of `LIMIT`.
+> **Known scale ceiling:** the correction discovery and self-test sampling
+> passes use unconstrained full-scan KQL, and the engine caps full-scan
+> solutions at 65,536 regardless of `LIMIT`.
 > On graphs past ~65k propositions these passes stop working; the failure
-> is loud (`log::error` + `decay_error`/`correction_scan_error` in the
+> is loud (`log::error` + `correction_scan_error` in the
 > settlement report and `memory_status`), but the fix — predicate-sharded
 > scans — is not implemented yet. Watch those report fields in production.
 
@@ -468,8 +467,7 @@ graph records; conversation, wiki and external copies retain their own lifecycle
 > assigns each space to exactly one process — do not point two instances
 > at the same space's storage: concurrent ledger writes can duplicate
 > rows, and the miss-cache clear race guard does not cross processes.
-> (The graph-side fences — `decay_applied_at`, `correction_settled` —
-> stay safe either way.)
+> (The graph-side `correction_settled` fence stays safe either way.)
 
 **Dream self-test (self-repair):** after each maintenance cycle completes,
 the runtime samples recent memories with no usage evidence, generates one
@@ -590,7 +588,8 @@ Detailed API docs (with TypeScript request/response types):
 | `POST`  | `/v1/{space_id}/recall`                                | Query memory with natural language                                            | `read` (CWT or space token)  |
 | `POST`  | `/v1/{space_id}/recall_structured`                     | Recall with machine-readable provenance (citations, found, uncertainty)       | `read` (CWT or space token)  |
 | `POST`  | `/v1/{space_id}/probe`                                 | LLM-free metamemory existence check with negative-knowledge caching           | `read` (CWT or space token)  |
-| `POST`  | `/v1/{space_id}/memory/pin`                            | Pin/unpin a memory (pinned memories are exempt from disuse decay)             | `write` (CWT or space token) |
+| `POST`  | `/v1/{space_id}/memory/pin`                            | Pin/unpin a memory (a `pinned` retention class)                               | `write` (CWT or space token) |
+| `GET`   | `/v1/{space_id}/memory/attention`                      | Attention recall: fired Watches and due Commitments after a kept cursor       | `read` (public read allowed) |
 | `POST`  | `/v1/{space_id}/memory/forget`                         | Privacy-grade deletion (dry-run supported; physically removes, not archives)  | `write` (CWT or space token) |
 | `GET`   | `/v1/{space_id}/memory_status`                         | Memory observability: usage/probe/self-test counters, rates, graph counts    | `read` (CWT or space token)  |
 | `POST`  | `/v1/{space_id}/management/shadow_eval`                | Compare a candidate memory policy on forked copies (recent-recall replay)     | `write` (CWT)                |
@@ -795,7 +794,6 @@ Trigger a memory maintenance cycle. Runs asynchronously with single-execution gu
   "timestamp": "2026-03-10T03:00:00.000Z",
   "parameters": {
     "stale_event_threshold_days": 7,
-    "memory_strength_decay_factor": 0.95,
     "unconsolidated_max_backlog": 20,
     "orphan_max_count": 10
   }
@@ -808,8 +806,8 @@ Trigger a memory maintenance cycle. Runs asynchronously with single-execution gu
 | `scope`                                 | `string` | No       | `full` (all phases) / `quick` (assessment + urgent tasks) / `daydream` (idle-time salience scoring & micro-consolidation, default) |
 | `timestamp`                             | `string` | No       | Canonical UTC timestamp (`YYYY-MM-DDTHH:mm:ss.SSSZ`)      |
 | `parameters.stale_event_threshold_days` | `u32`    | No       | Days before events are considered stale (default: 7)      |
-| `parameters.memory_strength_decay_factor` | `f64`  | No       | Multiplier disuse metabolism applies to `MnemonicState.memory_strength` (default: 0.95). Never to `confidence`: KIP 2.0 forbids letting time erode a stance. Accepted under its KIP 1.x name `confidence_decay_factor` for stored-policy compatibility. |
-| `parameters.unconsolidated_max_backlog` | `u32`    | No       | Events and Experiences that may sit without `consolidated_to` lineage (default: 20). Accepted as `unsorted_max_backlog`. |
+| `parameters.memory_strength_decay_factor` | `f64`  | No       | **Deprecated and ignored.** Decay is computed at read time from a pinned strength policy; no sweep applies a factor. Still range-checked in (0, 1] and accepted as `confidence_decay_factor`, so existing callers are not rejected. |
+| `parameters.unconsolidated_max_backlog` | `u32`    | No       | Events and Experiences no formation or consolidation Activity has taken as input yet (default: 20). Accepted as `unsorted_max_backlog`. |
 | `parameters.orphan_max_count`           | `u32`    | No       | Max orphans to process (default: 10)                      |
 
 The parameters are targets to work toward, not commands. The runtime fills an
@@ -876,7 +874,7 @@ the published v1 `a` / `m` attribute and metadata fields.
 
 | v1 data | v2 representation |
 | --- | --- |
-| `(type, name)` identity | Immutable Concept `key`; standard Person / Event / Preference / Insight / Commitment / SleepTask fields are normalized |
+| `(type, name)` identity | Immutable Concept `key`; standard Person / Event / Insight / Commitment / SleepTask fields are normalized; a 1.x `Preference` keeps an open legacy type (the Profile has none) |
 | Insight `description`; SleepTask `reason` / `requested_action` | Native summary / task class; interrupted tasks become blocked without a fabricated lease |
 | A recorded claim | Proposition + `mode: "imported"` Assertion; recorded confidence and resolvable author are preserved |
 | Retracted or superseded claim | Native lifecycle where the same-actor, same-Proposition revision is reconstructible; otherwise archived with its original annotations, never revived as current belief |
@@ -992,9 +990,9 @@ anda_brain = "0.12"
 anda_brain = { version = "0.12", features = ["mcp", "wiki"] }
 ```
 
-To use development APIs before a crate release, build this checkout. Dependencies
-resolve from published crates, including Nexus 0.13.4's legacy migration fixes;
-a sibling `anda-db` checkout is only needed for optional local development overrides. Trusted experiment hosts add `experiments`; it is independent of the
+To use development APIs before a crate release, build this checkout. Until
+`anda_kip` / `anda_cognitive_nexus` 0.14 and a matching `anda_engine` are
+published, `Cargo.toml` patches the sibling `anda-db` and `anda` checkouts. Trusted experiment hosts add `experiments`; it is independent of the
 `learning` feature.
 
 The `anda_brain` **binary** is the full product and declares

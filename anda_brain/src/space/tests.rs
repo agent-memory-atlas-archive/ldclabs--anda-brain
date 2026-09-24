@@ -7,7 +7,7 @@ use crate::{
     agents::{BrainHook, FormationAgent, MaintenanceAgent, SELF_USER_ID, TimedMemoryReadonly},
     kip,
     payload::StringOr,
-    testkit::{app_state_core, create_loaded_space, signed_token, signing_key},
+    testkit::{app_state_core, create_loaded_space, declare_types, signed_token, signing_key},
     types::{
         AddSpaceTokenInput, FormationInput, InputContext, MaintenanceInput, MaintenanceParameters,
         MaintenanceScope, MemoryPolicy, ModelConfig, RecallInput, SpaceTier, SpaceToken,
@@ -908,7 +908,8 @@ async fn maintenance_fills_parameters_from_memory_policy() {
     // The prompt is the pretty-printed MaintenanceInput JSON, escaped
     // inside the stored message text.
     assert!(encoded.contains("\\\"unconsolidated_max_backlog\\\": 42"));
-    assert!(encoded.contains("\\\"memory_strength_decay_factor\\\": 0.95"));
+    // The deprecated decay factor no longer reaches the model.
+    assert!(!encoded.contains("memory_strength_decay_factor"));
 }
 
 #[tokio::test]
@@ -935,15 +936,16 @@ async fn maintenance_keeps_explicit_parameters() {
         .unwrap();
     let encoded = serde_json::to_string(&conversation.messages).unwrap();
     assert!(encoded.contains("\\\"stale_event_threshold_days\\\": 3"));
-    // Explicit values win; omitted values use the same effective policy as settlement.
-    assert!(encoded.contains("memory_strength_decay_factor"));
+    // Explicit values win; omitted values use the space policy.
+    assert!(encoded.contains("unconsolidated_max_backlog"));
+    assert!(!encoded.contains("memory_strength_decay_factor"));
 }
 
 #[tokio::test]
-async fn maintenance_override_controls_the_actual_decay_without_changing_space_policy() {
+async fn deprecated_decay_override_writes_no_strength_and_keeps_space_policy() {
     let app = test_app_state_with_final_model("decay_override");
     let space = create_loaded_space(&app, "decay_override").await;
-    space.memory.execute(r#"CREATE CONCEPT ?c { TYPE "Preference" NAME "keep accessible" SET FACET "MnemonicState" {memory_strength: 0.8} }"#, None).await.unwrap();
+    space.memory.execute(r#"CREATE CONCEPT ?c { TYPE "Insight" NAME "keep accessible" SET ATTRIBUTES {summary:"keep accessible"} SET FACET "MnemonicState" {memory_strength: 0.8} }"#, None).await.unwrap();
     let previous_policy = space.memory_policy();
     space
         .maintenance(
@@ -951,7 +953,7 @@ async fn maintenance_override_controls_the_actual_decay_without_changing_space_p
             MaintenanceInput {
                 scope: MaintenanceScope::Quick,
                 parameters: Some(MaintenanceParameters {
-                    memory_strength_decay_factor: Some(1.0),
+                    memory_strength_decay_factor: Some(0.5),
                     stale_event_threshold_days: None,
                     unconsolidated_max_backlog: None,
                     orphan_max_count: None,
@@ -961,7 +963,7 @@ async fn maintenance_override_controls_the_actual_decay_without_changing_space_p
         )
         .await
         .unwrap();
-    let response = space.execute_kip_readonly(kip::request(r#"FIND(?c.facets["MnemonicState"].memory_strength) WHERE { ?c CONCEPT {type: "Preference"} } LIMIT 10"#)).await.unwrap();
+    let response = space.execute_kip_readonly(kip::request(r#"FIND(?c.facets["MnemonicState"].memory_strength) WHERE { ?c CONCEPT {type: "Insight"} } LIMIT 10"#)).await.unwrap();
     assert_eq!(kip::ok_result(&response), Some(&serde_json::json!([0.8])));
     assert_eq!(space.memory_policy(), previous_policy);
 }
@@ -1262,6 +1264,7 @@ async fn the_runtime_mints_the_observation_the_model_only_cites() {
 
     let app = test_app_state("formation_ingest");
     let space = create_loaded_space(&app, "formation_ingest").await;
+    declare_types(&space, &["AnswerStyle"]).await;
     let guarded = crate::agents::GuardedMemory::new(space.memory.clone());
 
     let said = "Please keep answers concise — I mean it, ≤ 3 sentences.";
@@ -1289,9 +1292,8 @@ async fn the_runtime_mints_the_observation_the_model_only_cites() {
             r#"MUTATE {
   UPSERT CONCEPT ?alice { MATCH {type: "Person", key: "alice"} SET FIELDS {name: "Alice"} }
   CREATE CONCEPT ?concise {
-    TYPE "Preference"
+    TYPE "AnswerStyle"
     NAME "Alice concise answers"
-    SET ATTRIBUTES {preference_class: "communication"}
   }
   ASSERT ?a (?alice, "prefers", ?concise) {
     by: ?alice, mode: "stated", confidence: 0.95, evidence: :msg1
@@ -1483,9 +1485,12 @@ async fn watches_use_nexus_coverage_and_never_infer_text_consumption() {
     let next = settlement::sweep_watches(space.as_ref()).await;
     assert_eq!((next.fired, next.deferred), (0, 2));
     let assessment = space.maintenance_assessment(None).await;
-    assert!(assessment.armed_watches.iter().all(|watch| {
-        watch.schema_ref == "kip://profiles/cognitive-memory@2.1.0/Watch" && watch.version.is_some()
-    }));
+    assert!(
+        assessment
+            .armed_watches
+            .iter()
+            .all(|watch| { watch.schema_ref == profile!("Watch") && watch.version.is_some() })
+    );
     let nexus = space.memory.nexus();
     let committed_version = element_version(&space, &ids[0]).await;
     let replay = nexus
@@ -1514,6 +1519,161 @@ async fn watches_use_nexus_coverage_and_never_infer_text_consumption() {
         .await
         .unwrap_err();
     assert_eq!(error.code, anda_kip::KipErrorCode::VersionConflict);
+}
+
+#[tokio::test]
+async fn attention_recall_orders_raised_items_by_their_commit_and_changes_nothing() {
+    let app = test_app_state("attention_recall");
+    let space = create_loaded_space(&app, "attention_recall").await;
+    let empty = space
+        .recall_attention(crate::types::AttentionRecallInput::default())
+        .await
+        .unwrap();
+    assert!(empty.items.is_empty() && empty.complete);
+    assert_eq!(empty.attention_cursor, "attention:-1");
+
+    let target = created_ref(
+        &space,
+        r#"CREATE CONCEPT ?item {TYPE "Person" NAME "vendor"}"#,
+        Default::default(),
+    )
+    .await;
+    let watch = created_ref(&space,r#"CREATE CONCEPT ?item {TYPE "Watch" SET ATTRIBUTES {watch_class:"delta",summary:"vendor changed",status:"disarmed",condition:{element: :target,ops:["update"]}} SET STRUCTURAL {("watches", :target)}}"#,kip::param("target",target.clone())).await;
+    runtime_work(&space, "arm_watch", &watch).await;
+    seed_kip(
+        &space,
+        kip::request_with(
+            r#"UPDATE :id SET FIELDS {name:"vendor changed"}"#,
+            kip::param("id", target.clone()),
+        ),
+    )
+    .await;
+    assert_eq!(settlement::sweep_watches(space.as_ref()).await.fired, 1);
+    // A due Commitment with no Watch is raised by Maintenance's review.
+    let commitment = created_ref(&space,r#"CREATE CONCEPT ?item {TYPE "Commitment" SET ATTRIBUTES {summary:"Send the report",status:"pending",due_at:"2026-01-01T00:00:00.000Z"}}"#,Default::default()).await;
+    seed_kip(
+        &space,
+        kip::request_with(
+            r#"CREATE ACTIVITY ?review {SET FIELDS {activity_class:"commitment_review",status:"completed"} SET STRUCTURAL {("inputs", :commitment)}}"#,
+            kip::param("commitment", commitment.clone()),
+        ),
+    )
+    .await;
+
+    let before = space
+        .memory
+        .nexus()
+        .store
+        .current_seq(anda_cognitive_nexus::nexus::DEFAULT_SPACE)
+        .await
+        .unwrap();
+    let page = space
+        .recall_attention(crate::types::AttentionRecallInput::default())
+        .await
+        .unwrap();
+    assert!(page.complete, "{page:?}");
+    let kinds: Vec<_> = page
+        .items
+        .iter()
+        .map(|i| (i.kind.as_str(), i.reference.as_str()))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ("watch_fired", watch.as_str()),
+            ("commitment_due", commitment.as_str())
+        ]
+    );
+    assert_eq!(page.items[0].target_refs, std::slice::from_ref(&target));
+    assert!(page.items[0].raised_seq < page.items[1].raised_seq);
+    assert_eq!(
+        page.items[1].due_at.as_deref(),
+        Some("2026-01-01T00:00:00.000Z")
+    );
+    assert_eq!(
+        page.attention_cursor,
+        format!("attention:{}", page.items[1].raised_seq)
+    );
+    // Reading is read-only, and the kept cursor skips what was taken.
+    assert_eq!(
+        space
+            .memory
+            .nexus()
+            .store
+            .current_seq(anda_cognitive_nexus::nexus::DEFAULT_SPACE)
+            .await
+            .unwrap(),
+        before
+    );
+    let next = space
+        .recall_attention(crate::types::AttentionRecallInput {
+            attention_cursor: Some(page.attention_cursor.clone()),
+            limit: Some(1),
+        })
+        .await
+        .unwrap();
+    assert!(next.items.is_empty() && next.complete);
+    assert_eq!(next.attention_cursor, page.attention_cursor);
+    // A page cut after one raise resumes at the next.
+    let first = space
+        .recall_attention(crate::types::AttentionRecallInput {
+            attention_cursor: None,
+            limit: Some(1),
+        })
+        .await
+        .unwrap();
+    assert_eq!(first.items.len(), 1);
+    assert!(!first.complete);
+    let rest = space
+        .recall_attention(crate::types::AttentionRecallInput {
+            attention_cursor: Some(first.attention_cursor),
+            limit: Some(1),
+        })
+        .await
+        .unwrap();
+    assert_eq!(rest.items[0].reference, commitment);
+    assert!(
+        space
+            .recall_attention(crate::types::AttentionRecallInput {
+                attention_cursor: Some("42".into()),
+                limit: None,
+            })
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn the_unconsolidated_backlog_reads_activity_provenance() {
+    let app = test_app_state("unconsolidated_backlog");
+    let space = create_loaded_space(&app, "unconsolidated_backlog").await;
+    let first = created_ref(
+        &space,
+        r#"CREATE CONCEPT ?item {TYPE "Event" NAME "first" SET ATTRIBUTES {summary:"first"}}"#,
+        Default::default(),
+    )
+    .await;
+    created_ref(
+        &space,
+        r#"CREATE CONCEPT ?item {TYPE "Event" NAME "second" SET ATTRIBUTES {summary:"second"}}"#,
+        Default::default(),
+    )
+    .await;
+    let count =
+        || crate::assess::kip_count_sum(space.as_ref(), crate::assess::UNCONSOLIDATED_COUNT_KQL);
+    assert_eq!(count().await, Some(2));
+    seed_kip(
+        &space,
+        kip::request_with(
+            r#"MUTATE {
+  CREATE CONCEPT ?lesson {TYPE "Insight" NAME "lesson" SET ATTRIBUTES {summary:"lesson"}}
+  CREATE ACTIVITY ?item {SET FIELDS {activity_class:"semantic_consolidation",status:"completed"} SET STRUCTURAL {("inputs", :event) ("outputs", ?lesson)}}
+}"#,
+            kip::param("event", first),
+        ),
+    )
+    .await;
+    assert_eq!(count().await, Some(1));
 }
 
 #[tokio::test]
@@ -1563,8 +1723,7 @@ async fn task_completion_requires_a_live_lease_and_current_version() {
         .settle_memory_metabolism(MaintenanceScope::Quick, unix_ms())
         .await
         .unwrap();
-    assert!(settlement.decay_error.is_none(), "{settlement:?}");
-    assert!(settlement.decayed > 0);
+    assert!(settlement.correction_scan_error.is_none(), "{settlement:?}");
     assert_eq!(element_version(&space, &task).await, 1);
     let early = space
         .run_kip_settlement(kip::request_with(
@@ -1728,7 +1887,7 @@ fn strength(state: &serde_json::Value) -> f64 {
 }
 
 #[tokio::test]
-async fn settlement_metabolizes_every_memory_and_reinforces_none() {
+async fn settlement_neither_sweeps_nor_reinforces_memory_strength() {
     let app = test_app_state("settlement");
     let space = create_loaded_space(&app, "settlement").await;
     let now_ms = unix_ms();
@@ -1752,30 +1911,20 @@ async fn settlement_metabolizes_every_memory_and_reinforces_none() {
         .settle_memory_metabolism(MaintenanceScope::Full, now_ms)
         .await
         .unwrap();
-    assert!(report.decay_ran);
-    assert_eq!(report.decayed, 3, "{report:?}");
     assert_eq!(report.new_corrections, 0);
 
-    // All three decayed by the policy factor (0.8 × 0.95), the recalled
-    // one included. It earned no gain and bought no exemption — the
-    // ledger row exists, and the graph does not know about it.
+    // Decay is computed at read time from base, anchor and a pinned policy
+    // (Spec §59.1), so the stored base is neither swept down nor paid out
+    // for the recall.
     for id in [&alpha, &beta, &gamma] {
         let state = mnemonic_state(&space, id).await;
-        assert!((strength(&state) - 0.76).abs() < 1e-9, "{id}: {state}");
+        assert!((strength(&state) - 0.8).abs() < 1e-9, "{id}: {state}");
     }
     assert_eq!(
         space.ledger.get(&beta).await.unwrap().unwrap().recall_count,
         1,
         "the recall is still recorded, just not paid out"
     );
-
-    // Idempotence: an immediate re-settlement does not re-decay (weekly
-    // rate limit).
-    let report = space
-        .settle_memory_metabolism(MaintenanceScope::Full, now_ms + 1)
-        .await
-        .unwrap();
-    assert_eq!(report.decayed, 0, "{report:?}");
 
     // Nothing decayed the *claims*: KIP 2.0 forbids letting time erode a
     // stance, and a settlement that quietly did would be the single
@@ -1834,13 +1983,6 @@ SUPERSEDING :old"#,
         .settle_memory_metabolism(MaintenanceScope::Quick, now_ms)
         .await
         .unwrap();
-    // Disuse metabolism is paced by `DECAY_MIN_INTERVAL_MS`, not by the
-    // cycle scope: a `quick` cycle sweeps too. These Concepts have never
-    // carried `MnemonicState`, so they metabolize from the baseline rather
-    // than being skipped — "the model forgot to set MnemonicState" must
-    // not mean "this memory never fades".
-    assert!(report.decay_ran);
-    assert!(report.decayed > 0, "{report:?}");
     assert_eq!(report.new_corrections, 1, "{report:?}");
     let row = space.ledger.get(&old).await.unwrap().unwrap();
     assert_eq!(row.correction_count, 1);
@@ -1962,7 +2104,6 @@ async fn settlement_expires_lapsed_records_and_claims() {
         .await
         .unwrap();
     assert_eq!(quick.retention.archived, 0, "{quick:?}");
-    assert_eq!(quick.retention.expired_assertions, 0, "{quick:?}");
 
     let report = space
         .settle_memory_metabolism(MaintenanceScope::Full, now_ms)
@@ -1973,7 +2114,6 @@ async fn settlement_expires_lapsed_records_and_claims() {
     // rather than dropped — "archived 1" when 2 lapsed is not the truth.
     assert_eq!(report.retention.archived, 1, "{report:?}");
     assert_eq!(report.retention.held, 1, "{report:?}");
-    assert!(report.retention.expired_assertions >= 1, "{report:?}");
 
     // Archived, not destroyed: the element is still there to be read.
     let still_there = space
@@ -1985,21 +2125,20 @@ async fn settlement_expires_lapsed_records_and_claims() {
         .unwrap();
     assert!(kip::succeeded(&still_there), "{still_there:?}");
 
-    // §14.3: the lapsed claim is `expired` — not retracted and not
-    // superseded, because nobody withdrew it and nothing replaced it.
+    // §14.3: the lapsed claim is not swept. Its expiry is computed at read
+    // time, so the record stays active — not retracted, not superseded.
     let status = space
         .execute_kip_readonly(kip::request(
             r#"FIND(?a.lifecycle.status) WHERE {
   ?a ASSERTION {}
-  FILTER(?a.lifecycle.status == "expired")
+  FILTER(?a.valid_time.until == "2020-01-01T00:00:00.000Z")
 } LIMIT 5"#,
         ))
         .await
         .unwrap();
-    assert!(
-        kip::ok_result(&status)
-            .and_then(|value| value.as_array())
-            .is_some_and(|rows| !rows.is_empty()),
+    assert_eq!(
+        kip::ok_result(&status).cloned(),
+        Some(serde_json::json!(["active"])),
         "{status:?}"
     );
 
@@ -2009,12 +2148,11 @@ async fn settlement_expires_lapsed_records_and_claims() {
         .await
         .unwrap();
     assert_eq!(again.retention.archived, 0, "{again:?}");
-    assert_eq!(again.retention.expired_assertions, 0, "{again:?}");
     assert_eq!(again.retention.held, 1, "{again:?}");
 }
 
 #[tokio::test]
-async fn pin_exempts_from_metabolism_and_forget_removes_for_real() {
+async fn pin_keeps_memory_and_forget_removes_for_real() {
     let app = test_app_state("pin_forget");
     let space = create_loaded_space(&app, "pin_forget").await;
     let now_ms = unix_ms();
@@ -2025,16 +2163,17 @@ async fn pin_exempts_from_metabolism_and_forget_removes_for_real() {
         concepts[2].clone(),
     );
 
-    // Pin one Concept: metabolism must skip it (plan M6 + M2 integration).
+    // Pin one Concept: a storage-lifecycle statement, and settlement writes
+    // no strength either way (decay is computed at read time).
     assert_eq!(space.pin_memory(&pinned, true).await.unwrap(), 1);
-    let report = space
+    space
         .settle_memory_metabolism(MaintenanceScope::Full, now_ms)
         .await
         .unwrap();
-    assert_eq!(report.decayed, 2, "{report:?}");
-    let state = mnemonic_state(&space, &pinned).await;
-    assert!((strength(&state) - 0.8).abs() < 1e-9, "{state}");
-    assert!((strength(&mnemonic_state(&space, &plain).await) - 0.76).abs() < 1e-9);
+    for id in [&pinned, &plain] {
+        let state = mnemonic_state(&space, id).await;
+        assert!((strength(&state) - 0.8).abs() < 1e-9, "{state}");
+    }
 
     // Dry run reports without erasing.
     let doomed = propositions[0].clone();
@@ -2299,7 +2438,7 @@ async fn memory_status_aggregates_counters_and_schema_audit() {
                 output: serde_json::json!([{
                     "id": concepts[0],
                     "name": "alpha",
-                    "schema_ref": "kip://profiles/cognitive-memory@2.1.0/Person",
+                    "schema_ref": profile!("Person"),
                 }]),
                 is_error: None,
                 call_id: Some("c1".to_string()),
@@ -2376,7 +2515,7 @@ SUPERSEDING :old"#,
 #[test]
 fn current_settlement_failure_replaces_a_stale_stored_report() {
     let stored = crate::types::MemorySettlementReport {
-        decay_error: Some("previous decay failure".into()),
+        correction_scan_error: Some("previous scan failure".into()),
         ..Default::default()
     };
     assert_eq!(
@@ -2385,7 +2524,7 @@ fn current_settlement_failure_replaces_a_stale_stored_report() {
     );
     assert_eq!(
         settlement_error_messages(Some(&stored), None),
-        vec!["decay: previous decay failure"]
+        vec!["corrections: previous scan failure"]
     );
 }
 
@@ -2784,10 +2923,7 @@ async fn space_agent_entrypoints_use_memory_and_model_without_network() {
         .unwrap();
     // A Concept names its type by the exact schema symbol it was created
     // under, so the meaning cannot drift when a package is republished.
-    assert_eq!(
-        counterparty["schema_ref"],
-        "kip://profiles/cognitive-memory@2.1.0/Person"
-    );
+    assert_eq!(counterparty["schema_ref"], profile!("Person"));
     assert_eq!(counterparty["key"], "external-user-formation");
     assert_eq!(counterparty["name"], "Formation User");
 

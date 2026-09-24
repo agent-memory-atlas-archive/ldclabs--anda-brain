@@ -2,7 +2,7 @@ import { CurrentMemorySession, executeAgentOperations } from './agent-session.js
 import { MaintenanceWork, REVISED_ROOTS_KEY } from './maintenance.js'
 import { forget, validateForget, type ForgetInput } from './forget.js'
 import { MemoryProduct, assertCurrentOperations, type SourceIdentity, type ChangeInput, type RecordSource } from './product.js'
-import { BRAIN_CAPABILITIES, legacyRuntimeReplacement, runtimeOperations, type RuntimeOperation } from './cognitive.js'
+import { BRAIN_CAPABILITIES, runtimeOperations, type RuntimeOperation } from './cognitive.js'
 import {
   KipDatabase,
   type AuthContext,
@@ -21,6 +21,7 @@ import {
   type KipOperation,
 } from './kip.js'
 import { assess, settle } from './settle.js'
+import { recallAttention, type AttentionRecall, type AttentionRecallInput } from './attention.js'
 import type {
   BrainStats,
   DeclaredVocabulary,
@@ -276,11 +277,6 @@ export class AndaBrain extends KipDatabase<Env> {
     const results: KipResult[] = []
     for (const [index, request] of work.entries()) {
       try {
-        const id = tryParseElementId(request.target_ref)!
-        const target = this.nexus.store.load(id)
-        const schemaRef = target?.kind === 'Concept' ? target.row.schema_ref : ''
-        const legacy = legacyRuntimeReplacement(request.operation, schemaRef)
-        if (legacy) throw new KipError('UnsupportedCapability', legacy)
         const result = request.operation === 'arm_watch'
           ? session.armWatch(request.target_ref, request.expected_version)
           : session.leaseTask(request.target_ref, request.expected_version, new Date(Date.now() + 300_000).toISOString())
@@ -330,12 +326,11 @@ export class AndaBrain extends KipDatabase<Env> {
    * the nexus, and {@link run} hands the settlement the one capability it
    * cannot supply itself.
    */
-  settleMemory(nowMs: number, decayFactor?: number, run?: string, epoch = 0): SettlementReport {
+  settleMemory(nowMs: number, run?: string, epoch = 0): SettlementReport {
     this.checkProcessing(epoch)
     if (run) this.maintenance.check(run, epoch)
     const work = this.maintenance
     const report = settle((operation) => this.run(operation), nowMs, {
-      decayFactor,
       advanceWatch: (id, version, generation) =>
         this.nexus.session(this.authenticate(undefined)).advanceWatch(id, version, generation, 200),
       correctionCursor: work.cursor(),
@@ -391,6 +386,13 @@ export class AndaBrain extends KipDatabase<Env> {
     const rejected = vocabulary.extend(types, predicates)
     if (vocabulary.revision !== before) vocabulary.activate(this.nexus)
     return vocabulary.declared(rejected)
+  }
+
+  /** Attention recall (Memory Interface §4): read-only, ordered by `raised_seq`. */
+  recallAttention(input: AttentionRecallInput): AttentionRecall {
+    this.ensureInitialized()
+    return recallAttention((command, parameters) =>
+      super.executeKipBatch([{ command, parameters }], undefined, undefined, undefined, undefined, true)[0]!, input)
   }
 
   /** What this Space can already say, without publishing anything. */

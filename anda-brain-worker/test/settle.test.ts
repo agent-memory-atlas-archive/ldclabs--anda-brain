@@ -1,6 +1,6 @@
 import type { KipOperation } from '../src/kip.js'
 const OK: KipResult = {status:'succeeded'}
-import { KipError, type KipResult } from '@ldclabs/kip-do'
+import type { KipResult } from '@ldclabs/kip-do'
 import { describe, expect, it } from 'vitest'
 import { settle } from '../src/settle.js'
 const NOW = Date.parse('2026-09-03T00:00:00Z')
@@ -21,17 +21,10 @@ describe('deterministic settlement', () => {
     ]) : rows([]), NOW, { advanceWatch: () => { throw new Error('must not evaluate text') } })
     expect(report.watches).toEqual({fired:0,disarmed:0,deferred:2,conflicted:0})
   })
-  it('reports a failed decay without suppressing protected Watch advancement', () => {
-    const report = settle((op) => {
-      if (op.command.startsWith('UPDATE ?c')) return {status:'failed',error:new KipError('InternalError','scan budget exceeded').toJSON()}
-      if (op.command.includes('type: "Watch"')) return rows([
-        ['C-1','wait',{condition:{element:'C-2'}},7,{arm_generation:3}],
-      ])
-      return rows([])
-    }, NOW, {advanceWatch: () => ({status:'fired'})})
-    expect(report.decayed).toBe(0)
-    expect(report.decay_error).toBe('scan budget exceeded')
-    expect(report.watches.fired).toBe(1)
+  it('never sweeps memory strength: decay is computed at read time', () => {
+    const commands: string[] = []
+    settle((op) => { commands.push(op.command); return rows([]) }, NOW)
+    expect(commands.some((command) => command.includes('memory_strength') || command.startsWith('UPDATE'))).toBe(false)
   })
   it('passes the real version and generation to the protected runtime', () => {
     const calls: unknown[] = []

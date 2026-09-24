@@ -17,9 +17,9 @@ class Ai implements AiBinding {
   }
 }
 const empty = {types:[],predicates:[],commands:[],summary:'no additional changes'}
-const plan = {...empty, commands:[`MUTATE {
+const plan = {...empty, types:['AnswerStyle'], commands:[`MUTATE {
   CREATE CONCEPT ?actor {TYPE "Person" NAME "Alice"}
-  CREATE CONCEPT ?value {TYPE "Preference" NAME "concise"}
+  CREATE CONCEPT ?value {TYPE "AnswerStyle" NAME "concise"}
   ASSERT ?claim (?actor,"prefers",?value) {by:?actor,mode:"stated",evidence: :msg1}
 }`],summary:'stored'}
 function post(ai: Ai, space: string, action: string, body: unknown) {

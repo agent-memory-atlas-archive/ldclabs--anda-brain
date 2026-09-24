@@ -425,6 +425,10 @@ fn build_router(
             routing::get(get_memory_status),
         )
         .route(
+            "/v1/{space_id}/memory/attention",
+            routing::get(get_memory_attention),
+        )
+        .route(
             "/v1/{space_id}/wiki/docs",
             routing::post(post_wiki_commit).get(list_wiki_docs),
         )

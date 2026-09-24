@@ -67,7 +67,7 @@ fn review_reply() -> String {
     json!({"facts": [{
         "subject": {"type": "Person", "name": "alice"},
         "predicate": "prefers",
-        "object": {"type": "Preference", "name": "dark_mode"},
+        "object": {"type": "ColorScheme", "name": "dark_mode"},
         "confidence": 0.9
     }]})
     .to_string()
@@ -99,7 +99,7 @@ async fn archive_withdraws_already_digested_claim() {
         .run_wiki_digest(crate::agents::SELF_USER_ID)
         .await
         .unwrap();
-    let item = fact(("Person", "alice"), "prefers", ("Preference", "dark_mode"));
+    let item = fact(("Person", "alice"), "prefers", ("ColorScheme", "dark_mode"));
     let states = digest_claim_status(&space.wiki_digest, &item).await;
     assert_eq!(states, ["retracted"], "archive digest report: {after:?}");
 }
@@ -125,7 +125,7 @@ async fn partial_extraction_does_not_withdraw_unchanged_fact() {
         .run_wiki_digest(crate::agents::SELF_USER_ID)
         .await
         .unwrap();
-    let item = fact(("Person", "alice"), "prefers", ("Preference", "dark_mode"));
+    let item = fact(("Person", "alice"), "prefers", ("ColorScheme", "dark_mode"));
     assert_eq!(
         digest_claim_status(&space.wiki_digest, &item).await,
         ["active"],
@@ -166,7 +166,7 @@ async fn omitted_claim_stays_in_ledger_and_can_later_be_withdrawn() {
         .unwrap();
     assert_eq!(report.superseded, 0);
     assert_eq!(report.citations_invalid, 0);
-    let item = fact(("Person", "alice"), "prefers", ("Preference", "dark_mode"));
+    let item = fact(("Person", "alice"), "prefers", ("ColorScheme", "dark_mode"));
     assert_eq!(
         digest_claim_status(&space.wiki_digest, &item).await,
         ["active"]
@@ -226,7 +226,7 @@ async fn withdrawal_requires_an_explicit_absent_review_from_every_batch() {
         .unwrap();
     assert_eq!(unknown.failed, 0);
     assert_eq!(unknown.superseded, 0);
-    let item = fact(("Person", "alice"), "prefers", ("Preference", "dark_mode"));
+    let item = fact(("Person", "alice"), "prefers", ("ColorScheme", "dark_mode"));
     assert_eq!(
         digest_claim_status(&space.wiki_digest, &item).await,
         ["active"]
@@ -451,7 +451,7 @@ async fn acl_change_during_extraction_fences_the_graph_write() {
             .digest_pending,
         1
     );
-    let item = fact(("Person", "alice"), "prefers", ("Preference", "dark_mode"));
+    let item = fact(("Person", "alice"), "prefers", ("ColorScheme", "dark_mode"));
     assert!(
         digest_claim_status(&space.wiki_digest, &item)
             .await

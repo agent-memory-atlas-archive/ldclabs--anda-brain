@@ -2,7 +2,7 @@
 use super::*;
 use crate::learning::AdoptionBasis;
 
-const PROFILE: &str = "kip://profiles/cognitive-memory@2.1.0/";
+use crate::PROFILE;
 
 /// A trusted host's short-lived observation of the actual application context.
 /// Never accept this object from Recall/model arguments. A new process must
@@ -345,8 +345,9 @@ impl LearningRuntime {
         if edge(&revision, "revision_of")? != skill_ref {
             return Err("Skill and current revision disagree".into());
         }
-        let grade = &skill["facets"][format!("{PROFILE}GradingState")];
-        let trial_state = &skill["facets"][format!("{PROFILE}TrialState")];
+        let current_evaluation =
+            crate::learning::native::settlement::pointer(&skill, "current_evaluation");
+        let current_trial = crate::learning::native::settlement::pointer(&skill, "current_trial");
         let mut result = ProcedureStatus {
             skill_ref: skill_ref.into(),
             revision_ref: revision_ref.clone(),
@@ -361,7 +362,7 @@ impl LearningRuntime {
                 .unwrap_or("descriptive")
                 .into(),
             dependency_validity: revision["_system"]["dependency_validity"].clone(),
-            evaluation_ref: grade["evaluation_ref"].as_str().map(str::to_string),
+            evaluation_ref: current_evaluation.map(str::to_string),
             acquisition: None,
             review_due_at: None,
             context_expires_at_ms: None,
@@ -434,10 +435,10 @@ impl LearningRuntime {
         let evaluation = self.record(evaluation_ref, "EvaluationRecord").await?;
         let trial_ref = job.trial_ref.as_deref().ok_or("trial missing")?;
         let trial = self.record(trial_ref, "TrialRecord").await?;
+        // The pointers are cleared whenever the selected revision changes, so
+        // binding them to this Skill's current revision is the engine's check.
         if job.plan.candidate_revision != revision_ref
-            || grade["revision_ref"] != revision_ref
-            || trial_state["revision_ref"] != revision_ref
-            || trial_state["trial_ref"] != trial_ref
+            || current_trial != Some(trial_ref)
             || evaluation["trial_ref"] != trial_ref
             || evaluation["revision_refs"] != json!([revision_ref])
             || evaluation["to_status"] != "adopted"

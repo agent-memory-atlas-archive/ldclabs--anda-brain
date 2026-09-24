@@ -21,18 +21,17 @@ export interface SettlePosition {
   pendingCorrections?: CorrectionScan
   correctionCursor?: number | CorrectionCursor
   advanceWatch?: AdvanceWatch
-  decayFactor?: number
 }
 
+/**
+ * There is no disuse sweep: decay is computed from base, anchor and a pinned
+ * strength policy when a read is evaluated (Spec §59.1, Profile §6.1, §18),
+ * and a missing input leaves strength unknown.
+ */
 export function settle(run: RunKip, nowMs: number, position: SettlePosition = {}): SettlementReport {
   const now = new Date(nowMs).toISOString()
-  const factor = position.decayFactor ?? DECAY_FACTOR
-  if (!Number.isFinite(factor) || factor <= 0 || factor > 1) throw new Error('decayFactor must be in (0, 1]')
-  const decay = metabolize(run, now, new Date(nowMs - DECAY_MIN_INTERVAL_MS).toISOString(), factor)
   return {
     settled_at: now,
-    decayed: decay.decayed,
-    ...(decay.error === undefined ? {} : { decay_error: decay.error }),
     watches: sweepWatches(run, position.advanceWatch),
     skills: {
       graded: 0, transitions: 0, conflicted: 0,
@@ -58,11 +57,6 @@ export function assess(
 
 
 const WATCH_SWEEP_LIMIT = 20
-const DEFAULT_MEMORY_STRENGTH = 0.5
-const DECAY_FACTOR = 0.95
-const DECAY_FLOOR = 0.3
-const DECAY_MIN_INTERVAL_MS = 7 * 24 * 3_600 * 1_000
-const DECAY_BATCH_LIMIT = 200
 
 function sweepWatches(run: RunKip, advance?: AdvanceWatch): WatchSettlement {
   const report: WatchSettlement = { fired: 0, conflicted: 0, disarmed: 0, deferred: 0 }
@@ -76,7 +70,7 @@ function sweepWatches(run: RunKip, advance?: AdvanceWatch): WatchSettlement {
   for (const row of rows) {
     if (row.generation === undefined) {
       report.deferred += 1
-      report.error = 'legacy Watch has no WatchState and cannot be re-armed in place; after reviewing its observation gap, create a CognitiveMemory 2.1 replacement, reconnect structural references, then archive the legacy record'
+      report.error = 'armed Watch has no WatchState; review its observation gap and re-arm it through the host'
       continue
     }
     // An arbitrary text member must never be ignored by a structured matcher.
@@ -181,7 +175,8 @@ const DEPENDENTS_LIMIT = 20
  * never skips its unread tail. Old scalar checkpoints remain readable.
  *
  * Reachability is topology, not judgment: a listed dependent is a candidate
- * for `DerivationState {status: "stale"}`, not already stale. The cycle decides.
+ * for a `review_derived` SleepTask; its currentness is the engine's computed
+ * `_system.dependency_validity`. The cycle decides.
  */
 function scanCorrections(run: RunKip, position: number | CorrectionCursor): CorrectionScan {
   const after = typeof position === 'number' ? { seq: position, after_id: '' } : position
@@ -287,61 +282,6 @@ function readDependents(result: unknown): Dependent[] {
   return dependents
 }
 
-// --- mnemonic metabolism ----------------------------------------------------
-
-/**
- * Disuse metabolism: `MnemonicState.memory_strength`, never confidence.
- *
- * The `last_metabolized_at` filter is both the weekly rate limit and the
- * intra-sweep cursor, so a Space with nothing due costs one query that matches
- * no rows. A failed sweep decays nothing and says so by reporting zero — the
- * cycle still runs.
- */
-function metabolize(run: RunKip, now: string, metabolizedBefore: string, factor: number): { decayed: number; error?: string } {
-  const result = run(decayCommand(now, metabolizedBefore, factor))
-  if (result.status === 'failed') return { decayed: 0, error: result.error?.message ?? 'mnemonic metabolism failed' }
-  const changes = result.extensions?.['kip-do/outcome']?.changes ?? []
-  return { decayed: changes.filter((change) => change.op === 'update').length }
-}
-
-/**
- * One disuse-metabolism batch.
- *
- * Decays `MnemonicState.memory_strength` — accessibility — and never Assertion
- * confidence: a fact nobody has asked about in a month is no less credible, and
- * KIP 2.0 forbids letting time erode a stance.
- *
- * A Concept that has never carried the Facet is metabolized from a baseline
- * rather than skipped: leaving it out would make "the model forgot to set
- * MnemonicState" mean "this memory never fades", which is not a decision
- * anybody made. The `last_metabolized_at` filter is both the weekly rate limit
- * and the intra-sweep cursor — rows stamped by this pass stop matching.
- */
-function decayCommand(now: string, metabolizedBefore: string, factor: number): KipOperation {
-  return {
-    command: `UPDATE ?c
-SET FACET "MnemonicState" {
-  memory_strength: CLAMP(MUL(COALESCE(?c.facets["MnemonicState"].memory_strength, :baseline), :factor), :floor, 1.0),
-  last_metabolized_at: :now
-}
-WHERE {
-  ?c CONCEPT {}
-  NOT { ?c CONCEPT {type: "SleepTask"} }
-  NOT { ?c CONCEPT {type: "Watch"} }
-  FILTER(IS_NULL(?c.facets["MnemonicState"].last_metabolized_at) || ?c.facets["MnemonicState"].last_metabolized_at < :before)
-  FILTER(IS_NULL(?c.facets["MnemonicState"].memory_strength) || ?c.facets["MnemonicState"].memory_strength > :floor)
-}
-LIMIT :limit`,
-    parameters: {
-      baseline: DEFAULT_MEMORY_STRENGTH,
-      factor,
-      floor: DECAY_FLOOR,
-      now,
-      before: metabolizedBefore,
-      limit: DECAY_BATCH_LIMIT,
-    },
-  }
-}
 
 // --- assessment reads -------------------------------------------------------
 

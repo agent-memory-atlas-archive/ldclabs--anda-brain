@@ -32,7 +32,10 @@ impl Default for RecallBudget {
         Self {
             tokenizer: TOKENIZER.into(),
             max_tokens: 4096,
-            context_tokens: 32768,
+            // The static Recall prefix (full syntax, Profile, role cards and
+            // deployment policy) is about 28k tokens on its own; the default
+            // leaves one planning pass room for candidate memory items.
+            context_tokens: 49152,
         }
     }
 }

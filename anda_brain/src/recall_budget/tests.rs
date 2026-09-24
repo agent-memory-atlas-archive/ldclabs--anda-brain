@@ -110,7 +110,7 @@ fn opt_in_resolution_preserves_operator_caps_and_rejects_unknown_encoding() {
     let default: RecallBudget = serde_json::from_str("{}").unwrap();
     assert_eq!(default, RecallBudget::default());
     assert_eq!(default.max_tokens, 4096);
-    assert_eq!(default.context_tokens, 32768);
+    assert_eq!(default.context_tokens, 49152);
     let policy = RecallBudget {
         max_tokens: 1000,
         context_tokens: 30_000,

@@ -1,9 +1,9 @@
-/** Trusted host mechanics for CognitiveMemory 2.1; no authority comes from a plan. */
+/** Trusted host mechanics for the Cognitive Memory Profile; no authority comes from a plan. */
 import { contentDigest, tryParseElementId, type Json, type JsonMap } from '@ldclabs/kip-do'
 
 export const BRAIN_CAPABILITIES = {
   kip: '2.0',
-  cognitive_memory_schema: '2.1.0',
+  cognitive_memory_schema: '2.0.0',
   memory_interface: false,
   memory_bundles: [],
   learning_scheduler: false,
@@ -22,15 +22,6 @@ export interface RuntimeOperation {
   operation: 'arm_watch' | 'lease_task'
   target_ref: string
   expected_version: number
-}
-
-const LEGACY_PROFILE = 'kip://profiles/cognitive-memory@2.0.0/'
-
-export function legacyRuntimeReplacement(operation: RuntimeOperation['operation'], schemaRef: string): string | undefined {
-  const kind = operation === 'arm_watch' ? 'Watch' : 'SleepTask'
-  if (schemaRef !== `${LEGACY_PROFILE}${kind}`) return undefined
-  return `CognitiveMemory 2.0 ${kind} cannot be upgraded in place because schema_ref is immutable; ` +
-    'create a 2.1 replacement, reconnect its structural references, and archive the legacy record only after the replacement is ready'
 }
 
 export function runtimeOperations(value: unknown): RuntimeOperation[] {

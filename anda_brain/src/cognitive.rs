@@ -1,4 +1,4 @@
-//! The model's bounded host operations for CognitiveMemory 2.1.
+//! The model's bounded host operations for the Cognitive Memory Profile.
 //!
 //! No identity, evaluator, observer policy or external-tool capability comes
 //! from these arguments. Those remain trusted host configuration.
@@ -9,31 +9,14 @@ use serde::Deserialize;
 use serde_json::json;
 use std::sync::{Arc, LazyLock};
 
-pub(crate) const CAPABILITIES: &str = "Anda Brain uses KIP 2.0 / CognitiveMemory 2.1.0. \
+pub(crate) const CAPABILITIES: &str = "Anda Brain uses KIP 2.0 / cognitive-memory@2.0.0. \
 This connection exposes the existing Brain API and raw KIP, not the optional five-intent \
 Memory Interface; no memory_* bundle or full CognitiveMemory conformance is claimed. \
 Procedural candidates remain unproven until independently qualified; trial/evaluation scheduling requires explicit host configuration. \
 External dispatch requires installed host bindings and the four-way action gate; memory_runtime status reports this connection's configuration. Model plans cannot write learning records, \
-LeaseState or WatchState. Nexus computes dependency validity; a stored review never overrides it. \
+Skill learning pointers, computed lineage, LeaseState or WatchState. Nexus computes dependency validity; a stored review never overrides it. \
 Text and mixed-selector Watches require a host-installed semantic evaluator; read memory_runtime status.semantic_attention for this connection's configuration and recovery state. Without that binding, semantic evaluation is unavailable. \
 Read constraints, task scope, uncertainty and invalid dependencies must remain visible.";
-
-const LEGACY_PROFILE: &str = "kip://profiles/cognitive-memory@2.0.0/";
-
-fn legacy_runtime_replacement(operation: &str, schema_ref: &str) -> Option<String> {
-    let kind = match operation {
-        "arm_watch" => "Watch",
-        "lease_task" => "SleepTask",
-        _ => return None,
-    };
-    (schema_ref == format!("{LEGACY_PROFILE}{kind}")).then(|| {
-        format!(
-            "CognitiveMemory 2.0 {kind} cannot be upgraded in place because schema_ref is \
-             immutable; create a 2.1 replacement, reconnect its structural references, and \
-             archive the legacy record only after the replacement is ready"
-        )
-    })
-}
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -102,12 +85,6 @@ impl MemoryRuntimeTool {
         let nexus = self.memory.nexus();
         let session = nexus.system_session();
         let operation = async {
-            let id: anda_cognitive_nexus::ElementId = target.parse()?;
-            let element = nexus.store.get_element(id).await?;
-            if let Some(message) = legacy_runtime_replacement(&args.operation, element.schema_ref())
-            {
-                return Err(anda_kip::KipError::unsupported_capability(message));
-            }
             match args.operation.as_str() {
                 "arm_watch" => self
                     .attention
@@ -193,29 +170,5 @@ impl Tool<BaseCtx> for MemoryRuntimeTool {
             .execute(args, ctx.agent == crate::agents::MaintenanceAgent::NAME)
             .await?;
         Ok(ToolOutput::new(result))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn legacy_operational_records_require_an_explicit_replacement() {
-        let watch =
-            legacy_runtime_replacement("arm_watch", "kip://profiles/cognitive-memory@2.0.0/Watch")
-                .unwrap();
-        assert!(watch.contains("create a 2.1 replacement"));
-        assert!(
-            legacy_runtime_replacement("arm_watch", "kip://profiles/cognitive-memory@2.1.0/Watch")
-                .is_none()
-        );
-        assert!(
-            legacy_runtime_replacement(
-                "lease_task",
-                "kip://profiles/cognitive-memory@2.0.0/SleepTask"
-            )
-            .is_some()
-        );
     }
 }

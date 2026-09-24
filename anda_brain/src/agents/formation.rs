@@ -597,21 +597,23 @@ impl FormationAgent {
         // A thread/channel is provenance, not the identity of an observation.
         // Each durable conversation has its own key, stable across retries,
         // so a later submission from the same source cannot cite old bytes.
-        ctx.base.set_state(super::Observation(
-            crate::kip::observation_ingest(
-                &input.messages,
-                &crate::kip::observation_timestamp(
-                    input.timestamp.as_deref(),
-                    conversation.created_at,
-                ),
-                &format!("formation:conversation:{}", conversation._id),
-                counterparty_info
-                    .as_ref()
-                    .and_then(|person| person.get("id"))
-                    .and_then(Json::as_str),
-            )
-            .map(Arc::new),
-        ));
+        let observation = crate::kip::observation_ingest(
+            &input.messages,
+            &crate::kip::observation_timestamp(input.timestamp.as_deref(), conversation.created_at),
+            &format!("formation:conversation:{}", conversation._id),
+            counterparty_info
+                .as_ref()
+                .and_then(|person| person.get("id"))
+                .and_then(Json::as_str),
+        )
+        .map(Arc::new);
+        // Each claim's `at` is when its source said it (Spec §13.2), so the
+        // model reads the captured times rather than guessing them.
+        let captured = observation
+            .as_deref()
+            .map(crate::kip::observation_manifest)
+            .unwrap_or_else(|| "none".into());
+        ctx.base.set_state(super::Observation(observation));
 
         // add history conversations to provide more context for recall
         let chat_history: Vec<Document> = if self
@@ -644,11 +646,12 @@ impl FormationAgent {
         let mut runner = ctx.clone().completion_iter(
             CompletionRequest {
                 instructions: format!(
-                    "{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Your Notes:\n{}\n\n# Counterparty Profile:\n{}\n\n# Current Datetime: {}",
+                    "{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Your Notes:\n{}\n\n# Counterparty Profile:\n{}\n\n# Captured Evidence:\n{}\n\n# Current Datetime: {}",
                     super::prompts::system_prompt(super::prompts::PromptTarget::Formation, &self.prompt),
                     primer,
                     serde_json::to_string(&notes.items).unwrap_or_default(),
                     serde_json::to_string(&counterparty_info).unwrap_or_default(),
+                    captured,
                     local_date_hour(self.clock.now_ms()).unwrap_or_default()
                 ),
                 prompt,

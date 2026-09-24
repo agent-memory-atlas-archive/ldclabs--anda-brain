@@ -2,6 +2,74 @@
 
 All notable changes to the Anda Brain project.
 
+## [Unreleased] — KIP `3251912` synchronization
+
+**Breaking for draft data.** The service now tracks KIP `3251912` and
+`kip://profiles/cognitive-memory@2.0.0` (content digest
+`sha256:3ea9e4591b403dfc196b611c3e5844be95524987ec3cf80664572e780770d8d9`). The draft
+rewrote 2.0.0 in place and dropped 2.1.0, so Spaces activated under the 2.1.0 draft
+are not compatible and are not migrated; use new Spaces. KIP 1.x Spaces still upgrade
+automatically, and a 1.x `Preference` keeps an open legacy type. Rust depends on
+`anda_kip =0.14.0` / `anda_cognitive_nexus 0.14.0` and the Worker on `@ldclabs/kip-do`
+0.14; until they and a matching `anda_engine` are published, the workspace patches the
+sibling `anda-db` and `anda` checkouts and the Worker links the sibling kip-do.
+
+### Memory semantics
+
+- World changes are one new Assertion from the change; the engine's temporal
+  succession ends the older value, which keeps answering for its time. Supersession
+  is reserved for a claim that was wrong. Formation prompts, the review pass and
+  both deployment contracts say so, and claims carry `at:` from the cited message's
+  observation time. Evidence takes a message's own `timestamp` when it has one, and
+  the model receives the captured Evidence times.
+- Formation `timestamp` is validated at the API boundary: an RFC 3339 instant is
+  canonicalized to millisecond UTC; an unparseable value or sub-millisecond
+  precision is rejected with 400 instead of silently becoming the receipt time.
+- Options are Concepts typed by their kind; the Profile has no `Preference` type.
+  Vocabulary still enters through the host package; `DEFINE` is refused because
+  neither engine provides `draft_vocabulary`.
+- Decay is computed at read time from base, anchor and a pinned strength policy.
+  The settlement sweep and its 0.5 default are gone; `memory_strength_decay_factor`
+  and `decay_floor` are deprecated, still accepted and range-checked, and ignored.
+  Settlement reports drop `decayed`, `decay_ran`, `decay_error` and
+  `retention.expired_assertions` (claim expiry is computed, never stored), and
+  metrics drop `decayed`.
+- Model plans can no longer write a Skill's `current_trial` / `current_evaluation`
+  or the computed `derived_from`, `compiled_from`, `compiled_by`, `consolidated_to`;
+  `TrialState` is gone and `GradingState` is a computed view. The learning runtime
+  moves the pointers in its verdict transactions instead of writing caches.
+- The unconsolidated-backlog probe reads formation/consolidation Activity provenance
+  instead of the computed `consolidated_to` field.
+
+### Product and attention
+
+- Product `ChangeKind` gains `WorldChange` (one new claim; the old one stays active)
+  and `Misrecorded`, which fails `unsupported_capability` because recording repair is
+  not available — it is never mapped to a correction. `Correct` now supersedes the
+  old claim and keeps the world interval it covered instead of retracting it and
+  starting the new value at the correction time. The Worker's product contract matches.
+- `GET /v1/{space_id}/memory/attention` (Rust and Worker) returns fired Watches and
+  due Commitments ordered by the `space_seq` of the commit that raised them, with an
+  `attention:<seq>` cursor the caller keeps. Maintenance raises a due Commitment
+  without a Watch by recording a `commitment_review` Activity. Reading is read-only
+  and grants nothing. The authenticated runtime inbox is unchanged.
+
+### Maintenance of copied material
+
+- Reference halves, the Worker's verbatim cards and the reference supplement were
+  regenerated from `anda_kip` 0.14.0 by script; the supplement adds the Brain Runtime
+  and Validated Learning companions and the common schema.
+- The default Recall `context_tokens` rises from 32768 to 49152: the static Recall
+  prefix alone is about 28k tokens after the synchronization.
+
+### Known limits
+
+- No Memory Interface is advertised. Resume briefings, `after` barriers, processing
+  receipts, recording repair, the exposure log and the draft vocabulary are not
+  provided; neither engine yet computes `effective_strength`, the lineage fields or
+  the GradingState view on read.
+- Behavioral gains from these changes are not measured here (`not_run` until MIB).
+
 ## [0.12.1] — 2026-09-23
 
 ### CLI correctness and batch performance

@@ -38,8 +38,11 @@ request exactly-once behavior. They are shown in the change preview.
 
 `productPrepare(auth, {operation_id, record_id, expected_revision, kind, new_value?})`
 stores a ten-minute preview. Operation ids use 1–128 ASCII letters, digits, `_` or
-`-`. `kind` is `correct`, `suppress`, or `delete`. It returns a receipt with exact
-versioned targets, excluded sources, scope and `preview_digest`.
+`-`. `kind` is `correct`, `world_change`, `misrecorded`, `suppress`, or `delete`.
+It returns a receipt with exact versioned targets, excluded sources, scope and
+`preview_digest`. `misrecorded` (the Brain recorded what the caller never said)
+needs recording repair, which kip-do does not provide, so it fails
+`unsupported_capability` and is never written as a correction or a world change.
 
 `productCommit(auth, operation_id, preview_digest)` revalidates the record, source
 closure and current permissions. Retries with the same operation/input recover the
@@ -47,12 +50,16 @@ same result; changed input conflicts. `productChange(auth, operation_id)` reads
 status; `productDiscard(auth, operation_id)` invalidates an uncommitted preview
 and clears its copied content. An expired/discarded preview cannot be committed.
 
-A correction requires an active supporting Assertion whose actor key matches the
-verified caller's principal id. Only Concept-valued records supported by the live
-schema are accepted. `new_value` is nonblank, at most 8192 UTF-8 bytes. One native
-`MUTATE` retracts the old claim and creates new user Evidence, a new typed value,
-an attributed Assertion and a provenance Activity; it never overwrites an
-Assertion or treats another actor's testimony as the caller's own statement.
+A correction or world change requires an active supporting Assertion whose actor
+key matches the verified caller's principal id. Only Concept-valued records
+supported by the live schema are accepted. `new_value` is nonblank, at most 8192
+UTF-8 bytes. One native `MUTATE` creates new user Evidence, a new typed value, an
+attributed Assertion and a provenance Activity. For `correct` the new Assertion
+supersedes the old one and keeps the world interval it covered (an absent start
+becomes `{latest: <original asserted_at>}`); for `world_change` the new Assertion
+starts now and temporal succession ends the old value, which stays active. It never
+overwrites an Assertion or treats another actor's testimony as the caller's own
+statement.
 
 Suppression archives and deletion purges the reviewed closure: the Proposition,
 Assertions, cited Evidence and recorded referrers, bounded to 128 elements. Shared

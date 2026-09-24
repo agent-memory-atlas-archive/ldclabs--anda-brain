@@ -3,6 +3,22 @@ use ic_auth_types::ByteBufB64;
 use ic_cose_types::cose::{CoseKey, ed25519::VerifyingKey, get_cose_key_public};
 use std::str::FromStr;
 
+/// A Cognitive Memory Profile symbol: `profile!("Watch")` is
+/// `kip://profiles/cognitive-memory@2.0.0/Watch`, `profile!()` the prefix.
+/// One spelling, so a package bump is one edit; the reference alone does not
+/// identify a draft revision, the bundled content digest does.
+macro_rules! profile {
+    () => {
+        "kip://profiles/cognitive-memory@2.0.0/"
+    };
+    ($symbol:literal) => {
+        concat!("kip://profiles/cognitive-memory@2.0.0/", $symbol)
+    };
+}
+
+/// The Cognitive Memory Profile prefix every Profile symbol lives under.
+pub(crate) const PROFILE: &str = profile!();
+
 pub mod action;
 pub mod agents;
 pub mod assess;
@@ -74,6 +90,15 @@ fn parse_ed25519_pubkey(input: &str) -> Option<VerifyingKey> {
 #[cfg(test)]
 mod tests {
     use super::parse_ed25519_pubkeys;
+
+    #[test]
+    fn profile_prefix_names_the_bundled_package() {
+        assert_eq!(
+            super::PROFILE,
+            format!("{}/", anda_cognitive_nexus::profiles::COGNITIVE_MEMORY_REF)
+        );
+        assert_eq!(profile!("Watch"), format!("{}Watch", super::PROFILE));
+    }
     use cose2::{Key as CoseKey, iana};
     use ic_auth_types::ByteBufB64;
 

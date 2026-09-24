@@ -9,7 +9,7 @@
 //! The part this test exists to pin down is *which vocabulary* the migrated
 //! elements land on. A 1.x Anda Brain used `Person`, `Event`, `SleepTask`,
 //! `Insight`, `Commitment` and `Preference`; the Cognitive Memory Profile this
-//! service activates declares all six. If the migration minted its own
+//! service activates declares the first five. If the migration minted its own
 //! `Person` beside the profile's, every command naming the bare local name —
 //! which is every command this service and its prompts issue — would fail with
 //! `SchemaSymbolAmbiguous` on a space whose data had migrated perfectly.
@@ -21,8 +21,9 @@
 //! - a migrated `Person` *is* a profile `Person`, so recall, formation and the
 //!   self-test all see it;
 //! - a migrated `prefers` is the profile's, so `BELIEF` over it works;
-//! - a type the profile does not have (`Topic`) keeps a legacy symbol, because
-//!   a 1.x deployment's own word means whatever that deployment meant by it;
+//! - a type the profile does not have (`Topic`, and `Preference`, which the
+//!   profile replaced with option kinds) keeps a legacy symbol, because a 1.x
+//!   deployment's own word means whatever that deployment meant by it;
 //! - 1.x `(type, name)` identity becomes a 2.0 `key`, so
 //!   `get_or_init_counterparty` resolves the migrated Person instead of
 //!   minting a second one beside it.
@@ -191,11 +192,7 @@ async fn a_kip_1x_space_migrates_onto_the_vocabulary_this_service_activates() {
     )
     .await
     .unwrap();
-    assert!(
-        refs.to_string()
-            .contains("kip://profiles/cognitive-memory@2.1.0/Person"),
-        "{refs}"
-    );
+    assert!(refs.to_string().contains(profile!("Person")), "{refs}");
 
     // A counterparty lookup resolves the migrated Person rather than missing it.
     let alice = read(
@@ -213,10 +210,7 @@ async fn a_kip_1x_space_migrates_onto_the_vocabulary_this_service_activates() {
     )
     .await
     .unwrap();
-    assert_eq!(
-        predicates.to_string(),
-        r#"["kip://profiles/cognitive-memory@2.1.0/prefers"]"#
-    );
+    assert_eq!(predicates, serde_json::json!([profile!("prefers")]));
 
     // A type the profile does not declare keeps its legacy symbol: this
     // deployment's `Topic` means what this deployment meant by it, and nothing

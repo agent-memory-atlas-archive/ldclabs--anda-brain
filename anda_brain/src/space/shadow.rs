@@ -58,14 +58,9 @@ impl AppState {
             self.fork_space(space_id, None),
             self.fork_space(space_id, Some(input.policy.clone())),
         )?;
-        // Interval 0 bypasses the weekly decay gate: the forks inherit the
-        // live space's `decay_applied_at` stamps, and under the gate both
-        // sides would settle identically whenever the live space decayed
-        // recently — turning every decay-knob comparison into a tie. Forks
-        // are throwaway copies, so over-decaying them has no consequence.
         let _ = tokio::join!(
-            baseline.settle_memory_metabolism_with(MaintenanceScope::Full, now_ms, 0),
-            candidate.settle_memory_metabolism_with(MaintenanceScope::Full, now_ms, 0),
+            baseline.settle_memory_metabolism(MaintenanceScope::Full, now_ms),
+            candidate.settle_memory_metabolism(MaintenanceScope::Full, now_ms),
         );
 
         let mut report = ShadowReport {

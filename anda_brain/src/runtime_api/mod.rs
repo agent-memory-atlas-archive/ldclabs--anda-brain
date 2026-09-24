@@ -21,7 +21,7 @@ pub use service::MemoryRuntime;
 pub use watches::RecordWatch;
 
 pub const FORMAT: &str = "anda-brain:runtime-api-v1";
-pub(crate) const PROFILE: &str = "kip://profiles/cognitive-memory@2.1.0/";
+pub(crate) use crate::PROFILE;
 
 #[derive(Clone, Default)]
 pub struct MemoryRuntimeBindings {

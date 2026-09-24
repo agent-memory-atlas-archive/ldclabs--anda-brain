@@ -4,7 +4,7 @@ import {
   ANONYMOUS_PRINCIPAL, contentDigest, formatElementId, isJsonMap, parseElementId,
   parseKip, requirePermitted, spaceResource,
   type AuthContext, type CognitiveNexus, type Element, type EvidenceRow,
-  type Json, type Session, type WhereClause, type ObjectMatcher, type IngestContext,
+  type Json, type JsonMap, type Session, type WhereClause, type ObjectMatcher, type IngestContext,
 } from '@ldclabs/kip-do'
 import type { KipOperation } from './kip.js'
 
@@ -26,10 +26,18 @@ export interface MemoryRecord {
   asserted_at: string | null; valid_from: string | null; valid_until: string | null
   updated_at: string; sources: RecordSource[]; sources_complete: boolean
 }
+/**
+ * Which history a change writes (Spec §14.2, Memory Interface §4): `correct`
+ * supersedes the caller's own wrong claim and keeps the interval it covered;
+ * `world_change` adds one Assertion from now and lets temporal succession end
+ * the old value; `misrecorded` needs recording repair, which this engine does
+ * not provide, so it is refused rather than written as either of the others.
+ */
 export interface ChangeInput {
   operation_id: string; record_id: string; expected_revision: number
-  kind: 'correct' | 'suppress' | 'delete'; new_value?: string
+  kind: 'correct' | 'world_change' | 'misrecorded' | 'suppress' | 'delete'; new_value?: string
 }
+const revises = (kind: ChangeInput['kind']): boolean => kind === 'correct' || kind === 'world_change'
 interface Target { id: string; revision: number; kind: string }
 export interface ChangePreview {
   record: MemoryRecord; new_value: string | null; targets: Target[]
@@ -279,7 +287,7 @@ export class MemoryProduct {
     if (!record.sources_complete) fail('unsupported_scope')
     const sources = new Set(record.sources.flatMap(source => this.keysForSource(source)))
     let targets: Target[]
-    if (input.kind === 'correct') {
+    if (revises(input.kind)) {
       if (record.status !== 'active' || record.storage_state !== 'active' || record.stance !== 'support' || record.actor_key !== auth.principal_id) fail('unsupported_scope')
       if (typeof input.new_value !== 'string' || !input.new_value.trim() || new TextEncoder().encode(input.new_value).length > 8192 || input.new_value === record.object_label) fail('invalid_request')
       targets = [{ id: record.id, revision: record.revision, kind: 'assertion' }]
@@ -314,7 +322,8 @@ export class MemoryProduct {
   }
   prepare(auth: AuthContext, input: ChangeInput): ChangeReceipt {
     if (!input || Object.keys(input).some(key => !['operation_id', 'record_id', 'expected_revision', 'kind', 'new_value'].includes(key)) ||
-        !['correct', 'suppress', 'delete'].includes(input.kind) || !Number.isSafeInteger(input.expected_revision) || input.expected_revision < 1) fail('invalid_request')
+        !['correct', 'world_change', 'misrecorded', 'suppress', 'delete'].includes(input.kind) || !Number.isSafeInteger(input.expected_revision) || input.expected_revision < 1) fail('invalid_request')
+    if (input.kind === 'misrecorded') fail('unsupported_capability')
     const key = this.key(auth, input.operation_id), inputDigest = digest(input)
     const old = this.kv.get<StoredChange>(CHANGE + key)
     if (old) {
@@ -373,7 +382,7 @@ export class MemoryProduct {
       if (stored.receipt.state !== 'prepared' || Date.now() > stored.receipt.expires_at) fail('preview_expired')
       const input: ChangeInput = { operation_id: id, kind: stored.kind, record_id: stored.receipt.preview.record.id,
         expected_revision: stored.receipt.preview.record.revision,
-        ...(stored.kind === 'correct' ? { new_value: stored.receipt.preview.new_value! } : {}) }
+        ...(revises(stored.kind) ? { new_value: stored.receipt.preview.new_value! } : {}) }
       if (digest(this.preview(auth, input)) !== stored.receipt.preview_digest) fail('revision_conflict')
       control.epoch += 1
       if (!Number.isSafeInteger(control.epoch)) fail('epoch_exhausted')
@@ -403,7 +412,7 @@ export class MemoryProduct {
     try {
       const session = this.session(stored.auth)
       for (const [index, request] of stored.requests.entries()) {
-        const target = stored.kind === 'correct' ? 'correction' : stored.receipt.preview.targets[index]!.id
+        const target = revises(stored.kind) ? 'correction' : stored.receipt.preview.targets[index]!.id
         if (stored.completed.includes(target)) continue
         const row = target === 'correction' ? null : this.load(session, target)
         const already = row?.row.state === 'purged' || (stored.kind === 'suppress' && row?.row.state === 'archived')
@@ -412,7 +421,7 @@ export class MemoryProduct {
           if (!('Kml' in command)) throw new Error('invalid_change')
           const outcome = session.mutate(command.Kml, request.parameters, { idempotencyKey: `memory-product:${key}:${target}` })
           if (outcome.status !== 'committed') fail('change_not_committed')
-          if (stored.kind === 'correct') {
+          if (revises(stored.kind)) {
             stored.receipt.replacement_record = outcome.handles.new ?? null
             stored.receipt.source_evidence = outcome.handles.input ?? null
           }
@@ -420,8 +429,11 @@ export class MemoryProduct {
         stored.completed.push(target)
         this.kv.put(CHANGE + key, stored)
       }
-      if (stored.kind === 'correct') {
-        if (this.record(stored.auth, stored.receipt.preview.record.id).status !== 'retracted' || !stored.receipt.replacement_record) fail('verification_incomplete')
+      if (revises(stored.kind)) {
+        // A correction supersedes the old claim; a world change leaves it
+        // active and true for its time.
+        const expected = stored.kind === 'correct' ? 'superseded' : 'active'
+        if (this.record(stored.auth, stored.receipt.preview.record.id).status !== expected || !stored.receipt.replacement_record) fail('verification_incomplete')
       } else {
         for (const target of stored.receipt.preview.targets) {
           const state = this.load(session, target.id).row.state
@@ -488,7 +500,7 @@ export class MemoryProduct {
   }
 
   private requests(auth: AuthContext, key: string, input: ChangeInput, preview: ChangePreview): KipOperation[] {
-    if (input.kind !== 'correct') return preview.targets.map(target => ({
+    if (!revises(input.kind)) return preview.targets.map(target => ({
       command: input.kind === 'delete'
         ? 'PURGE :id EXPECT VERSION :version REFERENCE POLICY "tombstone_reference" CONFIRM "PURGE"'
         : 'TRANSITION :id TO "archived" EXPECT VERSION :version',
@@ -498,16 +510,35 @@ export class MemoryProduct {
     if (typeof objectId !== 'string') return fail('unsupported_scope')
     const object = this.load(this.session(auth), objectId)
     if (object.kind !== 'Concept') return fail('unsupported_scope')
-    return [{ command: `MUTATE {
-      TRANSITION :old TO "retracted" EXPECT VERSION :version
+    const parameters: JsonMap = { old: input.record_id,
+      source_key: `memory-product:${key}:input`, statement: {kind:input.kind,new_value: input.new_value!,previous_record:input.record_id},
+      at: new Date().toISOString(), object_type: object.row.schema_ref, new_value: input.new_value!,
+      subject: preview.record.subject, predicate: preview.record.predicate, actor: {id: preview.record.actor_id!} }
+    if (input.kind === 'correct') {
+      // §14.2: a value-only correction keeps the interval it corrects; an
+      // absent start becomes the original claim's `{latest: asserted_at}`.
+      const from = endpoint(preview.record.valid_from) ??
+        (preview.record.asserted_at ? { latest: preview.record.asserted_at } : fail('unsupported_scope'))
+      const until = endpoint(preview.record.valid_until)
+      return [{ command: `MUTATE {
       CREATE EVIDENCE ?input { CLIENT KEY :source_key SET FIELDS {evidence_class:"user_statement",payload: :statement,observed_at: :at} }
       CREATE CONCEPT ?value { TYPE :object_type NAME :new_value }
-      ASSERT ?new (:subject, :predicate, ?value) {by: :actor,mode:"stated",evidence:?input,at: :at,valid:{from: :at}}
-      CREATE ACTIVITY ?change { SET FIELDS {activity_class:"user_memory_correction",status:"completed",started_at: :at,ended_at: :at} SET STRUCTURAL {("inputs", :old) ("inputs", ?input) ("outputs", ?new)} }
-    }`, parameters: { old: input.record_id, version: input.expected_revision,
-      source_key: `memory-product:${key}:input`, statement: {kind:'user_correction',new_value: input.new_value!,previous_record:input.record_id},
-      at: new Date().toISOString(), object_type: object.row.schema_ref, new_value: input.new_value!,
-      subject: preview.record.subject, predicate: preview.record.predicate, actor: {id: preview.record.actor_id!} } }]
+      ASSERT ?new (:subject, :predicate, ?value) {by: :actor,mode:"stated",evidence:?input,at: :at,valid: :valid}
+      TRANSITION :old TO "superseded" BY ?new EXPECT VERSION :version
+      CREATE ACTIVITY ?change { SET FIELDS {activity_class:"belief_revision",status:"completed",started_at: :at,ended_at: :at} SET STRUCTURAL {("inputs", :old) ("inputs", ?input) ("outputs", ?new)} }
+    }`, parameters: { ...parameters, version: input.expected_revision,
+        valid: until === undefined ? { from } : { from, until } } }]
+    }
+    // §25.4: one new Assertion from the change, whose time is known no more
+    // precisely than "no later than now"; temporal succession ends the old
+    // value. Nothing writes the old claim, so the prepared revision check
+    // under the product fence is its concurrency guard.
+    return [{ command: `MUTATE {
+      CREATE EVIDENCE ?input { CLIENT KEY :source_key SET FIELDS {evidence_class:"user_statement",payload: :statement,observed_at: :at} }
+      CREATE CONCEPT ?value { TYPE :object_type NAME :new_value }
+      ASSERT ?new (:subject, :predicate, ?value) {by: :actor,mode:"stated",evidence:?input,at: :at}
+      CREATE ACTIVITY ?change { SET FIELDS {activity_class:"user_memory_change",status:"completed",started_at: :at,ended_at: :at} SET STRUCTURAL {("inputs", :old) ("inputs", ?input) ("outputs", ?new)} }
+    }`, parameters }]
   }
   correctionSource(auth: AuthContext, source: RecordSource): string | null {
     if (!source.product_operation || !/^[a-f0-9]{64}$/.test(source.product_operation)) return null
@@ -596,4 +627,11 @@ function clearContent(stored: StoredChange): void {
   stored.receipt.preview.new_value = null
   stored.receipt.error = null
   stored.requests = []
+}
+
+/** A stored valid-time endpoint as the wire form: a timestamp or a `{earliest, latest}` bound. */
+function endpoint(stored: string | null): Json | undefined {
+  if (!stored) return undefined
+  if (!stored.startsWith('{')) return stored
+  try { return JSON.parse(stored) as Json } catch { return undefined }
 }

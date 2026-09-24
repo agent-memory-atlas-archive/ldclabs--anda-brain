@@ -35,7 +35,7 @@ pub use dispatch::{
     NativeDispatchReconciliation,
 };
 
-const PROFILE: &str = "kip://profiles/cognitive-memory@2.1.0/";
+use crate::PROFILE;
 
 /// Arm membership always becomes the native revision/trial bindings.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -377,7 +377,8 @@ impl NativeLearning {
 
     /// Recover an already committed operation without invoking any write path.
     /// Current write-policy changes cannot erase a past receipt. The caller
-    /// still needs fresh direct writer identity and native read_history access.
+    /// still needs fresh direct writer identity, native read_history access
+    /// and read access to the elements the transaction changed.
     /// None means the native journal explicitly reports TransactionUnknown.
     pub async fn recover_committed(
         &self,

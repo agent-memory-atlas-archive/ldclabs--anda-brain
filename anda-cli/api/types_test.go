@@ -329,7 +329,7 @@ func TestKipBatchRequestAndResponse(t *testing.T) {
 
 func TestCurrentSpaceAndConceptFieldsSurviveDecode(t *testing.T) {
 	var concept Concept
-	input := []byte(`{"id":"C-7","kind":"concept","schema_ref":"kip://profiles/cognitive-memory@2.1.0/Person","key":"user-1","name":"Alice","governance":{"authority_class":"descriptive"}}`)
+	input := []byte(`{"id":"C-7","kind":"concept","schema_ref":"kip://profiles/cognitive-memory@2.0.0/Person","key":"user-1","name":"Alice","governance":{"authority_class":"descriptive"}}`)
 	if err := json.Unmarshal(input, &concept); err != nil {
 		t.Fatal(err)
 	}

@@ -529,9 +529,11 @@ func (c MessageContent) textParts() []string {
 }
 
 type FormationInput struct {
-	Messages  []Message     `json:"messages"`
-	Context   *InputContext `json:"context,omitempty"`
-	Timestamp string        `json:"timestamp"`
+	Messages []Message     `json:"messages"`
+	Context  *InputContext `json:"context,omitempty"`
+	// Timestamp is when the conversation happened, in millisecond UTC. Formed
+	// claims take it as their asserted_at; omit it to use the receipt time.
+	Timestamp string `json:"timestamp,omitempty"`
 }
 
 type RecallInput struct {
@@ -541,7 +543,8 @@ type RecallInput struct {
 }
 
 type MaintenanceParameters struct {
-	StaleEventThresholdDays   *int     `json:"stale_event_threshold_days,omitempty"`
+	StaleEventThresholdDays *int `json:"stale_event_threshold_days,omitempty"`
+	// Deprecated: decay is computed by the engine; the server ignores this value.
 	MemoryStrengthDecayFactor *float64 `json:"memory_strength_decay_factor,omitempty"`
 	UnconsolidatedMaxBacklog  *int     `json:"unconsolidated_max_backlog,omitempty"`
 	OrphanMaxCount            *int     `json:"orphan_max_count,omitempty"`

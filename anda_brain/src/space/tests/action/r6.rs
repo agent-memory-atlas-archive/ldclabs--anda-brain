@@ -65,8 +65,11 @@ async fn fixture_store(
         &["read", "read_history", "create", "derive", "record_outcome"],
     )
     .await;
-    let target=created_ref(&space,r#"CREATE CONCEPT ?item {TYPE "Preference" NAME "verified useful memory" SET FACET "MnemonicState" {utility:0.5,memory_strength:0.7}}"#,Default::default()).await;
-    let other=created_ref(&space,r#"CREATE CONCEPT ?item {TYPE "Preference" NAME "retrieved only" SET FACET "MnemonicState" {utility:0.2,memory_strength:0.6}}"#,Default::default()).await;
+    // A plain host-declared kind: an Insight would carry derivation
+    // dependencies the action gate has to check first.
+    declare_types(&space, &["Guideline"]).await;
+    let target=created_ref(&space,r#"CREATE CONCEPT ?item {TYPE "Guideline" NAME "verified useful memory" SET FACET "MnemonicState" {utility:0.5,memory_strength:0.7}}"#,Default::default()).await;
+    let other=created_ref(&space,r#"CREATE CONCEPT ?item {TYPE "Guideline" NAME "retrieved only" SET FACET "MnemonicState" {utility:0.2,memory_strength:0.6}}"#,Default::default()).await;
     p.context.lock().unwrap().as_mut().unwrap().required_refs = vec![target.clone(), other.clone()];
     *p.proposal.lock().unwrap() = Proposal::Act {
         rationale: "Use the selected memory in this actual host operation".into(),

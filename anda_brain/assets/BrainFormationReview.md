@@ -45,10 +45,13 @@ the smallest supported correction in one coherent `MUTATE`, reusing existing
 identities, vocabulary and Evidence. Do not re-encode the input from scratch.
 
 - A misworded Assertion requires a new Assertion, never `UPDATE`. Use
-  `SUPERSEDING` only for a revision of the same actor's stance. A misattribution
-  in this pass needs retraction of the erroneous Assertion and a correctly
-  attributed replacement, not cross-actor supersession. Preserve historical
-  valid intervals when the world changed rather than the old claim being wrong.
+  `SUPERSEDING` only when the same actor's earlier claim was wrong, keeping the
+  interval it corrects. When the world changed instead, the old claim was true
+  for its time: write one new Assertion from the change and let temporal
+  succession end the old one. A misattribution is a misrecording, not the
+  actor's correction: write the correctly attributed claim if the source
+  supports it, and report the erroneous one for review rather than retracting or
+  superseding it on the actor's behalf (recording repair is not available here).
 - Correct genuinely erroneous Evidence only with a supported replacement and
   `TRANSITION :old TO "corrected" BY :new`; never edit host-captured observations
   to make them agree with your interpretation.

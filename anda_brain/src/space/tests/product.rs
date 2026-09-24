@@ -4,6 +4,7 @@ use super::*;
 async fn product_record_sources_use_host_evidence_bindings_and_preserve_claim_semantics() {
     let app = test_app_state("product_sources");
     let space = create_loaded_space(&app, "product_sources").await;
+    declare_types(&space, &["WritingStyle"]).await;
     let messages = vec![Message {
         role: "user".into(),
         content: vec!["Prefer concise release notes".to_string().into()],
@@ -12,7 +13,7 @@ async fn product_record_sources_use_host_evidence_bindings_and_preserve_claim_se
     let mut request = kip::request(
         r#"MUTATE {
         CREATE CONCEPT ?owner { TYPE "Person" NAME "Owner" SET FIELDS {key:"owner-key"} }
-        CREATE CONCEPT ?value { TYPE "Preference" NAME "Concise release notes" }
+        CREATE CONCEPT ?value { TYPE "WritingStyle" NAME "Concise release notes" }
         ASSERT ?claim (?owner, "prefers", ?value) { by: ?owner, mode: "stated", confidence: 0.9, evidence: :msg1 }
     }"#,
     );
@@ -52,6 +53,7 @@ async fn managed_record(
     space: &std::sync::Arc<Space>,
 ) -> (crate::product::MemoryRecord, crate::product::SourceIdentity) {
     let caller = anda_core::Principal::management_canister();
+    declare_types(space, &["WritingStyle"]).await;
     let source = crate::product::SourceIdentity {
         key: "fixture-conversation".into(),
         parents: vec!["fixture-session".into()],
@@ -86,7 +88,7 @@ async fn managed_record(
     let mut request = kip::request_with(
         r#"MUTATE {
         CREATE CONCEPT ?owner { TYPE "Person" NAME "Owner" SET FIELDS {key: :owner} }
-        CREATE CONCEPT ?value { TYPE "Preference" NAME "Concise release notes" }
+        CREATE CONCEPT ?value { TYPE "WritingStyle" NAME "Concise release notes" }
         ASSERT ?claim (?owner, "prefers", ?value) { by: ?owner, mode: "stated", confidence: 0.9, evidence: :msg1 }
     }"#,
         kip::param("owner", caller.to_string()),
@@ -334,9 +336,10 @@ async fn product_correction_preserves_old_claim_and_rejects_stale_or_changed_int
         .await
         .unwrap();
     assert_eq!(receipt.state, "confirmed", "{receipt:?}");
+    // §14.2: the same actor's correction supersedes the wrong claim.
     assert_eq!(
         space.product_record(&record.id).await.unwrap().status,
-        "retracted"
+        "superseded"
     );
     assert!(
         space
@@ -441,7 +444,7 @@ async fn product_delete_erases_declared_claims_and_rejects_old_processing_epochs
     );
     let tool = crate::agents::GuardedMemory::new(space.memory.clone())
         .with_product_control(space.product_control.clone());
-    let args=serde_json::from_value(serde_json::json!({"command":"CREATE CONCEPT ?x {TYPE \"Preference\" NAME \"Old context must not write\"}"})).unwrap();
+    let args=serde_json::from_value(serde_json::json!({"command":"CREATE CONCEPT ?x {TYPE \"Insight\" NAME \"Old context must not write\" SET ATTRIBUTES {summary:\"old\"}}"})).unwrap();
     let error = tool
         .call(ctx.child_base("execute_kip").unwrap(), args, vec![])
         .await
@@ -891,7 +894,7 @@ async fn product_delete_preserves_a_surviving_corrections_source() {
 }
 
 #[tokio::test]
-async fn product_changes_reject_old_cursors_but_preserve_new_pagination_after_reload() {
+async fn product_changes_reject_old_cursors_and_page_again_after_reload() {
     use crate::product::{ChangeInput, ChangeKind};
     let app = test_app_state("product_cursors");
     let space = create_loaded_space(&app, "product_cursors").await;
@@ -927,6 +930,15 @@ async fn product_changes_reject_old_cursors_but_preserve_new_pagination_after_re
         .product_commit(caller, change.operation_id, change.preview_digest)
         .await
         .unwrap();
+    space.close().await.unwrap();
+    app.spaces.write().await.remove("product_cursors");
+    drop(space);
+    let space = app
+        .load_space_with("product_cursors", false, false)
+        .await
+        .unwrap();
+    // Continuations are server-mapped and do not survive a reopen; a new
+    // traversal starts from page one under the current processing epoch.
     let fresh = space
         .execute_kip_readonly(first_page)
         .await
@@ -934,13 +946,6 @@ async fn product_changes_reject_old_cursors_but_preserve_new_pagination_after_re
         .results[0]
         .next_cursor
         .clone()
-        .unwrap();
-    space.close().await.unwrap();
-    app.spaces.write().await.remove("product_cursors");
-    drop(space);
-    let space = app
-        .load_space_with("product_cursors", false, false)
-        .await
         .unwrap();
     let ctx = space
         .ctx_for_test(SELF_USER_ID, crate::agents::RecallAgent::NAME)

@@ -535,8 +535,11 @@ pub struct FormationInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<InputContext>,
 
-    /// Caller observation time. RFC 3339 offsets/fractions are normalized;
-    /// missing or invalid strings fall back to the durable conversation receipt time.
+    /// Caller observation time, an RFC 3339 instant canonicalized to
+    /// millisecond UTC; an unparseable value or sub-millisecond precision is
+    /// rejected. Missing falls back to the durable conversation receipt time.
+    /// A message's own `timestamp` (Unix ms) is that message's observation
+    /// time, and it is what a claim citing the message writes as `at`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
 }
@@ -712,8 +715,8 @@ pub struct MaintenanceAssessment {
     ///
     /// The runtime walks `LIST DEPENDENTS` so the cycle does not have to
     /// guess which artifacts a revised root fed. Reachability is topology,
-    /// not judgment: a listed dependent is a candidate for `DerivationState
-    /// {status: "stale"}`, not already stale.
+    /// not judgment: a listed dependent is a candidate for a `review_derived`
+    /// SleepTask; its currentness is the computed `_system.dependency_validity`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revised_roots: Vec<RevisedRoot>,
 }
@@ -825,6 +828,9 @@ pub fn attribute_text(value: &serde_json::Value) -> String {
 pub struct MaintenanceParameters {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stale_event_threshold_days: Option<u32>,
+    /// Deprecated and ignored. Decay is computed from a pinned strength
+    /// policy at read time (Spec §59.1); no sweep applies a factor. Still
+    /// accepted, and range-checked, so an existing caller is not rejected.
     #[serde(
         skip_serializing_if = "Option::is_none",
         alias = "confidence_decay_factor"
@@ -891,13 +897,14 @@ pub struct MemoryPolicy {
     #[serde(default = "MemoryPolicy::default_version")]
     pub version: u32,
 
-    /// Multiplier disuse metabolism applies to `MnemonicState.memory_strength`
-    /// per cycle. Matches the default documented in BrainMaintenance.md.
+    /// Deprecated; retained for stored-policy compatibility and nothing
+    /// reads it.
     ///
-    /// KIP 1.x called this `confidence_decay_factor` and applied it to link
-    /// confidence; KIP 2.0 forbids decaying an epistemic stance over time, so
-    /// the same knob now paces accessibility instead. The old name is still
-    /// accepted when reading a persisted policy.
+    /// This was the multiplier a weekly sweep applied to
+    /// `MnemonicState.memory_strength`. Decay is now computed when a read is
+    /// evaluated, from the stored base, its anchor and a pinned
+    /// `strength_policy` (Profile §6.1, §18; Spec §59.1), so no sweep writes
+    /// it. The KIP 1.x name `confidence_decay_factor` is still accepted.
     #[serde(
         default = "MemoryPolicy::default_memory_strength_decay_factor",
         alias = "confidence_decay_factor"
@@ -928,7 +935,8 @@ pub struct MemoryPolicy {
     #[serde(default = "MemoryPolicy::default_correction_penalty")]
     pub correction_penalty: f64,
 
-    /// Lower bound disuse metabolism may not push `memory_strength` below.
+    /// Deprecated; retained for stored-policy compatibility and nothing
+    /// reads it. It was the floor of the removed disuse sweep.
     #[serde(default = "MemoryPolicy::default_decay_floor")]
     pub decay_floor: f64,
 
@@ -1021,8 +1029,6 @@ impl MemoryPolicy {
     fn default_correction_penalty() -> f64 {
         0.5
     }
-    // Matches the `confidence > 0.3` lower bound the maintenance prompt's
-    // decay pass has always used, so the default policy reproduces it.
     fn default_decay_floor() -> f64 {
         0.3
     }
@@ -1151,7 +1157,7 @@ impl MemoryPolicy {
     pub fn maintenance_parameters(&self) -> MaintenanceParameters {
         MaintenanceParameters {
             stale_event_threshold_days: Some(self.stale_event_threshold_days),
-            memory_strength_decay_factor: Some(self.memory_strength_decay_factor),
+            memory_strength_decay_factor: None,
             unconsolidated_max_backlog: Some(self.unconsolidated_max_backlog),
             orphan_max_count: Some(self.orphan_max_count),
         }
@@ -1308,15 +1314,6 @@ pub struct MemorySettlementReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revised_roots: Vec<RevisedRoot>,
 
-    /// Concepts whose `MnemonicState.memory_strength` the bulk pass decayed.
-    /// Zero is the ordinary answer: the sweep only touches Concepts last
-    /// metabolized more than `DECAY_MIN_INTERVAL_MS` ago.
-    pub decayed: u64,
-
-    /// Whether the decay pass ran this cycle. Every scope runs it — the
-    /// interval filter, not the scope, is what paces the metabolism.
-    pub decay_ran: bool,
-
     /// Superseded memories newly observed and recorded as corrections.
     pub new_corrections: u64,
 
@@ -1327,11 +1324,6 @@ pub struct MemorySettlementReport {
     /// What the Skill lifecycle pass did this cycle.
     #[serde(default)]
     pub skills: SkillSettlement,
-
-    /// Set when the bulk decay pass failed (e.g. the engine's full-scan
-    /// solution cap on large graphs) — decay did not complete this cycle.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decay_error: Option<String>,
 
     /// Set when the correction-discovery scan failed — new corrections were
     /// not recorded this cycle.
@@ -1349,25 +1341,74 @@ pub struct MemorySettlementReport {
     pub retention: RetentionSettlement,
 }
 
+/// Input of attention recall (KIP Memory Interface §4).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "mcp", derive(JsonSchema))]
+#[serde(default, deny_unknown_fields)]
+pub struct AttentionRecallInput {
+    /// The cursor the host kept from the last page it consumed; absent reads
+    /// from the first raise.
+    pub attention_cursor: Option<String>,
+
+    /// Raising Activities to read, `1..=50`; default 20.
+    pub limit: Option<usize>,
+}
+
+/// One page of attention the Brain raised. Reading changes nothing in memory.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct AttentionRecall {
+    /// Ordered by `raised_seq`.
+    pub items: Vec<AttentionRecallItem>,
+
+    /// The cursor after these items, `attention:<highest delivered raised_seq>`.
+    /// The host keeps it once it has taken the items; it does not expire.
+    pub attention_cursor: String,
+
+    /// Whether every raise after the input cursor was read.
+    pub complete: bool,
+}
+
+/// A fired Watch or a due Commitment (KIP `AttentionItem`). It grants nothing:
+/// acting on it passes the action gate and Governance like any other act.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+pub struct AttentionRecallItem {
+    /// The Watch or Commitment raised.
+    #[serde(rename = "ref")]
+    pub reference: String,
+
+    /// `watch_fired` or `commitment_due`.
+    pub kind: String,
+
+    pub summary: String,
+
+    /// The `space_seq` of the `watch_fire` or `commitment_review` Activity
+    /// that raised this item.
+    pub raised_seq: u64,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<String>,
+
+    /// What the item is about: a Watch's `watches` targets, or the Commitment.
+    pub target_refs: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<f64>,
+}
+
 /// What one retention pass did, and what it deliberately did not do.
 ///
 /// Two different clocks, kept apart because conflating them is how a Space
 /// loses memory it meant to keep. `retention.expires_at` says when the
 /// *record* stops being kept (Spec §19.1); `valid_time.until` says when the
 /// *claim* stops applying (§14.3). A claim that lapsed is still a claim that
-/// was made, so it is marked `expired` and kept; a record whose retention ran
-/// out is archived.
+/// was made: its expiry is computed at read time and never swept. A record
+/// whose retention ran out is archived.
 ///
 /// The counts that are not `archived` matter as much as the one that is. A
 /// sweep that reports "archived 4" when 9 had lapsed reads as the whole truth
 /// and is not, which is the shape of a retention failure nobody notices.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RetentionSettlement {
-    /// Assertions whose validity windows closed, marked `expired` (§14.3).
-    /// Not retraction and not supersession: nobody withdrew these and nothing
-    /// replaced them — their own stated windows ran out.
-    pub expired_assertions: u64,
-
     /// Elements whose `retention.expires_at` lapsed, archived. Archive rather
     /// than tombstone or purge: expiry says the record need not stay in
     /// ordinary recall, not that it should stop having existed.
@@ -1383,7 +1424,7 @@ pub struct RetentionSettlement {
     /// Left for the next cycle by this pass's limit.
     pub remaining: u64,
 
-    /// Set when the pass failed — nothing expired this cycle.
+    /// Set when the pass failed — nothing was archived this cycle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -1535,9 +1576,6 @@ pub struct MemoryMetrics {
 
     /// Corrections (superseded memories) settlement discovered.
     pub corrections: u64,
-
-    /// Concepts decayed by settlement.
-    pub decayed: u64,
 
     /// Structured recalls that carried an uncertainty self-report.
     pub uncertainty_reports: u64,
@@ -2042,19 +2080,18 @@ mod tests {
 
     #[test]
     fn memory_policy_defaults_match_documented_maintenance_defaults() {
-        // These four values must stay in lockstep with the defaults the
+        // These values must stay in lockstep with the defaults the
         // BrainMaintenance.md Input Format documents, so an unset policy is
-        // not a behavior change.
+        // not a behavior change. The deprecated decay factor is never sent.
         let policy = MemoryPolicy::default();
         assert_eq!(policy.stale_event_threshold_days, 7);
-        assert_eq!(policy.memory_strength_decay_factor, 0.95);
         assert_eq!(policy.unconsolidated_max_backlog, 20);
         assert_eq!(policy.orphan_max_count, 20);
         assert!(policy.validate().is_ok());
 
         let parameters = policy.maintenance_parameters();
         assert_eq!(parameters.stale_event_threshold_days, Some(7));
-        assert_eq!(parameters.memory_strength_decay_factor, Some(0.95));
+        assert_eq!(parameters.memory_strength_decay_factor, None);
         assert_eq!(parameters.unconsolidated_max_backlog, Some(20));
         assert_eq!(parameters.orphan_max_count, Some(20));
     }

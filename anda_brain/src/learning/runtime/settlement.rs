@@ -74,16 +74,18 @@ impl LearningRuntime {
         let skill =
             crate::runtime_api::full_read(&session, applicability::edge(&revision, "revision_of")?)
                 .await?;
-        let grade = &skill["facets"]["kip://profiles/cognitive-memory@2.1.0/GradingState"];
-        let Some(evaluation) = grade["evaluation_ref"].as_str() else {
+        let Some(evaluation) =
+            crate::learning::native::settlement::pointer(&skill, "current_evaluation")
+        else {
             return Ok((source_id.into(), None));
         };
-        if grade["revision_ref"] != source.plan.candidate_revision {
+        // `current_evaluation` is cleared when the selected revision changes.
+        if applicability::edge(&skill, "current_revision")? != source.plan.candidate_revision {
             return Err("safety revision is not the currently graded revision".into());
         }
         if skill["attributes"]["status"] == "revoked" {
             let record = crate::runtime_api::full_read(&session, evaluation).await?;
-            let e = &record["facets"]["kip://profiles/cognitive-memory@2.1.0/EvaluationRecord"];
+            let e = &record["facets"][profile!("EvaluationRecord")];
             if e["to_status"] == "revoked"
                 && e["revision_refs"] == json!([source.plan.candidate_revision])
             {

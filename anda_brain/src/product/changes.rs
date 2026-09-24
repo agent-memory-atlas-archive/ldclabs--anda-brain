@@ -17,12 +17,29 @@ use std::{
     sync::Arc,
 };
 
+/// Which history a change writes (Spec §14.2, Memory Interface §4).
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeKind {
+    /// The caller's own claim was wrong: a new Assertion supersedes it and
+    /// keeps the world interval it covered.
     Correct,
+    /// The world moved on: one new Assertion from now; temporal succession
+    /// ends the old value, which stays true for its time.
+    WorldChange,
+    /// The Brain recorded what the caller never said. That is recording
+    /// repair (§57.8), which this deployment does not provide, so it is
+    /// refused rather than written as a correction or a world change.
+    Misrecorded,
     Suppress,
     Delete,
+}
+
+impl ChangeKind {
+    /// A new value for the caller's own claim, rather than removal.
+    fn revises(&self) -> bool {
+        matches!(self, ChangeKind::Correct | ChangeKind::WorldChange)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -132,6 +149,9 @@ impl Space {
             return Err("unauthorized".into());
         }
         let key = operation_key(caller, &input.operation_id)?;
+        if input.kind == ChangeKind::Misrecorded {
+            return Err("unsupported_capability".into());
+        }
         let digest = anda_cognitive_nexus::content_digest(&serde_json::to_value(&input)?)?;
         let _guard = self.product_control.gate.lock().await;
         let path = format!("changes/{key}");
@@ -166,7 +186,7 @@ impl Space {
             return Err("unsupported_scope".into());
         }
         let mut excluded_sources = self.source_keys_for_record(&record).await?;
-        let targets = if input.kind != ChangeKind::Correct {
+        let targets = if !input.kind.revises() {
             self.deletion_targets(&record, &mut excluded_sources)
                 .await?
         } else {
@@ -183,14 +203,14 @@ impl Space {
                 kind: "assertion".into(),
             }]
         };
-        if input.kind == ChangeKind::Correct
+        if input.kind.revises()
             && input.new_value.as_deref().is_none_or(|text| {
                 text.trim().is_empty() || text.len() > 8192 || text == record.object_label
             })
         {
             return Err("invalid_request".into());
         }
-        if input.kind != ChangeKind::Correct && input.new_value.is_some() {
+        if !input.kind.revises() && input.new_value.is_some() {
             return Err("invalid_request".into());
         }
         let preview=ChangePreview {record,new_value:input.new_value.clone(),targets,excluded_sources,resets_processing_context:true,scope:"Selected claims, their cited input messages and recorded dependents. Background Notes/history are reset; source conversations stop contributing memory. Other independent records, Bot chat/files/logs/backups and already-delivered context are not erased.".into()};
@@ -199,9 +219,9 @@ impl Space {
         for request in &requests {
             request.parse_operations()?;
         }
-        // Validate the generated correction against the live schema before
+        // Validate the generated revision against the live schema before
         // admitting a durable change. Do not consume its idempotency key.
-        if input.kind == ChangeKind::Correct {
+        if input.kind.revises() {
             let mut dry = requests[0].clone();
             dry.options.get_or_insert_default().dry_run = Some(true);
             dry.operations[0].idempotency_key = None;
@@ -364,7 +384,7 @@ impl Space {
                         return Err("revision_conflict".into());
                     }
                     let mut keys = this.source_keys_for_record(&current).await?;
-                    let targets = if stored.value.input.kind != ChangeKind::Correct {
+                    let targets = if !stored.value.input.kind.revises() {
                         this.deletion_targets(&current, &mut keys).await?
                     } else {
                         vec![Target {
@@ -455,7 +475,7 @@ impl Space {
             self.product_control.save(control).await?;
         }
         for (index, request) in stored.value.requests.clone().into_iter().enumerate() {
-            let target = if stored.value.input.kind != ChangeKind::Correct {
+            let target = if !stored.value.input.kind.revises() {
                 stored.value.receipt.preview.targets[index].id.clone()
             } else {
                 "correction".into()
@@ -463,7 +483,7 @@ impl Space {
             if stored.value.completed_targets.contains(&target) {
                 continue;
             }
-            if stored.value.input.kind != ChangeKind::Correct {
+            if !stored.value.input.kind.revises() {
                 let element = self
                     .memory
                     .nexus()
@@ -501,7 +521,7 @@ impl Space {
                         .map(|v| v.value.receipt)
                         .ok_or_else(|| "memory change missing".into());
                 }
-                if stored.value.input.kind == ChangeKind::Correct {
+                if stored.value.input.kind.revises() {
                     stored.value.receipt.replacement_record = kip::ok_result(&response)
                         .and_then(|r| r["handles"]["new"].as_str())
                         .map(str::to_string);
@@ -527,7 +547,7 @@ impl Space {
                 .ok_or("memory change missing")?;
         }
         self.reset_product_processing_notes().await?;
-        if stored.value.input.kind != ChangeKind::Correct {
+        if !stored.value.input.kind.revises() {
             for target in &stored.value.receipt.preview.targets {
                 let state = if stored.value.input.kind == ChangeKind::Delete {
                     "purged"
@@ -547,8 +567,15 @@ impl Space {
                 }
             }
         } else {
+            // A correction supersedes the old claim; a world change leaves it
+            // active and true for its time.
             let old = self.product_record(&stored.value.input.record_id).await?;
-            if old.status != "retracted" || stored.value.receipt.replacement_record.is_none() {
+            let expected = if stored.value.input.kind == ChangeKind::Correct {
+                "superseded"
+            } else {
+                "active"
+            };
+            if old.status != expected || stored.value.receipt.replacement_record.is_none() {
                 return Err("correction verification incomplete".into());
             }
         }
@@ -773,9 +800,12 @@ impl Space {
                 .get(source.message_index.ok_or("unsupported_scope")?)
                 .ok_or("unsupported_scope")?;
             let digest = anda_cognitive_nexus::content_digest(&serde_json::to_value(message)?)?;
-            let observed_at = crate::kip::observation_timestamp(
-                input.timestamp.as_deref(),
-                conversation.created_at,
+            let observed_at = crate::kip::message_observed_at(
+                message,
+                &crate::kip::observation_timestamp(
+                    input.timestamp.as_deref(),
+                    conversation.created_at,
+                ),
             );
             if source.payload_digest.as_deref() != Some(digest.as_str())
                 || source.observed_at.as_deref() != Some(observed_at.as_str())
@@ -876,7 +906,7 @@ impl Space {
         preview: &ChangePreview,
         now: u64,
     ) -> Result<Vec<Request>, BoxError> {
-        if input.kind != ChangeKind::Correct {
+        if !input.kind.revises() {
             return preview.targets.iter().map(|target|{
                 let command=if input.kind==ChangeKind::Delete {"PURGE :id EXPECT VERSION :version REFERENCE POLICY \"authorized_cascade\" CONFIRM \"PURGE\""} else {"TRANSITION :id TO \"archived\" EXPECT VERSION :version"};
                 let mut request=kip::request_with(command,serde_json::Map::from_iter([("id".into(),json!(target.id)),("version".into(),json!(target.revision))]));
@@ -898,36 +928,71 @@ impl Space {
         else {
             return Err("unsupported_scope".into());
         };
-        let mut request = kip::request_with(
+        let mut parameters = serde_json::Map::from_iter([
+            ("old".into(), json!(input.record_id)),
+            ("version".into(), json!(input.expected_revision)),
+            (
+                "source_key".into(),
+                json!(format!("memory-product:{key}:input")),
+            ),
+            (
+                "statement".into(),
+                json!({"kind":input.kind,"new_value":input.new_value,"previous_record":input.record_id}),
+            ),
+            ("at".into(), json!(kip::timestamp(now))),
+            ("object_type".into(), json!(object.schema_ref)),
+            ("new_value".into(), json!(input.new_value)),
+            ("subject".into(), preview.record.subject.clone()),
+            ("predicate".into(), json!(preview.record.predicate)),
+            ("actor".into(), json!({"id":preview.record.actor_id})),
+        ]);
+        let command = if input.kind == ChangeKind::Correct {
+            // §14.2: a value-only correction keeps the interval it corrects.
+            // An absent start is materialized as the original claim's bound,
+            // or the correction time would become the new value's start.
+            parameters.insert("valid".into(), corrected_valid_time(&preview.record)?);
             r#"MUTATE {
-            TRANSITION :old TO "retracted" EXPECT VERSION :version
             CREATE EVIDENCE ?input { CLIENT KEY :source_key SET FIELDS { evidence_class:"user_statement", payload: :statement, observed_at: :at } }
             CREATE CONCEPT ?value { TYPE :object_type NAME :new_value }
-            ASSERT ?new (:subject, :predicate, ?value) {by: :actor, mode:"stated", evidence:?input, at: :at, valid: {from: :at}}
-            CREATE ACTIVITY ?change { SET FIELDS {activity_class:"user_memory_correction",status:"completed",started_at: :at,ended_at: :at} SET STRUCTURAL {("inputs", :old) ("inputs", ?input) ("outputs", ?new)} }
-        }"#,
-            serde_json::Map::from_iter([
-                ("old".into(), json!(input.record_id)),
-                ("version".into(), json!(input.expected_revision)),
-                (
-                    "source_key".into(),
-                    json!(format!("memory-product:{key}:input")),
-                ),
-                (
-                    "statement".into(),
-                    json!({"kind":"user_correction","new_value":input.new_value,"previous_record":input.record_id}),
-                ),
-                ("at".into(), json!(kip::timestamp(now))),
-                ("object_type".into(), json!(object.schema_ref)),
-                ("new_value".into(), json!(input.new_value)),
-                ("subject".into(), preview.record.subject.clone()),
-                ("predicate".into(), json!(preview.record.predicate)),
-                ("actor".into(), json!({"id":preview.record.actor_id})),
-            ]),
-        );
+            ASSERT ?new (:subject, :predicate, ?value) {by: :actor, mode:"stated", evidence:?input, at: :at, valid: :valid}
+            TRANSITION :old TO "superseded" BY ?new EXPECT VERSION :version
+            CREATE ACTIVITY ?change { SET FIELDS {activity_class:"belief_revision",status:"completed",started_at: :at,ended_at: :at} SET STRUCTURAL {("inputs", :old) ("inputs", ?input) ("outputs", ?new)} }
+        }"#
+        } else {
+            // §25.4: one new Assertion from the change. The change time is
+            // not known more precisely than "no later than now", which a
+            // missing `from` already says; succession ends the old value.
+            // Nothing writes the old claim, so the prepared revision check
+            // under the product fence is its concurrency guard.
+            parameters.remove("version");
+            r#"MUTATE {
+            CREATE EVIDENCE ?input { CLIENT KEY :source_key SET FIELDS { evidence_class:"user_statement", payload: :statement, observed_at: :at } }
+            CREATE CONCEPT ?value { TYPE :object_type NAME :new_value }
+            ASSERT ?new (:subject, :predicate, ?value) {by: :actor, mode:"stated", evidence:?input, at: :at}
+            CREATE ACTIVITY ?change { SET FIELDS {activity_class:"user_memory_change",status:"completed",started_at: :at,ended_at: :at} SET STRUCTURAL {("inputs", :old) ("inputs", ?input) ("outputs", ?new)} }
+        }"#
+        };
+        let mut request = kip::request_with(command, parameters);
         request.operations[0].idempotency_key = Some(format!("memory-product:{key}:correct"));
         Ok(vec![request])
     }
+}
+
+/// The world interval a value-only correction preserves (Spec §14.2): the
+/// original written endpoints, with an absent start materialized as
+/// `{latest: <original asserted_at>}`.
+fn corrected_valid_time(record: &MemoryRecord) -> Result<Value, BoxError> {
+    use anda_cognitive_nexus::time::Point;
+    let point = |stored: Option<&String>| stored.and_then(|text| Point::load(text));
+    let from = match point(record.valid_from.as_ref()) {
+        Some(from) => from.to_json(),
+        None => json!({"latest": record.asserted_at.as_deref().ok_or("unsupported_scope")?}),
+    };
+    let mut valid = serde_json::Map::from_iter([("from".to_string(), from)]);
+    if let Some(until) = point(record.valid_until.as_ref()) {
+        valid.insert("until".into(), until.to_json());
+    }
+    Ok(Value::Object(valid))
 }
 
 fn element_state(element: &Element) -> &str {

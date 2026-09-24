@@ -16,8 +16,9 @@ Spaces cannot fork native attention identities. The internal
 `memory_runtime/status` operation reads actual configuration without claiming work
 or granting permission; existing HTTP payload shapes and token scopes are unchanged.
 
-Bulk mnemonic decay excludes operational SleepTask/Watch Concepts. Host pass errors
-reach the maintenance model as assessment.settlement_errors.
+There is no bulk mnemonic decay: strength is computed at read time from a pinned
+policy (KIP Spec §59.1). Host pass errors reach the maintenance model as
+assessment.settlement_errors.
 
 <a id="trusted-host-memory-product-contracts"></a>
 
@@ -25,7 +26,13 @@ reach the maintenance model as assessment.settlement_errors.
 
 The Rust `product` module provides Assertion-backed `MemoryRecord` projections, stable native revisions, explicit stance/lifecycle/storage state and typed Evidence source references. `Space::product_records`, `product_record` and `product_source` do not authenticate a user. The embedding host must enforce owner/source visibility before returning any record, preview, dependent identifier or source quote. A matching source digest is provenance, not proof that an inference is correct.
 
-`Space::ingest_product` accepts a bounded, trusted `SourceIdentity` with parent conversation/session keys. Natural-language input cannot set that identity. `product_prepare`, `product_commit`, `product_change` and `product_discard` implement caller/operation-scoped immutable requests, fixed revision/preview digests and ten-minute previews. Corrections retract the old Assertion and create a new claim with a user-statement Evidence and correction Activity; they never rewrite a Concept label or create an illegal cross-Proposition supersession. Undo is another conditional correction.
+`Space::ingest_product` accepts a bounded, trusted `SourceIdentity` with parent conversation/session keys. Natural-language input cannot set that identity. `product_prepare`, `product_commit`, `product_change` and `product_discard` implement caller/operation-scoped immutable requests, fixed revision/preview digests and ten-minute previews. `ChangeKind` names which history a change writes (KIP Spec §14.2, Memory Interface §4):
+
+- `Correct` — the caller's own claim was wrong. A new claim with a user-statement Evidence supersedes the old Assertion and keeps the world interval it covered (an absent start is materialized as `{latest: <original asserted_at>}`); a `belief_revision` Activity records it. The old Assertion reads `superseded`.
+- `WorldChange` — the world moved on. One new claim from now; temporal succession ends the old value, which stays `active` and true for its time.
+- `Misrecorded` — the Brain recorded what the caller never said. That needs recording repair, which this deployment does not provide, so prepare fails `unsupported_capability`; it is never written as a correction or a world change.
+
+None of them rewrites a Concept label or creates an illegal cross-Proposition supersession. Undo is another conditional change.
 
 `Suppress` archives and `Delete` purges the declared bounded closure: selected Proposition/Assertions, cited inputs and recorded referrers. Unknown sources, Concept cascades, retention holds and closures above 128 elements are rejected. A durable source exclusion and processing epoch are admitted before mutation; tracked native work survives a cancelled API waiter and resumes before a reloaded Space is exposed. Stale Formation/Maintenance/Notes writes are fenced. Managed changes clear processing Notes and miss caches, stop old processor histories from entering new contexts and restrict automatic KIP readers to current active state. Trusted owner audit APIs remain distinct. Recall rechecks its captured epoch before returning context.
 
@@ -53,16 +60,18 @@ Anda Bot currently consumes these contracts through a temporary sibling patch. R
 - Most business endpoints return an RPC envelope: `RpcResponse<T>`
 - MCP clients can use the built-in Streamable HTTP endpoint: `/mcp/<space_id>`, or the local stdio server: `anda_brain mcp --space-id <space_id> [local|aws]`
 
-CognitiveMemory 2.1 synchronization preserves existing request shapes, authentication
-and JSON/CBOR/Markdown negotiation. No five-intent Memory Interface or standard after
-barrier is added; a conversation id is not a processing receipt. Settlement `skills`
+The KIP `3251912` / `cognitive-memory@2.0.0` synchronization preserves authentication
+and JSON/CBOR/Markdown negotiation. It adds `GET /v1/{space_id}/memory/attention`,
+removes the settlement's decay fields and `retention.expired_assertions` (decay and
+claim expiry are computed at read time), deprecates `memory_strength_decay_factor`,
+and rejects an unparseable formation `timestamp` with 400. No five-intent Memory
+Interface or standard after barrier is added; a conversation id is not a processing
+receipt. Settlement `skills`
 adds optional `unsupported_reason` when no trusted learning pipeline is configured;
 legacy counters stay zero. Watch `disarmed` also counts Nexus expiry, while text
 conditions remain deferred without a configured semantic evaluator. Model-generated Formation requests cannot replace captured
 ingest/msgN bindings; learning/runtime Facet writes fail UnsupportedCapability.
 Authorized raw administrative KIP remains subject to the engine's full contracts.
-Legacy `@2.0.0/Watch` and `@2.0.0/SleepTask` records require explicit 2.1
-replacement because their exact `schema_ref` cannot be changed in place.
 
 ---
 
@@ -110,7 +119,7 @@ export interface Message {
 export interface FormationInput {
   messages: Message[]; // must contain at least one non-empty message (400)
   context?: InputContext;
-  timestamp?: string; // RFC 3339; normalized to UTC milliseconds, invalid/missing falls back to receipt time
+  timestamp?: string; // RFC 3339; canonicalized to UTC milliseconds; unparseable or sub-millisecond is 400; missing uses receipt time
 }
 
 export interface RecallInput {
@@ -122,15 +131,15 @@ export interface RecallInput {
 export interface RecallBudget {
   tokenizer?: 'o200k_base@tiktoken-rs-0.12.0';
   max_tokens?: number; // 1–65536; default 4096 after explicit opt-in
-  context_tokens?: number; // 1–131072; default 32768; cumulative normalized planner inputs
+  context_tokens?: number; // 1–131072; default 49152; cumulative normalized planner inputs
 }
 
 export interface MemoryPolicy {
   version?: number;
-  memory_strength_decay_factor?: number;
+  memory_strength_decay_factor?: number; // deprecated; retained for stored-policy compatibility; inert
   recall_reinforcement?: number; // retained for stored-policy compatibility; inert
   correction_penalty?: number; // retained for stored-policy compatibility; inert
-  decay_floor?: number;
+  decay_floor?: number; // deprecated; retained for stored-policy compatibility; inert
   stale_event_threshold_days?: number;
   unconsolidated_max_backlog?: number;
   orphan_max_count?: number;
@@ -223,7 +232,6 @@ export interface MemoryMetrics {
   self_test_grounded: number;
   reencode_tasks: number;
   corrections: number;
-  decayed: number;
   uncertainty_reports: number;
   uncertainty_sum: number;
   forgotten_entities: number;
@@ -258,17 +266,13 @@ export interface SkillSettlement {
 export interface MemorySettlementReport {
   settled_at: number;
   revised_roots?: unknown[];
-  decayed: number;
-  decay_ran: boolean;
   new_corrections: number;
   watches: WatchSettlement;
   skills: SkillSettlement;
-  decay_error?: string;
   correction_scan_error?: string;
   correction_scan_incomplete: boolean;
   correction_scan_through_seq: number;
-  retention: {
-    expired_assertions: number;
+  retention: { // records whose retention expired; claim validity is computed at read time
     archived: number;
     held: number;
     refused: number;
@@ -318,7 +322,7 @@ export interface MemoryStatus {
 
 export interface MaintenanceParameters {
   stale_event_threshold_days?: number; // [1, 365]
-  memory_strength_decay_factor?: number; // (0, 1]; alias: confidence_decay_factor
+  memory_strength_decay_factor?: number; // deprecated and ignored; still checked in (0, 1]; alias: confidence_decay_factor
   unconsolidated_max_backlog?: number; // [1, 10000]; alias: unsorted_max_backlog
   orphan_max_count?: number; // [1, 10000]
 }
@@ -576,7 +580,7 @@ export interface Concept {
   id: string; // engine-assigned element id, e.g. "C-7"
   kind: 'concept';
   space_id?: string;
-  schema_ref?: string; // the exact type symbol, e.g. "kip://profiles/cognitive-memory@2.1.0/Person"
+  schema_ref?: string; // the exact type symbol, e.g. "kip://profiles/cognitive-memory@2.0.0/Person"
   key?: string; // immutable Space-local logical key — the caller's handle
   name?: string; // mutable display label; never identity
   canonical_id?: string;
@@ -870,7 +874,7 @@ When `ED25519_PUBKEYS` is set, configure the remote MCP client with an `Authoriz
 - Purpose: Submit a memory formation task
 - Auth: SpaceToken/CWT `write`
 - Request body: `FormationInput` (raw string is also accepted in Markdown mode)
-- Observation time accepts RFC 3339 offsets and fractional precision, normalized to `YYYY-MM-DDTHH:mm:ss.SSSZ`. An invalid or missing timestamp uses the stored conversation creation time; retries use the same fallback. The original input is retained. Markdown text is captured verbatim as one user message with the same `:msg1` Evidence binding.
+- Observation time accepts an RFC 3339 instant in any offset with up to millisecond precision and canonicalizes it to `YYYY-MM-DDTHH:mm:ss.SSSZ`; an unparseable value or sub-millisecond precision is rejected (400) rather than replaced. A missing timestamp uses the stored conversation creation time; retries use the same fallback. A message's own `timestamp` (Unix ms) is that message's observation time. Formation writes each claim's `asserted_at` from the observation time of the message it cites, never from when formation ran (KIP Spec §13.2). Markdown text is captured verbatim as one user message with the same `:msg1` Evidence binding.
 - Response (JSON/CBOR): `RpcResponse<AgentOutput>`
 - Response (Markdown): `string` (returns only `AgentOutput.content`)
 
@@ -951,7 +955,7 @@ Explicit `parameters` override the space policy; omitted members use policy defa
 
 ### POST `/v1/{space_id}/memory/pin`
 
-- Purpose: Pin or unpin one graph entity to exempt its memory strength from disuse decay.
+- Purpose: Pin or unpin one graph entity (a `pinned` retention class, kept out of retention archival).
 - Auth: SpaceToken/CWT `write`
 - Request body: `MemoryPinInput`; `pinned` defaults to `true`.
 - Response: `RpcResponse<MemoryPinOutput>`
@@ -965,6 +969,38 @@ Explicit `parameters` override the space policy; omitted members use policy defa
 
 Accepts explicit Concept (`C-*`), Proposition (`P-*`), Assertion (`A-*`), Evidence (`E-*`) and Activity (`X-*`) IDs, including the Evidence containing captured message text. Native legal holds and reference checks still apply; successful purges leave erased identity stubs. Counts report each erased kind, including cascades. This removes the selected graph records; stored conversations, wiki documents and external copies have separate lifecycles.
 Saved product previews that reference successfully purged elements are scrubbed before the response is reported as clean; a preview-cleanup failure is reported on that entity.
+
+### GET `/v1/{space_id}/memory/attention`
+
+- Purpose: Attention recall (KIP Memory Interface §4): the Watches that fired and the Commitments Maintenance found due, after the cursor the caller kept.
+- Auth: SpaceToken/CWT `read`; public spaces permit anonymous reads.
+- Query: `AttentionRecallInput` — `attention_cursor` (optional), `limit` (1–50 raising Activities, default 20).
+- Response: `RpcResponse<AttentionRecall>`, with existing JSON/CBOR/Markdown negotiation. An invalid cursor or limit is 400.
+
+```ts
+export interface AttentionRecallInput {
+  attention_cursor?: string; // "attention:<n>"; absent or "attention:-1" reads from the first raise
+  limit?: number; // 1–50; default 20
+}
+
+export interface AttentionRecall {
+  items: AttentionItem[]; // ordered by raised_seq
+  attention_cursor: string; // "attention:<highest delivered raised_seq>"; keep it after taking the items
+  complete: boolean; // every raise after the input cursor was read
+}
+
+export interface AttentionItem {
+  ref: string; // the Watch or Commitment raised
+  kind: 'watch_fired' | 'commitment_due';
+  summary: string;
+  raised_seq: number; // space_seq of the watch_fire / commitment_review Activity
+  due_at?: string;
+  target_refs: string[]; // a Watch's `watches` targets, or the Commitment
+  priority?: number;
+}
+```
+
+Every item is raised by a commit: a `watch_fire` Activity, or a `commitment_review` Activity in which Maintenance named the Commitments it found due. The passing of `due_at` alone raises nothing. Reading changes nothing in memory, and the cursor does not expire; the caller keeps it once it has taken the items. An item grants nothing: acting on it passes the action gate and Governance like any other act. This is separate from the authenticated runtime inbox (`GET /v1/{space_id}/attention`), which pages the action gate's wake records.
 
 ### GET `/v1/{space_id}/memory_status`
 

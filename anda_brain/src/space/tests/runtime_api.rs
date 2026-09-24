@@ -18,7 +18,7 @@ const OBSERVER: &str = "kip:principal:r4-observer";
 const OTHER: &str = "kip:principal:r4-other";
 const CONTROLLER: &str = "kip:principal:r4-controller";
 const ST: &str = "ST-r4-reader-token";
-const PROFILE: &str = "kip://profiles/cognitive-memory@2.1.0/";
+use crate::PROFILE;
 fn auth(principal: &str) -> AuthContext {
     let mut a = AuthContext::principal(principal);
     a.auth_method = "test-authenticated-instrument".into();
@@ -171,7 +171,8 @@ async fn fixture_with(
         Default::default(),
     )
     .await;
-    created_ref(&space,r#"MUTATE {CREATE CONCEPT ?p {TYPE "Preference" NAME "coordinate"} ENSURE PROPOSITION ?item (:target,"prefers",?p)}"#,kip::param("target",target.clone())).await;
+    declare_types(&space, &["Coordinate"]).await;
+    created_ref(&space,r#"MUTATE {CREATE CONCEPT ?p {TYPE "Coordinate" NAME "coordinate"} ENSURE PROPOSITION ?item (:target,"prefers",?p)}"#,kip::param("target",target.clone())).await;
     let watch=created_ref(&space,r#"CREATE CONCEPT ?item {TYPE "Watch" SET ATTRIBUTES {watch_class:"delta",summary:"R4 retained task",status:"disarmed",condition:{element: :target}}}"#,kip::param("target",target.clone())).await;
     space.attention().arm_watch(watch.clone(), 1).await.unwrap();
     seed_kip(
@@ -1043,7 +1044,8 @@ async fn r7_semantic_fire_uses_existing_inbox_gate_and_hides_global_counts_from_
         Default::default(),
     )
     .await;
-    created_ref(&space,r#"MUTATE {CREATE CONCEPT ?p {TYPE "Preference" NAME "coordinate"} ENSURE PROPOSITION ?item (:target,"prefers",?p)}"#,kip::param("target",target.clone())).await;
+    declare_types(&space, &["Coordinate"]).await;
+    created_ref(&space,r#"MUTATE {CREATE CONCEPT ?p {TYPE "Coordinate" NAME "coordinate"} ENSURE PROPOSITION ?item (:target,"prefers",?p)}"#,kip::param("target",target.clone())).await;
     let watch=created_ref(&space,r#"CREATE CONCEPT ?item {TYPE "Watch" SET ATTRIBUTES {watch_class:"delta",summary:"R7 inbox",status:"disarmed",condition:{element: :target,text:"reply marker"}}}"#,kip::param("target",target.clone())).await;
     space.attention().arm_watch(watch, 1).await.unwrap();
     seed_kip(

@@ -17,17 +17,35 @@ Cloudflare Worker 的对应能力和限制见[逐提交核对](anda-brain-worker
 [已退役离线 Eval API 和 CLI](anda_brain/README.md#offline-regression-and-instance-configuration)，迁移后的产品回归由 MIB 负责。运行策略归各 Space 所有；部署提示使用不可变宿主配置，并保留编译的 KIP 参考段。
 
 
-## KIP 2.0 / CognitiveMemory 2.1 更新
+## KIP 2.0 更新
 
-Rust 使用已发布的 Nexus 0.13.4 及兼容的 DB/KIP 包，包含旧数据迁移修复；Worker 使用
-已发布的 `@ldclabs/kip-do` 0.13。Skill 行为保存为不可变的
+本版本对齐 KIP `3251912` 与 Cognitive Memory Profile
+`kip://profiles/cognitive-memory@2.0.0`（修订 `sha256:3ea9e459…`；草案原地重写了
+2.0.0，只能靠摘要区分修订）。Rust 基于 `anda_kip` / `anda_cognitive_nexus` 0.14，
+Worker 基于 `@ldclabs/kip-do` 0.14。用早先 2.1.0 草案激活过的 Space 不做迁移，请使用
+新 Space；KIP 1.x 的 Space 仍会自动升级。
+
+- **世界时间。** 世界变化记为从变化时刻起的一条新 Assertion，时序继承结束旧值，旧值
+  仍回答它所在时段的问题；只有主张本身有误时才用 supersede。Formation 按所引用消息
+  的观察时间写入每条主张的 `asserted_at`，消息自带的 `timestamp` 即其观察时间。无法
+  解析的请求 `timestamp` 现在直接返回 400，不再悄悄变成接收时间。
+- **选项按类别定型。** Profile 已没有 `Preference` 类型：选项是按类别定型的 Concept
+  （`ColorScheme`、`Editor`），需要时通过 Space 词汇包声明；`prefers` 在同一类别内是函数型的。
+- **衰减改为计算。** 结算不再扫盘写 `memory_strength`；强度由引擎按基值、锚点和钉住
+  的策略计算，缺失即未知。`memory_strength_decay_factor` 已弃用并被忽略。
+- **注意力召回。** `GET /v1/{space_id}/memory/attention` 按提起它们的提交顺序返回已触发
+  的 Watch 与到期的 Commitment，游标由调用方保存。Maintenance 用 `commitment_review`
+  Activity 提起到期的 Commitment。
+- **学习指针。** Skill 指向其 `current_trial` / `current_evaluation`；`GradingState`
+  与血缘字段为计算值，从不写入。
+
+Skill 行为保存为不可变的
 `SkillRevision`；Watch 进度和任务租约通过 Nexus 的受保护接口维护。旧的 family
 成功率晋升规则已移除；未配置独立观察者、冻结试验和可重放评估时，程序候选保持未验证，
 `skills.unsupported_reason` 明确报告该边界。现有 Brain API 保持可用；这两个适配器
 **未声明支持**可选的五意图 Memory Interface 或 `memory_*` 能力包。
 
-Formation 会规范化 RFC 3339 观察时间，无效字符串回退到接收时间。Rust Markdown
-原文与结构化消息使用相同的 Evidence 捕获机制，未提供姓名时保留已有交互对象的显示名。
+Rust Markdown 原文与结构化消息使用相同的 Evidence 捕获机制，未提供姓名时保留已有交互对象的显示名。
 Rust 遗忘接口除 Concept、Proposition、Assertion 外，也接受显式的 Evidence 和 Activity
 ID，并继续遵守原生 legal hold 与引用检查。详见 [API](anda_brain/API_cn.md)。
 
@@ -156,7 +174,7 @@ Rust 服务会在完成前，对估算达到 10,000 tokens 的输入进行一次
 
 系统扫描图谱中未处理的事件节点，执行**精华提取**：
 
-- **单事件巩固**：一个记录了“Alice 说她喜欢用暗色主题”的 Event，被巩固为一个 `Preference` 类型的持久概念节点，带有与 Alice 的 `prefers` 关系。原始 Event 标记为“已巩固”。
+- **单事件巩固**：一个记录了“Alice 说她喜欢用暗色主题”的 Event，被巩固为 Alice 对 `ColorScheme` 选项（“dark”）的 `prefers` 主张，并以该 Event 为 Evidence；一条巩固 Activity 把该 Event 记为输入。
 - **跨事件模式提取**——最关键的一步。单个对话碎片可能毫不起眼，但多个相关事件聚合在一起，能揭示任何单一事件都无法表达的高阶模式：
   - Alice 在三次不同对话中分别提到了三文鱼、海胆和寿司 → 提取出“偏好日式料理”
   - Alice 在多个项目讨论中总是先问成本再问功能 → 提取出“决策倾向：成本优先”

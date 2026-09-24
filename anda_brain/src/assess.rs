@@ -21,12 +21,13 @@ use crate::types::MemoryCitation;
 ///
 /// KIP 1.x measured this as "concepts still in the `Unsorted` Domain". The
 /// Cognitive Memory Profile declares no Domain, so the backlog is now what
-/// Maintenance actually owes: Events and Experiences with no `consolidated_to`
-/// lineage. One probe per type, summed — a structural field is a schema symbol,
-/// so a single query cannot range over both.
+/// Maintenance actually owes: Events and Experiences no formation or
+/// consolidation Activity has taken as input and produced something from.
+/// That is Activity provenance read directly: `consolidated_to` is a computed,
+/// read-only view of the same thing (Profile §7), and nothing writes it.
 pub const UNCONSOLIDATED_COUNT_KQL: &[&str] = &[
-    "FIND(COUNT(?x)) WHERE { ?x CONCEPT {type: \"Event\"} NOT { STRUCTURAL (?x, \"consolidated_to\", ?to) } }",
-    "FIND(COUNT(?x)) WHERE { ?x CONCEPT {type: \"Experience\"} NOT { STRUCTURAL (?x, \"consolidated_to\", ?to) } }",
+    "FIND(COUNT(?x)) WHERE { ?x CONCEPT {type: \"Event\"} NOT { ?a ACTIVITY {} STRUCTURAL (?a, \"inputs\", ?x) STRUCTURAL (?a, \"outputs\", ?to) FILTER(?a.activity_class == \"experience_formation\" || ?a.activity_class == \"semantic_consolidation\" || ?a.activity_class == \"procedural_consolidation\") } }",
+    "FIND(COUNT(?x)) WHERE { ?x CONCEPT {type: \"Experience\"} NOT { ?a ACTIVITY {} STRUCTURAL (?a, \"inputs\", ?x) STRUCTURAL (?a, \"outputs\", ?to) FILTER(?a.activity_class == \"experience_formation\" || ?a.activity_class == \"semantic_consolidation\" || ?a.activity_class == \"procedural_consolidation\") } }",
 ];
 
 /// Orphan probe: Concepts no Proposition mentions on either side.
@@ -489,7 +490,7 @@ mod tests {
     fn recall_trace_extracts_tool_calls_and_outputs() {
         let call = ContentPart::ToolCall {
             name: "execute_kip_readonly".to_string(),
-            args: json!({"command": "FIND(?x) WHERE { ?x {type: \"Preference\"} }"}),
+            args: json!({"command": "FIND(?x) WHERE { ?x {type: \"TeaKind\"} }"}),
             call_id: Some("call_1".to_string()),
         };
         let output = ToolOutput::new(json!([{"name": "prefers concise"}]));
@@ -553,7 +554,7 @@ mod tests {
                     call_id: None,
                     output: Some(json!({"result": [
                         {"id": "C-7",
-                         "schema_ref": "kip://profiles/cognitive-memory@2.0.0/Preference",
+                         "schema_ref": "kip://anda-brain/memory@1.0.1/TeaKind",
                          "name": "oolong",
                          "_system": {"created_at": "2026-07-01T00:00:00.000Z"}},
                         {"id": "A-3", "confidence": 0.8,
@@ -588,7 +589,7 @@ mod tests {
         // name: the version is what keeps the meaning pinned, not what a reader
         // needs to see.
         assert_eq!(citations[0].entity, "C-7");
-        assert_eq!(citations[0].r#type.as_deref(), Some("Preference"));
+        assert_eq!(citations[0].r#type.as_deref(), Some("TeaKind"));
         assert_eq!(citations[0].name.as_deref(), Some("oolong"));
         assert_eq!(
             citations[0].created_at.as_deref(),

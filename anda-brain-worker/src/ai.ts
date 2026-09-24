@@ -5,7 +5,7 @@ import type {
   AiBinding,
   JsonObject,
   RecallAnswer,
-  RecallPlan,
+  RecallReadPlan,
   MutationPlan,
   Usage,
 } from './types.js'
@@ -129,7 +129,7 @@ export async function createRecallPlan(
   model: string,
   messages: AiMessage[],
   deadline?: ModelDeadline,
-): Promise<StructuredResult<RecallPlan>> {
+): Promise<StructuredResult<RecallReadPlan>> {
   const result = await runStructured(ai, model, messages, RECALL_PLAN_SCHEMA, 900, deadline)
   return validateResult(result, validateRecallPlan)
 }
@@ -307,7 +307,7 @@ function readSymbols(value: unknown): string[] {
     .slice(0, 16)
 }
 
-function validateRecallPlan(value: unknown): RecallPlan {
+function validateRecallPlan(value: unknown): RecallReadPlan {
   const object = asObject(value, 'invalid recall plan')
   return { commands: readCommands(object.commands, 3) }
 }
