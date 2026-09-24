@@ -158,6 +158,10 @@ fn concept_scope(row: &Json) -> (Option<String>, Vec<String>) {
     (task, contexts)
 }
 
+fn reference_id(value: &Json) -> Option<&str> {
+    value.as_str().or_else(|| value["id"].as_str())
+}
+
 fn version_of(row: &Json) -> u64 {
     row["_system"]["version"].as_u64().unwrap_or(0)
 }
@@ -213,6 +217,16 @@ impl Space {
             .ok()?
             .into_iter()
             .next()
+    }
+
+    async fn endpoint_text(&self, value: &Json, as_of: Option<u64>) -> String {
+        if let Some(id) = reference_id(value)
+            && let Some(row) = self.element_row(id, as_of).await
+            && let Some(name) = row["name"].as_str()
+        {
+            return name.to_string();
+        }
+        value.to_string()
     }
 
     /// Final belief in a Proposition under the request's scope and time.
@@ -377,6 +391,10 @@ impl Space {
             return self.briefing_response(request, briefing, max_tokens, vec![]);
         }
 
+        // All host reads and retained pins use this same snapshot. Search is
+        // permitted only while the live index still corresponds to it.
+        let as_of = Some(snapshot_seq);
+
         // The Recall pass: the model finds what bears on the question. Its
         // prose is used only when every memory it cited is in scope.
         let mut candidates: Vec<Candidate> = Vec::new();
@@ -401,9 +419,43 @@ impl Space {
             .await;
             match pass {
                 Ok(Ok(output)) if output.failed_reason.is_none() => {
-                    for citation in &output.memories {
+                    // The public memory citations intentionally omit Evidence;
+                    // scope and summary checks must inspect the full read trace.
+                    let mut reads = std::collections::BTreeMap::new();
+                    if let Some(id) = output.conversation {
+                        let conversation = self
+                            .recall
+                            .conversations
+                            .get_conversation(id)
+                            .await
+                            .map_err(|e| kip_error(e.into()))?;
+                        let messages = conversation
+                            .messages
+                            .into_iter()
+                            .filter_map(|m| serde_json::from_value(m).ok())
+                            .collect::<Vec<anda_core::Message>>();
+                        let trace = crate::assess::RecallTrace::from_messages(&messages);
+                        for tool in trace.tools.iter().filter(|t| t.is_error != Some(true)) {
+                            if let Some(value) = &tool.output {
+                                crate::assess::collect_element_objects(value, &mut |id, row| {
+                                    reads.insert(id.to_string(), version_of(&json!(row)));
+                                });
+                            }
+                        }
+                    }
+                    for (id, version) in reads {
+                        if version > 0
+                            && self
+                                .element_row(&id, as_of)
+                                .await
+                                .as_ref()
+                                .is_none_or(|row| version_of(row) != version)
+                        {
+                            dropped = true;
+                            continue;
+                        }
                         match self
-                            .cited_item(&citation.entity, &scope, valid_at.as_deref(), as_of)
+                            .cited_item(&id, &scope, valid_at.as_deref(), as_of)
                             .await
                         {
                             Some(Some(candidate)) => candidates.push(candidate),
@@ -436,8 +488,8 @@ impl Space {
         }
         if dropped {
             warnings.push(
-                "the recall pass cited memory outside this scope; it was left out and the \
-                 summary lists only in-scope items"
+                "the recall pass read unavailable, invalidated or out-of-scope memory; its \
+                 summary was replaced with verified items"
                     .to_string(),
             );
         }
@@ -675,52 +727,61 @@ impl Space {
         as_of: Option<u64>,
     ) -> Option<Option<Candidate>> {
         let parsed: ElementId = id.parse().ok()?;
-        let row = self.element_row(id, as_of).await?;
+        let Some(row) = self.element_row(id, as_of).await else {
+            return Some(None);
+        };
         if row["_system"]["state"] != "active" {
-            return None;
+            return Some(None);
         }
         match parsed.kind {
             anda_kip::ElementKind::Assertion => {
                 if row["_system"]["recording_validity"]["status"] == "invalidated" {
-                    return None;
-                }
-                let record = self.product_record(id).await.ok()?;
-                if !scope.admits(None, &record.context_refs) {
                     return Some(None);
                 }
+                let contexts: Vec<String> = row["context_refs"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(reference_id)
+                    .map(str::to_string)
+                    .collect();
+                if !scope.admits(None, &contexts) {
+                    return Some(None);
+                }
+                let proposition =
+                    reference_id(&row["proposition"]).or_else(|| row["proposition_id"].as_str())?;
+                let prop = self.element_row(proposition, as_of).await?;
                 let belief = self
-                    .belief(&record.proposition_id, scope, valid_at, as_of)
+                    .belief(proposition, scope, valid_at, as_of)
                     .await
                     .ok()?;
-                let status = status_of(belief["status"].as_str().unwrap_or(""));
+                let actor = self.endpoint_text(&row["asserted_by"], as_of).await;
+                let subject = self.endpoint_text(&prop["subject"], as_of).await;
+                let object = self.endpoint_text(&prop["object"], as_of).await;
+                let predicate = prop["predicate_ref"].as_str().map(local).unwrap_or("?");
                 Some(Some(Candidate {
                     item: MemoryItem {
                         reference: String::new(),
                         text: truncate(
-                            &format!(
-                                "{} (claimed by {})",
-                                record.text,
-                                record
-                                    .actor_key
-                                    .or(record.actor_id)
-                                    .unwrap_or_else(|| "unknown".into())
-                            ),
+                            &format!("{subject} · {predicate} · {object} (claimed by {actor})"),
                             4096,
                         ),
                         role: ItemRole::Fact,
-                        epistemic_status: status,
-                        evidence_refs: record
-                            .sources
-                            .iter()
-                            .map(|s| s.evidence_id.clone())
+                        epistemic_status: status_of(belief["status"].as_str().unwrap_or("")),
+                        evidence_refs: row["evidence"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(reference_id)
                             .take(32)
+                            .map(str::to_string)
                             .collect(),
                         action_eligible: false,
                         standing: None,
                     },
                     pins: vec![
                         (id.to_string(), version_of(&row)),
-                        (record.proposition_id.clone(), 0),
+                        (proposition.to_string(), version_of(&prop)),
                     ],
                     required: false,
                 }))
@@ -730,12 +791,17 @@ impl Space {
                 // one of its claims does.
                 let claims = self
                     .rows(kip::request_with(
-                        "FIND(?a) WHERE { ?p PROPOSITION (id: :id) ?a ASSERTION {proposition: ?p} } LIMIT 64",
+                        format!("FIND(?a) WHERE {{ ?p PROPOSITION (id: :id) ?a ASSERTION {{proposition: ?p}} }}{} LIMIT 64", as_of.map(|seq| format!(" AS OF SEQ {seq}")).unwrap_or_default()),
                         kip::param("id", id),
                     ))
                     .await
                     .ok()?;
                 let in_scope = claims.iter().any(|claim| {
+                    if claim["_system"]["state"] != "active"
+                        || claim["_system"]["recording_validity"]["status"] == "invalidated"
+                    {
+                        return false;
+                    }
                     let contexts: Vec<String> = claim["context_refs"]
                         .as_array()
                         .into_iter()
@@ -746,7 +812,7 @@ impl Space {
                     scope.admits(None, &contexts)
                 });
                 if !in_scope {
-                    return if claims.is_empty() { None } else { Some(None) };
+                    return Some(None);
                 }
                 let belief = self.belief(id, scope, valid_at, as_of).await.ok()?;
                 let status = status_of(belief["status"].as_str().unwrap_or(""));
@@ -874,7 +940,10 @@ impl Space {
                 command.replace(" ORDER BY", &format!(" AS OF SEQ {seq} ORDER BY"))
             }
             // Search indexes serve the current snapshot only.
-            Some(_) => return (vec![], Plan::failed("unsupported")),
+            Some(seq) if self.memory_seq().await.ok() != Some(seq) => {
+                return (vec![], Plan::failed("unsupported"));
+            }
+            Some(_) => command,
             None => command,
         };
         let rows = match self.rows(kip::request_with(command, parameters)).await {
@@ -884,6 +953,12 @@ impl Space {
         let truncated = query.trim().is_empty() && rows.len() > SEARCH_LIMIT;
         let mut items = Vec::new();
         for row in rows.into_iter().take(SEARCH_LIMIT) {
+            let Some(row) = self
+                .element_row(row["id"].as_str().unwrap_or(""), as_of)
+                .await
+            else {
+                continue;
+            };
             let (task, contexts) = concept_scope(&row);
             if !scope.admits(task.as_deref(), &contexts) {
                 continue;
@@ -894,7 +969,9 @@ impl Space {
         }
         (
             items,
-            if truncated {
+            if as_of.is_some() && self.memory_seq().await.ok() != as_of {
+                Plan::failed("unsupported")
+            } else if truncated {
                 Plan::exact(true)
             } else {
                 Plan::approximate(true)

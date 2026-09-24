@@ -36,7 +36,7 @@ func memoryServer(t *testing.T, requests *[]map[string]any) *httptest.Server {
 				}
 				briefing := map[string]any{"summary": "ok", "items": []any{}, "uncertainties": []any{}, "basis_ref": "basis-1",
 					"coverage": map[string]any{"complete": true, "channels": map[string]string{}, "pending_receipts": []string{}, "action_eligible": true},
-					"after": after, "attention_cursor": "attention:9"}
+					"after":    after, "attention_cursor": "attention:9"}
 				_ = json.NewEncoder(w).Encode(map[string]any{"kip_memory": "2.0", "operation": "recall", "status": "succeeded", "result": briefing, "warnings": []string{}})
 				return
 			}
@@ -100,6 +100,10 @@ func TestMemoryInterfaceSessionKeepsReceiptsUntilARecallAccountsForThem(t *testi
 	}
 	recall := requests[len(requests)-1]
 	input, _ := recall["input"].(map[string]any)
+	scope, _ := recall["scope"].(map[string]any)
+	if scope["task_ref"] != "t1" {
+		t.Fatalf("session lost its task scope: %v", recall["scope"])
+	}
 	if got := asStrings(input["after"]); len(got) != 1 || got[0] != "rcpt-observe" {
 		t.Fatalf("recall after %v", input["after"])
 	}
@@ -113,6 +117,17 @@ func TestMemoryInterfaceSessionKeepsReceiptsUntilARecallAccountsForThem(t *testi
 	// A failed intent is printed and fails the command.
 	if _, _, err := runCLI(t, env, append(base, "memory", "forget", "A-1", "--mode", "semantic", "--session", session)...); err == nil {
 		t.Fatal("a failed forget must exit non-zero")
+	}
+}
+
+func TestMemoryInterfaceForgetRejectsDryRunBeforeSending(t *testing.T) {
+	var requests []map[string]any
+	server := memoryServer(t, &requests)
+	defer server.Close()
+	_, _, err := runCLI(t, map[string]string{}, "--base-url", server.URL, "--space-id", "s",
+		"memory", "forget", "A-1", "--mode", "semantic", "--dry-run")
+	if err == nil || len(requests) != 0 {
+		t.Fatalf("dry-run submitted a mutation: err=%v requests=%v", err, requests)
 	}
 }
 

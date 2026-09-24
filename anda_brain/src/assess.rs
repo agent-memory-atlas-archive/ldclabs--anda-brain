@@ -290,10 +290,23 @@ pub(crate) fn collect_entity_objects(
     value: &Json,
     visit: &mut impl FnMut(&str, &serde_json::Map<String, Json>),
 ) {
+    collect_element_objects(value, &mut |id, row| {
+        if is_entity_id(id) {
+            visit(id, row);
+        }
+    });
+}
+
+/// Typed elements actually returned by a read, including provenance records.
+/// Memory Interface scope checks need these; usage metering still excludes them.
+pub(crate) fn collect_element_objects(
+    value: &Json,
+    visit: &mut impl FnMut(&str, &serde_json::Map<String, Json>),
+) {
     match value {
         Json::Array(items) => {
             for item in items {
-                collect_entity_objects(item, visit);
+                collect_element_objects(item, visit);
             }
         }
         Json::Object(map) => {
@@ -314,7 +327,7 @@ pub(crate) fn collect_entity_objects(
                         // Only confirmed successful operations in a partial
                         // batch contribute retrieval diagnostics.
                         if result.get("status").and_then(Json::as_str) == Some("succeeded") {
-                            collect_entity_objects(result, visit);
+                            collect_element_objects(result, visit);
                         }
                     }
                 }
@@ -325,7 +338,7 @@ pub(crate) fn collect_entity_objects(
                     .get("status")
                     .is_none_or(|status| status.as_str() == Some("succeeded"))
                 {
-                    collect_entity_objects(result, visit);
+                    collect_element_objects(result, visit);
                 }
                 return;
             }
@@ -335,7 +348,7 @@ pub(crate) fn collect_entity_objects(
                         && hit.get("id").and_then(Json::as_str)
                             == element.get("id").and_then(Json::as_str)
                     {
-                        collect_entity_objects(element, visit);
+                        collect_element_objects(element, visit);
                     }
                 }
                 return;
@@ -343,12 +356,12 @@ pub(crate) fn collect_entity_objects(
             if let Some(element) = map.get("element") {
                 if map.get("id").and_then(Json::as_str) == element.get("id").and_then(Json::as_str)
                 {
-                    collect_entity_objects(element, visit);
+                    collect_element_objects(element, visit);
                 }
                 return;
             }
             if let Some(Json::String(id)) = map.get("id")
-                && is_entity_id(id)
+                && id.parse::<anda_cognitive_nexus::ElementId>().is_ok()
                 && (map.contains_key("_system")
                     || map.contains_key("schema_ref")
                     || map.contains_key("predicate_ref")

@@ -126,8 +126,9 @@ export class AndaBrain extends KipDatabase<Env> {
   memoryScopedAttention(scope: Scope | undefined, items: AttentionRecall['items']): AttentionItem[] {
     return this.memory.scopedAttention(scope, items)
   }
-  memoryDeliver(namespace: string, scope: Scope | undefined, cited: string[], options: Parameters<MemoryLedger['deliver']>[3]): Briefing {
-    return this.memory.deliver(namespace, scope, cited, options)
+  memoryDeliver(namespace: string, scope: Scope | undefined, cited: string[], options: Parameters<MemoryLedger['deliver']>[3]): { briefing: Briefing; warnings: string[] } {
+    const warnings = [...options.warnings]
+    return { briefing: this.memory.deliver(namespace, scope, cited, { ...options, warnings }), warnings }
   }
   memoryExpand(namespace: string, target: string, evidence: boolean): Briefing {
     return this.memory.expand(namespace, target, evidence)

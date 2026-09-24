@@ -31,7 +31,10 @@ checkout, as the workspace does.
    database; the host's own collections (conversations, usage ledger, wiki, …) and database
    extensions are kept. The legacy package and `cognitive-memory@2.0.0` are installed and
    activated, the option kinds are `DEFINE`d, and the Capsule is imported in
-   dependency-ordered chunks that fit one transaction. Ids are preserved, keys and archived
+   referentially closed chunks that fit one transaction. Assertions, their Evidence
+   and Activities referencing them travel together; non-reusable records are imported
+   once. Reference closure and size are checked before any collection is dropped;
+   an oversized connected closure is refused without rebuilding the database. Ids are preserved, keys and archived
    states are restored, and the self Concept is designated again.
 4. **Verify.** A census of every kind, storage state and type is compared with the export.
 

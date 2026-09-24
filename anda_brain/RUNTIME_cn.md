@@ -208,6 +208,7 @@ Memory Interface（`POST /v1/{space_id}/memory`，见 [API](API_cn.md#memory-int
   任何序号。
 - **误记由宿主修复。** `misrecorded` 的 revise 一轮完成后，宿主用这一轮从原始来源写出的替换断言
   调用 Nexus 的 recording repair；修复被拒则回执失败。
+- **关闭前排空已受理的 Memory Interface 写入。** 先等待其任务，再关闭产品/原生任务与数据库。
 - **遗忘先核实再报告。** ErasurePlan 由 Nexus 依据实际存储校验，宿主副本（暂存字节、Formation 与
   Recall 会话记录、使用账本行、探测缓存）在报告 `completed` 之前逐项核实。被抑制的来源键并入
   产品来源排除，Formation 与暂存都不会再接纳这些字节。

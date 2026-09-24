@@ -37,6 +37,14 @@ fn target(reference: &str, surface: &str, state: &str) -> Json {
     json!({"ref": reference, "surface": surface, "state": state})
 }
 
+#[derive(Default)]
+struct SourceTargets {
+    evidence: BTreeSet<String>,
+    owned_concepts: BTreeSet<String>,
+    conversations: BTreeSet<String>,
+    incomplete: bool,
+}
+
 impl Space {
     /// forget (see the module docs).
     pub(crate) async fn memory_forget(
@@ -277,12 +285,21 @@ impl Space {
         // The staged source a target names, and the Evidence captured from it.
         let mut evidence_targets: Vec<String> = Vec::new();
         let mut staged: Option<String> = None;
+        let mut owned_concepts = BTreeSet::new();
         if target_ref.starts_with("src-") {
             let source = self.staged_memory_source(namespace, target_ref).await?;
             staged = Some(source.source_ref.clone());
             suppressed.insert(format!("memory-source:{}", source.source_ref));
             suppressed.insert(format!("memory-source-digest:{}", source.source_digest));
-            evidence_targets.extend(self.evidence_of_source(&source.source_ref).await?);
+            let targets = self.targets_of_source(&source.source_ref).await?;
+            evidence_targets.extend(targets.evidence);
+            if input.mode == ForgetMode::Semantic {
+                owned_concepts = targets.owned_concepts;
+                suppressed.extend(targets.conversations);
+                if targets.incomplete {
+                    partial = Some("some source outputs have no complete ownership trace or are still processing".into());
+                }
+            }
         } else {
             let id: ElementId = target_ref
                 .parse()
@@ -351,6 +368,9 @@ impl Space {
                 claims.sort();
                 claims.dedup();
                 for claim in &claims {
+                    if erased_ids.contains(claim) {
+                        continue;
+                    }
                     match self.product_delete(receipt_ref, claim).await {
                         Ok((targets, sources)) => {
                             for (id, kind) in targets {
@@ -394,6 +414,12 @@ impl Space {
                     .filter(|id| !erased_ids.contains(*id))
                     .cloned()
                     .collect();
+                direct.extend(
+                    owned_concepts
+                        .iter()
+                        .filter(|id| !erased_ids.contains(*id))
+                        .cloned(),
+                );
                 if !target_ref.starts_with("src-")
                     && !erased_ids.contains(target_ref)
                     && !claims.iter().any(|c| c == target_ref)
@@ -401,6 +427,9 @@ impl Space {
                     direct.push(target_ref.to_string());
                 }
                 for id in direct {
+                    if nexus.store.get_element(id.parse()?).await?.state() == "purged" {
+                        continue;
+                    }
                     if let Ok(Element::Evidence(row)) = nexus.store.get_element(id.parse()?).await {
                         let source =
                             crate::product::source_from_evidence(&row).map_err(kip_error)?;
@@ -447,7 +476,10 @@ impl Space {
                             erased_ids.insert(purged.to_string());
                         }
                     }
-                    if !id.starts_with("E-") && source_roots.is_empty() {
+                    if !id.starts_with("E-")
+                        && !owned_concepts.contains(&id)
+                        && source_roots.is_empty()
+                    {
                         partial.get_or_insert_with(|| {
                             format!(
                                 "{id} was purged, but the sources it was formed from were not \
@@ -684,11 +716,12 @@ impl Space {
             .collect())
     }
 
-    /// Evidence Formation captured from a staged source's conversations.
-    async fn evidence_of_source(&self, source_ref: &str) -> Result<Vec<String>, KipError> {
+    /// Captured Evidence and newly created narrative memory owned by this
+    /// source. Shared identity/option Concepts and updates are not owned.
+    async fn targets_of_source(&self, source_ref: &str) -> Result<SourceTargets, KipError> {
         use futures::TryStreamExt;
         let journal = &self.memory_interface.journal;
-        let mut found = Vec::new();
+        let mut found = SourceTargets::default();
         let mut keys = journal.keys("receipts/");
         while let Some(key) = keys.try_next().await.map_err(kip_error)? {
             let Some(record) = journal
@@ -702,6 +735,41 @@ impl Space {
                 continue;
             }
             if let Some(conversation) = record.value.conversation {
+                found
+                    .conversations
+                    .insert(format!("formation:{conversation}"));
+                let conversation_row = self
+                    .memory
+                    .get_conversation(conversation)
+                    .await
+                    .map_err(|e| kip_error(e.into()))?;
+                let trace = intake::FormationTrace::resume(&conversation_row)
+                    .0
+                    .lock()
+                    .clone();
+                found.incomplete |= conversation_row.status
+                    != anda_engine::memory::ConversationStatus::Completed
+                    || trace.formed.len() >= 128;
+                found.evidence.extend(trace.evidence);
+                for reference in &trace.formed {
+                    if let Ok(Element::Concept(row)) = self
+                        .memory
+                        .nexus()
+                        .store
+                        .get_element(reference.parse()?)
+                        .await
+                        && matches!(
+                            row.schema_ref.rsplit('/').next(),
+                            Some("Event" | "Insight" | "Experience" | "Commitment")
+                        )
+                    {
+                        if trace.created.contains(reference) {
+                            found.owned_concepts.insert(reference.clone());
+                        } else {
+                            found.incomplete = true;
+                        }
+                    }
+                }
                 for index in 1..=crate::kip::MAX_INGESTED_MESSAGES {
                     if let Some(id) = self
                         .memory
@@ -714,20 +782,18 @@ impl Space {
                         )
                         .await?
                     {
-                        found.push(id.to_string());
+                        found.evidence.insert(id.to_string());
                     }
                 }
             }
             if let Some(result) = &record.value.result {
                 for reference in result["memory_refs"].as_array().into_iter().flatten() {
                     if let Some(id) = reference.as_str().filter(|id| id.starts_with("E-")) {
-                        found.push(id.to_string());
+                        found.evidence.insert(id.to_string());
                     }
                 }
             }
         }
-        found.sort();
-        found.dedup();
         Ok(found)
     }
 

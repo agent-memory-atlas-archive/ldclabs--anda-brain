@@ -180,6 +180,9 @@ func sendMemory(cmd *cobra.Command, operation string, input map[string]any, keye
 			session.acknowledgeRecall(&briefing)
 		}
 	}
+	if session != nil && response.Status != "failed" {
+		session.Scope = scope
+	}
 	if err := session.save(sessionPath); err != nil {
 		return err
 	}

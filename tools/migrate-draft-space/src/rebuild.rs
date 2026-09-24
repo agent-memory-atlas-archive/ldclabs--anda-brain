@@ -258,117 +258,148 @@ fn nodes(value: &Json) -> usize {
     }
 }
 
-/// Packs records into runs that fit one transaction's plan.
-fn pack<'a>(records: &[&'a Json]) -> Vec<Vec<&'a Json>> {
-    let mut runs: Vec<Vec<&Json>> = Vec::new();
-    let mut size = 0;
-    for record in records {
-        let weight = nodes(record);
-        match runs.last_mut() {
-            Some(run) if run.len() < CHUNK_ELEMENTS && size + weight <= CHUNK_NODES => {
-                run.push(record);
-                size += weight;
-            }
-            _ => {
-                runs.push(vec![record]);
-                size = weight;
-            }
-        }
-    }
-    runs
-}
-
 /// The temporary identity a later chunk resolves an already imported Concept
 /// by; cleared once every chunk is in.
 fn canonical(id: &str) -> String {
     format!("urn:anda-brain:migrate-draft-space:{id}")
 }
 
-/// Splits the records into dependency-ordered imports that each fit one
-/// transaction: Concepts, then Propositions, Evidence and Activities, then
-/// Assertions. A chunk carries the records it references: Concepts resolve by
-/// their temporary canonical id and Propositions by their tuple, so neither is
-/// written twice. Evidence and Activities, which have no such identity, travel
-/// together, and nothing else references them.
+/// Splits the graph into referentially closed imports. Only Concepts with a
+/// temporary canonical id and Propositions can resolve across capsules. Any
+/// other mutually connected records (including Assertion evidence and Activity
+/// inputs/outputs) must travel together so each source identity is minted once.
 fn chunks(capsule: &Json) -> Result<Vec<Vec<Json>>, BoxError> {
     let records = capsule["payload"]["records"]
         .as_array()
         .ok_or("the Capsule has no records")?;
-    let by_id: BTreeMap<&str, &Json> = records
+    let by_id: BTreeMap<String, &Json> = records
         .iter()
-        .filter_map(|r| r["id"].as_str().map(|id| (id, r)))
-        .collect();
-    let of = |kind: &str| -> Vec<&Json> { records.iter().filter(|r| r["kind"] == kind).collect() };
-    let references = |record: &Json, prefix: char| -> BTreeSet<String> {
-        let mut found = BTreeSet::new();
-        fn walk(value: &Json, prefix: char, own: &str, found: &mut BTreeSet<String>) {
-            match value {
-                Json::String(s)
-                    if s.starts_with(prefix)
-                        && s[1..].starts_with('-')
-                        && s[2..].chars().all(|c| c.is_ascii_digit())
-                        && s != own =>
-                {
-                    found.insert(s.clone());
+        .map(|r| {
+            r["id"]
+                .as_str()
+                .map(|id| (id.to_string(), r))
+                .ok_or("record has no id")
+        })
+        .collect::<Result<_, _>>()?;
+    fn references(value: &Json, found: &mut BTreeSet<String>) {
+        match value {
+            Json::String(id) if id.parse::<anda_cognitive_nexus::ElementId>().is_ok() => {
+                found.insert(id.clone());
+            }
+            Json::Array(values) => values.iter().for_each(|v| references(v, found)),
+            Json::Object(values) => {
+                for (key, value) in values {
+                    // Payload and attributes are content, not graph references.
+                    if !matches!(
+                        key.as_str(),
+                        "_system" | "governance" | "payload" | "attributes"
+                    ) {
+                        references(value, found);
+                    }
                 }
-                Json::Array(items) => items.iter().for_each(|v| walk(v, prefix, own, found)),
-                Json::Object(map) => map
-                    .iter()
-                    .filter(|(k, _)| k.as_str() != "_system" && k.as_str() != "governance")
-                    .for_each(|(_, v)| walk(v, prefix, own, found)),
-                _ => {}
+            }
+            _ => {}
+        }
+    }
+    let mut edges = BTreeMap::new();
+    for (id, record) in &by_id {
+        let mut refs = BTreeSet::new();
+        references(record, &mut refs);
+        refs.remove(id);
+        for reference in &refs {
+            if !by_id.contains_key(reference) {
+                return Err(format!("{id} references {reference}, which was not exported").into());
             }
         }
-        walk(
-            record,
-            prefix,
-            record["id"].as_str().unwrap_or_default(),
-            &mut found,
-        );
-        found
-    };
-    let with = |members: &[&Json], prefixes: &[char]| -> Result<Vec<Json>, BoxError> {
-        let mut carried: BTreeSet<String> = BTreeSet::new();
-        for member in members {
-            for prefix in prefixes {
-                carried.extend(references(member, *prefix));
-            }
-        }
-        // A carried Proposition resolves by its tuple, so its endpoints come too.
-        let endpoints: Vec<String> = carried
+        edges.insert(id.clone(), refs);
+    }
+    let mut indivisible: BTreeSet<String> = by_id
+        .iter()
+        .filter(|(_, r)| r["kind"] != "concept" && r["kind"] != "proposition")
+        .map(|(id, _)| id.clone())
+        .collect();
+    // A Concept that refers to a non-reusable record must travel with it too.
+    loop {
+        let added: Vec<String> = edges
             .iter()
-            .filter(|id| id.starts_with("P-"))
-            .filter_map(|id| by_id.get(id.as_str()))
-            .flat_map(|record| references(record, 'C'))
+            .filter(|(id, refs)| {
+                !indivisible.contains(*id) && refs.iter().any(|r| indivisible.contains(r))
+            })
+            .map(|(id, _)| id.clone())
             .collect();
-        carried.extend(endpoints);
-        let mut chunk = Vec::new();
-        for id in carried {
-            let record = by_id
-                .get(id.as_str())
-                .ok_or_else(|| format!("{id} is referenced but not exported"))?;
-            chunk.push((*record).clone());
+        if added.is_empty() {
+            break;
         }
-        chunk.extend(members.iter().map(|r| (*r).clone()));
-        Ok(chunk)
+        indivisible.extend(added);
+    }
+    let mut adjacency: BTreeMap<String, BTreeSet<String>> = indivisible
+        .iter()
+        .map(|id| (id.clone(), BTreeSet::new()))
+        .collect();
+    for id in &indivisible {
+        for reference in &edges[id] {
+            if indivisible.contains(reference) {
+                adjacency.get_mut(id).unwrap().insert(reference.clone());
+                adjacency.get_mut(reference).unwrap().insert(id.clone());
+            }
+        }
+    }
+    let mut groups: Vec<BTreeSet<String>> = Vec::new();
+    let mut seen = BTreeSet::new();
+    // Preserve source order within each kind when assigning components.
+    for record in records {
+        let id = record["id"].as_str().unwrap();
+        if !seen.insert(id.to_string()) {
+            continue;
+        }
+        let mut group = BTreeSet::from([id.to_string()]);
+        let mut pending = vec![id.to_string()];
+        while let Some(id) = pending.pop() {
+            for reference in adjacency.get(&id).into_iter().flatten() {
+                if seen.insert(reference.clone()) {
+                    group.insert(reference.clone());
+                    pending.push(reference.clone());
+                }
+            }
+        }
+        groups.push(group);
+    }
+    let close = |roots: &BTreeSet<String>| -> Vec<Json> {
+        let mut included = roots.clone();
+        let mut pending: Vec<String> = roots.iter().cloned().collect();
+        while let Some(id) = pending.pop() {
+            for reference in &edges[&id] {
+                if included.insert(reference.clone()) {
+                    pending.push(reference.clone());
+                }
+            }
+        }
+        // The original transformed records are already sorted by kind and id.
+        records
+            .iter()
+            .filter(|r| included.contains(r["id"].as_str().unwrap()))
+            .cloned()
+            .collect()
+    };
+    let fits = |chunk: &[Json]| {
+        chunk.len() <= CHUNK_ELEMENTS && chunk.iter().map(nodes).sum::<usize>() <= CHUNK_NODES
     };
     let mut out = Vec::new();
-    for part in pack(&of("concept")) {
-        out.push(with(&part, &['C'])?);
-    }
-    for part in pack(&of("proposition")) {
-        out.push(with(&part, &['C'])?);
-    }
-    let mut events: Vec<&Json> = of("evidence");
-    events.extend(of("activity"));
-    if !events.is_empty() {
-        if pack(&events).len() > 1 {
-            return Err("Evidence and Activities must fit one transaction".into());
+    let mut roots = BTreeSet::new();
+    for group in groups {
+        let mut combined = roots.clone();
+        combined.extend(group.clone());
+        if !fits(&close(&combined)) && !roots.is_empty() {
+            out.push(close(&roots));
+            roots.clear();
         }
-        out.push(with(&events, &['C'])?);
+        roots.extend(group);
+        if !fits(&close(&roots)) {
+            return Err("a connected reference closure exceeds one migration transaction; the database was not rebuilt".into());
+        }
     }
-    for part in pack(&of("assertion")) {
-        out.push(with(&part, &['C', 'P'])?);
+    if !roots.is_empty() {
+        out.push(close(&roots));
     }
     Ok(out)
 }
@@ -420,6 +451,10 @@ pub async fn rebuild(
     types: &BTreeMap<String, OptionType>,
 ) -> Result<Report, BoxError> {
     let mut report = Report::default();
+    // Resolve the entire reference closure before deleting any collection.
+    // A malformed export or oversized connected group must leave the input intact.
+    let preview = transform(exported, types, &[], &mut Report::default())?;
+    chunks(&preview)?;
 
     // The generated legacy package is this Space's own artifact: read it from
     // the old Nexus before that Nexus is dropped.
@@ -685,4 +720,182 @@ pub async fn census(root: &Path, space: &str) -> Result<BTreeMap<String, usize>,
     census.insert(format!("installed {packages:?}"), 1);
     nexus.close().await?;
     Ok(census)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunking_keeps_shared_evidence_and_cross_kind_lineage_together() {
+        let mut records = vec![
+            json!({"kind":"concept","id":"C-1"}),
+            json!({"kind":"proposition","id":"P-1","subject":{"id":"C-1"},"object":{"id":"C-1"}}),
+        ];
+        for id in 1..=300 {
+            records.push(json!({"kind":"evidence","id":format!("E-{id}")}));
+            records.push(json!({"kind":"assertion","id":format!("A-{id}"),"proposition":{"id":"P-1"},"evidence":[{"id":format!("E-{id}")}]}));
+            records.push(json!({"kind":"activity","id":format!("X-{id}"),"inputs":[{"id":format!("E-{id}")}],"outputs":[{"id":format!("A-{id}")}]}));
+        }
+        let runs = chunks(&json!({"payload":{"records":records}})).unwrap();
+        assert!(runs.len() > 1);
+        let mut seen = BTreeSet::new();
+        for run in runs {
+            let ids: BTreeSet<_> = run.iter().map(|r| r["id"].as_str().unwrap()).collect();
+            for row in &run {
+                let id = row["id"].as_str().unwrap();
+                if id.starts_with(['E', 'A', 'X']) {
+                    assert!(seen.insert(id.to_string()), "duplicate {id}");
+                }
+                if row["kind"] == "assertion" {
+                    assert!(ids.contains(row["evidence"][0]["id"].as_str().unwrap()));
+                }
+                if row["kind"] == "activity" {
+                    assert!(ids.contains(row["outputs"][0]["id"].as_str().unwrap()));
+                }
+            }
+        }
+        assert_eq!(seen.len(), 900);
+        assert!(chunks(&json!({"payload":{"records":[{"id":"A-1","kind":"assertion","evidence":[{"id":"E-1"}]}]}})).is_err());
+    }
+
+    async fn nexus(name: &str) -> CognitiveNexus {
+        let db = AndaDB::connect(
+            Arc::new(object_store::memory::InMemory::new()),
+            DBConfig {
+                name: name.into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let nexus = CognitiveNexus::connect(Arc::new(db)).await.unwrap();
+        let profile =
+            SchemaPackage::parse(anda_cognitive_nexus::profiles::COGNITIVE_MEMORY).unwrap();
+        nexus.install_package(&profile, "test").await.unwrap();
+        let mut lock = SchemaLock::default();
+        lock.packages.insert(PROFILE_ID.into(), "2.0.0".into());
+        lock.states.insert(PROFILE_ID.into(), PackageState::Active);
+        nexus.activate_schema(DEFAULT_SPACE, lock).await.unwrap();
+        nexus
+    }
+
+    #[tokio::test]
+    async fn imports_assertion_evidence_and_activity_references_without_duplicates() {
+        let source = nexus("migration_source").await;
+        run(&source, r#"MUTATE {
+            CREATE CONCEPT ?alice { TYPE "Person" NAME "Alice" }
+            CREATE CONCEPT ?bob { TYPE "Person" NAME "Bob" }
+            ENSURE PROPOSITION ?p (?alice, "same_as", ?bob)
+            CREATE EVIDENCE ?e { SET FIELDS {evidence_class: "user_statement", payload: "Same person", observed_at: "2026-01-01T00:00:00.000Z"} }
+            CREATE ASSERTION ?a { SET FIELDS {proposition: ?p, asserted_by: ?alice, stance: "support", mode: "stated", confidence: 0.9, asserted_at: "2026-01-01T00:00:00.000Z"} SET STRUCTURAL {("evidence", ?e)} }
+            CREATE ACTIVITY ?x { SET FIELDS {activity_class: "extraction", status: "completed"} SET STRUCTURAL {("inputs", ?e) ("outputs", ?a)} }
+        }"#, json!({})).await.unwrap();
+        let auth = AuthContext::system();
+        let authority = EffectiveAuthority::resolve(&source.store, DEFAULT_SPACE, &auth)
+            .await
+            .unwrap();
+        let mut context = anda_cognitive_nexus::kql::Context::open(
+            &source.store,
+            DEFAULT_SPACE,
+            None,
+            None,
+            &authority,
+            &auth,
+        )
+        .await
+        .unwrap();
+        let roots = ["C-1", "C-2", "P-1", "E-1", "A-1", "X-1"]
+            .into_iter()
+            .map(|id| id.parse().unwrap())
+            .collect();
+        let mut capsule = serde_json::to_value(
+            anda_cognitive_nexus::capsule::export(
+                &mut context,
+                roots,
+                &serde_json::Map::from_iter([("closure".into(), json!("selective"))]),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        // Exercise the importer on the owner's complete records, independent
+        // of the public exporter's redaction/omission policy.
+        let mut records = Vec::new();
+        for pattern in [
+            "?e CONCEPT {}",
+            r#"?e PROPOSITION (id: "P-1")"#,
+            "?e EVIDENCE {}",
+            "?e ASSERTION {}",
+            "?e ACTIVITY {}",
+        ] {
+            let rows = run(
+                &source,
+                &format!("FIND(?e) WHERE {{ {pattern} }} LIMIT 20"),
+                json!({}),
+            )
+            .await
+            .unwrap();
+            records.extend(rows.as_array().unwrap().iter().cloned());
+        }
+        capsule["payload"]["records"] = json!(records);
+        capsule["payload"]["external_refs"] = json!([]);
+        let exported = Exported {
+            capsule,
+            facts: vec![],
+            self_concept: String::new(),
+        };
+        let capsule = transform(
+            &exported,
+            &BTreeMap::new(),
+            &[format!("{PROFILE_ID}@2.0.0")],
+            &mut Report::default(),
+        )
+        .unwrap();
+        let destination = nexus("migration_destination").await;
+        let mut mapping = BTreeMap::new();
+        for chunk in chunks(&capsule).unwrap() {
+            let mut part = capsule.clone();
+            part["payload"]["manifest"]["roots"] =
+                json!(chunk.iter().map(|r| r["id"].clone()).collect::<Vec<_>>());
+            part["payload"]["records"] = json!(chunk);
+            let mut part: anda_kip::Capsule = serde_json::from_value(part).unwrap();
+            part.integrity.content_digest =
+                anda_cognitive_nexus::capsule::payload_digest(&part.payload).unwrap();
+            let report = anda_cognitive_nexus::capsule::import(
+                &destination,
+                &part,
+                DEFAULT_SPACE,
+                false,
+                AuthContext::system(),
+                false,
+                &[],
+            )
+            .await
+            .unwrap();
+            mapping.extend(report.mapping);
+        }
+        assert!(
+            mapping.iter().all(|(source, target)| source == target),
+            "{mapping:?}"
+        );
+        for (kind, count) in [
+            (anda_kip::ElementKind::Concept, 2),
+            (anda_kip::ElementKind::Evidence, 1),
+            (anda_kip::ElementKind::Assertion, 1),
+            (anda_kip::ElementKind::Activity, 1),
+        ] {
+            assert_eq!(destination.store.elements(kind).ids().len(), count);
+        }
+        let assertions = run(
+            &destination,
+            "FIND(?a) WHERE { ?a ASSERTION {} } LIMIT 5",
+            json!({}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(assertions[0]["evidence"][0]["id"], "E-1");
+        destination.close().await.unwrap();
+        source.close().await.unwrap();
+    }
 }

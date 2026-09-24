@@ -602,7 +602,8 @@ is `agent_statement`); it never grades or promotes anything.
 
 **6. forget** `{"target_ref": "A-…" | "E-…" | "src-…", "mode": "payload_only" |
 "semantic"}` runs an ErasurePlan; `semantic` needs the owner's CWT. Report forgetting
-as done only when `result.status` is `completed`.
+as done only when `result.status` is `completed`. Missing source ownership traces
+or unfinished source processing are reported as partial, not completed.
 
 Retrying a mutation with the same key replays the original receipt; the same key
 with different content fails `IdempotencyConflict`. Receipt progress is also at

@@ -60,6 +60,9 @@ var memoryForgetCmd = &cobra.Command{
 	Args:  cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if mode, _ := cmd.Flags().GetString("mode"); mode != "" {
+			if dryRun, _ := cmd.Flags().GetBool("dry-run"); dryRun {
+				return fmt.Errorf("--dry-run is not supported with --mode; no deletion was submitted")
+			}
 			if len(args) != 1 {
 				return fmt.Errorf("a Memory Interface forget names one target")
 			}

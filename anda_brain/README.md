@@ -52,6 +52,8 @@ five intents `observe`, `recall`, `revise`, `feedback`, `forget`, staged sources
 idempotent receipts, `after` barriers, seven-channel coverage, recording repair for a
 misrecording and governed forgetting (see [API](API.md#memory-interface)).
 `memory_experience`, `memory_learning` and `durable_brain_runtime` are not advertised.
+Scoped feedback remains in scope; source erasure includes owned narrative memory and
+reports incomplete ownership explicitly. Recall discards summaries based on invalidated reads.
 
 ## Architecture
 

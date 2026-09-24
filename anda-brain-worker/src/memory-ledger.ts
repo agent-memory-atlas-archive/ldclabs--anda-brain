@@ -74,13 +74,15 @@ export interface IntakeRecord {
   terminal?: Progress; result?: unknown; warnings: string[]; created_at: number
   /** Evidence a Formation pass captured from this intake's source. */
   evidence?: string[]
+  /** Elements created by this pass, not updates to existing shared memory. */
+  created?: string[]
 }
 /** What intake decided: a replay of a bound key, or new work to run. */
 export type Admission =
   | { replay: IntakeRecord }
   | { record: IntakeRecord; messages: Message[]; observed_at: string; identity: SourceIdentity; intent?: MemoryIntent }
 /** What a Formation pass committed, from its results. */
-export interface PassTrace { formed: string[]; evidence: string[]; assertions: string[]; max_seq: number | null }
+export interface PassTrace { formed: string[]; evidence: string[]; assertions: string[]; created: string[]; max_seq: number | null }
 
 const digest = (value: unknown): string => contentDigest(JSON.parse(JSON.stringify(value ?? null)) as Json)
 const hexId = (value: unknown): string => digest(value).slice(7, 47)
@@ -139,16 +141,16 @@ export class MemoryLedger {
       if ((order.predecessor_receipts ?? []).length > MAX_AFTER) throw new MemoryError('ResultLimitExceeded', 'too many predecessor receipts')
       for (const predecessor of order.predecessor_receipts ?? []) this.record(namespace, predecessor)
     }
-    const captured_at = new Date().toISOString()
-    const observed_at = input.observed_at === undefined ? captured_at : canonicalTimestamp(input.observed_at)
-    const source_digest = digest({ kind, messages: input.messages, observed_at })
     const source_ref = `src-${hexId([namespace, space, 'source', input.idempotency_key])}`
+    const existing = this.kv.get<StagedSource>(SOURCE + source_ref)
+    const captured_at = new Date().toISOString()
+    const observed_at = input.observed_at === undefined ? existing?.observed_at ?? captured_at : canonicalTimestamp(input.observed_at)
+    const source_digest = digest({ kind, messages: input.messages, observed_at })
     // Admission precedes capture: excluded bytes are refused before storage.
     const excluded = this.product.state().suppressed
     if ([`memory-source:${source_ref}`, `memory-source-digest:${source_digest}`].some(key => excluded.includes(key))) {
       throw new MemoryError('NotFoundOrNotVisible', 'this source is excluded from memory by an earlier forget')
     }
-    const existing = this.kv.get<StagedSource>(SOURCE + source_ref)
     if (existing) {
       if (existing.namespace !== namespace) notFound('source')
       if (existing.source_digest !== source_digest || JSON.stringify(existing.order ?? null) !== JSON.stringify(input.order ?? null)) {
@@ -338,6 +340,8 @@ export class MemoryLedger {
   /** Settles a Formation pass: its disposition, and a misrecording's repair. */
   finishFormation(receiptRef: string, trace: PassTrace): IntakeRecord {
     const record = this.kv.get<IntakeRecord>(RECEIPT + receiptRef) ?? notFound('receipt')
+    record.created = [...new Set([...(record.created ?? []), ...trace.created])]
+    this.kv.put(RECEIPT + receiptRef, record)
     if (trace.evidence.length) {
       record.evidence = [...new Set([...(record.evidence ?? []), ...trace.evidence])]
       this.kv.put(RECEIPT + receiptRef, record)
@@ -415,15 +419,18 @@ export class MemoryLedger {
     }
     const evidence: string[] = []
     let max = record.receipt.accepted_seq
-    if (record.source_ref && !record.source_ref.startsWith('src-')) {
-      evidence.push(record.source_ref)
-    } else {
+    const original = record.source_ref?.startsWith('E-') ? this.nexus.store.load(parseElementId(record.source_ref)) : null
+    const originalClass = original?.kind === 'Evidence' ? original.row.evidence_class : undefined
+    {
       messages.forEach((message, index) => {
         const payload = { ...(message as unknown as JsonMap), ...(about ? { memory_feedback: about } : {}) } as JsonMap
         const at = typeof message.timestamp === 'number' ? new Date(message.timestamp).toISOString() : observedAt
+        const scoped = record.scope.contexts.length
+          ? 'SET FACET "MemoryScope" {task_ref: :scope_task, context_refs: :contexts}' : ''
         const outcome = this.session.execute(`MUTATE {
-          CREATE EVIDENCE ?e { CLIENT KEY :key SET FIELDS { evidence_class: :class, payload: :payload, observed_at: :at } }
-        }`, { key: `memory-${purpose}:${receiptRef}:${index + 1}`, class: evidenceClass(message.role), payload, at })
+          CREATE EVIDENCE ?e { CLIENT KEY :key SET FIELDS { evidence_class: :class, payload: :payload, observed_at: :at } ${scoped} }
+        }`, { key: `memory-${purpose}:${receiptRef}:${index + 1}`, class: originalClass ?? evidenceClass(message.role), payload, at,
+          scope_task: record.scope.task, contexts: record.scope.contexts })
         if (outcome.handles.e) evidence.push(outcome.handles.e)
         if (typeof outcome.space_seq === 'number') max = Math.max(max, outcome.space_seq)
       })
@@ -470,6 +477,7 @@ export class MemoryLedger {
     let status: 'completed' | 'partial' | 'blocked' = 'completed'
     let summary = ''
     const evidenceTargets: string[] = []
+    const ownedConcepts = new Set<string>()
     let staged: StagedSource | undefined
     try {
       if (input.target_ref.startsWith('src-')) {
@@ -478,8 +486,16 @@ export class MemoryLedger {
         suppressed.add(`memory-source-digest:${staged.source_digest}`)
         for (const [, intake] of this.kv.list<IntakeRecord>({ prefix: RECEIPT })) {
           if (intake.source_ref !== staged.source_ref) continue
+          if (!intake.terminal) { status = 'partial'; summary = 'source processing has not finished' }
           for (const reference of (isJsonMap(intake.result) && Array.isArray(intake.result.memory_refs) ? intake.result.memory_refs : [])) {
             if (typeof reference === 'string' && reference.startsWith('E-')) evidenceTargets.push(reference)
+            if (input.mode === 'semantic' && typeof reference === 'string' && reference.startsWith('C-')) {
+              const element = this.nexus.store.load(parseElementId(reference))
+              if (element?.kind === 'Concept' && ['Event', 'Insight', 'Experience', 'Commitment'].includes(local(element.row.schema_ref))) {
+                if (intake.created?.includes(reference)) ownedConcepts.add(reference)
+                else { status = 'partial'; summary = 'some source outputs have no verified ownership trace' }
+              }
+            }
           }
           for (const id of intake.evidence ?? []) evidenceTargets.push(id)
         }
@@ -534,9 +550,10 @@ export class MemoryLedger {
             } else throw error
           }
         }
-        const direct = evidenceTargets.filter(id => !erased.has(id))
+        const direct = [...evidenceTargets, ...ownedConcepts].filter(id => !erased.has(id))
         if (!input.target_ref.startsWith('src-') && !erased.has(input.target_ref) && !claims.has(input.target_ref)) direct.push(input.target_ref)
         for (const id of [...new Set(direct)]) {
+          if (this.nexus.store.load(parseElementId(id))?.row.state === 'purged') continue
           if (id.startsWith('E-')) roots.push(id)
           try {
             const outcome = this.session.execute('PURGE :id REFERENCE POLICY "authorized_cascade" CONFIRM "PURGE"', { id })
@@ -545,7 +562,7 @@ export class MemoryLedger {
             if ((error as { code?: string }).code === 'LegalHoldConflict') { status = 'blocked'; summary = `a legal hold retains ${id}`; break }
             throw error
           }
-          if (!id.startsWith('E-') && roots.length === 0 && status === 'completed') {
+          if (!id.startsWith('E-') && !ownedConcepts.has(id) && roots.length === 0 && status === 'completed') {
             status = 'partial'
             summary = `${id} was purged, but the sources it was formed from were not enumerated, so erasure of their copies is not verified`
           }
@@ -645,7 +662,7 @@ export class MemoryLedger {
     for (const id of cited) {
       const candidate = this.citedItem(id, scope, options.valid_at, options.as_of_seq)
       if (candidate === null) continue
-      if (candidate === 'out_of_scope') { dropped = true; continue }
+      if (candidate === 'out_of_scope' || candidate === 'unavailable') { dropped = true; continue }
       if (!candidates.some(c => c.pins[0]?.[0] === candidate.pins[0]?.[0])) candidates.push(candidate)
     }
     const plans: Record<string, Plan> = {}
@@ -732,7 +749,7 @@ export class MemoryLedger {
           [], options.after, [], options.uncertainties, `${options.attention?.length ?? 0} attention item(s) raised since the cursor. An item is a prompt to think, never permission to act.`),
         candidates: [] as Candidate[], dropped: false }
       : this.briefing(namespace, scopeInput, cited, options)
-    if (built.dropped) options.warnings.push('the recall pass cited memory outside this scope; it was left out and the summary lists only in-scope items')
+    if (built.dropped) options.warnings.push('the recall pass read unavailable, invalidated or out-of-scope memory; its summary was replaced with verified items')
     const plans = (built.briefing as Briefing & { __plans?: Record<string, Plan> }).__plans ?? {}
     const candidates = built.candidates
     for (;;) {
@@ -888,15 +905,15 @@ export class MemoryLedger {
     } catch { return null }
   }
 
-  private citedItem(id: string, scope: ResolvedScope, validAt?: string, asOf?: number): Candidate | 'out_of_scope' | null {
+  private citedItem(id: string, scope: ResolvedScope, validAt?: string, asOf?: number): Candidate | 'out_of_scope' | 'unavailable' | null {
     const parsed = tryParseElementId(id)
     if (!parsed) return null
     const row = this.row(id, asOf)
     const system = row && isJsonMap(row._system) ? row._system : null
-    if (!row || !system || system.state !== 'active') return null
+    if (!row || !system || system.state !== 'active') return 'unavailable'
     const version = typeof system.version === 'number' ? system.version : 0
     if (parsed.kind === 'Assertion') {
-      if (isJsonMap(system.recording_validity) && system.recording_validity.status === 'invalidated') return null
+      if (isJsonMap(system.recording_validity) && system.recording_validity.status === 'invalidated') return 'unavailable'
       const contexts = (Array.isArray(row.context_refs) ? row.context_refs : []).flatMap(ref =>
         typeof ref === 'string' ? [ref] : isJsonMap(ref) && typeof ref.id === 'string' ? [ref.id] : [])
       if (!admits(scope, null, contexts)) return 'out_of_scope'
@@ -916,9 +933,11 @@ export class MemoryLedger {
       // A tuple is content too: it belongs to this scope only when one of its claims does.
       let claims: Json[] = []
       try { claims = this.query('FIND(?a) WHERE { ?p PROPOSITION (id: :id) ?a ASSERTION {proposition: ?p} } LIMIT 64', { id }) } catch { return null }
-      const inScope = claims.some(claim => isJsonMap(claim) && admits(scope, null, (Array.isArray(claim.context_refs) ? claim.context_refs : [])
+      const inScope = claims.some(claim => isJsonMap(claim) && isJsonMap(claim._system) && claim._system.state === 'active'
+        && !(isJsonMap(claim._system.recording_validity) && claim._system.recording_validity.status === 'invalidated')
+        && admits(scope, null, (Array.isArray(claim.context_refs) ? claim.context_refs : [])
         .flatMap(ref => typeof ref === 'string' ? [ref] : isJsonMap(ref) && typeof ref.id === 'string' ? [ref.id] : [])))
-      if (!inScope) return claims.length ? 'out_of_scope' : null
+      if (!inScope) return 'out_of_scope'
       const belief = this.belief(id, scope, validAt, asOf)
       return { item: { ref: '', text: `${this.label(row.subject)} · ${local(String(row.predicate_ref ?? '?'))} · ${this.label(row.object)}`.slice(0, 4096),
         role: 'fact', epistemic_status: statusOf(belief?.status), evidence_refs: [], action_eligible: false }, pins: [[id, version]], required: false }
@@ -1038,4 +1057,3 @@ function conceptItem(row: JsonMap, required: boolean): Candidate | null {
   if (type === 'Insight') return make(`Insight: ${summary}`, 'fact', 'uncertain', required)
   return null
 }
-

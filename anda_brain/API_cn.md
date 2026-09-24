@@ -150,7 +150,7 @@ Facet；recall 只接纳上下文集包含于请求上下文集的记录（KIP S
 
 **幂等。** 变更的键作用域为 `(调用方, Space, operation)`；语义包括 operation、请求的作用域、
 input 以及来源身份和摘要，不含 `request_id` 与 `budget`。同键同义返回原 `receipt`（附当前进度），
-绝不重新抽取；同键异义返回 `IdempotencyConflict`。键、回执与暂存来源在重启后仍在。
+绝不重新抽取；同键异义返回 `IdempotencyConflict`。键、回执与暂存来源在重启后仍在。暂存省略 `observed_at` 时，重试复用首次观察时间。
 
 **进度。** 每个变更返回不可变的 `receipt`（`receipt_ref`、`operation`、`space_id`、`accepted_seq`）
 及当前 `progress`：
@@ -182,6 +182,7 @@ Formation 按 Space 队列顺序处理，前驱失败的后继直接失败，绝
 
 **feedback**（`{source_ref, decision_ref?, attempt_ref?}`）由宿主按暂存时的角色保存为 Evidence——
 助手的自述是 `agent_statement`，人的反馈是 `user_statement`——绝不是 Outcome，也不评分。
+捕获的 Evidence 保留请求作用域（包括引用已有 Evidence 的反馈）。
 `decision_ref` / `attempt_ref` 必须是本 Space 的元素。
 
 **forget**（`{target_ref, mode}`）执行 ErasurePlan（Spec §60.7）：
@@ -195,7 +196,9 @@ Formation 按 Space 队列顺序处理，前驱失败的后继直接失败，绝
 结果为 `ForgetResult`（`status`、`plan_ref`、`summary`、`coverage_ref`）。只有在 Nexus 依据实际
 存储校验了计划、且每个宿主表面都已核实之后，才报告 `completed`（disposition 为 `erased`）；
 法律保留为 `blocked`；无法枚举来源的目标为 `partial`。计划可在 `GET …/memory/plans/{plan_ref}`
-读取。`POST /memory/forget` 仍是不带计划的技术性元素清除端点。
+读取。来源目标还覆盖处理轨迹证明由它新建的 Event、Insight、Experience 和 Commitment；
+共享人物及选项概念保留。所有权轨迹缺失或处理未完成时报告 partial。
+`POST /memory/forget` 仍是不带计划的技术性元素清除端点。
 
 **recall**（`{query?, target_ref?, mode?, goal?, context?, after?, detail?, time?, attention_cursor?}`）
 返回 `Briefing`：
@@ -249,6 +252,9 @@ export interface MemoryResponse {
 
 MCP 以 `anda_brain_memory`（`{request}`）、`anda_brain_stage_memory_source` 与
 `anda_brain_memory_receipt` 暴露同一绑定。
+
+Rust 简报的宿主读取与保留元素固定在同一个快照；期间索引变化会使检索覆盖标为不完整。
+摘要检查包含 Evidence 读取与已失效的抽取，但不会把来源记录加入记忆使用计数。
 
 已知限制：`memory_experience` 需要达到 KIP-CognitiveMemory 级的 Nexus（GradingState 与血缘字段的
 计算视图、选择依赖尚未实现），因此不声明；`resume` 没有 WorkingState；被关闭打断的 Formation 以

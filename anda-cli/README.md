@@ -159,7 +159,8 @@ anda-cli --space-id my_space --token $TOKEN memory forget C-7
 
 # Memory Interface (KIP 2.0, memory_basic): stage what you observed, then send
 # one intent at a time. --session keeps outstanding receipts and the attention
-# cursor; recall adds the outstanding receipts to `after` automatically.
+# cursor and task/context scope; recall adds outstanding receipts to `after` automatically.
+# --dry-run is refused with --mode: the Memory Interface has no erasure preview.
 anda-cli --space-id my_space --token $TOKEN memory sources stage \
   --file chat.json --observed-at 2026-09-02T08:00:00.000Z --key chat-42:msg-7
 anda-cli --space-id my_space --token $TOKEN memory observe --source src-… \

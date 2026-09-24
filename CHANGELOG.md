@@ -151,6 +151,23 @@ sibling `anda-db` and `anda` checkouts and the Worker links the sibling kip-do.
   `Space::memory_receipt_state` returns a receipt's progress and its Formation
   conversation. Neither is exposed over HTTP or MCP. Anda Bot uses both.
 
+### Memory Interface review fixes
+
+- Staging retries without `observed_at` reuse the first capture time. Direct feedback
+  and untargeted misrecording reports retain their requested MemoryScope.
+- Recall audits returned Evidence as well as memory citations, replaces answers based
+  on invalidated or out-of-scope reads, and retains the same snapshot used by host
+  reads. Changes to the live search index make its coverage incomplete.
+- Source forgetting includes newly created Events, Insights, Experiences and
+  Commitments while preserving shared identity/option Concepts. Missing ownership
+  traces or unfinished processing report partial coverage. Overlapping Assertion
+  closures are deleted once, and Memory Interface work drains before database close.
+- CLI sessions retain task/context scope. `memory forget --mode … --dry-run` is
+  explicitly refused before sending a request because this interface has no preview.
+- The standalone migration preflights reference closures before dropping collections;
+  Assertions, Evidence and Activities that cannot resolve across capsules travel
+  together, with each non-reusable element imported once.
+
 ### Draft-Space migration
 
 - `tools/migrate-draft-space` (a standalone crate linking the 0.13 and 0.14

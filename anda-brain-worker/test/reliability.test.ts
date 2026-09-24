@@ -173,20 +173,22 @@ it('loads only the active schema packages when inspecting vocabulary', async () 
   for(let i=0;i<8;i++) await brain.declareSymbols([`Project${i}`],[])
   await runInDurableObject(brain as never,(instance)=>{
     const nexus=(instance as unknown as {nexus:CognitiveNexus}).nexus
-    const packages=nexus.store.packages.bind(nexus.store)
+    const allRows=nexus.store.all.bind(nexus.store)
     let loaded=0, bytes=0
-    nexus.store.packages=()=>{
-      const all=packages()
-      loaded+=all.length
-      bytes+=new TextEncoder().encode(JSON.stringify(all)).length
+    nexus.store.all=((...args: Parameters<typeof allRows>)=>{
+      const all=allRows(...args)
+      if(args[0]==='schema_packages') {
+        loaded+=all.length
+        bytes+=new TextEncoder().encode(JSON.stringify(all)).length
+      }
       return all
-    }
+    }) as typeof nexus.store.all
     try {
       const result=(instance as unknown as AndaBrain).vocabulary()
       expect(result.draft_types).toHaveLength(8)
       expect(loaded).toBe(0)
       expect(bytes).toBe(0)
-    } finally {nexus.store.packages=packages}
+    } finally {nexus.store.all=allRows}
   })
 })
 

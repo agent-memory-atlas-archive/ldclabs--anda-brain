@@ -66,7 +66,9 @@ Existing Brain endpoints remain available, and both adapters now serve the KIP
 of five intents (`observe`, `recall`, `revise`, `feedback`, `forget`) over staged
 sources, with idempotent receipts, `after` barriers, scoped seven-channel recall,
 recording repair for a misrecording and governed forgetting. `memory_experience` and
-`memory_learning` are not advertised.
+`memory_learning` are not advertised. Source erasure covers owned narrative memory;
+missing ownership is reported as partial. Scoped feedback and invalidated-read checks
+also apply to Memory Interface recall.
 
 Rust Markdown submissions receive the same captured Evidence
 as structured messages, and existing counterparty display names are preserved

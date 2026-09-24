@@ -87,13 +87,14 @@ async function intake(env: Env, brain: BrainRpc, spaceId: string, request: Memor
 
 /** What a pass committed, from its operation results. */
 export function traceOf(results: readonly KipResult[]): PassTrace {
-  const trace: PassTrace = { formed: [], evidence: [], assertions: [], max_seq: null }
+  const trace: PassTrace = { formed: [], evidence: [], assertions: [], created: [], max_seq: null }
   for (const result of results) {
     const outcome = result.extensions?.['kip-do/outcome']
     if (!outcome || outcome.status !== 'committed') continue
     if (typeof outcome.space_seq === 'number') trace.max_seq = Math.max(trace.max_seq ?? 0, outcome.space_seq)
     for (const change of outcome.changes) {
       if (typeof change.id !== 'string') continue
+      if (change.op === 'create') trace.created.push(change.id)
       if (change.kind === 'evidence') trace.evidence.push(change.id)
       else {
         trace.formed.push(change.id)
@@ -156,13 +157,13 @@ async function recall(env: Env, brain: BrainRpc, _spaceId: string, request: Memo
       uncertainties.push(`the recall pass did not complete: ${errorOf(error).message}`)
     }
   }
-  const briefing = await brain.memoryDeliver(NAMESPACE, request.scope, cited, {
+  const delivered = await brain.memoryDeliver(NAMESPACE, request.scope, cited, {
     mode, ...(input.time?.valid_at ? { valid_at: input.time.valid_at } : {}), ...(asOf === undefined ? {} : { as_of_seq: asOf }),
     ...(input.query ? { query: input.query } : {}), after, uncertainties, evidence_complete: evidenceComplete,
     ...(summary ? { summary } : {}), max_tokens: maxTokens, warnings,
     ...(attention ? { attention: attention.items, attention_cursor: attention.cursor } : {}),
   })
-  return briefingResponse(request, briefing, maxTokens, warnings)
+  return briefingResponse(request, delivered.briefing, maxTokens, delivered.warnings)
 }
 
 function briefingResponse(request: MemoryRequest, briefing: Briefing, maxTokens: number, warnings: string[]): MemoryResponse {

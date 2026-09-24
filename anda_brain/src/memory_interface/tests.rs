@@ -18,6 +18,10 @@ enum Step {
     Read(Json),
     Final(String),
     Hold(Arc<tokio::sync::Notify>),
+    Barrier {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    },
 }
 
 /// Replays tool calls and answers in order, across every agent.
@@ -53,6 +57,10 @@ impl CompletionFeaturesDyn for Script {
                 let step = script.0.lock().unwrap().pop_front();
                 match step {
                     Some(Step::Hold(gate)) => gate.notified().await,
+                    Some(Step::Barrier { entered, release }) => {
+                        entered.notify_one();
+                        release.notified().await;
+                    }
                     other => break other,
                 }
             };
@@ -850,6 +858,20 @@ async fn revise_writes_each_history_and_repairs_a_misrecording() {
     );
     // No actor withdrawal was forged: the lifecycle is untouched.
     assert_eq!(rows[0]["lifecycle"]["status"], "active");
+    f.script.read(&format!(
+        "FIND(?a) WHERE {{ ?a ASSERTION {{id: \"{wrong}\"}} }} LIMIT 1"
+    ));
+    f.script.push(Step::Final("You are vegetarian.".into()));
+    let recalled = f
+        .space
+        .memory_request(
+            NS,
+            false,
+            request("recall", None, None, json!({"query":"What diet?"})),
+        )
+        .await;
+    assert_ne!(briefing(&recalled).summary, "You are vegetarian.");
+    assert!(!recalled.warnings.is_empty());
     f.space.close().await.unwrap();
 }
 
@@ -1260,4 +1282,379 @@ async fn a_failed_predecessor_blocks_its_successor() {
     assert_eq!(progress.error.unwrap().code, "PreconditionFailed");
     f.space.close().await.unwrap();
     let _ = SELF_USER_ID;
+}
+
+#[tokio::test]
+async fn staging_without_observed_at_replays_after_restart() {
+    let f = fixture("mi_staging_time").await;
+    let input = StageSourceInput {
+        messages: vec![Message {
+            role: "user".into(),
+            content: vec!["same source".to_string().into()],
+            ..Default::default()
+        }],
+        observed_at: None,
+        kind: SourceKind::Message,
+        order: None,
+        idempotency_key: "implicit-time".into(),
+    };
+    let first = f
+        .space
+        .stage_memory_source(NS, input.clone())
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    assert_eq!(
+        first,
+        f.space
+            .stage_memory_source(NS, input.clone())
+            .await
+            .unwrap()
+    );
+    f.space.close().await.unwrap();
+    let reopened = f
+        .app
+        .fork_with_store(f.store.clone())
+        .load_space_with(&f.name, false, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        first,
+        reopened.stage_memory_source(NS, input).await.unwrap()
+    );
+    reopened.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn scoped_feedback_and_raw_evidence_do_not_escape_the_task() {
+    let f = fixture("mi_feedback_scope").await;
+    let source = stage(
+        &f.space,
+        "feedback",
+        "task A private feedback",
+        "2026-01-01T00:00:00.000Z",
+    )
+    .await;
+    let response = f
+        .space
+        .memory_request(
+            NS,
+            false,
+            request(
+                "feedback",
+                Some("f"),
+                Some(json!({"task_ref":"task-a"})),
+                json!({"source_ref": source}),
+            ),
+        )
+        .await;
+    let evidence = response.result.unwrap()["memory_refs"][0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    f.script.read(&format!(
+        "FIND(?e) WHERE {{ ?e EVIDENCE {{id: \"{evidence}\"}} }} LIMIT 1"
+    ));
+    f.script.push(Step::Final("task A private feedback".into()));
+    let other = f
+        .space
+        .memory_request(
+            NS,
+            false,
+            request(
+                "recall",
+                None,
+                Some(json!({"task_ref":"task-b"})),
+                json!({"query":"What feedback?"}),
+            ),
+        )
+        .await;
+    let brief = briefing(&other);
+    assert!(brief.items.is_empty(), "{brief:?}");
+    assert!(!brief.summary.contains("task A private feedback"));
+    assert!(!other.warnings.is_empty());
+    let original = anda_kip::execute_request(f.space.memory.nexus().as_ref(), &crate::kip::request(
+        r#"CREATE EVIDENCE ?e { SET FIELDS {evidence_class: "tool_result", payload: "tool feedback", observed_at: "2026-01-01T00:00:00.000Z"} }"#
+    )).await;
+    let original_id = crate::kip::ok_result(&original).unwrap()["handles"]["e"]
+        .as_str()
+        .unwrap();
+    let copied = f
+        .space
+        .memory_request(
+            NS,
+            false,
+            request(
+                "feedback",
+                Some("tool-feedback"),
+                Some(json!({"task_ref":"task-a"})),
+                json!({"source_ref":original_id}),
+            ),
+        )
+        .await;
+    let copied_id = copied.result.unwrap()["memory_refs"][0]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let Element::Evidence(copied) = f
+        .space
+        .memory
+        .nexus()
+        .store
+        .get_element(copied_id)
+        .await
+        .unwrap()
+    else {
+        panic!("expected Evidence");
+    };
+    assert_eq!(copied.evidence_class, "tool_result");
+    f.space.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn source_forget_erases_owned_constraints_but_keeps_shared_concepts() {
+    let f = fixture("mi_source_concept").await;
+    f.script.write(r#"MUTATE {
+        UPSERT CONCEPT ?person { MATCH {type: "Person", key: "shared-person"} SET FIELDS {name: "Alice"} }
+        CREATE CONCEPT ?rule { TYPE "Insight" NAME "No Friday deploys"
+            SET ATTRIBUTES {summary: "Never deploy on Fridays", insight_class: "constraint"}
+            SET FACET "MemoryScope" {task_ref: :scope_task, context_refs: :contexts} }
+    }"#);
+    f.script.done();
+    let source = stage(
+        &f.space,
+        "s",
+        "Never deploy on Fridays",
+        "2026-01-01T00:00:00.000Z",
+    )
+    .await;
+    let observed = f
+        .space
+        .memory_request(
+            NS,
+            false,
+            request(
+                "observe",
+                Some("o"),
+                Some(json!({"task_ref":"release"})),
+                json!({"source_ref":source}),
+            ),
+        )
+        .await;
+    wait_available(&f.space, &observed.receipt.unwrap().receipt_ref).await;
+    let forgotten = f
+        .space
+        .memory_request(
+            NS,
+            true,
+            request(
+                "forget",
+                Some("f"),
+                None,
+                json!({"target_ref":source,"mode":"semantic"}),
+            ),
+        )
+        .await;
+    assert_eq!(
+        forgotten.result.as_ref().unwrap()["status"],
+        "completed",
+        "{forgotten:?}"
+    );
+    let rules = f
+        .space
+        .execute_kip_readonly(crate::kip::request(
+            "FIND(?c) WHERE { ?c {type: \"Insight\"} } LIMIT 5",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(crate::kip::ok_result(&rules).unwrap(), &json!([]));
+    let people = f
+        .space
+        .execute_kip_readonly(crate::kip::request(
+            "FIND(?c) WHERE { ?c {key: \"shared-person\"} } LIMIT 5",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::kip::ok_result(&people)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        f.space
+            .staged_memory_source(NS, &source)
+            .await
+            .unwrap()
+            .messages
+            .is_empty()
+    );
+    f.space.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn forget_a_proposition_with_multiple_assertions_cleans_every_source() {
+    let f = fixture("mi_forget_overlap").await;
+    let mut sources = Vec::new();
+    for (key, at) in [
+        ("first", "2026-01-01T00:00:00.000Z"),
+        ("second", "2026-01-02T00:00:00.000Z"),
+    ] {
+        f.script.write(&prefers("dark", "ColorScheme", at, false));
+        f.script.done();
+        let source = stage(&f.space, key, "I prefer dark mode", at).await;
+        let response = f
+            .space
+            .memory_request(
+                NS,
+                false,
+                request("observe", Some(key), None, json!({"source_ref":source})),
+            )
+            .await;
+        wait_available(&f.space, &response.receipt.unwrap().receipt_ref).await;
+        sources.push(source);
+    }
+    let rows = claims(&f.space, "dark").await;
+    assert_eq!(rows.len(), 2);
+    let record = f
+        .space
+        .product_record(rows[0]["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    let forgotten = f
+        .space
+        .memory_request(
+            NS,
+            true,
+            request(
+                "forget",
+                Some("f"),
+                None,
+                json!({"target_ref":record.proposition_id,"mode":"semantic"}),
+            ),
+        )
+        .await;
+    assert_eq!(forgotten.status, Status::Succeeded, "{forgotten:?}");
+    for source in sources {
+        assert!(
+            f.space
+                .staged_memory_source(NS, &source)
+                .await
+                .unwrap()
+                .erased
+        );
+    }
+    f.space.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn close_waits_for_memory_interface_work() {
+    let f = fixture("mi_close_owner").await;
+    let (release, wait) = tokio::sync::oneshot::channel();
+    let work = f
+        .space
+        .memory_interface
+        .tasks
+        .start(async move {
+            wait.await?;
+            Ok(())
+        })
+        .unwrap();
+    let space = f.space.clone();
+    let close = tokio::spawn(async move { space.close().await });
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert!(
+        !close.is_finished(),
+        "close must wait for admitted Memory Interface work"
+    );
+    release.send(()).unwrap();
+    work.await.unwrap().unwrap();
+    close.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn recall_and_expansion_keep_the_snapshot_while_memory_changes() {
+    let f = fixture("mi_snapshot").await;
+    let nexus = f.space.memory.nexus();
+    let created = anda_kip::execute_request(nexus.as_ref(), &crate::kip::request(
+        r#"CREATE CONCEPT ?rule { TYPE "Insight" NAME "Release rule" SET ATTRIBUTES {summary: "old rule", insight_class: "constraint"} }"#
+    )).await;
+    let id = crate::kip::ok_result(&created).unwrap()["handles"]["rule"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    f.script.read(&format!(
+        "FIND(?c) WHERE {{ ?c CONCEPT {{id: \"{id}\"}} }} LIMIT 1"
+    ));
+    f.script.push(Step::Barrier {
+        entered: entered.clone(),
+        release: release.clone(),
+    });
+    f.script.push(Step::Final("old rule".into()));
+    let space = f.space.clone();
+    let recall = tokio::spawn(async move {
+        space
+            .memory_request(
+                NS,
+                false,
+                request("recall", None, None, json!({"query":"Which release rule?"})),
+            )
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+        .await
+        .unwrap();
+    let updated = anda_kip::execute_request(
+        nexus.as_ref(),
+        &crate::kip::request_with(
+            r#"UPDATE :id SET ATTRIBUTES {summary: "new rule"}"#,
+            crate::kip::param("id", id.as_str()),
+        ),
+    )
+    .await;
+    assert!(crate::kip::succeeded(&updated), "{updated:?}");
+    release.notify_one();
+    let response = recall.await.unwrap();
+    let brief = briefing(&response);
+    assert!(
+        brief
+            .items
+            .iter()
+            .any(|item| item.text.contains("old rule")),
+        "{brief:?}"
+    );
+    assert!(
+        brief
+            .items
+            .iter()
+            .all(|item| !item.text.contains("new rule"))
+    );
+    let expanded = briefing(
+        &f.space
+            .memory_request(
+                NS,
+                false,
+                request(
+                    "recall",
+                    None,
+                    None,
+                    json!({"target_ref":brief.basis_ref,"detail":"evidence"}),
+                ),
+            )
+            .await,
+    );
+    let details = expanded.details.as_ref().unwrap();
+    assert!(
+        details
+            .elements
+            .iter()
+            .any(|row| row["id"] == id && row["attributes"]["summary"] == "old rule")
+    );
+    assert!(expanded.uncertainties.is_empty(), "{expanded:?}");
+    f.space.close().await.unwrap();
 }

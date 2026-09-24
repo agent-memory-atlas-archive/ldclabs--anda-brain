@@ -152,6 +152,9 @@ impl Space {
         self.tasks.cancel();
         self.engine.cancel();
         self.model_cancel.cancel();
+        // Forget may itself use the product/native task owners. Drain its
+        // admitted work before closing those owners or the database.
+        self.memory_interface.tasks.shutdown().await;
         self.product_control.tasks.shutdown().await;
         if let Some(runtime) = &self.memory_runtime {
             runtime.shutdown().await;

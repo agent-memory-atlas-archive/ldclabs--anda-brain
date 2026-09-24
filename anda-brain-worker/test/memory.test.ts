@@ -223,3 +223,67 @@ describe('Memory Interface', () => {
     expect(expanded.result.coverage.action_eligible).toBe(false)
   })
 })
+
+describe('Memory Interface regressions', () => {
+  it('replays staging with an implicit observation time', async () => {
+    const runtime = testEnv(new FakeAi([])), space = uniqueSpace('mi-implicit-time')
+    const input = { messages: [{ role: 'user', content: 'same source' }], idempotency_key: 'retry' }
+    const first = await call(runtime, space, 'memory/sources', input)
+    await new Promise(resolve => setTimeout(resolve, 5))
+    const again = await call(runtime, space, 'memory/sources', input)
+    expect(again.status).toBe(200)
+    expect(again.result).toEqual(first.result)
+    expect((await call(runtime, space, 'memory/sources', { ...input, messages: [{ role: 'user', content: 'changed' }] })).status).toBe(409)
+  })
+
+  it('does not return scoped feedback to another task', async () => {
+    const ai = new FakeAi([]), runtime = testEnv(ai), space = uniqueSpace('mi-feedback-scope')
+    const source = await stage(runtime, space, 's', 'Private task A feedback', '2026-01-01T00:00:00.000Z')
+    const feedback = await memory(runtime, space, { operation: 'feedback', idempotency_key: 'f', scope: { task_ref: 'task-a' }, input: { source_ref: source } })
+    const id = feedback.result.memory_refs[0]
+    ai.push({ commands: [`FIND(?e) WHERE { ?e EVIDENCE {id: "${id}"} } LIMIT 1`] }, { answer: 'Private task A feedback', found: true, uncertainty: 0 })
+    const other = await memory(runtime, space, { operation: 'recall', scope: { task_ref: 'task-b' }, input: { query: 'What feedback?' } })
+    expect(other.result.items).toEqual([])
+    expect(other.result.summary).not.toContain('Private task A feedback')
+    const original = await call(runtime, space, 'execute_kip', { command: 'CREATE EVIDENCE ?e { SET FIELDS {evidence_class: "tool_result", payload: "tool feedback", observed_at: "2026-01-01T00:00:00.000Z"} }' })
+    expect(original.result[0].status, JSON.stringify(original)).toBe('succeeded')
+    const copied = await memory(runtime, space, { operation: 'feedback', idempotency_key: 'tool-feedback', scope: { task_ref: 'task-a' }, input: { source_ref: original.result[0].extensions['kip-do/outcome'].handles.e } })
+    const read = await call(runtime, space, 'execute_kip_readonly', { command: 'FIND(?e.evidence_class) WHERE { ?e EVIDENCE {id: :id} } LIMIT 1', parameters: { id: copied.result.memory_refs[0] } })
+    expect(read.result[0].result).toEqual(['tool_result'])
+  })
+
+  it('erases a source-owned constraint without deleting shared identities', async () => {
+    const ai = new FakeAi([plan([`MUTATE {
+      UPSERT CONCEPT ?person { MATCH {type: "Person", key: "shared-person"} SET FIELDS {name: "Alice"} }
+      CREATE CONCEPT ?rule { TYPE "Insight" NAME "No Friday deploys"
+        SET ATTRIBUTES {summary: "Never deploy on Fridays", insight_class: "constraint"}
+        SET FACET "MemoryScope" {task_ref: :scope_task, context_refs: :contexts} }
+    }`])])
+    const runtime = testEnv(ai), space = uniqueSpace('mi-source-concept')
+    const source = await stage(runtime, space, 's', 'Never deploy on Fridays', '2026-01-01T00:00:00.000Z')
+    const observed = await memory(runtime, space, { operation: 'observe', idempotency_key: 'o', scope: { task_ref: 'release' }, input: { source_ref: source } })
+    expect(observed.status).toBe('succeeded')
+    const forgotten = await memory(runtime, space, { operation: 'forget', idempotency_key: 'f', input: { target_ref: source, mode: 'semantic' } })
+    expect(forgotten.result.status).toBe('completed')
+    const rules = await call(runtime, space, 'execute_kip_readonly', { command: 'FIND(?c) WHERE { ?c {type: "Insight"} } LIMIT 5' })
+    expect(rules.result[0].result).toEqual([])
+    const people = await call(runtime, space, 'execute_kip_readonly', { command: 'FIND(?c) WHERE { ?c {key: "shared-person"} } LIMIT 5' })
+    expect(people.result[0].result).toHaveLength(1)
+  })
+
+  it('replaces an answer based on an invalidated extraction', async () => {
+    const ai = new FakeAi([plan([prefers('vegetarian', 'Diet', '2026-01-01T00:00:00.000Z')])])
+    const runtime = testEnv(ai), space = uniqueSpace('mi-repaired-summary')
+    await declareTypes(space, ['Diet'])
+    const source = await stage(runtime, space, 's', 'Alice talked about dinner', '2026-01-01T00:00:00.000Z')
+    await memory(runtime, space, { operation: 'observe', idempotency_key: 'o', input: { source_ref: source } })
+    const [wrong] = await claims(runtime, space, 'vegetarian')
+    const report = await stage(runtime, space, 'r', 'You misheard me', '2026-09-01T00:00:00.000Z')
+    ai.push(plan([]))
+    expect((await memory(runtime, space, { operation: 'revise', idempotency_key: 'r', input: { source_ref: report, target_ref: wrong!.id, change_kind: 'misrecorded' } })).status).toBe('succeeded')
+    ai.push({ commands: [`FIND(?a) WHERE { ?a ASSERTION {id: "${wrong!.id}"} } LIMIT 1`] }, { answer: 'You are vegetarian.', found: true, uncertainty: 0 })
+    const recalled = await memory(runtime, space, { operation: 'recall', input: { query: 'What diet?' } })
+    expect(recalled.result.summary).not.toBe('You are vegetarian.')
+    expect(recalled.warnings.length).toBeGreaterThan(0)
+  })
+})

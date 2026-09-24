@@ -173,7 +173,8 @@ meaning is the operation, the requested scope, the input and the source's identi
 and digest — never `request_id` or `budget`. The same key and meaning returns the
 original `receipt` (with current progress) and never re-runs extraction; the same
 key with another meaning is `IdempotencyConflict`. Keys, receipts and staged
-sources survive restart.
+sources survive restart. When staging omits `observed_at`, a retry reuses the
+original observation time rather than assigning a new one.
 
 **Progress.** Each mutation returns an immutable `receipt` (`receipt_ref`,
 `operation`, `space_id`, `accepted_seq`) and its current `progress`:
@@ -216,7 +217,8 @@ histories (KIP Spec §14.2):
 **feedback** (`{source_ref, decision_ref?, attempt_ref?}`) is captured by the host
 as Evidence classed by the role that was staged — an assistant's self-report is
 `agent_statement`, a person's is `user_statement` — never an Outcome, and grades
-nothing. `decision_ref` / `attempt_ref` must be elements of this Space.
+nothing. The captured Evidence carries the request’s scope, including when the
+source was already captured as Evidence. `decision_ref` / `attempt_ref` must be elements of this Space.
 
 **forget** (`{target_ref, mode}`) runs an ErasurePlan (Spec §60.7):
 
@@ -234,7 +236,10 @@ The result is a `ForgetResult` (`status`, `plan_ref`, `summary`, `coverage_ref`)
 `completed` (with an `erased` disposition) is reported only after the Nexus
 validated the plan against its storage and every host surface was verified; a
 legal hold is `blocked`; a target whose sources cannot be enumerated is `partial`.
-Read the plan at `GET …/memory/plans/{plan_ref}`. `POST /memory/forget` remains the
+A source target also covers narrative Concepts newly created by its processing
+trace (Events, Insights, Experiences, Commitments), without deleting shared
+identity/option Concepts. Missing ownership traces or unfinished processing make
+coverage partial. Read the plan at `GET …/memory/plans/{plan_ref}`. `POST /memory/forget` remains the
 technical element-purge endpoint without a plan.
 
 **recall** (`{query?, target_ref?, mode?, goal?, context?, after?, detail?, time?,
@@ -301,6 +306,11 @@ export interface MemoryResponse {
 
 MCP exposes the same binding as `anda_brain_memory` (`{request}`),
 `anda_brain_stage_memory_source` and `anda_brain_memory_receipt`.
+
+Rust briefings pin host reads and retained elements to one snapshot; concurrent
+index changes are reported as incomplete search coverage. Summary validation
+includes Evidence reads and invalidated extractions, without adding provenance
+records to the memory usage ledger.
 
 Known limits: `memory_experience` needs a KIP-CognitiveMemory Nexus (computed
 GradingState and lineage views and selection dependencies are not built yet), so it

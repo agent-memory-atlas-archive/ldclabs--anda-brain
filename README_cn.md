@@ -54,7 +54,8 @@ Skill 行为保存为不可变的
 `memory_basic` 级别提供 KIP **Memory Interface**：`POST /v1/{space_id}/memory` 每次接收一个意图
 （`observe`、`recall`、`revise`、`feedback`、`forget`），基于暂存来源，提供幂等回执、`after`
 屏障、带作用域的七通道召回、误记的 recording repair 与受治理的遗忘。不声明
-`memory_experience` 与 `memory_learning`。
+`memory_experience` 与 `memory_learning`。来源遗忘覆盖所属的叙事记忆；所有权缺失时报告 partial。
+带作用域的反馈与失效读取检查同样适用于 Memory Interface 召回。
 
 Rust Markdown 原文与结构化消息使用相同的 Evidence 捕获机制，未提供姓名时保留已有交互对象的显示名。
 Rust 遗忘接口除 Concept、Proposition、Assertion 外，也接受显式的 Evidence 和 Activity

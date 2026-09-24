@@ -76,7 +76,7 @@ export interface BrainRpc {
   memoryForget(namespace: string, space: string, request: import('./memory-wire.js').MemoryRequest, owner: boolean): Promise<import('./memory-ledger.js').IntakeRecord>
   memoryBarrier(namespace: string, after: string[]): Promise<import('./memory-wire.js').Progress[]>
   memoryScopedAttention(scope: import('./memory-wire.js').Scope | undefined, items: AttentionRecall['items']): Promise<import('./memory-wire.js').AttentionItem[]>
-  memoryDeliver(namespace: string, scope: import('./memory-wire.js').Scope | undefined, cited: string[], options: Parameters<import('./memory-ledger.js').MemoryLedger['deliver']>[3]): Promise<import('./memory-wire.js').Briefing>
+  memoryDeliver(namespace: string, scope: import('./memory-wire.js').Scope | undefined, cited: string[], options: Parameters<import('./memory-ledger.js').MemoryLedger['deliver']>[3]): Promise<{ briefing: import('./memory-wire.js').Briefing; warnings: string[] }>
   memoryExpand(namespace: string, target: string, evidence: boolean): Promise<import('./memory-wire.js').Briefing>
   memoryReceipt(namespace: string, receiptRef: string): Promise<Record<string, unknown>>
   memoryPlan(namespace: string, planRef: string): Promise<Record<string, unknown>>

@@ -289,6 +289,8 @@ bases and erasure plans. Native facts stay in the Nexus.
 - **Misrecordings are repaired by the host.** After a `misrecorded` revise pass
   completes, the host calls the Nexus recording repair with the replacements that
   pass wrote from the original source; a refused repair fails the receipt.
+- **Shutdown drains admitted Memory Interface writes.** Its task owner drains
+  before the product/native task owners and database close.
 - **Forget verifies before it reports.** The ErasurePlan is validated by the Nexus
   against actual storage, and host copies (staged bytes, Formation and Recall
   transcripts, usage-ledger rows, the probe cache) are checked before `completed`.

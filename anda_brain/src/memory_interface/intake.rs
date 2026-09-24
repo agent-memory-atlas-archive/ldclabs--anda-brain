@@ -242,6 +242,8 @@ pub(crate) struct TraceData {
     pub max_seq: Option<u64>,
     /// Elements other than Evidence the pass created or changed.
     pub formed: Vec<String>,
+    /// New elements, distinguished from updates to shared existing memory.
+    pub created: Vec<String>,
     /// Evidence the pass captured.
     pub evidence: Vec<String>,
     /// Assertions the pass created.
@@ -296,6 +298,9 @@ impl TraceData {
                 };
                 if op == "noop" {
                     continue;
+                }
+                if op == "create" {
+                    Self::push(&mut self.created, id);
                 }
                 match kind {
                     "evidence" => Self::push(&mut self.evidence, id),
@@ -1187,23 +1192,43 @@ impl Space {
         let receipt_ref = record.receipt.receipt_ref.clone();
         let mut evidence = Vec::new();
         let mut max_seq = record.receipt.accepted_seq;
-        if let Some(existing) = &source.evidence {
-            // An already captured source is cited, not captured again.
-            evidence.push(existing.clone());
+        let original_class = if source.source_ref.starts_with("E-") {
+            match self
+                .memory
+                .nexus()
+                .store
+                .get_element(source.source_ref.parse()?)
+                .await?
+            {
+                Element::Evidence(row) => Some(row.evidence_class.clone()),
+                _ => None,
+            }
         } else {
+            None
+        };
+        {
             for (index, message) in source.messages.iter().enumerate() {
-                let class = sources::evidence_class(&message.role);
+                let class = original_class
+                    .as_deref()
+                    .unwrap_or_else(|| sources::evidence_class(&message.role));
                 let mut payload = serde_json::to_value(message)
                     .map_err(|e| KipError::internal_error(e.to_string()))?;
                 if let (Some(about), Some(payload)) = (&about, payload.as_object_mut()) {
                     payload.insert("memory_feedback".into(), about.clone());
                 }
+                let scoped = if record.scope.contexts.is_empty() {
+                    ""
+                } else {
+                    r#"SET FACET "MemoryScope" {task_ref: :scope_task, context_refs: :contexts}"#
+                };
                 let request = crate::kip::request_with(
-                    r#"MUTATE {
-                        CREATE EVIDENCE ?e { CLIENT KEY :key SET FIELDS {
+                    format!(
+                        r#"MUTATE {{
+                        CREATE EVIDENCE ?e {{ CLIENT KEY :key SET FIELDS {{
                             evidence_class: :class, payload: :payload, observed_at: :at
-                        } }
-                    }"#,
+                        }} {scoped} }}
+                    }}"#
+                    ),
                     Map::from_iter([
                         (
                             "key".into(),
@@ -1211,6 +1236,8 @@ impl Space {
                         ),
                         ("class".into(), json!(class)),
                         ("payload".into(), payload),
+                        ("scope_task".into(), json!(record.scope.task)),
+                        ("contexts".into(), json!(record.scope.contexts)),
                         (
                             "at".into(),
                             json!(crate::kip::message_observed_at(

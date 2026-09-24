@@ -115,8 +115,6 @@ pub(crate) struct ResolvedSource {
     pub messages: Vec<Message>,
     pub observed_at: String,
     pub order: Option<SourceOrder>,
-    /// Set when the handle is an already captured Evidence element.
-    pub evidence: Option<String>,
     pub host: Option<HostSource>,
 }
 
@@ -242,15 +240,6 @@ impl Space {
                 self.intake_record(namespace, predecessor).await?;
             }
         }
-        let now = anda_engine::unix_ms();
-        let captured_at = crate::kip::timestamp(now);
-        let observed_at = match &input.observed_at {
-            Some(value) => {
-                crate::kip::source_timestamp(value).map_err(KipError::invalid_request_envelope)?
-            }
-            None => captured_at.clone(),
-        };
-        let digest = source_digest(&input.messages, &observed_at, input.kind)?;
         let key_id = anda_cognitive_nexus::content_digest(&json!([
             namespace,
             self.id(),
@@ -259,6 +248,24 @@ impl Space {
         ]))?[7..47]
             .to_string();
         let source_ref = format!("src-{key_id}");
+        let journal = &self.memory_interface.journal;
+        let path = format!("sources/{source_ref}");
+        let _gate = self.memory_interface.gate.lock().await;
+        let existing = journal
+            .read::<StagedSource>(&path)
+            .await
+            .map_err(kip_error)?;
+        let captured_at = crate::kip::timestamp(anda_engine::unix_ms());
+        let observed_at = match &input.observed_at {
+            Some(value) => {
+                crate::kip::source_timestamp(value).map_err(KipError::invalid_request_envelope)?
+            }
+            None => existing
+                .as_ref()
+                .map(|s| s.value.observed_at.clone())
+                .unwrap_or_else(|| captured_at.clone()),
+        };
+        let digest = source_digest(&input.messages, &observed_at, input.kind)?;
         // Admission precedes capture: bytes a forget excluded are refused
         // before they are stored, and the key stays unbound.
         let identity = crate::product::SourceIdentity {
@@ -270,14 +277,7 @@ impl Space {
                 "this source is excluded from memory by an earlier forget",
             ));
         }
-        let journal = &self.memory_interface.journal;
-        let path = format!("sources/{source_ref}");
-        let _gate = self.memory_interface.gate.lock().await;
-        if let Some(existing) = journal
-            .read::<StagedSource>(&path)
-            .await
-            .map_err(kip_error)?
-        {
+        if let Some(existing) = existing {
             let existing = existing.value;
             if existing.namespace != namespace {
                 return Err(KipError::not_found_or_not_visible("source not found"));
@@ -360,7 +360,6 @@ impl Space {
                 messages: staged.messages,
                 observed_at: staged.observed_at,
                 order: staged.order,
-                evidence: None,
                 host: staged.host,
             });
         }
@@ -390,7 +389,6 @@ impl Space {
                 row.observed_at.clone()
             },
             order: None,
-            evidence: Some(id.to_string()),
             host: None,
         })
     }
