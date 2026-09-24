@@ -32,8 +32,9 @@ export interface MemoryRecord {
  * Which history a change writes (Spec §14.2, Memory Interface §4): `correct`
  * supersedes the caller's own wrong claim and keeps the interval it covered;
  * `world_change` adds one Assertion from now and lets temporal succession end
- * the old value; `misrecorded` needs recording repair, which this engine does
- * not provide, so it is refused rather than written as either of the others.
+ * the old value; `misrecorded` is recording repair, which runs through the
+ * Memory Interface `revise` intent, so this value-based API refuses it rather
+ * than writing either of the others.
  */
 export interface ChangeInput {
   operation_id: string; record_id: string; expected_revision: number
@@ -154,6 +155,15 @@ export class MemoryProduct {
       if (old && digest(old) !== digest(binding)) fail('source_identity_conflict')
       this.kv.put(EVIDENCE + key, binding)
     }
+  }
+  /** Excludes sources from Formation for good: the forget tombstone. */
+  suppress(keys: readonly string[]): void {
+    const state = this.state()
+    const merged = [...new Set([...state.suppressed, ...keys])]
+    if (merged.length === state.suppressed.length) return
+    if (merged.length > 100_000) fail('source_capacity_exhausted')
+    state.suppressed = merged
+    this.kv.put(CONTROL, state)
   }
   invalidate(): void {
     const state = this.state()

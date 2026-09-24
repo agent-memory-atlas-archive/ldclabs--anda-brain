@@ -23,8 +23,8 @@
 `SkillRevision`，并用 `current_trial` / `current_evaluation` 指针；Watch 进度和任务租约
 通过 Nexus 的受保护接口维护。旧的 family 成功率晋升规则已移除；未配置独立观察者、冻结
 试验和可重放评估时，程序候选保持未验证，`skills.unsupported_reason` 明确报告该边界。现有
-Brain API 保持可用；这两个适配器**未声明支持**可选的五意图 Memory Interface 或
-`memory_*` 能力包。
+Brain API 保持可用。两个适配器现在还在 `memory_basic` 级别提供 KIP Memory Interface
+（见下文「Memory Interface」），不声明 `memory_experience` 与 `memory_learning`。
 
 ## KIP 2.0 意味着什么
 
@@ -70,11 +70,33 @@ pnpm --filter @ldclabs/anda-brain-worker check
 | 自动周期维护 | 未实现；由调用方或 Cron Trigger 调用 maintenance |
 | 确定性 settlement（Nexus Watch 推进 / 更正发现） | 保留，见下节；不扫盘衰减 |
 | 注意力召回（`GET memory/attention`） | 保留，按提起提交的 `raised_seq` 排序，游标由调用方保存 |
+| Memory Interface（`POST memory`，`memory_basic`） | 保留；Formation 在请求内完成，回执返回时已是 `available` 或 `failed`；预算按 UTF-8 字节保守限制；存储表面只有 Durable Object |
 | 全文检索（`SEARCH`） | 保留，keyword 模式，见「检索」一节 |
 | 派生闭包（`LIST DEPENDENTS`） | 保留，`DEPTH` 上限 8；runtime 在 settlement 里替模型走：每条新 superseded 的 Assertion 带着它的 dependents 进 `assessment.revised_roots` |
 | 保留期（`SET RETENTION`） | 引擎已实现，maintenance 可以写；但没有到期清扫，Rust 服务两样都有 |
 | 载荷清除（`PURGE PAYLOAD`） | 引擎已实现；maintenance 计划里和 `PURGE` 一样被拒 |
 | 原子批（`execution.mode: "atomic"`） | 引擎未实现（`atomic_batch` 能力为 false），请求按 §75.3 被拒绝而不是降级成 sequence |
+
+## Memory Interface
+
+`POST /v1/{space}/memory` 接收一个 KIP 2.0 Memory Interface 请求（`kip_memory: "2.0"`，
+`observe` / `recall` / `revise` / `feedback` / `forget` 之一），返回 Memory Interface
+`Response`（不是 `{result}` 包装），失败也以 `status: "failed"` 加 KIP 错误放在 Response 里。
+描述符见 `GET /` 与 `GET /v1/{space}/info` 的 `memory_interface`，与 `DESCRIBE CAPABILITIES`
+一致：只有 `memory_basic`。行为与 Rust 服务相同（见 [API](../anda_brain/API_cn.md#memory-interface)），
+差异如下：
+
+- 这个 Worker 只有一个 API key，所以所有调用方同属一个句柄命名空间；该 key 同时是所有者凭据，
+  可以执行 `semantic` forget。
+- `POST /v1/{space}/memory/sources` 暂存来源（最多 16 条消息、256 KiB）；
+  `GET /v1/{space}/memory/{receipts|sources|plans}/{ref}` 读取回执进度、暂存来源与擦除计划。
+- observe / revise 在请求内完成 Formation，回执返回时已是 `available` 或 `failed`；一直没有回报
+  结果的回执十分钟后读为 `failed`（`OutcomeUnknown`），不会重跑。带作用域的计划若有 ASSERT 没写
+  `context: :contexts`，整份计划被拒，回执失败。
+- recall 的 `max_output_tokens` 按 UTF-8 字节数保守限制（每个 o200k token 至少一个字节，所以
+  不会少算，可能比 Rust 服务更早裁掉可选条目）。展开默认预算为 65,536。
+- forget 的存储表面只有本 Durable Object：图元素、Evidence 载荷与暂存来源字节；没有会话记录
+  需要清理。
 
 ## 确定性 settlement 与受保护操作
 

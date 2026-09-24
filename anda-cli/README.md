@@ -157,6 +157,27 @@ anda-cli --space-id my_space --token $TOKEN memory pin --pinned=false C-7
 anda-cli --space-id my_space --token $TOKEN memory forget --dry-run C-7
 anda-cli --space-id my_space --token $TOKEN memory forget C-7
 
+# Memory Interface (KIP 2.0, memory_basic): stage what you observed, then send
+# one intent at a time. --session keeps outstanding receipts and the attention
+# cursor; recall adds the outstanding receipts to `after` automatically.
+anda-cli --space-id my_space --token $TOKEN memory sources stage \
+  --file chat.json --observed-at 2026-09-02T08:00:00.000Z --key chat-42:msg-7
+anda-cli --space-id my_space --token $TOKEN memory observe --source src-… \
+  --task relocation --session ./brain-session.json
+anda-cli --space-id my_space --token $TOKEN memory recall "Where does the user live now?" \
+  --mode action --task relocation --session ./brain-session.json
+# Poll attention (due Commitments, fired Watches) from the kept cursor
+anda-cli --space-id my_space --token $TOKEN memory recall --mode attention --session ./brain-session.json
+# Expand a result's retained basis and element versions
+anda-cli --space-id my_space --token $TOKEN memory recall --target basis-… --detail evidence
+# Revise with the right history: correction | world_change | misrecorded | unspecified
+anda-cli --space-id my_space --token $TOKEN memory revise --source src-… --kind misrecorded --target A-12
+anda-cli --space-id my_space --token $TOKEN memory feedback --source src-…
+# Governed forgetting (semantic needs the owner's CWT); read the plan it reports
+anda-cli --space-id my_space --token $CWT memory forget --mode semantic A-12
+anda-cli --space-id my_space --token $TOKEN memory receipt rcpt-…
+anda-cli --space-id my_space --token $TOKEN memory plan plan-…
+
 # Trigger maintenance
 anda-cli --space-id my_space --token $TOKEN maintenance
 anda-cli --space-id my_space --token $TOKEN maintenance --trigger on_demand --scope full

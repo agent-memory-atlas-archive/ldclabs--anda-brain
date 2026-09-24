@@ -393,7 +393,12 @@ impl Space {
         // The KIP tool definition comes from `anda_kip` itself (via the
         // engine's default), so the schema the model is shown and the envelope
         // the engine executes stay in step across protocol revisions.
+        // The Memory Interface this Brain serves is declared to the Nexus, so
+        // `DESCRIBE CAPABILITIES`/`PRIMER` and every `requires` block report
+        // the binding truthfully (Spec §67.4, MI §2).
+        nexus.set_host_capabilities(crate::memory_interface::host_capabilities(&id))?;
         let memory = Arc::new(MemoryManagement::connect(db.clone(), Arc::new(nexus)).await?);
+        let memory_interface = crate::memory_interface::MemoryInterface::new(&db);
         let recall_receipts =
             crate::recall_receipt::RecallReceipts::connect(&id, &db, attention_directory.clone())
                 .await?;
@@ -666,6 +671,7 @@ impl Space {
             maintenance,
             ledger,
             recall_receipts,
+            memory_interface,
             utility,
             trust,
             miss_cache,

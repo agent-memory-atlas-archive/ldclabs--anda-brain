@@ -1,5 +1,5 @@
 import { assertCurrentOperations, type SourceIdentity } from './product.js'
-import { contentDigest, type KipResult } from '@ldclabs/kip-do'
+import { contentDigest, type JsonMap, type KipResult } from '@ldclabs/kip-do'
 import { observationTimestamp } from './validation.js'
 import {
   DEFAULT_AI_MODEL,
@@ -13,6 +13,10 @@ import {
 import {
   MAX_KIP_OPERATIONS,
   assertFormationOperations,
+  assertIntentOperations,
+  intentBindings,
+  intentDirective,
+  type IntentShape,
   assertMaintenanceOperations,
   citationsFrom,
   conceptLookupCommand,
@@ -60,6 +64,21 @@ export async function formMemory(
   input: FormationInput,
   sourceIdentity?: SourceIdentity,
 ): Promise<unknown> {
+  return (await formMemoryWithResults(env, brain, input, sourceIdentity)).output
+}
+
+/**
+ * Formation, also returning the raw operation results a Memory Interface
+ * receipt reads its disposition from. An intent adds its directive to the
+ * prompt, its host bindings to every write and its gate to the plan.
+ */
+export async function formMemoryWithResults(
+  env: Env,
+  brain: BrainRpc,
+  input: FormationInput,
+  sourceIdentity?: SourceIdentity,
+  intent?: IntentShape,
+): Promise<{ output: unknown; results: KipResult[] }> {
   const timestamp = observationTimestamp(input.timestamp, Date.now())
   const origin = await conversationOrigin(input, timestamp)
   const epoch = await brain.beginProcessing(sourceIdentity ?? { key: origin,
@@ -73,7 +92,7 @@ export async function formMemory(
     const plan = await createMutationPlan(
       env.AI,
       model,
-      formationMessages(primer, input, timestamp),
+      formationMessages(primer, input, timestamp, intent ? intentDirective(intent) : undefined),
       deadline,
     )
 
@@ -85,9 +104,13 @@ export async function formMemory(
     const { operations, vocabulary } = await preparePlan(
       brain,
       plan.value,
-      assertFormationOperations,
+      intent
+        ? (operations) => { assertFormationOperations(operations); assertIntentOperations(intent, operations, plan.value.parameters ?? {}) }
+        : assertFormationOperations,
       'formation',
       epoch,
+      undefined,
+      intent ? intentBindings(intent) : undefined,
     )
 
     // The observation rides the envelope, so the model's commands cite `:msg1`
@@ -96,6 +119,7 @@ export async function formMemory(
       at: timestamp,
       origin,
       sourceActor: counterparty.id,
+      ...(intent ? { scope: intent.scope } : {}),
     })
     deadline.check()
     const results = operations.length
@@ -115,8 +139,12 @@ export async function formMemory(
         if (repair.value.reviewed_corrections?.length) throw new OperationError('Formation review cannot acknowledge maintenance corrections', 422)
         if (repair.value.commands.length > 1) throw new OperationError('Formation review accepts at most one repair MUTATE', 422)
         if (repair.value.runtime?.length) throw new OperationError('Formation review cannot manage runtime actions', 422)
-        const prepared = await preparePlan(brain, repair.value, assertFormationOperations, 'formation review', epoch)
-        const repairIngest = observationIngest(prepared.operations, input.messages, {at: timestamp, origin, sourceActor: counterparty.id})
+        const prepared = await preparePlan(brain, repair.value,
+          intent
+            ? (operations) => { assertFormationOperations(operations); assertIntentOperations(intent, operations, repair.value.parameters ?? {}) }
+            : assertFormationOperations,
+          'formation review', epoch, undefined, intent ? intentBindings(intent) : undefined)
+        const repairIngest = observationIngest(prepared.operations, input.messages, {at: timestamp, origin, sourceActor: counterparty.id, ...(intent ? { scope: intent.scope } : {})})
         deadline.check()
         repairResults = prepared.operations.length ? await brain.executeFormationPlan(prepared.operations, repairIngest, epoch) : []
         throwOnKipError(repairResults, 'formation review KIP failed')
@@ -131,13 +159,16 @@ export async function formMemory(
     stored.concepts += counterparty.created
 
     return {
-      content: committedContent(plan.value.summary, [...results, ...repairResults], 'No memory-plan changes were committed.'),
-      operation_results: operationStatuses([...results, ...repairResults]),
-      stored,
-      commands: operations.length + (review?.commands ?? 0),
-      ...(vocabulary ? { vocabulary } : {}),
-      ...(review ? { review } : {}),
-      usage,
+      output: {
+        content: committedContent(plan.value.summary, [...results, ...repairResults], 'No memory-plan changes were committed.'),
+        operation_results: operationStatuses([...results, ...repairResults]),
+        stored,
+        commands: operations.length + (review?.commands ?? 0),
+        ...(vocabulary ? { vocabulary } : {}),
+        ...(review ? { review } : {}),
+        usage,
+      },
+      results: [...results, ...repairResults],
     }
   } catch (error) { throw withUsage(error, usage) }
   finally { deadline.close(); await brain.checkProcessing(epoch) }
@@ -360,10 +391,11 @@ async function preparePlan(
   mode: string,
   epoch: number,
   run?: string,
+  bindings?: JsonMap,
 ): Promise<{ operations: KipOperation[]; vocabulary?: DeclaredVocabulary }> {
   // The strength pin and this write's time ride every operation, so a
   // MnemonicState base the model writes is one the engine can compute.
-  const parameters = { ...plan.parameters, ...hostBindings(Date.now()) }
+  const parameters = { ...plan.parameters, ...hostBindings(Date.now()), ...(bindings ?? {}) }
   const operations = plan.commands.map((command) => ({ command, parameters }))
   try {
     if (operations.length > 0) gate(operations)

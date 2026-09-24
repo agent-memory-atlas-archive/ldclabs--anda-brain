@@ -174,6 +174,20 @@ impl From<RecallMemoryInput> for RecallInput {
     }
 }
 
+/// One Memory Interface request (`kip-memory.schema.json#/$defs/Request`).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct MemoryInterfaceInput {
+    /// The request object: `kip_memory`, `operation`, `input`, and for a
+    /// mutation an `idempotency_key`; optional `scope`, `budget`, `requires`.
+    pub request: Value,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct MemoryReceiptInput {
+    /// A `receipt_ref` a Memory Interface mutation returned.
+    pub receipt_ref: String,
+}
+
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct RunMaintenanceInput {
     /// Maintenance trigger label. Defaults to "on_demand".
@@ -668,6 +682,65 @@ impl AndaBrainMcpServer {
             .await
             .map_err(invalid_params)?;
         agent_output_result(output)
+    }
+
+    async fn memory_for(
+        &self,
+        access: &McpAccess,
+        input: MemoryInterfaceInput,
+    ) -> Result<CallToolResult, ErrorData> {
+        use anda_kip::memory::binding::{Operation, Request as MemoryRequest};
+        let request: MemoryRequest =
+            serde_json::from_value(input.request).map_err(invalid_params)?;
+        let recall = request.operation == Operation::Recall;
+        let scope = if recall {
+            TokenScope::Read
+        } else {
+            TokenScope::Write
+        };
+        let (space, caller) = self.load_authorized_space_with_token(scope, access).await?;
+        if recall && let Some(reason) = caller.recall_forbidden() {
+            return Err(authz_error_data(AuthzError::Forbidden(reason)));
+        }
+        let _permit = if recall {
+            Some(self.acquire_llm_permit()?)
+        } else {
+            None
+        };
+        let response = space
+            .memory_request(&caller.namespace(), caller.is_owner(), request)
+            .await;
+        structured_result(response)
+    }
+
+    async fn stage_memory_source_for(
+        &self,
+        access: &McpAccess,
+        input: crate::memory_interface::StageSourceInput,
+    ) -> Result<CallToolResult, ErrorData> {
+        let (space, caller) = self
+            .load_authorized_space_with_token(TokenScope::Write, access)
+            .await?;
+        let staged = space
+            .stage_memory_source(&caller.namespace(), input)
+            .await
+            .map_err(invalid_params)?;
+        structured_result(staged)
+    }
+
+    async fn memory_receipt_for(
+        &self,
+        access: &McpAccess,
+        input: MemoryReceiptInput,
+    ) -> Result<CallToolResult, ErrorData> {
+        let (space, caller) = self
+            .load_authorized_space_with_mode(TokenScope::Read, AuthzMode::Credentialed, access)
+            .await?;
+        let view = space
+            .memory_receipt_view(&caller.namespace(), &input.receipt_ref)
+            .await
+            .map_err(invalid_params)?;
+        structured_result(view)
     }
 
     async fn run_maintenance_for(
@@ -1273,6 +1346,73 @@ impl AndaBrainMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let access = self.access_from_context(&context)?;
         self.recall_memory_for(&access, input).await
+    }
+
+    /// The KIP Memory Interface: one of observe, recall, revise, feedback or
+    /// forget per request (`kip_memory: "2.0"`). Stage the observed messages
+    /// first with anda_brain_stage_memory_source and cite the returned
+    /// source_ref; retry a mutation with the same idempotency_key; pass
+    /// outstanding receipts in recall `after`. An attention item or a briefing
+    /// grants nothing.
+    #[tool(
+        name = "anda_brain_memory",
+        annotations(
+            title = "Memory Interface",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    pub async fn memory(
+        &self,
+        Parameters(input): Parameters<MemoryInterfaceInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let access = self.access_from_context(&context)?;
+        self.memory_for(&access, input).await
+    }
+
+    /// Stage observed messages as an immutable source and get its
+    /// source_ref for observe, revise or feedback. The same idempotency_key
+    /// and bytes return the same handle.
+    #[tool(
+        name = "anda_brain_stage_memory_source",
+        annotations(
+            title = "Stage Memory Source",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    pub async fn stage_memory_source(
+        &self,
+        Parameters(input): Parameters<crate::memory_interface::StageSourceInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let access = self.access_from_context(&context)?;
+        self.stage_memory_source_for(&access, input).await
+    }
+
+    /// Read a Memory Interface receipt's current progress.
+    #[tool(
+        name = "anda_brain_memory_receipt",
+        annotations(
+            title = "Memory Receipt",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    pub async fn memory_receipt(
+        &self,
+        Parameters(input): Parameters<MemoryReceiptInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let access = self.access_from_context(&context)?;
+        self.memory_receipt_for(&access, input).await
     }
 
     /// Trigger a memory maintenance cycle for consolidation, pruning, and graph health.

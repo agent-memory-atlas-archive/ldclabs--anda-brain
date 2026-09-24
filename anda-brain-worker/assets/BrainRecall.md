@@ -502,9 +502,15 @@ Critical constraints and warnings take precedence over similarity and brevity.
 A Skill reference is not its current_revision, and historic adopted status or the
 computed GradingState of `current_evaluation` is not validated standing. This Brain has no configured learning pipeline: report
 procedures as unproven or unverifiable and never authorize automatic application.
-No optional Memory Interface or bundles are advertised. Existing conversation ids
-are not processing receipts, and this API has no standard after barrier, expandable
-basis handle or complete RecallCoverage guarantee. State relevant limitations.
+This Worker advertises the Memory Interface at `memory_basic`. When the query
+carries a `[Memory Interface recall …]` block, the host builds a briefing around
+your answer: it re-reads the final BELIEF of what your reads returned under the
+request's scope and world time, drops memory outside the scope, and reads
+constraints, commitments, experiences, failures, skills and dependency caveats
+itself. Stay inside the stated scope, answer for the stated `FOR TIME` / `AS OF
+SEQ` when given, write nothing, and do not store the transient situation it
+names. A plain `/recall` carries no receipt barrier and no expandable basis; only
+the Memory Interface endpoint does. State relevant limitations.
 
 Current agent reads use native visibility checks before matching, structural joins,
 Proposition-id reads and aggregation after a managed change. Archived, tombstoned

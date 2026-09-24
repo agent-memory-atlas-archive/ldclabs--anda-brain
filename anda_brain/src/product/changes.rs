@@ -28,8 +28,9 @@ pub enum ChangeKind {
     /// ends the old value, which stays true for its time.
     WorldChange,
     /// The Brain recorded what the caller never said. That is recording
-    /// repair (§57.8), which this deployment does not provide, so it is
-    /// refused rather than written as a correction or a world change.
+    /// repair (§57.8), which runs through the Memory Interface `revise`
+    /// intent with `change_kind: "misrecorded"`; this value-based product
+    /// API refuses it rather than writing a correction or a world change.
     Misrecorded,
     Suppress,
     Delete,
@@ -766,7 +767,7 @@ impl Space {
         Ok(keys)
     }
 
-    pub(super) async fn add_source_keys(
+    pub(crate) async fn add_source_keys(
         &self,
         source: &RecordSource,
         keys: &mut BTreeSet<String>,

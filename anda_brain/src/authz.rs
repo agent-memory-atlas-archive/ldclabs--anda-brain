@@ -130,13 +130,26 @@ impl Caller {
     /// subjects.
     #[cfg(feature = "wiki")]
     pub fn actor(&self) -> String {
-        wiki_actor(&self.cwt, self.st.as_ref())
+        caller_identity(&self.cwt, self.st.as_ref())
     }
 
     /// The caller's wiki read scope; see [`wiki_read_access`].
     #[cfg(feature = "wiki")]
     pub fn wiki_access(&self) -> WikiAccess {
         wiki_read_access(&self.cwt, self.st.as_ref())
+    }
+
+    /// The identity Memory Interface handles are scoped to: the CWT subject,
+    /// a Space token by name, or the anonymous reader (the same spelling the
+    /// wiki audit trail uses).
+    pub fn namespace(&self) -> String {
+        caller_identity(&self.cwt, self.st.as_ref())
+    }
+
+    /// Whether the caller presented an owner credential (a CWT for this
+    /// Space) rather than a delegated Space token.
+    pub fn is_owner(&self) -> bool {
+        self.cwt.is_some()
     }
 
     /// True when the caller is label-restricted; see [`label_restricted`].
@@ -433,8 +446,7 @@ pub async fn authorize(
 /// with no credential must not be recorded as the space's own identity).
 /// Shared by the HTTP and MCP channels so both audit trails name identical
 /// subjects.
-#[cfg(feature = "wiki")]
-fn wiki_actor(t: &Option<CWToken>, st: Option<&SpaceToken>) -> String {
+fn caller_identity(t: &Option<CWToken>, st: Option<&SpaceToken>) -> String {
     if let Some(t) = t {
         return t.user.to_string();
     }
@@ -493,7 +505,7 @@ fn wiki_read_access(t: &Option<CWToken>, st: Option<&SpaceToken>) -> WikiAccess 
         Some(Vec::new())
     };
     WikiAccess {
-        actor: wiki_actor(t, st),
+        actor: caller_identity(t, st),
         labels,
     }
 }

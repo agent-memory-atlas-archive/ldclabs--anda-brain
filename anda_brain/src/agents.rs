@@ -185,6 +185,27 @@ impl Tool<BaseCtx> for GuardedMemory {
                 anda_kip::KipError::not_authorized(error),
             )));
         }
+        // A Memory Interface pass writes in its scope and within its intent:
+        // the host binds the scope, and refuses a write the intent does not
+        // allow (MI §3, §4).
+        let intent = if formation {
+            ctx.get_state::<crate::memory_interface::IntentState>()
+                .and_then(|state| state.0)
+        } else {
+            None
+        };
+        if let Some(intent) = &intent {
+            if let Some(refusal) = intent.refusal(&request) {
+                return Ok(error_output(Response::from(
+                    anda_kip::KipError::not_authorized(refusal),
+                )));
+            }
+            if let Err(error) = kip::attach_intent_bindings(&mut request, intent.bindings()) {
+                return Ok(error_output(Response::from(
+                    anda_kip::KipError::not_authorized(error),
+                )));
+            }
+        }
         let nexus = self.memory.nexus();
         let nexus = nexus.as_ref();
         if !formation {
@@ -208,6 +229,9 @@ impl Tool<BaseCtx> for GuardedMemory {
         }
         let response = kip::execute_cognition_request(nexus, &request).await;
         crate::vocabulary::review_model_defines(nexus, &defines, &response).await;
+        if let Some(trace) = ctx.get_state::<crate::memory_interface::FormationTrace>() {
+            trace.0.lock().record(&request, &response);
+        }
         Ok(error_output(response))
     }
 }
@@ -228,6 +252,14 @@ fn error_output(res: Response) -> ToolOutput<Response> {
 #[async_trait::async_trait]
 pub trait BrainHook: Send + Sync {
     fn is_maintenance_processing(&self) -> bool;
+    /// A predecessor receipt that failed, blocking this Memory Interface
+    /// revision (MI §5.1); `None` when it may proceed.
+    async fn memory_predecessor_failed(
+        &self,
+        _intent: &crate::memory_interface::MemoryIntent,
+    ) -> Option<String> {
+        None
+    }
     async fn on_conversation_end(&self, agent_name: &str, conversation: &Conversation);
     async fn try_start_formation(&self);
     async fn try_start_maintenance(&self, formation_id: DocumentId) -> Option<DocumentId>;

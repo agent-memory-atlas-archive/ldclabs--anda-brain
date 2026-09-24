@@ -41,8 +41,9 @@ stores a ten-minute preview. Operation ids use 1–128 ASCII letters, digits, `_
 `-`. `kind` is `correct`, `world_change`, `misrecorded`, `suppress`, or `delete`.
 It returns a receipt with exact versioned targets, excluded sources, scope and
 `preview_digest`. `misrecorded` (the Brain recorded what the caller never said)
-needs recording repair, which kip-do does not provide, so it fails
-`unsupported_capability` and is never written as a correction or a world change.
+is recording repair, which runs through the Memory Interface `revise` intent, so
+this value-based API fails `unsupported_capability` and never writes it as a
+correction or a world change.
 
 `productCommit(auth, operation_id, preview_digest)` revalidates the record, source
 closure and current permissions. Retries with the same operation/input recover the

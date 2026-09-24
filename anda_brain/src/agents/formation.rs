@@ -537,6 +537,22 @@ impl FormationAgent {
                 }
             }
         }
+        // A Memory Interface revision waits for its predecessors; one that
+        // failed blocks it for good, and that is reported, not skipped
+        // (MI §5.1).
+        let intent = crate::memory_interface::MemoryIntent::of(conversation).map(Arc::new);
+        if let Some(intent) = &intent
+            && let Some(blocker) = self.hook.memory_predecessor_failed(intent).await
+        {
+            conversation.status = ConversationStatus::Cancelled;
+            conversation.failed_reason = Some(format!("predecessor_failed:{blocker}"));
+            self.persist_conversation_snapshot(conversation).await;
+            return;
+        }
+        let trace = crate::memory_interface::FormationTrace::resume(conversation);
+        ctx.base
+            .set_state(crate::memory_interface::IntentState(intent.clone()));
+        ctx.base.set_state(trace.clone());
         let prompt = match conversation
             .messages
             .first()
@@ -606,6 +622,14 @@ impl FormationAgent {
                 .and_then(|person| person.get("id"))
                 .and_then(Json::as_str),
         )
+        .map(|mut ingest| {
+            // A scoped observation's Evidence carries its scope too, so the
+            // raw source stays in its task (Profile §20.3).
+            if let Some(intent) = &intent {
+                intent.scope_evidence(&mut ingest);
+            }
+            ingest
+        })
         .map(Arc::new);
         // Each claim's `at` is when its source said it (Spec §13.2), so the
         // model reads the captured times rather than guessing them.
@@ -646,12 +670,16 @@ impl FormationAgent {
         let mut runner = ctx.clone().completion_iter(
             CompletionRequest {
                 instructions: format!(
-                    "{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Your Notes:\n{}\n\n# Counterparty Profile:\n{}\n\n# Captured Evidence:\n{}\n\n# Current Datetime: {}",
+                    "{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Your Notes:\n{}\n\n# Counterparty Profile:\n{}\n\n# Captured Evidence:\n{}\n\n# Memory Interface Intent:\n{}\n\n# Current Datetime: {}",
                     super::prompts::system_prompt(super::prompts::PromptTarget::Formation, &self.prompt),
                     primer,
                     serde_json::to_string(&notes.items).unwrap_or_default(),
                     serde_json::to_string(&counterparty_info).unwrap_or_default(),
                     captured,
+                    intent
+                        .as_deref()
+                        .map(crate::memory_interface::MemoryIntent::directive)
+                        .unwrap_or_else(|| "none (an ordinary Formation submission)".into()),
                     local_date_hour(self.clock.now_ms()).unwrap_or_default()
                 ),
                 prompt,
@@ -667,6 +695,7 @@ impl FormationAgent {
         let mut host = FormationRunnerHost {
             agent: self,
             review_prompt,
+            trace,
         };
         drive_runner_loop(&mut host, &mut runner, conversation).await;
     }
@@ -679,6 +708,9 @@ struct FormationRunnerHost<'a> {
     /// Taken once at the first successful idle boundary. The follow-up shares
     /// the runner's turn/time budgets and survives a compaction handoff.
     review_prompt: Option<String>,
+    /// What the pass has committed, persisted with each snapshot so a
+    /// receipt's disposition survives a restart.
+    trace: crate::memory_interface::FormationTrace,
 }
 
 impl RunnerHost for FormationRunnerHost<'_> {
@@ -708,6 +740,7 @@ impl RunnerHost for FormationRunnerHost<'_> {
         // Clears a previous attempt's failure so the process_loop Failed
         // retry converges to a clean Completed snapshot.
         conversation.failed_reason = None;
+        self.trace.persist_into(conversation);
     }
 
     fn after_turn(&mut self, runner: &mut CompletionRunner, is_done: bool) -> RunnerFlow {

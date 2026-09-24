@@ -32,6 +32,14 @@ impl BrainHook for Hooks {
             .unwrap_or(false)
     }
 
+    async fn memory_predecessor_failed(
+        &self,
+        intent: &crate::memory_interface::MemoryIntent,
+    ) -> Option<String> {
+        let space = self.space()?;
+        space.memory_predecessors_failed(intent).await
+    }
+
     async fn on_conversation_end(&self, agent_name: &str, conversation: &Conversation) {
         #[cfg(feature = "experiments")]
         if self.space().is_some_and(|space| !space.automatic) {
@@ -137,6 +145,21 @@ impl BrainHook for Hooks {
                         usage.accumulate(&conversation.usage);
                         Some(usage)
                     });
+                // A Memory Interface receipt settles as soon as its pass
+                // ends, so a misrecording is repaired without waiting for a
+                // reader (MI §5).
+                if matches!(
+                    conversation.status,
+                    ConversationStatus::Completed | ConversationStatus::Cancelled
+                ) && let Some(space) = self.space()
+                    && let Err(err) = space.settle_memory_conversation(conversation).await
+                {
+                    log::warn!(
+                        target: "brain",
+                        space_id = space.id;
+                        "memory receipt settlement failed: {err}"
+                    );
+                }
                 // New memory can answer any past miss: drop the whole
                 // negative-knowledge cache (plan M5 invalidation).
                 if conversation.status == ConversationStatus::Completed

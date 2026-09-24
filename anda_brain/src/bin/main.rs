@@ -429,6 +429,23 @@ fn build_router(
             routing::get(get_memory_attention),
         )
         .route(
+            "/v1/{space_id}/memory/sources",
+            routing::post(post_memory_source),
+        )
+        .route(
+            "/v1/{space_id}/memory/sources/{source_ref}",
+            routing::get(get_memory_source),
+        )
+        .route(
+            "/v1/{space_id}/memory/receipts/{receipt_ref}",
+            routing::get(get_memory_receipt),
+        )
+        .route(
+            "/v1/{space_id}/memory/plans/{plan_ref}",
+            routing::get(get_memory_plan),
+        )
+        .route("/v1/{space_id}/memory", routing::post(post_memory))
+        .route(
             "/v1/{space_id}/schema/drafts",
             routing::get(get_schema_drafts),
         )

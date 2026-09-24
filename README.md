@@ -44,6 +44,11 @@ KIP 1.x Spaces still upgrade automatically.
   derives `effective_strength` from base, anchor and the pinned
   `kip:strength-half-life-30d` policy the host binds on every model write, and a
   missing value is unknown. `memory_strength_decay_factor` is deprecated and ignored.
+- **Memory Interface.** Business Agents stage what they observed
+  (`POST /v1/{space_id}/memory/sources`) and send one intent per request to
+  `POST /v1/{space_id}/memory`; receipts report `recorded` → `available` with an
+  honest disposition, and recall reports final belief, coverage and an expandable
+  basis.
 - **Attention recall.** `GET /v1/{space_id}/memory/attention` returns fired Watches
   and due Commitments ordered by `(raised_seq, ref)`, with a cursor the caller
   keeps. The settlement raises each due Commitment without a Watch once per
@@ -56,8 +61,12 @@ immutable `SkillRevision`; Watch progress and task leases use protected Nexus
 operations. The former family-rate Skill promotion rule has been removed. Without
 configured independent observers, frozen trials and replayable evaluations,
 procedures remain unproven and `skills.unsupported_reason` reports the limitation.
-Existing Brain endpoints remain available. The optional five-intent Memory Interface
-and its `memory_*` bundles are **not advertised** by these adapters.
+Existing Brain endpoints remain available, and both adapters now serve the KIP
+**Memory Interface** at the `memory_basic` level: `POST /v1/{space_id}/memory` takes one
+of five intents (`observe`, `recall`, `revise`, `feedback`, `forget`) over staged
+sources, with idempotent receipts, `after` barriers, scoped seven-channel recall,
+recording repair for a misrecording and governed forgetting. `memory_experience` and
+`memory_learning` are not advertised.
 
 Rust Markdown submissions receive the same captured Evidence
 as structured messages, and existing counterparty display names are preserved
@@ -398,7 +407,7 @@ MCP_AUTH_TOKEN="$SPACE_TOKEN" ./anda_brain mcp --space-id my_space_001 local --d
 
 HTTP service mode also exposes a Streamable HTTP MCP endpoint at `/mcp/<spaceId>`. For internal agent platforms, assign each employee a space and configure their MCP client with `https://your-brain-host/mcp/<spaceId>` plus `Authorization: Bearer <spaceToken-or-CWT>`. For local MCP clients, register `anda_brain mcp --space-id <spaceId> local --db <path>` as a stdio server.
 
-Both MCP transports expose memory tools such as `anda_brain_remember_conversation`, `anda_brain_recall_memory`, `anda_brain_run_maintenance`, and `anda_brain_execute_kip_readonly`.
+Both MCP transports expose memory tools such as `anda_brain_memory` (the Memory Interface), `anda_brain_stage_memory_source`, `anda_brain_remember_conversation`, `anda_brain_recall_memory`, `anda_brain_run_maintenance`, and `anda_brain_execute_kip_readonly`.
 
 ### Integration Examples
 

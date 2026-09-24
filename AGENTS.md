@@ -52,6 +52,11 @@ recovery fully tested.
 - `anda_brain/src/kip.rs`: the KIP 2.0 envelope seam (request builders, the
   read-only gate, two-level response reading, and the KIP string/timestamp
   literal helpers).
+- `anda_brain/src/memory_interface/` and `handler/memory_interface.rs`: the KIP
+  Memory Interface at `memory_basic` (staged sources, intake ledger and receipts,
+  recall briefings, recording repair, forget/ErasurePlan). Receipt progress is
+  read from the Formation conversation and its persisted trace; keep it monotone
+  and keep the advertised levels truthful.
 - `anda_brain/src/assess/` and `assess.rs`: online diagnostic model routing,
   typed read observations, Recall trace/citations and metadata. Preserve these
   and the usage/correction ledgers; they are not the retired offline evaluator.
@@ -249,7 +254,8 @@ confidently repeat things nobody claimed:
   Profile has no `Preference` type.
 - A changed world is one new Assertion from the change; temporal succession ends
   the old value. `SUPERSEDING` is only for a claim that was wrong, and a
-  misrecording needs recording repair (not provided), never a correction.
+  misrecording needs recording repair (the Memory Interface `revise` with
+  `change_kind: "misrecorded"`), never a correction.
   Claims carry `asserted_at` from their source's observation time.
 - Decay is computed at read time; never sweep or default `memory_strength`. A
   model write of `memory_strength` carries `last_metabolized_at` and the host-bound

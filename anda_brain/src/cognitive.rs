@@ -10,8 +10,8 @@ use serde_json::json;
 use std::sync::{Arc, LazyLock};
 
 pub(crate) const CAPABILITIES: &str = "Anda Brain uses KIP 2.0 / cognitive-memory@2.0.0. \
-This connection exposes the existing Brain API and raw KIP, not the optional five-intent \
-Memory Interface; no memory_* bundle or full CognitiveMemory conformance is claimed. \
+This connection exposes the existing Brain API, raw KIP and the KIP Memory Interface at the \
+memory_basic level only; memory_experience, memory_learning and full CognitiveMemory conformance are not claimed. \
 Procedural candidates remain unproven until independently qualified; trial/evaluation scheduling requires explicit host configuration. \
 External dispatch requires installed host bindings and the four-way action gate; memory_runtime status reports this connection's configuration. Model plans cannot write learning records, \
 Skill learning pointers, computed lineage, LeaseState or WatchState. Nexus computes dependency validity; a stored review never overrides it. \

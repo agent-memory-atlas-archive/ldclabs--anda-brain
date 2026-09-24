@@ -4,8 +4,8 @@ import { contentDigest, tryParseElementId, type Json, type JsonMap } from '@ldcl
 export const BRAIN_CAPABILITIES = {
   kip: '2.0',
   cognitive_memory_schema: '2.0.0',
-  memory_interface: false,
-  memory_bundles: [],
+  memory_interface: true,
+  memory_bundles: ['memory_basic'],
   learning_scheduler: false,
   external_dispatch: false,
   structured_watch_runtime: true,

@@ -41,6 +41,9 @@ pub struct SpaceInfo {
     pub formation_processed_id: u64,
     pub maintenance_processed_id: u64,
     pub maintenance_at: MaintenanceAt,
+    /// The Memory Interface descriptor this Space serves (MI §2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_interface: Option<anda_kip::memory::binding::Descriptor>,
     #[cfg(feature = "wiki")]
     #[serde(default)]
     pub wiki_docs: usize,

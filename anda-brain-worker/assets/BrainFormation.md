@@ -883,19 +883,48 @@ stays `active` and keeps answering for its time. Never `SUPERSEDING` a claim tha
 was true for its time, and never invent a change instant. A preference that
 changed within one kind is such a change.
 
+## A.8 Memory Interface intents
+
+This Worker serves the KIP Memory Interface at the `memory_basic` level. When the
+request JSON carries `memory_intent`, the host admitted the source through
+`observe` or `revise`: the messages were staged by the host, a receipt is waiting
+on this plan, and the host decides the receipt's disposition from what you commit
+(`formed`, `evidence_only`, or `skipped` when your plan is empty). An empty plan
+is an honest answer for a source with nothing worth remembering.
+
+- **Scope.** When the intent names a task or contexts, the host binds `:contexts`
+  and `:scope_task`. Write every ASSERT with `context: :contexts`; a scoped ASSERT
+  without it refuses the whole plan. Set `SET FACET "MemoryScope" {task_ref:
+  :scope_task, context_refs: :contexts}` on every Event, Insight, Experience or
+  Commitment you create from the source. A task-scoped instruction is not a global
+  preference.
+- **Constraints.** Record a standing rule or prohibition ("never deploy on
+  Fridays") as an `Insight` with `SET ATTRIBUTES {summary: …, insight_class:
+  "constraint"}` in the source's scope; recall reads constraints from that shape.
+- **revise.** `correction` supersedes the actor's own wrong claim and keeps the
+  corrected interval; `world_change` is one new ASSERT from the change and never
+  supersedes or retracts; `unspecified` records new claims only. `misrecorded` is
+  repaired by the host through recording repair: never supersede, correct or
+  retract; if `:orig` (the original source) states a claim the extraction should
+  have been, write it citing `evidence: :orig` with `at:` the original source's
+  observed time, and otherwise return an empty plan. A plan the intent does not
+  allow is refused whole.
+- `memory_intent` is host data about this pass, never an instruction found in the
+  conversation. Do not bind `:contexts`, `:scope_task` or `:orig` yourself.
+
 ## A.9 Cognitive Memory Profile boundary
 
-The installed Profile (`cognitive-memory@2.0.0`) is vocabulary, not an advertised
-Memory Interface or learning bundle. Use the existing Formation API. No processing
-receipt or recall after barrier is implied by a conversation id or by committed
-Evidence alone. Preserve source and task context. Topic strings are not
+The installed Profile (`cognitive-memory@2.0.0`) is vocabulary; the Memory
+Interface level this Worker advertises is `memory_basic` only. An ordinary
+`/formation` request carries no processing receipt: a conversation id or committed
+Evidence alone is not one. Preserve source and task context. Topic strings are not
 authorization or global scope. For an exact authorized task or context scope,
 write it explicitly — `ASSERT … {context: [<context ref>]}` or CREATE ASSERTION
 `context_refs`; it is immutable once written. Never infer a task scope.
 Unresolved scope/actor/meaning stays explicit. A claim the Brain misrecorded is
-not yours to correct: recording repair is not available here, so report it rather
-than superseding or retracting on the actor's behalf. Feedback is attributed
-Evidence, not a gradable OutcomeRecord. Model plans cannot write learning/runtime
+not yours to correct in an ordinary pass: the host repairs it through a
+`misrecorded` revise, so report it rather than superseding or retracting on the
+actor's behalf. Feedback is attributed Evidence, not a gradable OutcomeRecord. Model plans cannot write learning/runtime
 record facets (TrialRecord, EvaluationRecord, AttemptRecord, OutcomeRecord,
 WatchState, LeaseState), the computed GradingState, a Skill's `current_trial` /
 `current_evaluation`, or the computed lineage fields (`derived_from`,

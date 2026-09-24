@@ -25,7 +25,10 @@ import {
 } from './kip.js'
 import { assess, settle } from './settle.js'
 import { recallAttention, type AttentionRecall, type AttentionRecallInput } from './attention.js'
+import { MemoryLedger, type Admission, type IntakeRecord, type PassTrace, type StageSourceInput } from './memory-ledger.js'
+import { descriptor, type AttentionItem, type Briefing, type MemoryRequest, type Progress, type Scope } from './memory-wire.js'
 import type {
+  Message,
   BrainStats,
   DeclaredVocabulary,
   DraftSymbol,
@@ -88,6 +91,52 @@ export class AndaBrain extends KipDatabase<Env> {
   acknowledgeCorrections(ids: string[], epoch: number): void {
     this.checkProcessing(epoch)
     this.maintenance.acknowledge(ids)
+  }
+
+  private get memory(): MemoryLedger {
+    this.ensureInitialized()
+    return new MemoryLedger(this.nexus, this.ctx.storage, this.product, this.nexus.session(this.authenticate(undefined)))
+  }
+
+  // ── Memory Interface (see memory-ledger.ts) ────────────────────────────
+  memoryStage(namespace: string, space: string, input: StageSourceInput) {
+    return this.memory.stage(namespace, space, input)
+  }
+  memorySource(namespace: string, sourceRef: string) {
+    return this.memory.stagedSource(namespace, sourceRef)
+  }
+  memoryAdmit(namespace: string, space: string, request: MemoryRequest): Admission {
+    return this.memory.admit(namespace, space, request)
+  }
+  memoryCaptureEvidence(receiptRef: string, messages: Message[], observedAt: string, purpose: 'feedback' | 'revise-report', about?: JsonMap): IntakeRecord {
+    return this.memory.captureEvidence(receiptRef, messages, observedAt, purpose, about)
+  }
+  memoryFinishFormation(receiptRef: string, trace: PassTrace): IntakeRecord {
+    return this.memory.finishFormation(receiptRef, trace)
+  }
+  memoryFailFormation(receiptRef: string, error: { code: string; message: string }): IntakeRecord {
+    return this.memory.failFormation(receiptRef, error)
+  }
+  memoryForget(namespace: string, space: string, request: MemoryRequest, owner: boolean): IntakeRecord {
+    return this.memory.forget(namespace, space, request, owner)
+  }
+  memoryBarrier(namespace: string, after: string[]): Progress[] {
+    return this.memory.barrier(namespace, after)
+  }
+  memoryScopedAttention(scope: Scope | undefined, items: AttentionRecall['items']): AttentionItem[] {
+    return this.memory.scopedAttention(scope, items)
+  }
+  memoryDeliver(namespace: string, scope: Scope | undefined, cited: string[], options: Parameters<MemoryLedger['deliver']>[3]): Briefing {
+    return this.memory.deliver(namespace, scope, cited, options)
+  }
+  memoryExpand(namespace: string, target: string, evidence: boolean): Briefing {
+    return this.memory.expand(namespace, target, evidence)
+  }
+  memoryReceipt(namespace: string, receiptRef: string): JsonMap {
+    return this.memory.receiptView(namespace, receiptRef)
+  }
+  memoryPlan(namespace: string, planRef: string): JsonMap {
+    return this.memory.plan(namespace, planRef)
   }
 
   private get product(): MemoryProduct {
@@ -503,7 +552,16 @@ export class AndaBrain extends KipDatabase<Env> {
    * Object is single-threaded — so there is no window for a second caller to
    * observe a half-initialized brain and nothing for a promise to guard.
    */
+  private hostDeclared = false
+
   private ensureInitialized(): void {
+    // The binding this Worker serves, declared to the engine so `DESCRIBE
+    // CAPABILITIES`/`PRIMER` and every `requires` block report it truthfully
+    // (Spec §67.4, MI §2). Process state: declared again after eviction.
+    if (!this.hostDeclared) {
+      this.nexus.setHostCapabilities({ memory_interface: descriptor(this.ctx.id.name) as never })
+      this.hostDeclared = true
+    }
     if (this.ctx.storage.kv.get<string>(APP_BOOTSTRAP_KEY) === APP_BOOTSTRAP_VERSION) {
       this.product.recover()
       return

@@ -122,7 +122,7 @@ export function capturedEvidence(
 export function observationIngest(
   operations: readonly KipOperation[],
   messages: readonly Message[],
-  observed: { at: string; origin: string; sourceActor?: string },
+  observed: { at: string; origin: string; sourceActor?: string; scope?: { task: string | null; contexts: string[] } },
 ): IngestContext | undefined {
   const start = Math.max(0, messages.length - MAX_INGESTED_MESSAGES)
   const recent = messages.slice(start)
@@ -142,6 +142,11 @@ export function observationIngest(
     ...(observed.sourceActor === undefined || message.role !== 'user'
       ? {}
       : { source_actor: { id: observed.sourceActor } }),
+    // A scoped observation's Evidence carries its scope, so the raw source
+    // stays in its task (Profile §20.3).
+    ...(observed.scope && observed.scope.contexts.length
+      ? { facets: { MemoryScope: { task_ref: observed.scope.task, context_refs: observed.scope.contexts } } }
+      : {}),
   }))
 
   // §74 merges request- and operation-level parameters into one binding
@@ -936,4 +941,83 @@ export function isDefine(command: string): boolean {
   } catch {
     return false
   }
+}
+
+/** What a Memory Interface pass was admitted for (see `memory-ledger.ts`). */
+export interface IntentShape {
+  receipt_ref: string
+  operation: 'observe' | 'revise'
+  scope: { task: string | null; contexts: string[] }
+  change_kind?: string
+  target_ref?: string
+  original_evidence?: string
+  original_observed_at?: string
+}
+
+const INTENT_BINDINGS = ['contexts', 'scope_task', 'orig']
+
+/** The parameters the host binds on every write of an intent's pass. */
+export function intentBindings(intent: IntentShape): JsonMap {
+  return {
+    contexts: intent.scope.contexts,
+    scope_task: intent.scope.task,
+    ...(intent.original_evidence ? { orig: intent.original_evidence } : {}),
+  }
+}
+
+/**
+ * The intent gate (mirrors `MemoryIntent::refusal` in the Rust Brain): a
+ * scoped pass writes every claim with `context: :contexts`, the host's
+ * bindings are not the plan's to set, and only a `correction` revise moves
+ * another claim's lifecycle — a world change, a misrecording and an
+ * unspecified revision only add claims (MI §4). An observation is ordinary
+ * Formation.
+ */
+export function assertIntentOperations(intent: IntentShape, operations: readonly KipOperation[], planParameters: JsonMap = {}): void {
+  if (INTENT_BINDINGS.some(name => name in planParameters)) {
+    throw new Error('`:contexts`, `:scope_task` and `:orig` are bound by the host; cite them without binding them')
+  }
+  for (const operation of operations) {
+    const command = parseKip(operation.command)
+    if (!('Kml' in command)) continue
+    for (const clause of command.Kml.clauses) {
+      if ('CreateAssertion' in clause && intent.scope.contexts.length > 0) {
+        const fields = new Map((clause.CreateAssertion as unknown as { set_fields?: [string, unknown][] | null }).set_fields ?? [])
+        const context = fields.get('context_refs')
+        if (!(isObject(context) && context.Param === 'contexts')) {
+          throw new Error('this observation is scoped: write every ASSERT with `context: :contexts` so the claim ' +
+            'stays in its task and contexts (MI §3, Profile §20.3)')
+        }
+      }
+      if ('Transition' in clause && intent.operation === 'revise') {
+        const state = transitionState(clause.Transition.to, operation.parameters)
+        if (['completed', 'failed', 'cancelled', 'running'].includes(state ?? '')) continue
+        if (intent.change_kind === 'correction' && ['superseded', 'corrected', 'retracted'].includes(state ?? '')) continue
+        throw new Error(intent.change_kind === 'misrecorded'
+          ? 'a misrecording is repaired by the host; do not supersede, correct or retract any claim'
+          : intent.change_kind === 'world_change'
+            ? 'a world change is one new Assertion from the change; temporal succession ends the old value, so do not supersede or retract it (Spec §25.4)'
+            : 'change_kind is unspecified: record the revision as new claims; never supersede or retract on a guess (MI §4)')
+      }
+    }
+  }
+}
+
+/** The directive a pass's prompt carries (mirrors `MemoryIntent::directive`). */
+export function intentDirective(intent: IntentShape): string {
+  const scope = intent.scope.contexts.length === 0
+    ? 'General (no task or context scope).'
+    : `Task ${intent.scope.task ?? 'none'} with context set ${JSON.stringify(intent.scope.contexts)}. Write every ASSERT with ` +
+      '`context: :contexts`, and set `SET FACET "MemoryScope" {task_ref: :scope_task, context_refs: :contexts}` on every ' +
+      'Event, Insight, Experience or Commitment you create from this source. A task-scoped instruction is not a global preference.'
+  const kind = intent.operation === 'observe'
+    ? 'observe: encode what this source says. If it holds nothing worth remembering, write nothing; that is an honest `skipped`.'
+    : intent.change_kind === 'correction'
+      ? `revise (correction): the speaker says their earlier claim was wrong. Write the corrected claim as a new ASSERT SUPERSEDING the wrong one${intent.target_ref ? ` (the caller named ${intent.target_ref})` : ''}, keeping the corrected world interval.`
+      : intent.change_kind === 'world_change'
+        ? 'revise (world change): write one new ASSERT from the time of the change; temporal succession ends the old value. Do not supersede or retract it.'
+        : intent.change_kind === 'misrecorded'
+          ? `revise (misrecorded): the host is repairing extraction ${intent.target_ref ?? 'unknown'} recorded from Evidence ${intent.original_evidence ?? 'unknown'} (bound as \`:orig\`, observed_at ${intent.original_observed_at ?? 'unknown'}). Do not supersede, correct or retract anything. If \`:orig\` states a claim the extraction should have been, write it citing \`evidence: :orig\` with \`at: "${intent.original_observed_at ?? ''}"\`; otherwise write nothing.`
+          : 'revise (unspecified): record what this source says as new claims. Do not supersede or retract anything.'
+  return `Receipt ${intent.receipt_ref}. Intent — ${kind}\nScope — ${scope}`
 }

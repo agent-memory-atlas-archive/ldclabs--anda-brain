@@ -428,6 +428,44 @@ pub fn attach_host_bindings(request: &mut Request, now_ms: u64) -> Result<(), St
     Ok(())
 }
 
+/// Binds a Memory Interface pass's host parameters (its context set, its
+/// MemoryScope and, for a misrecording, the original source) into a request
+/// that writes. Host-owned like the strength pin: a request binding one of
+/// these names itself is refused rather than overridden.
+pub fn attach_intent_bindings(
+    request: &mut Request,
+    bindings: Map<String, Json>,
+) -> Result<(), String> {
+    if !request.operations.iter().any(|operation| {
+        operation
+            .parse()
+            .is_ok_and(|command| writes_memory(&command))
+    }) {
+        return Ok(());
+    }
+    let binds = |parameters: Option<&Map<String, Json>>| {
+        parameters
+            .is_some_and(|parameters| bindings.keys().any(|name| parameters.contains_key(name)))
+    };
+    if binds(request.parameters.as_ref())
+        || request
+            .operations
+            .iter()
+            .any(|operation| binds(operation.parameters.as_ref()))
+    {
+        return Err(
+            "`:contexts`, `:scope_task` and `:orig` are bound by the host; cite them without \
+             binding them"
+                .into(),
+        );
+    }
+    request
+        .parameters
+        .get_or_insert_with(Map::new)
+        .extend(bindings);
+    Ok(())
+}
+
 /// Why a `MnemonicState` write leaves strength unknown, if it does.
 ///
 /// `effective_strength` is computed from the base, its anchor and a pinned

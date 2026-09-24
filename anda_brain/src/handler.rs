@@ -34,7 +34,11 @@ use crate::{
     types::*,
 };
 use std::sync::Arc;
+mod memory_interface;
 mod runtime;
+pub use memory_interface::{
+    get_memory_plan, get_memory_receipt, get_memory_source, post_memory, post_memory_source,
+};
 #[cfg(feature = "mcp")]
 pub(crate) use runtime::runtime_error;
 pub use runtime::{get_attention, get_runtime_status, post_attention_response, post_outcome};
@@ -62,6 +66,9 @@ pub async fn get_information(State(app): State<AppState>) -> impl IntoResponse {
         "name": app.app_name,
         "version": app.app_version,
         "sharding": app.sharding,
+        // Every Space served here speaks the Memory Interface; its default
+        // Space is the path segment of `POST /v1/{space_id}/memory`.
+        "memory_interface": crate::memory_interface::descriptor_template(),
          "description": "Brain is a long-term memory system for LLM agents, providing persistent storage and retrieval of knowledge across interactions. It enables agents to remember facts, preferences, relationships, past events, and any other information that can be useful for answering questions and making decisions. Brain organizes memories in a structured way, allowing efficient search and recall based on natural language queries. By using Brain, agents can maintain context and continuity over time, improving their ability to assist users effectively.",
     });
 

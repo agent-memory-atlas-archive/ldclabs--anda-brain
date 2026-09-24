@@ -15,7 +15,7 @@ passes reach the model in assessment.settlement_errors.
 
 The Rust `product` module provides Assertion-backed `MemoryRecord` projections, stable native revisions, explicit stance/lifecycle/storage state and typed Evidence source references. `Space::product_records`, `product_record` and `product_source` do not authenticate a user. The embedding host must enforce owner/source visibility before returning any record, preview, dependent identifier or source quote. A matching source digest is provenance, not proof that an inference is correct.
 
-`Space::ingest_product` accepts a bounded, trusted `SourceIdentity` with parent conversation/session keys. Natural-language input cannot set that identity. `product_prepare`, `product_commit`, `product_change` and `product_discard` implement caller/operation-scoped immutable requests, fixed revision/preview digests and ten-minute previews. `Correct` supersedes the caller's wrong claim with a new one that keeps the corrected world interval; `WorldChange` adds one claim from now and lets temporal succession end the old value; `Misrecorded` is refused (`unsupported_capability`) because recording repair is not available. Each writes a user-statement Evidence and an Activity; none rewrites a Concept label or creates an illegal cross-Proposition supersession. Undo is another conditional change.
+`Space::ingest_product` accepts a bounded, trusted `SourceIdentity` with parent conversation/session keys. Natural-language input cannot set that identity. `product_prepare`, `product_commit`, `product_change` and `product_discard` implement caller/operation-scoped immutable requests, fixed revision/preview digests and ten-minute previews. `Correct` supersedes the caller's wrong claim with a new one that keeps the corrected world interval; `WorldChange` adds one claim from now and lets temporal succession end the old value; `Misrecorded` is refused (`unsupported_capability`) here: recording repair runs through the Memory Interface `revise` intent. Each writes a user-statement Evidence and an Activity; none rewrites a Concept label or creates an illegal cross-Proposition supersession. Undo is another conditional change.
 
 `Suppress` archives and `Delete` purges the declared bounded closure: selected Proposition/Assertions, cited inputs and recorded referrers. Unknown sources, Concept cascades, retention holds and closures above 128 elements are rejected. A durable source exclusion and processing epoch are admitted before mutation; tracked native work survives a cancelled API waiter and resumes before a reloaded Space is exposed. Stale Formation/Maintenance/Notes writes are fenced. Managed changes clear processing Notes and miss caches, stop old processor histories from entering new contexts and restrict automatic KIP readers to current active state. Trusted owner audit APIs remain distinct. Recall rechecks its captured epoch before returning context.
 
@@ -46,8 +46,12 @@ immutable `SkillRevision`; Watch progress and task leases use protected Nexus
 operations. The former family-rate Skill promotion rule has been removed. Without
 configured independent observers, frozen trials and replayable evaluations,
 procedures remain unproven and `skills.unsupported_reason` reports the limitation.
-Existing Brain endpoints remain available. The optional five-intent Memory Interface
-and its `memory_*` bundles are **not advertised** by these adapters.
+Existing Brain endpoints remain available. Both adapters now also serve the KIP
+**Memory Interface** at the `memory_basic` level — `POST /v1/{space_id}/memory` with the
+five intents `observe`, `recall`, `revise`, `feedback`, `forget`, staged sources,
+idempotent receipts, `after` barriers, seven-channel coverage, recording repair for a
+misrecording and governed forgetting (see [API](API.md#memory-interface)).
+`memory_experience`, `memory_learning` and `durable_brain_runtime` are not advertised.
 
 ## Architecture
 
@@ -598,6 +602,10 @@ Detailed API docs (with TypeScript request/response types):
 | `POST`  | `/v1/{space_id}/recall_structured`                     | Recall with machine-readable provenance (citations, found, uncertainty)       | `read` (CWT or space token)  |
 | `POST`  | `/v1/{space_id}/probe`                                 | LLM-free metamemory existence check with negative-knowledge caching           | `read` (CWT or space token)  |
 | `POST`  | `/v1/{space_id}/memory/pin`                            | Pin/unpin a memory (a `pinned` retention class)                               | `write` (CWT or space token) |
+| `POST`  | `/v1/{space_id}/memory`                                | Memory Interface: observe / recall / revise / feedback / forget               | recall `read`; others `write` |
+| `POST`  | `/v1/{space_id}/memory/sources`                        | Stage a captured source for the Memory Interface                              | `write` (CWT or space token) |
+| `GET`   | `/v1/{space_id}/memory/receipts/{receipt_ref}`         | A Memory Interface receipt's current progress                                 | `read` (CWT or space token)  |
+| `GET`   | `/v1/{space_id}/memory/plans/{plan_ref}`               | A forget's ErasurePlan and host surfaces                                      | `read` (CWT or space token)  |
 | `GET`   | `/v1/{space_id}/memory/attention`                      | Attention recall: fired Watches and due Commitments after a kept cursor       | `read` (public read allowed) |
 | `POST`  | `/v1/{space_id}/memory/forget`                         | Privacy-grade deletion (dry-run supported; physically removes, not archives)  | `write` (CWT or space token) |
 | `GET`   | `/v1/{space_id}/memory_status`                         | Memory observability: usage/probe/self-test counters, rates, graph counts    | `read` (CWT or space token)  |
@@ -638,6 +646,9 @@ Both MCP modes use the same storage/model configuration as the HTTP service and 
 
 | Tool | Purpose | Scope |
 | ---- | ------- | ----- |
+| `anda_brain_memory` | The Memory Interface: one observe/recall/revise/feedback/forget request | recall `read`; others `write` |
+| `anda_brain_stage_memory_source` | Stage observed messages and get a `source_ref` | `write` |
+| `anda_brain_memory_receipt` | Read a Memory Interface receipt's progress | `read` |
 | `anda_brain_remember_conversation` | Encode conversation messages into memory | `write` |
 | `anda_brain_recall_memory` | Ask natural-language questions against memory | `read` |
 | `anda_brain_run_maintenance` | Trigger memory consolidation/pruning | `write` |

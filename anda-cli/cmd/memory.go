@@ -38,7 +38,7 @@ var memoryStatusCmd = &cobra.Command{
 	},
 }
 
-var memoryCmd = &cobra.Command{Use: "memory", Short: "Pin or forget graph memory entities"}
+var memoryCmd = &cobra.Command{Use: "memory", Short: "Memory Interface intents, and pin or forget graph memory entities"}
 
 var memoryPinCmd = &cobra.Command{
 	Use:   "pin <entity>",
@@ -56,9 +56,15 @@ var memoryPinCmd = &cobra.Command{
 
 var memoryForgetCmd = &cobra.Command{
 	Use:   "forget <entity> [entity...]",
-	Short: "Delete graph entities and report what was removed",
+	Short: "Delete graph entities, or with --mode run a Memory Interface forget",
 	Args:  cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if mode, _ := cmd.Flags().GetString("mode"); mode != "" {
+			if len(args) != 1 {
+				return fmt.Errorf("a Memory Interface forget names one target")
+			}
+			return memoryInterfaceForget(cmd, args[0], mode)
+		}
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		response, err := newClient().ForgetMemory(cmd.Context(), &api.MemoryForgetInput{Entities: args, DryRun: dryRun})
 		if err != nil {

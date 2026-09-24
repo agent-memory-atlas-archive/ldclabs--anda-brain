@@ -581,7 +581,9 @@ pub struct Space {
     #[cfg(feature = "learning")]
     learning: Arc<crate::learning::LearningRuntime>,
     /// Memory usage ledger (plan M1): off-graph recall/correction counters.
-    ledger: Arc<UsageLedger>,
+    pub(crate) ledger: Arc<UsageLedger>,
+    /// Memory Interface intake, receipts and retained recall bases.
+    pub(crate) memory_interface: Arc<crate::memory_interface::MemoryInterface>,
     recall_receipts: Arc<crate::recall_receipt::RecallReceipts>,
     utility: Arc<crate::consequence::utility::UtilityRuntime>,
     trust: Arc<crate::consequence::trust::TrustRuntime>,
@@ -618,6 +620,11 @@ pub struct Space {
 }
 
 impl Space {
+    /// This Space's id.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
     pub fn is_processing(&self) -> bool {
         let memory_busy = self.formation.is_processing() || self.maintenance.is_processing();
         #[cfg(feature = "learning")]
@@ -638,6 +645,7 @@ impl Space {
             || self.product_control.tasks.is_busy()
             || self.attention.is_busy()
             || self.recall_receipts.is_busy()
+            || self.memory_interface.is_busy()
             || self.utility.is_busy()
             || self.trust.is_busy()
             || self.memory_runtime.as_ref().is_some_and(|r| r.is_busy())
@@ -745,6 +753,7 @@ impl Space {
             formation_processed_id: self.formation.get_processed().unwrap_or_default(),
             maintenance_processed_id: self.maintenance.get_processed().unwrap_or_default(),
             maintenance_at: self.maintenance.get_processed_at(),
+            memory_interface: Some(self.memory_descriptor()),
             #[cfg(feature = "wiki")]
             wiki_docs: self.wiki.docs_count(),
             #[cfg(feature = "wiki")]
@@ -814,7 +823,7 @@ impl Space {
         user: Principal,
         input: StringOr<FormationInput>,
     ) -> Result<AgentOutput, BoxError> {
-        self.ingest_with_source(user, input, None).await
+        self.ingest_with_source(user, input, None, None).await
     }
 
     /// Trusted host source identity; derive it from authenticated conversation
@@ -826,8 +835,29 @@ impl Space {
         source: crate::product::SourceIdentity,
     ) -> Result<AgentOutput, BoxError> {
         source.validate()?;
-        self.ingest_with_source(user, StringOr::Value(input), Some(source))
+        self.ingest_with_source(user, StringOr::Value(input), Some(source), None)
             .await
+    }
+
+    /// Queues a Formation conversation for a Memory Interface intent: the
+    /// staged source as input, its source identity (what a forget
+    /// suppresses) and the intent the pass runs under. Host-owned; nothing
+    /// here comes from a model's arguments.
+    pub(crate) async fn ingest_memory_intent(
+        &self,
+        user: Principal,
+        input: FormationInput,
+        source: crate::product::SourceIdentity,
+        intent: &crate::memory_interface::MemoryIntent,
+    ) -> Result<AgentOutput, BoxError> {
+        source.validate()?;
+        self.ingest_with_source(
+            user,
+            StringOr::Value(input),
+            Some(source),
+            Some(serde_json::to_value(intent)?),
+        )
+        .await
     }
 
     async fn ingest_with_source(
@@ -835,6 +865,7 @@ impl Space {
         user: Principal,
         mut input: StringOr<FormationInput>,
         source: Option<crate::product::SourceIdentity>,
+        intent: Option<serde_json::Value>,
     ) -> Result<AgentOutput, BoxError> {
         // The observation time becomes every formed claim's start key, so an
         // unreadable one is refused here instead of silently becoming the
@@ -899,12 +930,18 @@ impl Space {
                 AgentInput {
                     name: FormationAgent::NAME.to_string(),
                     prompt: input.to_string(),
-                    meta: source.map(|source| anda_core::RequestMeta {
-                        extra: serde_json::Map::from_iter([(
+                    meta: source.map(|source| {
+                        let mut extra = serde_json::Map::from_iter([(
                             crate::product::control::SOURCE_KEY.into(),
                             serde_json::json!(source),
-                        )]),
-                        ..Default::default()
+                        )]);
+                        if let Some(intent) = intent {
+                            extra.insert(crate::memory_interface::INTENT_KEY.into(), intent);
+                        }
+                        anda_core::RequestMeta {
+                            extra,
+                            ..Default::default()
+                        }
                     }),
                     resources: vec![],
                     ..Default::default()
@@ -1939,7 +1976,7 @@ impl Space {
     /// invite a caller to redo work that is durable. Every settlement command
     /// writes absolute values, so the honest answer costs nothing but a re-run
     /// on the next cycle.
-    async fn run_kip_settlement(&self, request: Request) -> Result<Response, BoxError> {
+    pub(crate) async fn run_kip_settlement(&self, request: Request) -> Result<Response, BoxError> {
         let nexus = self.memory.nexus();
         match timeout(
             SETTLEMENT_KIP_TIMEOUT,

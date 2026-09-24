@@ -30,12 +30,14 @@ Check the deployed service and its configuration before choosing an optional pat
 
 Formation and Maintenance share a per-Space writer guard. If explicit Maintenance reports busy, let the active task finish before retrying. A successful Formation submission only acknowledges queued work; its background model calls keep using the host concurrency budget until they finish. A Space closing for eviction can temporarily be unavailable; retry after it finishes.
 
-Use Formation, Recall and Maintenance for ordinary memory work. A Proposition's
+Prefer the **Memory Interface** (below): stage what you observed, then send one
+intent — `observe`, `recall`, `revise`, `feedback` or `forget` — to
+`POST /v1/{space_id}/memory`. It is served at the `memory_basic` level only. The
+older Formation, Recall and Maintenance endpoints remain available. A Proposition's
 existence is not belief; `insufficient` is not false. Corrections append new claims,
-and reading never increases confidence or utility. A returned conversation ID is
-not proof that Formation finished; inspect its completion before relying on a new
-fact or correction. The optional five-intent Memory Interface, bundles and standard
-`after` barrier are not advertised.
+and reading never increases confidence or utility. A plain Formation conversation
+ID is not a processing receipt; a Memory Interface receipt is, and a recall that
+passes it in `after` waits for it.
 
 For reminders or business follow-up, read the authenticated runtime status and inbox
 as described under **Attention and independent outcomes** below. A fired Watch is
@@ -393,7 +395,7 @@ tool calls and artifacts from the response. `recall_structured.answer` carries
 the same packet and `memory_budget` reports its count; extra trace citations are
 not copied outside the packet. Treat `budget_insufficient` or literal `null`
 with `failed_reason` as unusable/incomplete. `semantic_complete` and
-`action_ready` remain false; no optional Memory Interface bundle is claimed.
+`action_ready` remain false; this packet is not a Memory Interface briefing.
 Each query has host-side concept discovery before selection. Compact views
 carry `recall_detail` references for omitted fields; fetch projected attributes
 when more detail is needed. Pending/blocked commitments and warnings remain
@@ -544,9 +546,73 @@ Bundles follow the OKF v0.1 convention (Markdown + YAML frontmatter; concept pat
 
 ---
 
+## Memory Interface (recommended)
+
+Five intents, one request shape (`kip_memory: "2.0"`), one intent per request. The
+host keeps the retry identities and handles; you never write KIP, re-type observed
+bytes or invent scores. Check `GET /v1/{space_id}/info` → `memory_interface` for the
+advertised levels (`memory_basic` only) and budgets.
+
+**1. Stage what you observed** and keep the `source_ref`:
+
+```bash
+curl -sX POST https://your-brain-host/v1/my_space_001/memory/sources \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"messages": [{"role": "user", "content": "I moved to Shanghai on 2026-09-01."}],
+       "observed_at": "2026-09-02T08:00:00.000Z", "idempotency_key": "chat-42:msg-7"}'
+```
+
+**2. observe** it (a mutation: always send an `idempotency_key` you can retry with):
+
+```bash
+curl -sX POST https://your-brain-host/v1/my_space_001/memory \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"kip_memory": "2.0", "operation": "observe", "idempotency_key": "observe:chat-42:msg-7",
+       "scope": {"task_ref": "relocation"}, "input": {"source_ref": "src-…"}}'
+```
+
+The Response carries a `receipt` and `progress`: `recorded` means durable but not
+yet formed (`status: "pending"`); `available` means recall can include it, with an
+honest `disposition` (`formed`, `evidence_only` or `skipped`). Keep every receipt you
+have not yet seen available.
+
+**3. recall** before you act, passing those receipts in `after`:
+
+```json
+{"kip_memory": "2.0", "operation": "recall", "scope": {"task_ref": "relocation"},
+ "budget": {"max_output_tokens": 1200, "deadline_ms": 30000},
+ "input": {"query": "Where does the user live now?", "mode": "action", "after": ["rcpt-…"]}}
+```
+
+Read the `Briefing`: `items[].epistemic_status` is final belief (`insufficient` is
+not "no"), `coverage` names seven channels and any `pending_receipts`, and
+`action_eligible` says whether memory is sufficient — never whether you may act.
+Required constraints (and open commitments) always come back. Expand an item or the
+whole result with `{"target_ref": "<basis_ref or item ref>", "detail": "evidence"}`.
+Poll `{"mode": "attention", "attention_cursor": "<last cursor>"}` to receive due
+Commitments and fired Watches; keep the returned cursor. An item grants nothing.
+
+**4. revise** with the right history: `correction` (they were wrong),
+`world_change` (it was true, now it changed), `misrecorded` (the Brain recorded
+something they never said — name the wrong Assertion in `target_ref`; it is repaired,
+never recorded as their retraction), or `unspecified` (recorded as new claims only).
+
+**5. feedback** preserves a report with its actual origin (an assistant's own report
+is `agent_statement`); it never grades or promotes anything.
+
+**6. forget** `{"target_ref": "A-…" | "E-…" | "src-…", "mode": "payload_only" |
+"semantic"}` runs an ErasurePlan; `semantic` needs the owner's CWT. Report forgetting
+as done only when `result.status` is `completed`.
+
+Retrying a mutation with the same key replays the original receipt; the same key
+with different content fails `IdempotencyConflict`. Receipt progress is also at
+`GET /v1/{space_id}/memory/receipts/{receipt_ref}`. MCP clients use
+`anda_brain_stage_memory_source`, `anda_brain_memory` (`{request}`) and
+`anda_brain_memory_receipt`.
+
 ## Integration Pattern
 
-A typical integration workflow for a business agent (replace `your-brain-host` with your deployment address, e.g. `localhost:8042`):
+The older endpoints remain available for existing integrations (replace `your-brain-host` with your deployment address, e.g. `localhost:8042`):
 
 ### 1. Remember: Send conversations for memory encoding
 
@@ -603,6 +669,9 @@ Core MCP tools:
 
 | Tool | Purpose |
 |------|---------|
+| `anda_brain_memory` | The Memory Interface: one observe/recall/revise/feedback/forget request |
+| `anda_brain_stage_memory_source` | Stage observed messages; returns the `source_ref` |
+| `anda_brain_memory_receipt` | Read a Memory Interface receipt's progress |
 | `anda_brain_remember_conversation` | Encode conversation messages into long-term memory |
 | `anda_brain_recall_memory` | Query memory with natural language |
 | `anda_brain_run_maintenance` | Trigger consolidation and pruning |

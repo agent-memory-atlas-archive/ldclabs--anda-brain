@@ -32,7 +32,7 @@ The Rust `product` module provides Assertion-backed `MemoryRecord` projections, 
 - `WorldChange` — the world moved on. One new claim from now; temporal succession ends the old value, which stays `active` and true for its time.
 
 Both revisions keep the record's `context_refs` (exposed on `MemoryRecord`): supersession across context sets fails `SupersessionMismatch` (Spec §14.2), and a new value outside the old context set would start a second succession line instead of ending the old value (Spec §25.4).
-- `Misrecorded` — the Brain recorded what the caller never said. That needs recording repair, which this deployment does not provide, so prepare fails `unsupported_capability`; it is never written as a correction or a world change.
+- `Misrecorded` — the Brain recorded what the caller never said. That is recording repair, which runs through the Memory Interface `revise` intent with `change_kind: "misrecorded"` (see [Memory Interface](#memory-interface)); this value-based product API fails `unsupported_capability` and never writes it as a correction or a world change.
 
 None of them rewrites a Concept label or creates an illegal cross-Proposition supersession. Undo is another conditional change.
 
@@ -80,6 +80,234 @@ legacy counters stay zero. Watch `disarmed` also counts Nexus expiry, while text
 conditions remain deferred without a configured semantic evaluator. Model-generated Formation requests cannot replace captured
 ingest/msgN bindings; learning/runtime Facet writes fail UnsupportedCapability.
 Authorized raw administrative KIP remains subject to the engine's full contracts.
+
+<a id="memory-interface"></a>
+
+## Memory Interface (KIP 2.0, `memory_basic`)
+
+Every Space serves the optional KIP 2.0 Memory Interface
+(`KIP-2.0-Memory-Interface.md`, wire shapes in `kip-memory.schema.json`) at the
+`memory_basic` level: five intents — `observe`, `recall`, `revise`, `feedback`,
+`forget` — over one request shape, one intent per request. `memory_experience`,
+`memory_learning`, `durable_brain_runtime`, `receiver_fencing` and Capsule exchange
+are not advertised, and a request that `requires` one fails `UnsupportedCapability`
+before anything runs. The existing endpoints are unchanged; this is the path a
+business Agent should use.
+
+The descriptor is on `GET /info` (without a default Space) and on
+`GET /v1/{space_id}/info` as `memory_interface`; raw KIP clients see the same
+binding in `DESCRIBE CAPABILITIES` and `DESCRIBE PRIMER`:
+
+```json
+{
+  "kip_memory": "2.0",
+  "bundles": ["memory_basic"],
+  "default_budget": {"max_output_tokens": 4096, "deadline_ms": 30000},
+  "tokenizer": "o200k_base@tiktoken-rs-0.12.0",
+  "minimum_response_tokens": 256,
+  "default_space": {"id": "my_space"}
+}
+```
+
+| Endpoint | Auth | Body / result |
+| --- | --- | --- |
+| `POST /v1/{space_id}/memory` | recall: `read` (public spaces allow anonymous); mutations: `write`; a `semantic` forget needs a CWT (owner) | Memory Interface `Request` → `Response` (not an `RpcResponse`) |
+| `POST /v1/{space_id}/memory/sources` | `write` | `StageSourceInput` → `RpcResponse<StagedSourceRef>` |
+| `GET /v1/{space_id}/memory/sources/{source_ref}` | `read` credential | `RpcResponse<StagedSource>` for the caller that staged it |
+| `GET /v1/{space_id}/memory/receipts/{receipt_ref}` | `read` credential | `RpcResponse<{receipt, progress, result, warnings}>` |
+| `GET /v1/{space_id}/memory/plans/{plan_ref}` | `read` credential | `RpcResponse<{plan_ref, receipt_ref, plan, host_surfaces}>` |
+
+Once a caller is admitted, `/memory` answers HTTP 200 and carries failures inside
+the Response as `status: "failed"` with a KIP `error`
+(`InvalidRequestEnvelope`, `UnsupportedCapability`, `IdempotencyConflict`,
+`NotFoundOrNotVisible`, `PreconditionFailed`, `ResultLimitExceeded`,
+`CursorInvalid`, `NotAuthorized`, `OutcomeUnknown`, `LegalHoldConflict` …). The
+helper endpoints use the ordinary HTTP error mapping (404 for an unknown or
+foreign handle, 409 for a staging-key conflict).
+
+**Handles are scoped to the caller.** Staged sources, idempotency keys, receipts,
+retained recall bases and erasure plans belong to the authenticated caller — the
+CWT subject, a Space token by name, or the anonymous reader — and the Space.
+Another caller, or another Space, gets `NotFoundOrNotVisible`, never a hint that
+the handle exists.
+
+```ts
+export interface StageSourceInput {
+  messages: Message[]; // 1–16 observed messages; a message's `timestamp` (Unix ms) is when it was observed
+  observed_at?: string; // RFC 3339, canonicalized to millisecond UTC; defaults to capture time
+  kind?: 'message' | 'tool_trace' | 'artifact';
+  order?: { stream_ref: string; event_ref: string; ordinal: number; predecessor_receipts?: string[] };
+  idempotency_key: string; // same key + same bytes → same handle; other bytes → 409
+}
+export interface StagedSourceRef { source_ref: string; source_digest: string; captured_at: string }
+
+export interface MemoryRequest {
+  kip_memory: '2.0';
+  request_id?: string;
+  operation: 'observe' | 'recall' | 'revise' | 'feedback' | 'forget';
+  space?: { id: string }; // must be this Space when given
+  scope?: { task_ref?: string; context_refs?: string[] };
+  budget?: { max_output_tokens?: number; deadline_ms?: number; tokenizer?: string };
+  idempotency_key?: string; // required on every mutation, refused on recall
+  requires?: ('memory_basic' | 'memory_experience' | 'memory_learning')[];
+  input: object; // per operation, below
+}
+```
+
+**Staging before intake.** `observe`, `revise` and `feedback` cite a `source_ref`:
+a staged handle (`src-…`) or an existing active Evidence id. Admission runs before
+anything is stored: bytes a forget excluded are refused and bind no key.
+
+**Scope.** `task_ref` and `context_refs` are exact handles: an active Concept id of
+this Space, or an opaque host string that the host maps to a scope Concept (an
+`Event` with `event_class: "memory_scope"`, keyed `memory_scope:<handle>`), created
+on the first mutation that names it. The canonical context set is the task's
+Concept plus every context's. Formation writes every claim from a scoped source
+with `context: :contexts` (the gate refuses one that does not), puts a MemoryScope
+Facet on the Evidence and on the Events, Insights, Experiences and Commitments it
+creates, and recall admits a record only when its context set is inside the
+request's (KIP Spec §25.3). A task label or topic string never selects scope.
+
+**Idempotency.** A mutation's key is scoped to `(caller, Space, operation)`; its
+meaning is the operation, the requested scope, the input and the source's identity
+and digest — never `request_id` or `budget`. The same key and meaning returns the
+original `receipt` (with current progress) and never re-runs extraction; the same
+key with another meaning is `IdempotencyConflict`. Keys, receipts and staged
+sources survive restart.
+
+**Progress.** Each mutation returns an immutable `receipt` (`receipt_ref`,
+`operation`, `space_id`, `accepted_seq`) and its current `progress`:
+
+| Phase | Here |
+| --- | --- |
+| `recorded` | The source and intent are durable and a Formation conversation is queued, running or being retried after a failed attempt (the reason is in `progress.reason`). |
+| `available` | The pass completed; search indexes are synchronous, so `available_seq = resolved_seq`. `disposition` is `formed` (it wrote memory), `evidence_only` (it captured Evidence only) or `skipped` (it wrote nothing — an honest answer, reported in `warnings`), or `erased` for a completed forget. |
+| `failed` | Terminal: the source was excluded before it ran, a predecessor receipt failed, the pass was interrupted and its outcome is unknown (`OutcomeUnknown`), or a recording repair was refused. Never reported as memory. |
+
+A mutation answers `succeeded` only with available progress, `pending` while
+recorded, and `failed` with the error. Pass `budget.deadline_ms` on a mutation to
+wait for its pass inside the request. The disposition is decided by the host from
+what the pass actually committed, not by the model. `SourceOrder.predecessor_receipts`
+must be the caller's receipts; Formation processes the Space's queue in order, and
+a successor whose predecessor failed is failed, never formed.
+
+**observe** (`{source_ref}`) runs Formation over the staged messages with the
+intent and scope in its prompt; the result is a `FormationResult`
+(`summary`, `memory_refs` — the elements it wrote).
+
+**revise** (`{source_ref, target_ref?, change_kind?}`) writes one of three
+histories (KIP Spec §14.2):
+
+- `correction` — the actor's earlier claim was wrong: Formation supersedes it by
+  the same actor and keeps the corrected interval.
+- `world_change` — one new Assertion from the change; temporal succession ends the
+  old value. The gate refuses any supersession or retraction in the pass.
+- `misrecorded` — the Brain recorded what the actor never said. With `target_ref`
+  (the wrong Assertion) the host runs **recording repair** (Spec §57.8): the pass
+  may write the claim the original source actually made, citing it (`:orig`) with
+  the original source's `asserted_at`; the host then invalidates the target
+  (`_system.recording_validity: invalidated`) with those replacements in one
+  protected transaction. Nothing is superseded or retracted, and the actor's
+  lifecycle and the source bytes are unchanged. Without `target_ref` the report is
+  preserved as Evidence and the response is `partial`.
+- `unspecified` (default) — recorded as new claims only; never superseded on a
+  guess, and the response says so in `warnings`.
+
+**feedback** (`{source_ref, decision_ref?, attempt_ref?}`) is captured by the host
+as Evidence classed by the role that was staged — an assistant's self-report is
+`agent_statement`, a person's is `user_statement` — never an Outcome, and grades
+nothing. `decision_ref` / `attempt_ref` must be elements of this Space.
+
+**forget** (`{target_ref, mode}`) runs an ErasurePlan (Spec §60.7):
+
+- `payload_only` purges an Evidence payload (`E-…`), or a staged source's bytes and
+  the Evidence captured from it.
+- `semantic` — the owner's decision — erases a claim through the product deletion
+  closure (its tuple, every Assertion on it, their Evidence and recorded
+  dependents), purges uncited Evidence or the named element, suppresses the
+  sources so Formation never re-ingests them, and scrubs the host's copies: staged
+  bytes, Formation transcripts, Recall transcripts that quoted an erased element,
+  usage-ledger rows and the probe cache. Retained recall bases that delivered an
+  erased element are listed in `external_exports`.
+
+The result is a `ForgetResult` (`status`, `plan_ref`, `summary`, `coverage_ref`).
+`completed` (with an `erased` disposition) is reported only after the Nexus
+validated the plan against its storage and every host surface was verified; a
+legal hold is `blocked`; a target whose sources cannot be enumerated is `partial`.
+Read the plan at `GET …/memory/plans/{plan_ref}`. `POST /memory/forget` remains the
+technical element-purge endpoint without a plan.
+
+**recall** (`{query?, target_ref?, mode?, goal?, context?, after?, detail?, time?,
+attention_cursor?}`) returns a `Briefing`:
+
+- `after` receipts must be the caller's (else `NotFoundOrNotVisible`); the host
+  waits for each until `deadline_ms`. Unfinished ones are listed in
+  `coverage.pending_receipts` and make the response `pending` with
+  `action_eligible: false`; failed ones are reported in `uncertainties`. A fixed
+  `time.as_of_seq` older than an `after` receipt's `available_seq` is
+  `PreconditionFailed`.
+- `mode: "attention"` returns the attention raised in scope after
+  `attention_cursor` (the same items as `GET /memory/attention`) and a new cursor;
+  it runs no model and writes nothing. `mode: "resume"` adds that page to a scoped
+  briefing (the minimal resume: no WorkingState is maintained yet).
+- `answer` (default) and `action` run one Recall pass for the question; its prose
+  becomes the `summary` only when everything it cited is in scope. The items are
+  built by the host: each cited claim is re-read through `BELIEF` under the
+  request's context set, `time.valid_at` (`FOR TIME`) and `time.as_of_seq` (`AS OF
+  SEQ`), so `epistemic_status` is final belief (`insufficient` is never a no);
+  raw Evidence is `source`; claims the Brain misrecorded are excluded.
+- The seven channels: `constraints` (exact: Insights with `insight_class:
+  "constraint"` in scope) and `commitments` (exact: pending/blocked Commitments)
+  are required and never dropped for budget; `failures`, `experiences` and
+  `skills` are bounded searches for the question (approximate, complete for their
+  declared plan); `dependencies` checks the returned items' own
+  `_system.dependency_validity`; `evidence` is the Recall pass. Procedures are
+  labeled `standing: "unproven"` (or `revoked`) and grant nothing.
+- `action_eligible` needs complete coverage, satisfied barriers and no unverified
+  precondition (in `action` mode a contested or uncertain fact is one); it
+  describes memory sufficiency, never permission.
+- `budget.max_output_tokens` bounds the serialized briefing under the advertised
+  tokenizer, metadata included. Optional items are dropped first (their channel
+  becomes `incomplete`); when the required ones do not fit the result is
+  `ResultLimitExceeded`. Another tokenizer is `UnsupportedCapability`.
+- Each briefing is retained behind `basis_ref`: the ProjectionBasis, the
+  RecallCoverage with one RecallPlan per channel, and the element versions behind
+  each item. `target_ref` (a `basis_ref` or an item `ref`) with `detail:
+  "evidence"` returns them in `details`, reading each element at the version that
+  produced the item; a changed or erased one is reported unavailable, never
+  replaced by a newer version. An expansion has its own default budget (65,536
+  tokens) and is never action-eligible.
+- Recall writes no memory. Returned elements are recorded as `retrieved` in the
+  Nexus exposure log (Spec §66.8), which is not cognition and reinforces nothing.
+
+```ts
+export interface MemoryResponse {
+  kip_memory: '2.0';
+  request_id?: string;
+  operation: MemoryRequest['operation'];
+  status: 'succeeded' | 'pending' | 'partial' | 'failed';
+  receipt?: { receipt_ref: string; operation: string; space_id: string; accepted_seq: number };
+  progress?: {
+    receipt_ref: string;
+    phase: 'recorded' | 'processed' | 'available' | 'failed';
+    disposition?: 'formed' | 'evidence_only' | 'skipped' | 'erased';
+    resolved_seq?: number; available_seq?: number; reason?: string; error?: KipError;
+  };
+  result?: unknown; // FormationResult | ForgetResult | Briefing
+  error?: KipError;
+  warnings: string[];
+}
+```
+
+MCP exposes the same binding as `anda_brain_memory` (`{request}`),
+`anda_brain_stage_memory_source` and `anda_brain_memory_receipt`.
+
+Known limits: `memory_experience` needs a KIP-CognitiveMemory Nexus (computed
+GradingState and lineage views and selection dependencies are not built yet), so it
+is not advertised; `resume` has no WorkingState; Formation that is interrupted by a
+close is reported `failed` with an unknown outcome and is not re-run; a
+misrecording can be repaired only for an extraction whose source bytes are held
+inline; the conformance adapter's real-model run is not recorded as evidence.
 
 ---
 
@@ -651,6 +879,7 @@ export interface SpaceInfo {
   formation_processed_id: number;
   maintenance_processed_id: number;
   maintenance_at: MaintenanceAt;
+  memory_interface?: MemoryDescriptor; // the Memory Interface this Space serves
   wiki_docs: number;
   wiki_chunks: number;
   wiki_versions: number;
@@ -744,6 +973,17 @@ export interface ServiceInfo {
   version: string;
   sharding: number;
   description: string;
+  memory_interface: MemoryDescriptor; // without default_space
+}
+
+export interface MemoryDescriptor {
+  kip_memory: '2.0';
+  bundles: ('memory_basic' | 'memory_experience' | 'memory_learning')[];
+  default_scope?: { task_ref?: string; context_refs?: string[] };
+  default_budget: { max_output_tokens: number; deadline_ms: number };
+  tokenizer: string;
+  minimum_response_tokens: number;
+  default_space?: { id: string };
 }
 
 export type KipOperation = string | {
@@ -832,6 +1072,9 @@ Both MCP modes use the same model, auth, and storage configuration as the HTTP s
 
 | Tool | Input | Output | Scope |
 | ---- | ----- | ------ | ----- |
+| `anda_brain_memory` | `{ request: MemoryRequest }` | `MemoryResponse` | recall `read`; mutations `write` |
+| `anda_brain_stage_memory_source` | `StageSourceInput` | `StagedSourceRef` | `write` |
+| `anda_brain_memory_receipt` | `{ receipt_ref }` | `{ receipt, progress, result, warnings }` | `read` credential |
 | `anda_brain_remember_conversation` | `FormationInput` shape (`messages`, `context`, `timestamp`) | `AgentOutput` | `write` |
 | `anda_brain_recall_memory` | `RecallInput` shape (`query`, `context`, optional `budget`) | `AgentOutput` | `read` |
 | `anda_brain_run_maintenance` | `MaintenanceInput` shape | `AgentOutput` | `write` |

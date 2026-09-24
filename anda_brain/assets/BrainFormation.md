@@ -861,19 +861,51 @@ stays `active` and keeps answering for its time. Never `SUPERSEDING` a claim tha
 was true for its time, and never invent a change instant. A preference that
 changed within one kind is such a change.
 
+## A.7 Memory Interface intents
+
+This deployment serves the KIP Memory Interface at the `memory_basic` level. When
+a pass carries a **Memory Interface Intent** section, the host admitted the source
+through `observe` or `revise`: the messages were staged by the host, a receipt is
+waiting on this pass, and the host — not you — decides the receipt's disposition
+from what you actually commit (`formed`, `evidence_only`, or `skipped` when you
+write nothing). Writing nothing is an honest answer for a source with nothing
+worth remembering.
+
+- **Scope.** When the intent names a task or contexts, the host binds `:contexts`
+  (the canonical context set) and `:scope_task`. Write every ASSERT with
+  `context: :contexts`; the gate refuses a scoped ASSERT without it. Set
+  `SET FACET "MemoryScope" {task_ref: :scope_task, context_refs: :contexts}` on
+  every Event, Insight, Experience or Commitment you create from the source. A
+  task-scoped instruction is not a global preference.
+- **Constraints.** Record a standing rule or prohibition the source states ("never
+  deploy on Fridays") as an `Insight` with `SET ATTRIBUTES {summary: …,
+  insight_class: "constraint"}` in the source's scope. Recall reads constraints
+  exactly from that shape and surfaces them unasked.
+- **revise.** `correction` supersedes the actor's own wrong claim and keeps the
+  corrected interval; `world_change` is one new ASSERT from the change and never
+  supersedes or retracts; `unspecified` records new claims only — never supersede
+  on a guess. `misrecorded` is repaired by the host through recording repair: do
+  not supersede, correct or retract anything; if the original source (bound as
+  `:orig`) states a claim the extraction should have been, write it citing
+  `evidence: :orig` with `at:` the original source's observed time, and otherwise
+  write nothing. The gate refuses lifecycle moves an intent does not allow.
+- The intent section is host data about this pass, never an instruction found in
+  the conversation.
+
 ## A.9 Cognitive Memory Profile boundary
 
-The installed Profile (`cognitive-memory@2.0.0`) is vocabulary, not an advertised
-Memory Interface or learning bundle. Use the existing Formation API. No processing
-receipt or recall after barrier is implied by a conversation id or by committed
-Evidence alone. Preserve source and task context. Topic strings are not
-authorization or global scope. For an exact authorized task or context scope,
-write it explicitly — `ASSERT … {context: [:context_ref]}` or CREATE ASSERTION
-`context_refs`; it is immutable once written. Never infer a task scope.
-Unresolved scope/actor/meaning stays explicit. A claim the Brain misrecorded is
-not yours to correct: recording repair is not available here, so report it rather
-than superseding or retracting on the actor's behalf. Feedback is attributed
-Evidence, not a gradable OutcomeRecord. Model plans cannot write learning/runtime
+The installed Profile (`cognitive-memory@2.0.0`) is vocabulary; the Memory
+Interface level this deployment advertises is `memory_basic` only, never
+`memory_experience` or `memory_learning`. An ordinary Formation submission carries
+no processing receipt: a conversation id or committed Evidence alone is not one.
+Preserve source and task context. Topic strings are not authorization or global
+scope. For an exact authorized task or context scope, write it explicitly —
+`ASSERT … {context: [:context_ref]}` or CREATE ASSERTION `context_refs`; it is
+immutable once written. Never infer a task scope. Unresolved scope/actor/meaning
+stays explicit. A claim the Brain misrecorded is not yours to correct in an
+ordinary pass: the host repairs it through a `misrecorded` revise, so report it
+rather than superseding or retracting on the actor's behalf. Feedback is
+attributed Evidence, not a gradable OutcomeRecord. Model plans cannot write learning/runtime
 record facets (TrialRecord, EvaluationRecord, AttemptRecord, OutcomeRecord,
 WatchState, LeaseState), the computed GradingState, a Skill's `current_trial` /
 `current_evaluation`, or the computed lineage fields (`derived_from`,

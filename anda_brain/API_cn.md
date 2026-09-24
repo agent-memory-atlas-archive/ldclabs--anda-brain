@@ -26,7 +26,7 @@ Rust `product` 模块提供由 Assertion 支撑的 `MemoryRecord`、稳定修订
 - `WorldChange`：世界变了。从现在起写一条新主张，时序继承结束旧值；旧值保持 `active`，仍回答它所在时段的问题。
 
 两种修订都沿用该记录的 `context_refs`（`MemoryRecord` 已暴露）：跨上下文集合的 supersession 会报 `SupersessionMismatch`（规范 §14.2）；新值若不在旧值的上下文集合里，会另起一条继承线而结束不了旧值（规范 §25.4）。
-- `Misrecorded`：Brain 记下了调用者从未说过的话。这需要 recording repair，本部署不提供，因此 prepare 返回 `unsupported_capability`，绝不写成更正或世界变化。
+- `Misrecorded`：Brain 记下了调用者从未说过的话。这是 recording repair，通过 Memory Interface 的 `revise` 意图（`change_kind: "misrecorded"`）执行（见 [Memory Interface](#memory-interface)）；这个按值修订的产品 API 返回 `unsupported_capability`，绝不写成更正或世界变化。
 
 以上都不改写原 Concept 名称，也不伪造跨 Proposition 的 supersession。撤销是新的条件变更。
 
@@ -70,6 +70,190 @@ KIP `597db44` / `cognitive-memory@2.0.0` 对齐说明：鉴权与 JSON/CBOR/Mark
 保持零。Watch 的 `disarmed` 兼容字段也统计 Nexus 的 expired；文本 Watch 无已配置的语义求值器时保持 deferred。
 模型生成的 Formation 请求不得覆盖宿主捕获的 ingest 或 msgN 绑定；学习/runtime Facet
 写入返回 UnsupportedCapability。原始管理 KIP 仍接受符合 Nexus 契约的受权写入。
+
+<a id="memory-interface"></a>
+
+## Memory Interface（KIP 2.0，`memory_basic`）
+
+每个 Space 都在 `memory_basic` 级别提供可选的 KIP 2.0 Memory Interface
+（`KIP-2.0-Memory-Interface.md`，线上形状见 `kip-memory.schema.json`）：五个意图——
+`observe`、`recall`、`revise`、`feedback`、`forget`——共用一种请求形状，一次一个意图。
+不声明 `memory_experience`、`memory_learning`、`durable_brain_runtime`、
+`receiver_fencing` 与 Capsule 交换；`requires` 中要求它们的请求在执行任何操作前返回
+`UnsupportedCapability`。原有端点不变；业务 Agent 应走这条路径。
+
+描述符在 `GET /info`（不含默认 Space）与 `GET /v1/{space_id}/info` 的 `memory_interface`
+字段中；原始 KIP 客户端在 `DESCRIBE CAPABILITIES` 与 `DESCRIBE PRIMER` 中看到同一个绑定：
+
+```json
+{
+  "kip_memory": "2.0",
+  "bundles": ["memory_basic"],
+  "default_budget": {"max_output_tokens": 4096, "deadline_ms": 30000},
+  "tokenizer": "o200k_base@tiktoken-rs-0.12.0",
+  "minimum_response_tokens": 256,
+  "default_space": {"id": "my_space"}
+}
+```
+
+| 端点 | 鉴权 | 请求 / 结果 |
+| --- | --- | --- |
+| `POST /v1/{space_id}/memory` | recall：`read`（公开 Space 允许匿名）；变更类：`write`；`semantic` forget 需要 CWT（所有者） | Memory Interface `Request` → `Response`（不是 `RpcResponse`） |
+| `POST /v1/{space_id}/memory/sources` | `write` | `StageSourceInput` → `RpcResponse<StagedSourceRef>` |
+| `GET /v1/{space_id}/memory/sources/{source_ref}` | `read` 凭据 | 暂存该来源的调用方可读 `RpcResponse<StagedSource>` |
+| `GET /v1/{space_id}/memory/receipts/{receipt_ref}` | `read` 凭据 | `RpcResponse<{receipt, progress, result, warnings}>` |
+| `GET /v1/{space_id}/memory/plans/{plan_ref}` | `read` 凭据 | `RpcResponse<{plan_ref, receipt_ref, plan, host_surfaces}>` |
+
+调用方通过鉴权后，`/memory` 一律返回 HTTP 200，失败放在 Response 里：`status: "failed"`
+并带 KIP `error`（`InvalidRequestEnvelope`、`UnsupportedCapability`、`IdempotencyConflict`、
+`NotFoundOrNotVisible`、`PreconditionFailed`、`ResultLimitExceeded`、`CursorInvalid`、
+`NotAuthorized`、`OutcomeUnknown`、`LegalHoldConflict` 等）。辅助端点使用常规 HTTP 错误映射
+（未知或他人的句柄为 404，暂存键冲突为 409）。
+
+**句柄归属调用方。** 暂存来源、幂等键、回执、保留的召回依据与擦除计划属于已认证的调用方
+（CWT 主体、按名称区分的 Space token，或匿名读者）和该 Space。其他调用方或其他 Space 只会得到
+`NotFoundOrNotVisible`，不会得到句柄存在的任何暗示。
+
+```ts
+export interface StageSourceInput {
+  messages: Message[]; // 1–16 条观察到的消息；消息的 `timestamp`（Unix 毫秒）是它被观察到的时间
+  observed_at?: string; // RFC 3339，规范为毫秒 UTC；缺省为捕获时间
+  kind?: 'message' | 'tool_trace' | 'artifact';
+  order?: { stream_ref: string; event_ref: string; ordinal: number; predecessor_receipts?: string[] };
+  idempotency_key: string; // 同键同字节 → 同一句柄；字节不同 → 409
+}
+export interface StagedSourceRef { source_ref: string; source_digest: string; captured_at: string }
+
+export interface MemoryRequest {
+  kip_memory: '2.0';
+  request_id?: string;
+  operation: 'observe' | 'recall' | 'revise' | 'feedback' | 'forget';
+  space?: { id: string }; // 给出时必须是本 Space
+  scope?: { task_ref?: string; context_refs?: string[] };
+  budget?: { max_output_tokens?: number; deadline_ms?: number; tokenizer?: string };
+  idempotency_key?: string; // 变更类必填，recall 不接受
+  requires?: ('memory_basic' | 'memory_experience' | 'memory_learning')[];
+  input: object; // 各意图见下
+}
+```
+
+**先暂存再受理。** `observe`、`revise`、`feedback` 引用 `source_ref`：暂存句柄（`src-…`）或
+已有的 active Evidence id。准入先于落盘：已被 forget 排除的字节会被拒绝，也不绑定任何键。
+
+**作用域。** `task_ref` 与 `context_refs` 是精确句柄：本 Space 的 active Concept id，或由宿主
+映射到作用域 Concept 的不透明字符串（`event_class: "memory_scope"` 的 `Event`，键为
+`memory_scope:<handle>`，在第一个命名它的变更中创建）。规范上下文集 = 任务 Concept 加每个
+上下文的 Concept。来自带作用域来源的每条断言，Formation 都写 `context: :contexts`（闸门拒绝
+不写的），Evidence 以及它创建的 Event、Insight、Experience、Commitment 都挂 MemoryScope
+Facet；recall 只接纳上下文集包含于请求上下文集的记录（KIP Spec §25.3）。任务名或话题字符串
+永远不会选中作用域。
+
+**幂等。** 变更的键作用域为 `(调用方, Space, operation)`；语义包括 operation、请求的作用域、
+input 以及来源身份和摘要，不含 `request_id` 与 `budget`。同键同义返回原 `receipt`（附当前进度），
+绝不重新抽取；同键异义返回 `IdempotencyConflict`。键、回执与暂存来源在重启后仍在。
+
+**进度。** 每个变更返回不可变的 `receipt`（`receipt_ref`、`operation`、`space_id`、`accepted_seq`）
+及当前 `progress`：
+
+| 阶段 | 本实现 |
+| --- | --- |
+| `recorded` | 来源与意图已持久化，Formation 会话在排队、运行，或在一次失败后等待重试（原因见 `progress.reason`）。 |
+| `available` | 这一轮已完成；检索索引同步，所以 `available_seq = resolved_seq`。`disposition` 为 `formed`（写入了记忆）、`evidence_only`（只保存了 Evidence）或 `skipped`（什么都没写——这是诚实结果，会在 `warnings` 说明）；完成的 forget 为 `erased`。 |
+| `failed` | 终态：来源在处理前已被排除、前驱回执失败、处理被中断且结果未知（`OutcomeUnknown`），或 recording repair 被拒。绝不报告成记忆。 |
+
+变更只有在 available 时才返回 `succeeded`，recorded 时为 `pending`，失败时为 `failed` 并带错误。
+变更请求可带 `budget.deadline_ms`，在请求内等待这一轮处理完成。disposition 由宿主根据这一轮
+实际提交的内容判定，不由模型决定。`SourceOrder.predecessor_receipts` 必须是调用方自己的回执；
+Formation 按 Space 队列顺序处理，前驱失败的后继直接失败，绝不形成。
+
+**observe**（`{source_ref}`）对暂存消息运行 Formation，提示词中带上意图与作用域；结果为
+`FormationResult`（`summary`、`memory_refs`——这一轮写入的元素）。
+
+**revise**（`{source_ref, target_ref?, change_kind?}`）写入三种历史之一（KIP Spec §14.2）：
+
+- `correction`：说话者之前的说法错了。Formation 以同一 actor 取代（supersede）它，并保留被更正的区间。
+- `world_change`：从变化时刻起的一条新断言；时序继承结束旧值。闸门拒绝这一轮中的任何取代或撤回。
+- `misrecorded`：Brain 记下了说话者从未说过的话。带 `target_ref`（错误的断言）时，宿主执行
+  **recording repair**（Spec §57.8）：这一轮可以写出原始来源实际表达的主张（引用 `:orig`，
+  `asserted_at` 取原始来源时间）；随后宿主在一个受保护事务中把目标标为失效
+  （`_system.recording_validity: invalidated`），并登记这些替换断言。不取代、不撤回，说话者的
+  生命周期与来源字节不变。没有 `target_ref` 时只把报告保存为 Evidence，响应为 `partial`。
+- `unspecified`（默认）：只记录新主张；绝不凭猜测取代，并在 `warnings` 中说明。
+
+**feedback**（`{source_ref, decision_ref?, attempt_ref?}`）由宿主按暂存时的角色保存为 Evidence——
+助手的自述是 `agent_statement`，人的反馈是 `user_statement`——绝不是 Outcome，也不评分。
+`decision_ref` / `attempt_ref` 必须是本 Space 的元素。
+
+**forget**（`{target_ref, mode}`）执行 ErasurePlan（Spec §60.7）：
+
+- `payload_only` 清除一条 Evidence 的载荷（`E-…`），或一个暂存来源的字节及从它捕获的 Evidence。
+- `semantic`（所有者的决定）经产品删除闭包擦除一条主张（它的元组、其上所有断言、这些断言的
+  Evidence 及已记录的依赖者），清除未被引用的 Evidence 或指定元素，抑制来源使 Formation 不再
+  重新摄入，并清理宿主副本：暂存字节、Formation 会话记录、引用过被擦除元素的 Recall 会话记录、
+  使用账本行与探测缓存。已交付过被擦除元素的召回依据列在 `external_exports` 中。
+
+结果为 `ForgetResult`（`status`、`plan_ref`、`summary`、`coverage_ref`）。只有在 Nexus 依据实际
+存储校验了计划、且每个宿主表面都已核实之后，才报告 `completed`（disposition 为 `erased`）；
+法律保留为 `blocked`；无法枚举来源的目标为 `partial`。计划可在 `GET …/memory/plans/{plan_ref}`
+读取。`POST /memory/forget` 仍是不带计划的技术性元素清除端点。
+
+**recall**（`{query?, target_ref?, mode?, goal?, context?, after?, detail?, time?, attention_cursor?}`）
+返回 `Briefing`：
+
+- `after` 中的回执必须属于调用方（否则 `NotFoundOrNotVisible`）；宿主逐个等待到 `deadline_ms`。
+  未完成的列在 `coverage.pending_receipts`，响应为 `pending` 且 `action_eligible: false`；失败的
+  写进 `uncertainties`。固定的 `time.as_of_seq` 早于某个 `after` 回执的 `available_seq` 时返回
+  `PreconditionFailed`。
+- `mode: "attention"` 返回作用域内、`attention_cursor` 之后提起的注意力（与
+  `GET /memory/attention` 相同的条目）和新游标；不调用模型，不写任何东西。`mode: "resume"`
+  在作用域简报上附带这一页（最小 resume：尚未维护 WorkingState）。
+- `answer`（默认）与 `action` 针对问题运行一次 Recall；只有当它引用的全部内容都在作用域内时，
+  其文字才作为 `summary`。条目由宿主构建：每条被引用的主张都在请求的上下文集、`time.valid_at`
+  （`FOR TIME`）与 `time.as_of_seq`（`AS OF SEQ`）下经 `BELIEF` 重新读取，因此 `epistemic_status`
+  是最终信念（`insufficient` 绝不等于否定）；原始 Evidence 标为 `source`；被判定误记的主张排除在外。
+- 七个通道：`constraints`（精确：作用域内 `insight_class: "constraint"` 的 Insight）与
+  `commitments`（精确：pending/blocked 的 Commitment）为必需项，绝不因预算丢弃；`failures`、
+  `experiences`、`skills` 为针对问题的有界检索（近似，按其声明的计划完成）；`dependencies`
+  检查返回条目自身的 `_system.dependency_validity`；`evidence` 即 Recall 这一轮。过程候选标为
+  `standing: "unproven"`（或 `revoked`），不授予任何权限。
+- `action_eligible` 要求覆盖完整、屏障满足且没有未核实前提（`action` 模式下 contested 或
+  uncertain 的事实即是未核实前提）；它描述记忆是否充分，绝不代表许可。
+- `budget.max_output_tokens` 按声明的 tokenizer 限制序列化后的简报（含元数据）。先丢弃可选条目
+  （其通道变为 `incomplete`）；必需条目放不下时返回 `ResultLimitExceeded`。其他 tokenizer 返回
+  `UnsupportedCapability`。
+- 每份简报都保存在 `basis_ref` 之后：ProjectionBasis、每个通道一份 RecallPlan 的 RecallCoverage，
+  以及每个条目背后的元素版本。`target_ref`（`basis_ref` 或条目 `ref`）配合 `detail: "evidence"`
+  在 `details` 中返回这些内容，按产生该条目的版本读取元素；已变化或已擦除的元素报告为不可用，
+  绝不用更新的版本替代。展开有独立的默认预算（65,536 token），且永不 action-eligible。
+- recall 不写记忆。返回的元素以 `retrieved` 记入 Nexus 曝光日志（Spec §66.8），它不是认知状态，
+  也不强化任何东西。
+
+```ts
+export interface MemoryResponse {
+  kip_memory: '2.0';
+  request_id?: string;
+  operation: MemoryRequest['operation'];
+  status: 'succeeded' | 'pending' | 'partial' | 'failed';
+  receipt?: { receipt_ref: string; operation: string; space_id: string; accepted_seq: number };
+  progress?: {
+    receipt_ref: string;
+    phase: 'recorded' | 'processed' | 'available' | 'failed';
+    disposition?: 'formed' | 'evidence_only' | 'skipped' | 'erased';
+    resolved_seq?: number; available_seq?: number; reason?: string; error?: KipError;
+  };
+  result?: unknown; // FormationResult | ForgetResult | Briefing
+  error?: KipError;
+  warnings: string[];
+}
+```
+
+MCP 以 `anda_brain_memory`（`{request}`）、`anda_brain_stage_memory_source` 与
+`anda_brain_memory_receipt` 暴露同一绑定。
+
+已知限制：`memory_experience` 需要达到 KIP-CognitiveMemory 级的 Nexus（GradingState 与血缘字段的
+计算视图、选择依赖尚未实现），因此不声明；`resume` 没有 WorkingState；被关闭打断的 Formation 以
+结果未知报告为 `failed`，不会重跑；只有来源字节以内联方式保存的抽取才能做 recording repair；
+conformance 适配器的真实模型运行未作为证据记录。
 
 ---
 
@@ -641,6 +825,7 @@ export interface SpaceInfo {
   formation_processed_id: number;
   maintenance_processed_id: number;
   maintenance_at: MaintenanceAt;
+  memory_interface?: MemoryDescriptor; // 本 Space 提供的 Memory Interface
   wiki_docs: number;
   wiki_chunks: number;
   wiki_versions: number;
@@ -734,6 +919,17 @@ export interface ServiceInfo {
   version: string;
   sharding: number;
   description: string;
+  memory_interface: MemoryDescriptor; // 不含 default_space
+}
+
+export interface MemoryDescriptor {
+  kip_memory: '2.0';
+  bundles: ('memory_basic' | 'memory_experience' | 'memory_learning')[];
+  default_scope?: { task_ref?: string; context_refs?: string[] };
+  default_budget: { max_output_tokens: number; deadline_ms: number };
+  tokenizer: string;
+  minimum_response_tokens: number;
+  default_space?: { id: string };
 }
 
 export type KipOperation = string | {
@@ -820,6 +1016,9 @@ MCP_AUTH_TOKEN="$SPACE_TOKEN" \
 
 | Tool | Input | Output | Scope |
 | ---- | ----- | ------ | ----- |
+| `anda_brain_memory` | `{ request: MemoryRequest }` | `MemoryResponse` | recall 为 `read`；变更类为 `write` |
+| `anda_brain_stage_memory_source` | `StageSourceInput` | `StagedSourceRef` | `write` |
+| `anda_brain_memory_receipt` | `{ receipt_ref }` | `{ receipt, progress, result, warnings }` | `read` 凭据 |
 | `anda_brain_remember_conversation` | `FormationInput` 形状（`messages`, `context`, `timestamp`） | `AgentOutput` | `write` |
 | `anda_brain_recall_memory` | `RecallInput` 形状（`query`, `context`，可选 `budget`） | `AgentOutput` | `read` |
 | `anda_brain_run_maintenance` | `MaintenanceInput` 形状 | `AgentOutput` | `write` |

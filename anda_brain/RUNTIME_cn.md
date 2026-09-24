@@ -189,6 +189,32 @@ legacy 和失败恢复保留原因及退避，不自动重新布防。
 需要支持条件写入的存储；CLI 本地模式已包装 MetaStore，裸 LocalFileSystem 不具备
 所需 CAS。每个存储 shard 只能有一个活动 Brain 所有者进程，未提供跨主机多写者接管。
 
+## Memory Interface 回执与屏障
+
+Memory Interface（`POST /v1/{space_id}/memory`，见 [API](API_cn.md#memory-interface)）把编排状态
+保存在 Space 的对象存储 `memory-interface/v1/` 下：暂存来源、幂等键、回执、保留的召回依据与
+擦除计划。原生事实仍在 Nexus 中。
+
+- **受理先落盘再应答。** 回执与键绑定在 Formation 会话入队之前写入，会话本身带着意图。重启后
+  同键重试只会重放回执，绝不再排第二轮处理。
+- **进度从工作本身读取。** Formation 会话处于 submitted、running，或失败后等待队列重试时，回执为
+  `recorded`；第一个终态结果只写回一次，进度不会倒退。完成的一轮在它提交的最新序号处为
+  `available`（检索索引同步）。disposition 取决于这一轮实际提交的内容（随会话快照持久化的
+  trace），而不是模型的总结。
+- **中断如实报告。** 关闭或驱逐 Space 会以 `outcome_unknown` 取消正在进行的 Formation；其回执读为
+  `failed`（`OutcomeUnknown`），不会重跑。前驱失败的后继同样失败。
+- **屏障只等待，召回不写入。** recall 对 `after` 中的回执最多等待 `deadline_ms`（上限 120 秒），
+  其余列入 `coverage.pending_receipts`。返回的元素以 `retrieved` 记入 Nexus 曝光日志，它不推进
+  任何序号。
+- **误记由宿主修复。** `misrecorded` 的 revise 一轮完成后，宿主用这一轮从原始来源写出的替换断言
+  调用 Nexus 的 recording repair；修复被拒则回执失败。
+- **遗忘先核实再报告。** ErasurePlan 由 Nexus 依据实际存储校验，宿主副本（暂存字节、Formation 与
+  Recall 会话记录、使用账本行、探测缓存）在报告 `completed` 之前逐项核实。被抑制的来源键并入
+  产品来源排除，Formation 与暂存都不会再接纳这些字节。
+
+Worker 在 Durable Object 存储中保存同样的记录。它的 Formation 在请求内完成，所以请求返回时回执
+已是 `available` 或 `failed`；请求一直没有回报结果的回执，十分钟后读为 `failed`（`OutcomeUnknown`）。
+
 ## 预算与生命周期
 
 | 默认值 | 值 |

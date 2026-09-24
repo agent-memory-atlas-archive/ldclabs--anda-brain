@@ -261,6 +261,45 @@ the required CAS. InMemory and the configured S3 backend also support it. Keep
 **one live Brain owner process per storage shard**. This is not cross-host storage
 ownership/fencing or a multi-writer failover protocol.
 
+## Memory Interface receipts and barriers
+
+The Memory Interface (`POST /v1/{space_id}/memory`, see the [API](API.md#memory-interface))
+keeps its orchestration state in the Space's object store under
+`memory-interface/v1/`: staged sources, idempotency keys, receipts, retained recall
+bases and erasure plans. Native facts stay in the Nexus.
+
+- **Intake is durable before it answers.** The receipt and key binding are written
+  before the Formation conversation is queued, and the conversation carries the
+  intent. A same-key retry after a restart replays the receipt and never queues a
+  second pass.
+- **Progress is read from the work.** A receipt is `recorded` while its Formation
+  conversation is submitted, running, or failed and waiting for the queue's retry;
+  the first terminal answer is written back once, so progress never moves
+  backwards. A completed pass is `available` at the newest sequence it committed
+  (search indexes are synchronous). The disposition comes from what the pass
+  committed — a trace persisted with the conversation snapshot — not from the
+  model's summary.
+- **Interruption is explicit.** Closing or evicting a Space cancels an in-flight
+  Formation with `outcome_unknown`; its receipt then reads `failed` with
+  `OutcomeUnknown` and is not re-run. A failed predecessor fails its successor.
+- **Barriers wait, recall never writes.** A recall waits on its `after` receipts
+  up to `deadline_ms` (at most 120 s), then reports the rest in
+  `coverage.pending_receipts`. Returned elements are logged as `retrieved` in the
+  Nexus exposure log, which advances no sequence.
+- **Misrecordings are repaired by the host.** After a `misrecorded` revise pass
+  completes, the host calls the Nexus recording repair with the replacements that
+  pass wrote from the original source; a refused repair fails the receipt.
+- **Forget verifies before it reports.** The ErasurePlan is validated by the Nexus
+  against actual storage, and host copies (staged bytes, Formation and Recall
+  transcripts, usage-ledger rows, the probe cache) are checked before `completed`.
+  Suppressed source keys join the product source exclusions, so neither Formation
+  nor staging re-admits the bytes.
+
+The Worker keeps the same records in Durable Object storage. Its Formation finishes
+inside the request, so its receipts are `available` or `failed` when the request
+returns; a receipt whose request never reported back reads `failed` with
+`OutcomeUnknown` after ten minutes.
+
 ## Budgets and lifecycle
 
 | Default | Value |

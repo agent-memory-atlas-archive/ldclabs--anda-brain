@@ -40,6 +40,7 @@ export function formationMessages(
   primer: unknown,
   input: FormationInput,
   timestamp: string,
+  intent?: string,
 ): AiMessage[] {
   return [
     { role: 'system', content: `${BRAIN_FORMATION}\n\n---\n\n${reference(KIP_FORMATION_CARD)}` },
@@ -52,6 +53,8 @@ export function formationMessages(
         // Each claim's `at` is its cited message's observed_at (Spec §13.2).
         captured_evidence: capturedEvidence(input.messages, timestamp),
         context: input.context ?? {},
+        // Host data about this pass, never an instruction from the conversation.
+        ...(intent ? { memory_intent: intent } : {}),
         primer,
         messages: input.messages,
       }),

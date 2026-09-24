@@ -70,8 +70,8 @@ sibling `anda-db` and `anda` checkouts and the Worker links the sibling kip-do.
 ### Product and attention
 
 - Product `ChangeKind` gains `WorldChange` (one new claim; the old one stays active)
-  and `Misrecorded`, which fails `unsupported_capability` because recording repair is
-  not available — it is never mapped to a correction. `Correct` now supersedes the
+  and `Misrecorded`, which fails `unsupported_capability` here — recording repair runs
+  through the Memory Interface `revise` intent — and is never mapped to a correction. `Correct` now supersedes the
   old claim and keeps the world interval it covered instead of retracting it and
   starting the new value at the correction time. Both keep the record's
   `context_refs` (now on `MemoryRecord`), so a scoped claim is revised in its own
@@ -87,6 +87,58 @@ sibling `anda-db` and `anda` checkouts and the Worker links the sibling kip-do.
   raises it again. The settlement report gains `commitments`. Reading is read-only
   and grants nothing. The authenticated runtime inbox is unchanged.
 
+### Memory Interface (`memory_basic`)
+
+- Both adapters serve the KIP 2.0 Memory Interface at the `memory_basic` level:
+  `POST /v1/{space_id}/memory` takes one of `observe`, `recall`, `revise`,
+  `feedback`, `forget` per request and answers a `Response`; failures ride inside it
+  as KIP errors. `POST …/memory/sources` stages a captured source and returns its
+  `source_ref`; `GET …/memory/receipts/{ref}`, `…/memory/sources/{ref}` and
+  `…/memory/plans/{ref}` read progress, a staged source and an erasure plan. Rust MCP
+  adds `anda_brain_memory`, `anda_brain_stage_memory_source` and
+  `anda_brain_memory_receipt`. The descriptor is on `GET /info` and
+  `GET /v1/{space_id}/info` (`memory_interface`), and the Nexus reports the same
+  binding in `DESCRIBE CAPABILITIES` / `DESCRIBE PRIMER`. `requires` naming an
+  unadvertised level fails `UnsupportedCapability`.
+- Staged sources, idempotency keys, receipts, retained recall bases and erasure
+  plans are scoped to the caller and the Space and survive restart. The same key and
+  meaning replays the receipt without re-running extraction; a different meaning is
+  `IdempotencyConflict`. Admission precedes capture, so bytes a forget excluded are
+  refused.
+- observe and revise run as Formation conversations carrying the intent. Progress is
+  `recorded` until the pass completes, then `available` with the disposition the
+  host reads from what the pass committed (`formed`, `evidence_only`, `skipped`); a
+  source excluded before processing, a failed predecessor or an interrupted pass is
+  `failed`. Scoped intake binds `:contexts` / `:scope_task`, refuses a scoped
+  ASSERT without `context: :contexts`, and scopes the captured Evidence with a
+  MemoryScope Facet.
+- revise writes one history per `change_kind`: `correction` supersedes the actor's
+  own claim; `world_change` and `unspecified` may not supersede or retract;
+  `misrecorded` with a `target_ref` runs Nexus recording repair after the pass,
+  with the replacements it wrote from the original source; without a target the
+  report is kept as Evidence and the result is `partial`. feedback is host-captured
+  Evidence classed by role (`agent_statement` for a self-report), never an Outcome.
+- forget runs an ErasurePlan: `payload_only` purges Evidence payloads or a staged
+  source's bytes; `semantic` (owner CWT) erases a claim's closure through the
+  product deletion path, suppresses its sources and scrubs staged bytes, Formation
+  and Recall transcripts, usage-ledger rows and the probe cache. `completed` needs
+  the Nexus to validate the plan; holds are `blocked`, unverifiable sources
+  `partial`.
+- recall waits on `after` receipts, runs one Recall pass, and builds the Briefing on
+  the host: cited claims are re-read through `BELIEF` under the scope, `valid_at`
+  and `as_of_seq`; out-of-scope memory is dropped; constraints (Insights with
+  `insight_class: "constraint"`) and open commitments are read exactly and never
+  dropped for budget; failures, experiences and skills come from bounded searches;
+  dependency caveats come from the items' own validity. `max_output_tokens` counts
+  the serialized briefing under the advertised tokenizer (the Worker bounds by
+  UTF-8 bytes, which never undercounts). The basis, coverage and per-channel
+  RecallPlans are retained for `detail: "evidence"`, which reads the pinned element
+  versions. `attention` and a minimal `resume` return the scoped attention page.
+  Returned elements are logged as `retrieved` in the Nexus exposure log.
+- Formation and Recall prompt contracts gain the intent, scope, constraint and
+  repair rules; the reference halves are unchanged. Product `Misrecorded` still
+  fails `unsupported_capability` and points at the `revise` path.
+
 ### Maintenance of copied material
 
 - Reference halves, the Worker's verbatim cards and the reference supplement were
@@ -97,9 +149,14 @@ sibling `anda-db` and `anda` checkouts and the Worker links the sibling kip-do.
 
 ### Known limits
 
-- No Memory Interface is advertised. Resume briefings, `after` barriers, processing
-  receipts, recording repair and the exposure log are not provided; neither engine
-  yet computes the lineage fields or the GradingState view on read.
+- The Memory Interface is advertised at `memory_basic` only. `memory_experience`
+  needs a KIP-CognitiveMemory Nexus (computed GradingState and lineage views, and
+  selection-dependency evaluation, are not built), and `durable_brain_runtime` is
+  not declared. `resume` has no WorkingState; a Formation pass interrupted by a
+  close is reported `failed` with an unknown outcome and not re-run; recording
+  repair needs the extraction's source held inline; Recall transcripts are scrubbed
+  by scanning every stored Recall conversation. The KIP conformance adapter's
+  real-model run is not recorded here.
 - A promoted draft does not yet re-key existing Propositions (anda-db N6b):
   `ENSURE PROPOSITION` after a promotion may create a second tuple for one written
   under the draft. Capsule import mapping is not exposed by this service.

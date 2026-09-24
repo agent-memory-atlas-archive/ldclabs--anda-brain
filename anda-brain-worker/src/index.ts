@@ -3,6 +3,8 @@ import { processingErrorCode } from './processing.js'
 import { validateForget } from './forget.js'
 import { assertReadonlyOperations } from './kip.js'
 import { AndaBrain } from './brain.js'
+import { NAMESPACE, handleMemory } from './memory.js'
+import { descriptor, errorOf } from './memory-wire.js'
 import {
   formMemory,
   maintainMemory,
@@ -25,6 +27,8 @@ export { AndaBrain }
 const MAX_BODY_BYTES = 256 * 1024
 const SPACE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 const GET_ONLY = new Set(['info', 'formation_status', 'vocabulary', 'memory/attention', 'schema/drafts'])
+/** Memory Interface handle reads: `memory/{receipts|sources|plans}/{ref}`. */
+const MEMORY_HANDLE = /^memory\/(receipts|sources|plans)\/([A-Za-z0-9-]{1,128})$/
 const POST_ACTIONS = new Set([
   'formation',
   'memory/forget',
@@ -35,6 +39,8 @@ const POST_ACTIONS = new Set([
   'execute_kip_readonly',
   'execute_kip',
   'schema/promote',
+  'memory',
+  'memory/sources',
 ])
 
 class ApiError extends Error {
@@ -60,10 +66,11 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
         description: 'Compact graph memory for AI agents on Cloudflare Workers.',
         engine: '@ldclabs/kip-do',
         kip: '2.0',
+        memory_interface: descriptor(),
       })
     }
 
-    const match = /^\/v1\/([^/]+)\/([^/]+(?:\/[^/]+)?)$/.exec(url.pathname)
+    const match = /^\/v1\/([^/]+)\/([^/]+(?:\/[^/]+){0,2})$/.exec(url.pathname)
     if (!match) throw new ApiError('not found', 404)
     authorize(request, env)
 
@@ -75,15 +82,29 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     }
     const action = match[2] ?? ''
     if (!SPACE_ID.test(spaceId)) throw new ApiError('invalid space id', 400)
-    if (!GET_ONLY.has(action) && !POST_ACTIONS.has(action)) {
+    const handle = MEMORY_HANDLE.exec(action)
+    if (!GET_ONLY.has(action) && !POST_ACTIONS.has(action) && !handle) {
       throw new ApiError('not found', 404)
     }
     const brain = env.BRAIN.getByName(spaceId) as unknown as BrainRpc
 
+    if (handle) {
+      if (request.method !== 'GET') throw new ApiError('method not allowed', 405)
+      const [, kind, ref] = handle
+      try {
+        return ok(kind === 'receipts' ? await brain.memoryReceipt(NAMESPACE, ref!)
+          : kind === 'sources' ? await brain.memorySource(NAMESPACE, ref!)
+            : await brain.memoryPlan(NAMESPACE, ref!))
+      } catch (error) {
+        const kipError = errorOf(error)
+        throw new ApiError(kipError.message, kipError.code === 'NotFoundOrNotVisible' ? 404 : 400, kipError)
+      }
+    }
+
     if (GET_ONLY.has(action)) {
       if (request.method !== 'GET') throw new ApiError('method not allowed', 405)
       if (action === 'info') {
-        return ok({ space_id: spaceId, ...(await brain.stats()) })
+        return ok({ space_id: spaceId, ...(await brain.stats()), memory_interface: descriptor(spaceId) })
       }
       if (action === 'vocabulary') {
         return ok(await brain.vocabulary())
@@ -115,6 +136,19 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
 
     const body = await readJson(request)
     switch (action) {
+      case 'memory':
+        // One Memory Interface request, one Response (MI §3); failures ride
+        // inside the Response, so an admitted request answers 200. The API
+        // key is this deployment's owner credential.
+        return json(await handleMemory(env, brain, spaceId, body, true))
+      case 'memory/sources':
+        try {
+          return ok(await brain.memoryStage(NAMESPACE, spaceId, body as never))
+        } catch (error) {
+          const kipError = errorOf(error)
+          throw new ApiError(kipError.message, kipError.code === 'IdempotencyConflict' ? 409
+            : kipError.code === 'NotFoundOrNotVisible' ? 404 : 400, kipError)
+        }
       case 'memory/forget':
         try { validateForget(body) } catch (error) { throw new ValidationError((error as Error).message) }
         return ok(await brain.forgetMemory(body))

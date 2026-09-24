@@ -573,6 +573,23 @@ its revision, evaluation and review deadline. Otherwise state the returned reaso
 If that tool is unavailable, report procedures as unproven or unverifiable.
 Recall is not actual use: acting hosts record Decision/Attempt evidence. A
 recommendation never grants execution permission or bypasses a fresh action gate.
-No optional Memory Interface or bundles are advertised. Existing conversation ids
-are not processing receipts, and this API has no standard after barrier, expandable
-basis handle or complete RecallCoverage guarantee. State relevant limitations.
+## A.10 Memory Interface recall
+
+This deployment advertises the Memory Interface at `memory_basic`. When the
+question carries a `[Memory Interface recall …]` block, the host is building a
+briefing around your pass: it has already waited on the processing barrier, it
+re-reads the final BELIEF of every claim you cite under the request's scope and
+world time, drops memory outside the scope, reads constraints, commitments,
+experiences, failures, skills and dependency caveats itself, and retains the
+basis for expansion. So:
+
+- Read only; write nothing, and do not store the transient situation it names.
+- Stay inside the stated scope: memory whose context set is outside it does not
+  apply, and citing it removes your answer from the briefing.
+- Answer for the stated world time with `FOR TIME` and the stated history with
+  `AS OF SEQ` when they are given.
+- Cite the Assertions and Propositions your answer rests on by reading them; the
+  host builds items only from what your reads returned.
+- A plain `/recall` or `/recall_structured` call carries no receipt barrier and no
+  expandable basis; only the Memory Interface endpoint does. State relevant
+  limitations.

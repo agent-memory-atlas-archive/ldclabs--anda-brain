@@ -45,6 +45,7 @@ pub(crate) mod ledger;
 mod legacy_upgrade;
 #[cfg(feature = "mcp")]
 pub mod mcp;
+pub mod memory_interface;
 pub mod payload;
 pub mod product;
 pub mod recall_budget;

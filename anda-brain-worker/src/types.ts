@@ -67,6 +67,19 @@ export interface BrainRpc {
   schemaDrafts(): Promise<SchemaDrafts>
   promoteDraftSymbol(input: PromoteDraftInput): Promise<PromoteDraftOutput>
   recallAttention(input: AttentionRecallInput): Promise<AttentionRecall>
+  memoryStage(namespace: string, space: string, input: import('./memory-ledger.js').StageSourceInput): Promise<import('./memory-ledger.js').StagedSourceRef>
+  memorySource(namespace: string, sourceRef: string): Promise<import('./memory-ledger.js').StagedSource>
+  memoryAdmit(namespace: string, space: string, request: import('./memory-wire.js').MemoryRequest): Promise<import('./memory-ledger.js').Admission>
+  memoryCaptureEvidence(receiptRef: string, messages: Message[], observedAt: string, purpose: 'feedback' | 'revise-report', about?: Record<string, unknown>): Promise<import('./memory-ledger.js').IntakeRecord>
+  memoryFinishFormation(receiptRef: string, trace: import('./memory-ledger.js').PassTrace): Promise<import('./memory-ledger.js').IntakeRecord>
+  memoryFailFormation(receiptRef: string, error: { code: string; message: string }): Promise<import('./memory-ledger.js').IntakeRecord>
+  memoryForget(namespace: string, space: string, request: import('./memory-wire.js').MemoryRequest, owner: boolean): Promise<import('./memory-ledger.js').IntakeRecord>
+  memoryBarrier(namespace: string, after: string[]): Promise<import('./memory-wire.js').Progress[]>
+  memoryScopedAttention(scope: import('./memory-wire.js').Scope | undefined, items: AttentionRecall['items']): Promise<import('./memory-wire.js').AttentionItem[]>
+  memoryDeliver(namespace: string, scope: import('./memory-wire.js').Scope | undefined, cited: string[], options: Parameters<import('./memory-ledger.js').MemoryLedger['deliver']>[3]): Promise<import('./memory-wire.js').Briefing>
+  memoryExpand(namespace: string, target: string, evidence: boolean): Promise<import('./memory-wire.js').Briefing>
+  memoryReceipt(namespace: string, receiptRef: string): Promise<Record<string, unknown>>
+  memoryPlan(namespace: string, planRef: string): Promise<Record<string, unknown>>
 }
 
 /** This Space's draft vocabulary (Spec §20.16), as its owner reviews it. */

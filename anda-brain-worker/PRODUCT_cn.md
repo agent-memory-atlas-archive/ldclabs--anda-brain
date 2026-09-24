@@ -32,8 +32,8 @@ Formation 在调用模型前注册 `formation:sha256:…` 观察身份。默认�
 保存有效期十分钟的预览。操作 id 为 1–128 个 ASCII 字母、数字、`_` 或 `-`。
 `kind` 为 `correct`、`world_change`、`misrecorded`、`suppress` 或 `delete`，回执包含
 精确的带版本目标列表、排除来源、范围和 `preview_digest`。`misrecorded`（Brain 记下了
-调用者从未说过的话）需要 recording repair，kip-do 未提供，因此返回
-`unsupported_capability`，绝不写成更正或世界变化。
+调用者从未说过的话）是 recording repair，通过 Memory Interface 的 `revise` 意图执行，
+因此这个按值修订的 API 返回 `unsupported_capability`，绝不写成更正或世界变化。
 
 `productCommit(auth, operation_id, preview_digest)` 重查记录、来源闭包和当前权限。
 相同操作/输入的重试恢复同一结果，改变输入会冲突。

@@ -38,6 +38,9 @@ Worker 基于 `@ldclabs/kip-do` 0.14。用早先 2.1.0 草案激活过的 Space 
 - **衰减改为计算。** 结算不再扫盘写 `memory_strength`；引擎按基值、锚点和宿主在每次
   模型写入时绑定的 `kip:strength-half-life-30d` 策略计算 `effective_strength`，缺失即未知。
   `memory_strength_decay_factor` 已弃用并被忽略。
+- **Memory Interface。** 业务 Agent 先暂存观察到的内容（`POST /v1/{space_id}/memory/sources`），
+  再向 `POST /v1/{space_id}/memory` 每次发送一个意图；回执如实报告 `recorded` → `available`
+  及处置结果，recall 报告最终信念、覆盖范围和可展开的依据。
 - **注意力召回。** `GET /v1/{space_id}/memory/attention` 按 `(raised_seq, ref)` 返回已触发
   的 Watch 与到期的 Commitment，游标由调用方保存。settlement 为每个没有 Watch 的到期
   Commitment 按 `due_at` 写一次 `commitment_review` Activity 提起它。
@@ -47,8 +50,11 @@ Worker 基于 `@ldclabs/kip-do` 0.14。用早先 2.1.0 草案激活过的 Space 
 Skill 行为保存为不可变的
 `SkillRevision`；Watch 进度和任务租约通过 Nexus 的受保护接口维护。旧的 family
 成功率晋升规则已移除；未配置独立观察者、冻结试验和可重放评估时，程序候选保持未验证，
-`skills.unsupported_reason` 明确报告该边界。现有 Brain API 保持可用；这两个适配器
-**未声明支持**可选的五意图 Memory Interface 或 `memory_*` 能力包。
+`skills.unsupported_reason` 明确报告该边界。现有 Brain API 保持可用；两个适配器现在还在
+`memory_basic` 级别提供 KIP **Memory Interface**：`POST /v1/{space_id}/memory` 每次接收一个意图
+（`observe`、`recall`、`revise`、`feedback`、`forget`），基于暂存来源，提供幂等回执、`after`
+屏障、带作用域的七通道召回、误记的 recording repair 与受治理的遗忘。不声明
+`memory_experience` 与 `memory_learning`。
 
 Rust Markdown 原文与结构化消息使用相同的 Evidence 捕获机制，未提供姓名时保留已有交互对象的显示名。
 Rust 遗忘接口除 Concept、Proposition、Assertion 外，也接受显式的 Evidence 和 Activity
@@ -359,7 +365,7 @@ MCP_AUTH_TOKEN="$SPACE_TOKEN" ./anda_brain mcp --space-id my_space_001 local --d
 
 HTTP 服务模式也会在 `/mcp/<spaceId>` 暴露支持流式传输的 HTTP MCP 端点。公司内部智能体平台可以为每位员工分配一个 space，并把 MCP client 配置为 `https://your-brain-host/mcp/<spaceId>`，同时携带 `Authorization: Bearer <spaceToken-or-CWT>`。本地 MCP client 仍可将 `anda_brain mcp --space-id <spaceId> local --db <path>` 注册为 stdio server。
 
-两种 MCP transport 都会暴露 `anda_brain_remember_conversation`、`anda_brain_recall_memory`、`anda_brain_run_maintenance`、`anda_brain_execute_kip_readonly` 等记忆工具。
+两种 MCP transport 都会暴露 `anda_brain_memory`（Memory Interface）、`anda_brain_stage_memory_source`、`anda_brain_remember_conversation`、`anda_brain_recall_memory`、`anda_brain_run_maintenance`、`anda_brain_execute_kip_readonly` 等记忆工具。
 
 ### 集成
 
