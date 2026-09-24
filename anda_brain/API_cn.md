@@ -24,6 +24,8 @@ Rust `product` 模块提供由 Assertion 支撑的 `MemoryRecord`、稳定修订
 
 - `Correct`：调用者自己的主张写错了。新主张带用户陈述 Evidence，supersede 旧 Assertion，并保留其原有的世界时间区间（缺失的起点写成 `{latest: <原 asserted_at>}`），由 `belief_revision` Activity 记录；旧 Assertion 状态为 `superseded`。
 - `WorldChange`：世界变了。从现在起写一条新主张，时序继承结束旧值；旧值保持 `active`，仍回答它所在时段的问题。
+
+两种修订都沿用该记录的 `context_refs`（`MemoryRecord` 已暴露）：跨上下文集合的 supersession 会报 `SupersessionMismatch`（规范 §14.2）；新值若不在旧值的上下文集合里，会另起一条继承线而结束不了旧值（规范 §25.4）。
 - `Misrecorded`：Brain 记下了调用者从未说过的话。这需要 recording repair，本部署不提供，因此 prepare 返回 `unsupported_capability`，绝不写成更正或世界变化。
 
 以上都不改写原 Concept 名称，也不伪造跨 Proposition 的 supersession。撤销是新的条件变更。
@@ -54,11 +56,16 @@ Anda Bot 当前通过同级临时 patch 使用这些合同。改用已发布的 
 - 大多数业务接口都会返回 RPC 包装后的结构体：`RpcResponse<T>`
 - MCP 客户端可使用内置的支持流式传输的 HTTP MCP 端点：`/mcp/<space_id>`，也可以使用本地 stdio server：`anda_brain mcp --space-id <space_id> [local|aws]`
 
-KIP `3251912` / `cognitive-memory@2.0.0` 对齐说明：鉴权与 JSON/CBOR/Markdown 协商保持
+KIP `597db44` / `cognitive-memory@2.0.0` 对齐说明：鉴权与 JSON/CBOR/Markdown 协商保持
 兼容；新增 `GET /v1/{space_id}/memory/attention`；settlement 报告移除衰减字段与
 `retention.expired_assertions`（衰减与主张到期在读取时计算）；`memory_strength_decay_factor`
 弃用；无法解析的 formation `timestamp` 返回 400。没有新增五意图 Memory Interface 或
-标准 after barrier。conversation id 不是处理回执。
+标准 after barrier。conversation id 不是处理回执。KIP `597db44` 的后续同步新增草稿词汇
+（`GET /v1/{space_id}/schema/drafts`、`POST /v1/{space_id}/schema/promote`）；attention 按
+`(raised_seq, ref)` 排序，游标可以停在同一次提交中间；到期 Commitment 由 settlement 原生
+提起（报告字段 `commitments`）；模型写入增加两道闸门：引用捕获消息的 Assertion 必须带
+`at`（或 `valid.from`），写 `MnemonicState.memory_strength` 必须同时写 `last_metabolized_at`
+与宿主绑定的 `strength_policy`（均返回 `ConstraintViolation`）。
 维护报告 `skills` 新增可选 `unsupported_reason`，说明没有配置可信学习管线，旧计数
 保持零。Watch 的 `disarmed` 兼容字段也统计 Nexus 的 expired；文本 Watch 无已配置的语义求值器时保持 deferred。
 模型生成的 Formation 请求不得覆盖宿主捕获的 ingest 或 msgN 绑定；学习/runtime Facet
@@ -259,6 +266,7 @@ export interface MemorySettlementReport {
   revised_roots?: unknown[];
   new_corrections: number;
   watches: WatchSettlement;
+  commitments: { due: number; raised: number; error?: string }; // 以 commitment_review Activity 提起的到期 Commitment
   skills: SkillSettlement;
   correction_scan_error?: string;
   correction_scan_incomplete: boolean;
@@ -947,20 +955,22 @@ RPC/MCP 传输副本不属于这些范围。不根据模型名猜编码，也不
 
 ### GET `/v1/{space_id}/memory/attention`
 
-- 作用：注意力召回（KIP Memory Interface §4）：返回调用方所保存游标之后，已触发的 Watch 与 Maintenance 判定到期的 Commitment。
+- 作用：注意力召回（KIP Memory Interface §4）：返回调用方所保存游标之后，已触发的 Watch 与 settlement 判定到期的 Commitment。
 - 鉴权：SpaceToken/CWT `read`；公开空间允许匿名读取。
-- 查询参数：`AttentionRecallInput`——`attention_cursor`（可选）、`limit`（1–50 条提起记录，默认 20）。
+- 查询参数：`AttentionRecallInput`——`attention_cursor`（可选）、`limit`（1–50 个条目，默认 20）。
 - 响应：`RpcResponse<AttentionRecall>`，保持 JSON/CBOR/Markdown 协商。游标或 limit 无效返回 400。
 
 ```ts
 export interface AttentionRecallInput {
-  attention_cursor?: string; // "attention:<n>"；缺省或 "attention:-1" 表示从第一次提起开始
-  limit?: number; // 1–50；默认 20
+  attention_cursor?: string; // 不透明；缺省、"attention:start" 或旧的 "attention:-1" 表示从第一次提起开始
+  limit?: number; // 1–50 个条目；默认 20
 }
 
 export interface AttentionRecall {
-  items: AttentionItem[]; // 按 raised_seq 排序
-  attention_cursor: string; // "attention:<已交付的最大 raised_seq>"；取走条目后由调用方保存
+  items: AttentionItem[]; // 按 (raised_seq, ref) 排序
+  // 最后交付的位置：页面停在一次提交中间时为 "attention:<seq>:<ref>"；该次提交及之前的
+  // 条目全部交付时为 "attention:<seq>"；没有新条目时为输入游标（或 "attention:start"）
+  attention_cursor: string;
   complete: boolean; // 输入游标之后的所有提起是否都已读完
 }
 
@@ -975,7 +985,38 @@ export interface AttentionItem {
 }
 ```
 
-每个条目都由一次提交提起：`watch_fire` Activity，或 Maintenance 在其中列出到期 Commitment 的 `commitment_review` Activity；仅仅过了 `due_at` 不会提起任何条目。读取不改变记忆，游标不会过期，调用方取走条目后自行保存。条目不授予任何权限：据此行动仍须经过 action gate 与 Governance。它与有身份的运行时收件箱（`GET /v1/{space_id}/attention`，按 action gate 的 wake 记录分页）相互独立。
+每个条目都由一次提交提起：`watch_fire` Activity，或指名某个到期 Commitment 的 `commitment_review` Activity。settlement 为每个到期、状态为 `pending`/`blocked` 且没有 Watch 的 Commitment 原生写一条这样的 Activity，键为 `commitment_review:<commitment id>:<due_at>`（Profile §17）：重放不会再次提起，只有新的 `due_at` 才会再次提起；Commitment 的状态不变。一次提交可以提起多个条目，页面可以停在它们中间，下一页从最后交付的条目之后继续。读取不改变记忆，游标不会过期，调用方取走条目后自行保存。条目不授予任何权限：据此行动仍须经过 action gate 与 Governance。它与有身份的运行时收件箱（`GET /v1/{space_id}/attention`，按 action gate 的 wake 记录分页）相互独立。
+
+### GET `/v1/{space_id}/schema/drafts`
+
+- 作用：本空间的草稿词汇（KIP §20.16）：Formation 用 `DEFINE`（或已弃用的 `declare_memory_symbols`）起草的每个符号、其定义，以及晋升后所并入的谱系。
+- 鉴权：SpaceToken/CWT `read`；公开空间允许匿名读取。
+- 响应：`RpcResponse<SchemaDrafts>`。
+
+```ts
+export interface SchemaDrafts {
+  package_ref: 'kip://local/draft@0.0.0';
+  schema_environment_version: number;
+  symbols: DraftSymbol[];
+}
+
+export interface DraftSymbol {
+  kind: 'ConceptType' | 'PredicateType';
+  name: string;
+  ref: string; // kip://local/draft@0.0.0/<name>；元素永久保留这个引用
+  definition: object; // 起草时的定义
+  promoted_to?: string; // 晋升目标谱系，如 kip://profiles/cognitive-memory/Person
+}
+```
+
+每个新草稿排一个 `review_schema` SleepTask，键为 `review_schema:<kind>:<ref>`（带 `symbol_kind` / `symbol_ref` 属性）。Maintenance 审阅它，可以在总结里提议晋升，但从不定义或晋升符号。Formation 定义符号的请求只能包含 `DEFINE`（最多 8 个），名称与定义体必须是字面量并符合本部署的命名形状；每个空间自有符号最多 512 个。
+
+### POST `/v1/{space_id}/schema/promote`
+
+- 作用：把一个草稿符号晋升到已安装包中同类别的符号（KIP §20.16）。这是 Schema 迁移：草稿下写入的元素保留原有的 `schema_ref` / `predicate_ref`，从新的 Schema Environment 版本起，类型与谓词匹配把两条谱系视为一条。每个草稿至多晋升一次，从不隐式晋升。
+- 鉴权：管理 CWT `write`（代表 `manage_schema`）；Space token 不能晋升。
+- 请求体：`{kind: 'ConceptType' | 'PredicateType', from: string, to: string}`——`from` 是草稿的本地名或确切引用，`to` 是已安装符号的确切引用或无歧义的本地名。
+- 响应：`RpcResponse<{promoted: string, to: string, schema_environment_version: number}>`。草稿不存在、类别不符、目标无法解析或重复晋升均返回 400。
 
 ### GET `/v1/{space_id}/memory_status`
 

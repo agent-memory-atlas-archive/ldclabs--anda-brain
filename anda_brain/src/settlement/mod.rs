@@ -12,7 +12,9 @@ use std::future::Future;
 
 use crate::{
     kip,
-    types::{ArmedWatch, Dependent, RevisedRoot, SkillSettlement, WatchSettlement},
+    types::{
+        ArmedWatch, CommitmentSettlement, Dependent, RevisedRoot, SkillSettlement, WatchSettlement,
+    },
 };
 
 /// Per-command row limit for bulk settlement passes.
@@ -284,6 +286,92 @@ pub(crate) async fn sweep_watches(port: &impl RunKip) -> WatchSettlement {
                 report.deferred += 1;
                 report.error = Some(error.to_string());
             }
+        }
+    }
+    report
+}
+
+/// How many due Commitments one cycle raises; the rest wait for the next.
+pub(crate) const COMMITMENT_REVIEW_LIMIT: usize = 50;
+
+/// Due `pending` / `blocked` Commitments that no Watch watches, earliest first.
+/// The `due_at` comparison is lexical here and re-checked as a time below.
+const DUE_COMMITMENTS: &str = r#"FIND(?c.id, ?c.attributes.due_at) WHERE {
+  ?c CONCEPT {type: "Commitment"}
+  FILTER((?c.attributes.status == "pending" || ?c.attributes.status == "blocked") && ?c.attributes.due_at <= :now)
+  NOT { ?w CONCEPT {type: "Watch"} STRUCTURAL (?w, "watches", ?c) }
+} ORDER BY ?c.attributes.due_at ASC LIMIT :limit"#;
+
+/// One `commitment_review` Activity raising one Commitment (Profile §5.7, §17).
+const RAISE_COMMITMENT: &str = r#"CREATE ACTIVITY ?review {
+  CLIENT KEY :key
+  SET FIELDS { activity_class: "commitment_review", status: "completed", started_at: :now, ended_at: :now }
+  SET STRUCTURAL { ("inputs", :commitment) }
+}"#;
+
+/// Raises every due Commitment without a Watch as `commitment_due` attention.
+///
+/// Native rather than left to the maintenance model: the attention stream is
+/// what a business agent acts on, so a Commitment has to reach it whether or
+/// not a model thought to look, and exactly once per `due_at`. The CLIENT KEY
+/// `commitment_review:<id>:<due_at>` is what makes a replay `no_effect` and a
+/// rescheduled Commitment rise again (Profile §5.7, §17; Memory Interface §4).
+/// A due time passing changes nothing else: the Commitment keeps its status.
+pub(crate) async fn raise_due_commitments(port: &impl RunKip, now_ms: u64) -> CommitmentSettlement {
+    let now = kip::timestamp(now_ms);
+    let mut report = CommitmentSettlement::default();
+    let response = match read(
+        port,
+        kip::request_with(
+            DUE_COMMITMENTS,
+            serde_json::Map::from_iter([
+                ("now".to_string(), Json::from(now.as_str())),
+                ("limit".to_string(), Json::from(COMMITMENT_REVIEW_LIMIT)),
+            ]),
+        ),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            report.error = Some(error);
+            return report;
+        }
+    };
+    let rows = kip::ok_result(&response)
+        .and_then(Json::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for row in rows {
+        let (Some(id), Some(due_at)) = (
+            row.get(0).and_then(Json::as_str),
+            row.get(1).and_then(Json::as_str),
+        ) else {
+            continue;
+        };
+        if kip::time_ms(due_at).is_none_or(|due| due > now_ms) {
+            continue;
+        }
+        report.due += 1;
+        let request = kip::request_with(
+            RAISE_COMMITMENT,
+            serde_json::Map::from_iter([
+                (
+                    "key".to_string(),
+                    Json::from(format!("commitment_review:{id}:{due_at}")),
+                ),
+                ("commitment".to_string(), Json::from(id)),
+                ("now".to_string(), Json::from(now.as_str())),
+            ]),
+        );
+        match port.run_kip(request, false).await {
+            Ok(response) if kip::succeeded(&response) => {
+                if kip::changed(&response, "create") > 0 {
+                    report.raised += 1;
+                }
+            }
+            Ok(response) => report.error = Some(kip::error_message(&response)),
+            Err(error) => report.error = Some(error.to_string()),
         }
     }
     report

@@ -16,6 +16,7 @@ import {
   parseKip,
   tryParseElementId,
   type Command,
+  type DefineCommand,
   type Json,
   type JsonMap,
   type KipResult,
@@ -26,6 +27,7 @@ import {
   type Scalar,
 } from '@ldclabs/kip-do'
 import type { MemoryCitation, Message } from './types.js'
+import { isSymbolName } from './vocabulary.js'
 
 export const MAX_KIP_OPERATIONS = 4
 const MAX_KIP_COMMAND_BYTES = 256 * 1024
@@ -201,6 +203,9 @@ const FORMATION_CLAUSES = new Set([
   'CreateAssertion',
   'CreateActivity',
   'Transition',
+  // A standalone draft symbol (Spec §20.16); the host runs it before the
+  // plan's other commands. See `assertLiteralDefine`.
+  'Define',
 ])
 
 /**
@@ -270,6 +275,7 @@ function assertBoundedReadonlyOperations(
 
 /** Formation writes cognition; it does not administer memory. */
 export function assertFormationOperations(operations: readonly KipOperation[]): void {
+  // At most MAX_KIP_OPERATIONS commands, which also bounds a plan's DEFINEs.
   assertOperationBatch(operations)
   for (const operation of operations) {
     const command = parseKip(operation.command)
@@ -277,7 +283,10 @@ export function assertFormationOperations(operations: readonly KipOperation[]): 
       throw new Error('formation accepts only KIP KML commands')
     }
     for (const clause of command.Kml.clauses) {
+      if ('Define' in clause) assertLiteralDefine(clause.Define)
       assertCognitiveRecords(clause, operation.parameters)
+      assertCompleteStrength(clause, operation.parameters)
+      assertDatedCitation(clause)
       const name = clauseName(clause)
       if (!FORMATION_CLAUSES.has(name)) {
         throw new Error(
@@ -332,6 +341,12 @@ export function assertMaintenanceOperations(operations: readonly KipOperation[])
     }
     for (const clause of command.Kml.clauses) {
       assertCognitiveRecords(clause, operation.parameters)
+      assertCompleteStrength(clause, operation.parameters)
+      if ('Define' in clause) {
+        throw new Error('maintenance reviews draft vocabulary and never defines it: record a ' +
+          'near-synonym as an Insight about the existing symbol, and put a symbol worth keeping ' +
+          'in the summary as a proposed promotion {kind, from, to}')
+      }
       if ('Purge' in clause || 'PurgePayload' in clause) {
         throw new Error('maintenance plans cannot issue KIP PURGE commands')
       }
@@ -797,5 +812,128 @@ function assertCognitiveRecords(clause: MutationClause, parameters?: JsonMap): v
     if (PROTECTED_STRUCTURAL.includes(localName(name))) {
       throw new Error(`UnsupportedCapability: ${name} is moved by host learning transactions or computed from Activity provenance; it cannot be authored by a model plan`)
     }
+  }
+}
+
+/**
+ * The `strength_policy` pin this deployment writes on every `MnemonicState`
+ * base: the standard `kip:strength-half-life-30d` artifact the engine computes
+ * `effective_strength` under (Profile §6.1, Spec §59.1). kip-do does not
+ * export its bundled policy, so the pin is spelled here; the Rust service
+ * reads the same two strings from Nexus's bundled artifact.
+ */
+export const STRENGTH_POLICY_PIN: JsonMap = {
+  artifact_ref: 'kip:strength-half-life-30d',
+  content_digest: 'sha256:a50a89b83f937c97cabf0f8371cccfd326f4fdd438b6d7b9ead507d77927b227',
+}
+
+/**
+ * The parameters the host binds on every model write: the strength pin and
+ * this write's time, cited as `:strength_policy` and `:now`. Plan parameters
+ * are `digest_*` names only, so these never shadow a model binding.
+ */
+export function hostBindings(nowMs: number): JsonMap {
+  return { strength_policy: STRENGTH_POLICY_PIN, now: new Date(nowMs).toISOString() }
+}
+
+/**
+ * A `MnemonicState` `memory_strength` is a base: written without its anchor
+ * and policy pin, `effective_strength` reads `null` forever (Profile §6.1).
+ * Checked on member names, which the grammar fixes. Mirrors
+ * `incomplete_strength` in `anda_brain/src/kip.rs`.
+ */
+function assertCompleteStrength(clause: MutationClause, parameters?: JsonMap): void {
+  const body = Object.values(clause)[0] as Record<string, unknown>
+  const assignments: { facet?: { Name?: string; Param?: string }; values?: [string, unknown][] }[] = []
+  if (Array.isArray(body.set_facets)) assignments.push(...body.set_facets)
+  if (Array.isArray(body.actions)) {
+    for (const action of body.actions) if ('SetFacet' in action) assignments.push(action.SetFacet)
+  }
+  for (const assignment of assignments) {
+    const name = assignment.facet?.Name ??
+      (assignment.facet?.Param ? parameters?.[assignment.facet.Param] : undefined)
+    if (typeof name !== 'string' || localName(name) !== 'MnemonicState') continue
+    const members = new Set((assignment.values ?? []).map(([member]) => member))
+    if (members.has('memory_strength') &&
+        !(members.has('last_metabolized_at') && members.has('strength_policy'))) {
+      throw new Error('ConstraintViolation: a MnemonicState memory_strength is a base: write it ' +
+        'with its anchor and the host\'s policy pin, `last_metabolized_at: :now, strength_policy: ' +
+        ':strength_policy`, or leave strength unwritten (Profile §6.1)')
+    }
+  }
+}
+
+/** The runtime's captured message handles, `:msg1` … `:msg16`. */
+const CAPTURED = /^msg\d+$/
+
+/**
+ * A claim taken from a captured message carries that message's time: without
+ * `at` (or a written `valid.from`) it starts at the write's time, and a
+ * late-processed message would end a newer value (Spec §13.2, §25.4; Memory
+ * Interface §5.1). The Brain's own inferences are exempt, and a parameter is
+ * given the benefit of the doubt. Mirrors `undated_citation` in
+ * `anda_brain/src/kip.rs`.
+ */
+function assertDatedCitation(clause: MutationClause): void {
+  if (!('CreateAssertion' in clause)) return
+  const body = clause.CreateAssertion as unknown as {
+    set_fields?: [string, unknown][] | null
+    set_structural?: { field?: { Name?: string }; value?: { Param?: string } }[] | null
+  }
+  const citesCapture = (body.set_structural ?? []).some((edge) =>
+    edge.field?.Name === 'evidence' && typeof edge.value?.Param === 'string' && CAPTURED.test(edge.value.Param))
+  if (!citesCapture) return
+  const fields = new Map(body.set_fields ?? [])
+  const literal = (value: unknown): unknown => (isObject(value) && 'Value' in value ? value.Value : undefined)
+  const mode = literal(fields.get('mode'))
+  if (isObject(mode) && mode.String === 'inferred') return
+  const at = fields.get('asserted_at')
+  const dated = at !== undefined && literal(at) !== 'Null'
+  const valid = fields.get('valid_time')
+  let starts = false
+  if (isObject(valid)) {
+    if ('Value' in valid) {
+      const object = isObject(valid.Value) ? valid.Value.Object : undefined
+      starts = isObject(object) && object.from !== undefined && object.from !== 'Null'
+    } else if ('Object' in valid && Array.isArray(valid.Object)) {
+      starts = (valid.Object as [string, unknown][]).some(([key, value]) => key === 'from' && literal(value) !== 'Null')
+    } else {
+      starts = true
+    }
+  }
+  if (!dated && !starts) {
+    throw new Error('ConstraintViolation: an ASSERT citing a captured message needs `at:` — that ' +
+      "message's observed_at from captured_evidence — or a `valid: {from: …}`; without it the claim " +
+      'starts at this write\'s time and a late-processed message would end a newer value (Spec §13.2, §25.4)')
+  }
+}
+
+/**
+ * A `DEFINE` Formation may send: its name and body are literals, so what is
+ * defined is what the plan says, and the name keeps this brain's shapes. The
+ * engine checks the body against §20.16 and the Schema Environment. Mirrors
+ * `define_refusal` in `anda_brain/src/kip.rs`.
+ */
+function assertLiteralDefine(define: DefineCommand): void {
+  if (!('Name' in define.name)) throw new Error('write the DEFINE name as a literal, not a parameter')
+  const name = define.name.Name
+  const kind = define.kind === 'ConceptType' ? 'ConceptType' : 'PredicateType'
+  if (!isSymbolName(kind, name)) {
+    throw new Error(`\`${name}\` is not a symbol name this brain drafts: Concept types are ` +
+      'UpperCamelCase letters and digits, predicates are snake_case, at most 64 characters, ' +
+      'and never a Core element kind')
+  }
+  if (Object.values(define.definition as Record<string, unknown>).some((value) => !isObject(value) || !('Value' in value))) {
+    throw new Error('write the DEFINE body as literals; a bound body cannot be reviewed before it runs')
+  }
+}
+
+/** Whether a command is a standalone `DEFINE` (Spec §20.16). */
+export function isDefine(command: string): boolean {
+  try {
+    const parsed = parseKip(command)
+    return 'Kml' in parsed && parsed.Kml.clauses.length === 1 && 'Define' in parsed.Kml.clauses[0]!
+  } catch {
+    return false
   }
 }

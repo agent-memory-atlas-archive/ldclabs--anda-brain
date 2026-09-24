@@ -790,20 +790,19 @@ impl WikiDigest {
         Ok(retracted)
     }
 
-    /// Publishes the Schema Package covering these facts' symbols, when the
-    /// digest has met a new one.
+    /// Drafts the symbols these facts use that the Space does not yet speak,
+    /// and returns the vocabulary as it now stands.
     ///
-    /// Schema is protected control state: KML cannot declare a type, so the
-    /// host does it. Activation only happens when the vocabulary actually grew
-    /// — every activation mints a new Schema Environment version, and walking
-    /// that forward on every digest would invalidate clients' preconditions for
-    /// no change at all.
+    /// New vocabulary is draft vocabulary (Spec §20.16): one `DEFINE` per new
+    /// symbol, each queued for review. Nothing is defined when the Space
+    /// already covers every symbol, and a name refused (malformed, or past the
+    /// cap) costs only the facts that needed it.
     async fn ensure_vocabulary(
         &self,
         facts: &[DigestedFact],
     ) -> Result<MemoryVocabulary, BoxError> {
         let nexus = self.memory.nexus();
-        let mut vocabulary = MemoryVocabulary::load(nexus.as_ref()).await?;
+        let vocabulary = MemoryVocabulary::load(nexus.as_ref()).await?;
         let types: BTreeSet<&str> = facts
             .iter()
             .flat_map(|fact| [fact.subject_type.as_str(), fact.object_type.as_str()])
@@ -813,16 +812,18 @@ impl WikiDigest {
             return Ok(vocabulary);
         }
 
-        let rejected = vocabulary.extend(types.iter().copied(), predicates.iter().copied());
-        if !rejected.is_empty() {
+        let types: Vec<&str> = types.into_iter().collect();
+        let predicates: Vec<&str> = predicates.into_iter().collect();
+        let drafted = crate::vocabulary::draft_symbols(nexus.as_ref(), &types, &predicates).await?;
+        if !drafted.rejected.is_empty() {
             log::warn!(
                 target: "brain",
                 space_id = self.wiki.space_id;
-                "the wiki digest proposed symbols this Space will not publish: {rejected:?}"
+                "the wiki digest proposed symbols this Space will not draft: {:?}",
+                drafted.rejected
             );
         }
-        vocabulary.activate(nexus.as_ref()).await?;
-        Ok(vocabulary)
+        MemoryVocabulary::load(nexus.as_ref()).await
     }
 
     /// Facts recorded by the most recent digest of this document before the

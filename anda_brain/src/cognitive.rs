@@ -18,6 +18,21 @@ Skill learning pointers, computed lineage, LeaseState or WatchState. Nexus compu
 Text and mixed-selector Watches require a host-installed semantic evaluator; read memory_runtime status.semantic_attention for this connection's configuration and recovery state. Without that binding, semantic evaluation is unavailable. \
 Read constraints, task scope, uncertainty and invalid dependencies must remain visible.";
 
+/// The `strength_policy` pin this deployment writes on every `MnemonicState`
+/// base: the standard `kip:strength-half-life-30d` artifact bundled with
+/// Nexus, named by its policy id and content digest (Profile §6.1, Spec
+/// §59.1). The engine computes `effective_strength` only for a pin it can
+/// resolve, and reads `null` for any other.
+pub(crate) static STRENGTH_POLICY: LazyLock<Json> = LazyLock::new(|| {
+    let artifact: Json =
+        serde_json::from_str(anda_cognitive_nexus::profiles::STRENGTH_HALF_LIFE_30D)
+            .expect("the bundled strength policy parses");
+    json!({
+        "artifact_ref": artifact["policy_id"],
+        "content_digest": artifact["integrity"]["content_digest"],
+    })
+});
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RuntimeArgs {

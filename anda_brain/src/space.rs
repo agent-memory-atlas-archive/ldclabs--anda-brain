@@ -134,6 +134,7 @@ mod lifecycle;
 mod metabolism;
 mod processing;
 mod tokens;
+mod vocabulary;
 use hooks::Hooks;
 mod runtime_api;
 mod self_test;

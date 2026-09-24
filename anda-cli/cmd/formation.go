@@ -152,23 +152,35 @@ func parseMessagesInput(raw string) ([]api.Message, error) {
 	if json.Valid([]byte(raw)) {
 		switch raw[0] {
 		case '[':
-			var messages []api.Message
-			if err := json.Unmarshal([]byte(raw), &messages); err != nil {
+			var parsed []fileMessage
+			if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
 				return nil, fmt.Errorf("invalid message array: %w", err)
 			}
-			if len(messages) == 0 {
+			if len(parsed) == 0 {
 				return nil, fmt.Errorf("messages cannot be empty")
+			}
+			messages := make([]api.Message, 0, len(parsed))
+			for idx, message := range parsed {
+				converted, err := message.message()
+				if err != nil {
+					return nil, fmt.Errorf("message[%d]: %w", idx, err)
+				}
+				messages = append(messages, converted)
 			}
 			if err := validateMessages(messages); err != nil {
 				return nil, err
 			}
 			return messages, nil
 		case '{':
-			var single api.Message
+			var single fileMessage
 			if err := json.Unmarshal([]byte(raw), &single); err != nil {
 				return nil, fmt.Errorf("invalid message object: %w", err)
 			}
-			messages := []api.Message{single}
+			converted, err := single.message()
+			if err != nil {
+				return nil, fmt.Errorf("message[0]: %w", err)
+			}
+			messages := []api.Message{converted}
 			if err := validateMessages(messages); err != nil {
 				return nil, err
 			}
@@ -180,6 +192,47 @@ func parseMessagesInput(raw string) ([]api.Message, error) {
 		Role:    "user",
 		Content: api.MessageContentFromText(raw),
 	}}, nil
+}
+
+// fileMessage is an input message whose `timestamp` may be Unix milliseconds
+// or an RFC 3339 instant, the spelling most transcript exports use. Each
+// message keeps its own time: it is when that message was said, and a claim
+// formed from it takes that time as asserted_at, so a long conversation is
+// not flattened onto one observation time.
+type fileMessage struct {
+	api.Message
+	Timestamp json.RawMessage `json:"timestamp,omitempty"`
+}
+
+func (m fileMessage) message() (api.Message, error) {
+	message := m.Message
+	message.Timestamp = nil
+	raw := strings.TrimSpace(string(m.Timestamp))
+	if raw == "" || raw == "null" {
+		return message, nil
+	}
+	var millis int64
+	if err := json.Unmarshal(m.Timestamp, &millis); err == nil {
+		if millis < 0 {
+			return message, fmt.Errorf("timestamp must not be negative")
+		}
+		message.Timestamp = &millis
+		return message, nil
+	}
+	var text string
+	if err := json.Unmarshal(m.Timestamp, &text); err != nil {
+		return message, fmt.Errorf("timestamp must be Unix milliseconds or an RFC 3339 instant")
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(text))
+	if err != nil {
+		return message, fmt.Errorf("timestamp %q is not an RFC 3339 instant", text)
+	}
+	if parsed.Nanosecond()%int(time.Millisecond) != 0 {
+		return message, fmt.Errorf("timestamp %q is finer than milliseconds", text)
+	}
+	millis = parsed.UnixMilli()
+	message.Timestamp = &millis
+	return message, nil
 }
 
 func validateMessages(messages []api.Message) error {

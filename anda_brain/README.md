@@ -33,8 +33,8 @@ Anda Bot currently consumes these contracts through a temporary sibling patch. R
 
 ## KIP 2.0 update
 
-The service tracks KIP `3251912` and `kip://profiles/cognitive-memory@2.0.0`
-(revision `sha256:3ea9e459…`; only the digest names the revision). Rust uses
+The service tracks KIP `597db44` and `kip://profiles/cognitive-memory@2.0.0`
+(revision `sha256:734aa0fd…`; only the digest names the revision). Rust uses
 `anda_kip`, Cognitive Nexus and AndaDB 0.14; the Worker uses `@ldclabs/kip-do`
 0.14. Spaces activated under the earlier 2.1.0 draft are not migrated. A changed
 world is one new Assertion and temporal succession ends the old value; claims
@@ -122,11 +122,20 @@ Receives conversation messages and encodes them into structured memory within th
   or misrepresentation. No changes is a valid result; missing source context
   is reported as a coverage limit. This self-review does not guarantee
   exhaustive processing or establish measured accuracy gains.
-- New vocabulary enters through the host, never through KML. KIP 2.0 makes
-  Schema protected control state, so a command naming an undeclared type or
-  predicate is refused with `SchemaSymbolNotFound`; the model asks for one
-  through the `declare_memory_symbols` tool, and the host validates the name's
-  shape, caps how many a space may hold, and versions the result.
+- New vocabulary is a draft (KIP §20.16). A command naming an undefined type or
+  predicate is refused with `SchemaSymbolNotFound`, so Formation sends
+  `DEFINE CONCEPT TYPE` / `DEFINE PREDICATE` with a literal name and description
+  in a request of its own, before the `MUTATE` that uses the symbol. The host
+  checks the name's shape, caps a space at 512 symbols of its own, runs the
+  request's `DEFINE`s independently (a name that already resolves answers
+  `SchemaSymbolConflict` and stops nothing), and queues one `review_schema`
+  SleepTask per new symbol. The `declare_memory_symbols` tool remains for one
+  release as a deprecated shortcut that drafts bare names the same way.
+- Claims taken from a captured message carry that message's time: the gate
+  refuses an Assertion citing `:msgN` without `at` (or `valid.from`), except the
+  Brain's own inferences. A `MnemonicState.memory_strength` must be written with
+  `last_metabolized_at` and the host-bound `:strength_policy`, so the engine can
+  compute `effective_strength`.
 
 ### Recall — Memory Retrieval (`recall_memory`)
 
@@ -178,7 +187,7 @@ Consolidates, prunes, and optimizes the knowledge graph during scheduled or on-d
 5. **Identity review** — Review `same_as` suspicions, then `MERGE CONCEPT`, which is non-destructive: the source survives as merged historical identity.
 6. **Contradiction and derivation review** — Different actors' disagreement coexists; only an actor's own revision supersedes. After a revision, the settlement walks `LIST DEPENDENTS` and hands the agent each revised root with its dependents (`assessment.revised_roots`); the agent flags what no longer holds `stale`.
 7. **Mnemonic metabolism** — decay is computed, not written: the engine derives strength at read time from `memory_strength` (base), `last_metabolized_at` (anchor) and a pinned `strength_policy`, and a missing input is unknown. The agent writes a new base only on an explicit signal (a decision's `used_refs`, a correction). Never `confidence`; a fact nobody has asked about lately is no less credible.
-8. **Commitments and Watches** — Review outstanding obligations and attention. A due Commitment without a Watch is raised to attention by one `commitment_review` Activity whose inputs name it. Nexus advances structured Watches under generation/CAS/coverage checks; prose conditions remain deferred without a semantic evaluator. No model completion attests change-stream consumption. See the Watch contract below.
+8. **Commitments and Watches** — Review outstanding obligations and attention. The settlement raises each due `pending`/`blocked` Commitment without a Watch natively, with one `commitment_review` Activity keyed `commitment_review:<id>:<due_at>`: a replay raises nothing and only a new `due_at` raises it again. Maintenance reviews `review_schema` tasks and proposes promotions; it never defines or promotes a symbol. Nexus advances structured Watches under generation/CAS/coverage checks; prose conditions remain deferred without a semantic evaluator. No model completion attests change-stream consumption. See the Watch contract below.
 9. **SelfModel and WorkingState refresh** — Consolidate identity from evidence rather than from the latest conversation, and rebuild the digest the next waking session resumes from, stamped with the `basis_seq` it was built at.
 10. **Retention review** — Decide what should carry an expiry and write it with `SET RETENTION`; the full settlement's sweep is what makes that write mean something. See "Retention expiry" below.
 
@@ -923,10 +932,14 @@ memory is — lives in the `MnemonicState` Facet, and is not confidence.
 **Schema is not graph state.** Types and predicates are resolved from immutable,
 versioned Schema Packages, so a write cannot change what a type means. This
 space activates the standard [Cognitive Memory
-Profile](https://github.com/ldclabs/KIP) plus a `kip://anda-brain/memory`
-package of its own. When Formation meets vocabulary the profile lacks, it asks
-the host to publish it (`declare_memory_symbols`) — the host validates the
-name's shape, caps how many a space may hold, and versions the result.
+Profile](https://github.com/ldclabs/KIP). When Formation meets vocabulary the
+profile lacks, it drafts it with `DEFINE` into the space's draft vocabulary
+`kip://local/draft@0.0.0` (KIP §20.16): additive, never changed afterwards, and
+under the host's name checks and 512-symbol cap. Each new symbol queues a
+`review_schema` task; `GET /v1/{space_id}/schema/drafts` lists the drafts, and
+the owner promotes one onto an installed symbol with `POST
+/v1/{space_id}/schema/promote`. Spaces that grew vocabulary earlier keep their
+`kip://anda-brain/memory` package in force; nothing is added to it any more.
 
 ## Configuration
 

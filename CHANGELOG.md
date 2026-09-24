@@ -2,11 +2,12 @@
 
 All notable changes to the Anda Brain project.
 
-## [Unreleased] — KIP `3251912` synchronization
+## [Unreleased] — KIP `597db44` synchronization
 
-**Breaking for draft data.** The service now tracks KIP `3251912` and
+**Breaking for draft data.** The service now tracks KIP `597db44` (following the
+earlier `3251912` pass) and
 `kip://profiles/cognitive-memory@2.0.0` (content digest
-`sha256:3ea9e4591b403dfc196b611c3e5844be95524987ec3cf80664572e780770d8d9`). The draft
+`sha256:734aa0fd93b6258d433a6f71915d9d5118552e2ea0458a3050d368dcfcc1d1b3`). The draft
 rewrote 2.0.0 in place and dropped 2.1.0, so Spaces activated under the 2.1.0 draft
 are not compatible and are not migrated; use new Spaces. KIP 1.x Spaces still upgrade
 automatically, and a 1.x `Preference` keeps an open legacy type. Rust depends on
@@ -26,8 +27,33 @@ sibling `anda-db` and `anda` checkouts and the Worker links the sibling kip-do.
   canonicalized to millisecond UTC; an unparseable value or sub-millisecond
   precision is rejected with 400 instead of silently becoming the receipt time.
 - Options are Concepts typed by their kind; the Profile has no `Preference` type.
-  Vocabulary still enters through the host package; `DEFINE` is refused because
-  neither engine provides `draft_vocabulary`.
+- New vocabulary is the Space's draft vocabulary (KIP §20.16). Formation sends
+  `DEFINE CONCEPT TYPE` / `DEFINE PREDICATE` with literal names and bodies, in a
+  request (Rust) or as plan commands (Worker) that the host runs before the writes
+  using them; a name that already resolves (`SchemaSymbolConflict`) stops nothing.
+  The host checks name shapes, caps a Space at 512 symbols of its own (drafts plus
+  any legacy host package) and queues one `review_schema` SleepTask per new symbol,
+  keyed `review_schema:<kind>:<ref>`. Maintenance may not define: its `DEFINE` is
+  refused, Rust Maintenance no longer gets `declare_memory_symbols`, and the Worker
+  reports Maintenance `types` / `predicates` as refused. `declare_memory_symbols`
+  and the Worker `types` / `predicates` fields remain for one release as deprecated
+  shortcuts that draft bare names with a host description; nothing is added to
+  `kip://anda-brain/memory` any more, and Spaces that have it keep it in force. The
+  wiki digest drafts its symbols the same way. The Worker `vocabulary` response
+  gains `draft_package`, `draft_types`, `draft_predicates` and `defined`, and its
+  `package_ref` is `null` for a Space without the legacy package.
+- `GET /v1/{space_id}/schema/drafts` lists the drafts with their definitions and
+  promotion targets, and `POST /v1/{space_id}/schema/promote` (`{kind, from, to}`)
+  lets the owner promote one onto an installed symbol — management CWT on Rust, the
+  API key on the Worker. The CLI adds `schema drafts` and `schema promote --kind`.
+- The Formation gate refuses an Assertion citing a captured `:msgN` without `at`
+  (or a written `valid.from`), except the Brain's own `mode: "inferred"` claims;
+  both writing gates refuse a `MnemonicState.memory_strength` written without
+  `last_metabolized_at` and `strength_policy`. The host binds `:strength_policy`
+  (the standard `kip:strength-half-life-30d` pin) and `:now` on every model write
+  and refuses a model-bound pin, so the engine can compute `effective_strength`.
+- CLI message files may give each message's `timestamp` as Unix milliseconds or an
+  RFC 3339 instant; each message keeps its own observation time.
 - Decay is computed at read time from base, anchor and a pinned strength policy.
   The settlement sweep and its 0.5 default are gone; `memory_strength_decay_factor`
   and `decay_floor` are deprecated, still accepted and range-checked, and ignored.
@@ -47,11 +73,18 @@ sibling `anda-db` and `anda` checkouts and the Worker links the sibling kip-do.
   and `Misrecorded`, which fails `unsupported_capability` because recording repair is
   not available — it is never mapped to a correction. `Correct` now supersedes the
   old claim and keeps the world interval it covered instead of retracting it and
-  starting the new value at the correction time. The Worker's product contract matches.
+  starting the new value at the correction time. Both keep the record's
+  `context_refs` (now on `MemoryRecord`), so a scoped claim is revised in its own
+  context set. The Worker's product contract matches.
 - `GET /v1/{space_id}/memory/attention` (Rust and Worker) returns fired Watches and
-  due Commitments ordered by the `space_seq` of the commit that raised them, with an
-  `attention:<seq>` cursor the caller keeps. Maintenance raises a due Commitment
-  without a Watch by recording a `commitment_review` Activity. Reading is read-only
+  due Commitments ordered by `(raised_seq, ref)`. The cursor is the last delivered
+  position — `attention:<seq>:<ref>` inside a commit, `attention:<seq>` after a
+  whole one, `attention:start` before any — so a commit raising more items than a
+  page is no longer cut short; `attention:-1` is still accepted. `limit` counts
+  items. The settlement raises each due `pending`/`blocked` Commitment without a
+  Watch natively, with one `commitment_review` Activity keyed
+  `commitment_review:<id>:<due_at>`: a replay raises nothing and a new `due_at`
+  raises it again. The settlement report gains `commitments`. Reading is read-only
   and grants nothing. The authenticated runtime inbox is unchanged.
 
 ### Maintenance of copied material
@@ -65,9 +98,11 @@ sibling `anda-db` and `anda` checkouts and the Worker links the sibling kip-do.
 ### Known limits
 
 - No Memory Interface is advertised. Resume briefings, `after` barriers, processing
-  receipts, recording repair, the exposure log and the draft vocabulary are not
-  provided; neither engine yet computes `effective_strength`, the lineage fields or
-  the GradingState view on read.
+  receipts, recording repair and the exposure log are not provided; neither engine
+  yet computes the lineage fields or the GradingState view on read.
+- A promoted draft does not yet re-key existing Propositions (anda-db N6b):
+  `ENSURE PROPOSITION` after a promotion may create a second tuple for one written
+  under the draft. Capsule import mapping is not exposed by this service.
 - Behavioral gains from these changes are not measured here (`not_run` until MIB).
 
 ## [0.12.1] — 2026-09-23

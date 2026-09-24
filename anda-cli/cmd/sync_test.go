@@ -13,7 +13,7 @@ func TestCurrentAPICommandsAreRegistered(t *testing.T) {
 		"management shadow-eval", "wiki commit", "wiki list", "wiki get",
 		"wiki read", "wiki versions", "wiki archive", "wiki restore",
 		"wiki search", "wiki verify", "wiki events", "wiki import",
-		"wiki export", "wiki digest",
+		"wiki export", "wiki digest", "schema drafts", "schema promote",
 	} {
 		parts := strings.Fields(path)
 		command, _, err := rootCmd.Find(parts)

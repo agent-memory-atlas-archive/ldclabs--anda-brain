@@ -24,6 +24,8 @@ export interface MemoryRecord {
   text: string; subject_label: string; object_label: string
   stance: string; status: string; storage_state: string
   asserted_at: string | null; valid_from: string | null; valid_until: string | null
+  /** The claim's context set as Concept ids; a revision keeps it (§14.2, §25.4). */
+  context_refs: string[]
   updated_at: string; sources: RecordSource[]; sources_complete: boolean
 }
 /**
@@ -229,6 +231,9 @@ export class MemoryProduct {
       subject_label: subject, object_label: object, stance: row.stance, status: row.status,
       storage_state: row.state, asserted_at: row.asserted_at || null,
       valid_from: row.valid_from || null, valid_until: row.valid_until || null,
+      context_refs: row.context_refs.flatMap(reference =>
+        typeof reference === 'string' ? [reference]
+          : isJsonMap(reference) && typeof reference.id === 'string' ? [reference.id] : []),
       updated_at: row.updated_at, sources,
       sources_complete: sources.length > 0 && sources.every(source => {
         try { return source.payload_digest !== null && this.keysForSource(source).length > 0 } catch { return false }
@@ -513,7 +518,11 @@ export class MemoryProduct {
     const parameters: JsonMap = { old: input.record_id,
       source_key: `memory-product:${key}:input`, statement: {kind:input.kind,new_value: input.new_value!,previous_record:input.record_id},
       at: new Date().toISOString(), object_type: object.row.schema_ref, new_value: input.new_value!,
-      subject: preview.record.subject, predicate: preview.record.predicate, actor: {id: preview.record.actor_id!} }
+      subject: preview.record.subject, predicate: preview.record.predicate, actor: {id: preview.record.actor_id!},
+      // The revision keeps the claim's context set: a Correct outside it is
+      // SupersessionMismatch (§14.2), and a WorldChange outside it would start
+      // a second succession line that never ends the old value (§25.4).
+      contexts: preview.record.context_refs ?? [] }
     if (input.kind === 'correct') {
       // §14.2: a value-only correction keeps the interval it corrects; an
       // absent start becomes the original claim's `{latest: asserted_at}`.
@@ -523,7 +532,7 @@ export class MemoryProduct {
       return [{ command: `MUTATE {
       CREATE EVIDENCE ?input { CLIENT KEY :source_key SET FIELDS {evidence_class:"user_statement",payload: :statement,observed_at: :at} }
       CREATE CONCEPT ?value { TYPE :object_type NAME :new_value }
-      ASSERT ?new (:subject, :predicate, ?value) {by: :actor,mode:"stated",evidence:?input,at: :at,valid: :valid}
+      ASSERT ?new (:subject, :predicate, ?value) {by: :actor,mode:"stated",evidence:?input,at: :at,valid: :valid,context: :contexts}
       TRANSITION :old TO "superseded" BY ?new EXPECT VERSION :version
       CREATE ACTIVITY ?change { SET FIELDS {activity_class:"belief_revision",status:"completed",started_at: :at,ended_at: :at} SET STRUCTURAL {("inputs", :old) ("inputs", ?input) ("outputs", ?new)} }
     }`, parameters: { ...parameters, version: input.expected_revision,
@@ -536,7 +545,7 @@ export class MemoryProduct {
     return [{ command: `MUTATE {
       CREATE EVIDENCE ?input { CLIENT KEY :source_key SET FIELDS {evidence_class:"user_statement",payload: :statement,observed_at: :at} }
       CREATE CONCEPT ?value { TYPE :object_type NAME :new_value }
-      ASSERT ?new (:subject, :predicate, ?value) {by: :actor,mode:"stated",evidence:?input,at: :at}
+      ASSERT ?new (:subject, :predicate, ?value) {by: :actor,mode:"stated",evidence:?input,at: :at,context: :contexts}
       CREATE ACTIVITY ?change { SET FIELDS {activity_class:"user_memory_change",status:"completed",started_at: :at,ended_at: :at} SET STRUCTURAL {("inputs", :old) ("inputs", ?input) ("outputs", ?new)} }
     }`, parameters }]
   }

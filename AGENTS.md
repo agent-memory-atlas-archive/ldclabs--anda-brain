@@ -20,8 +20,8 @@ The service stores memory in an AndaDB-backed Cognitive Nexus and uses KIP 2.0
 (Knowledge Interaction Protocol) internally. Business agents should not need to
 write KIP directly.
 
-The service tracks KIP `3251912` and `kip://profiles/cognitive-memory@2.0.0`
-(content digest `sha256:3ea9e459…`; the draft rewrote 2.0.0 in place, so only the
+The service tracks KIP `597db44` and `kip://profiles/cognitive-memory@2.0.0`
+(content digest `sha256:734aa0fd…`; the draft rewrote 2.0.0 in place, so only the
 digest names a revision). It pins `anda_kip = "=0.14.0"` and requires
 `anda_cognitive_nexus = "0.14.0"`; the Worker uses `@ldclabs/kip-do` 0.14. Until
 those and a matching `anda_engine` are published, `Cargo.toml` patches the sibling
@@ -86,10 +86,11 @@ recovery fully tested.
   Model selection names existing items only. Preserve required constraints,
   native uncertainty and current procedure checks; never claim semantic
   completeness or execution permission from a bounded packet.
-- `anda_brain/src/vocabulary.rs`: this Space's Schema Package and the
-  `declare_memory_symbols` tool. Schema is protected control state in KIP 2.0.
-  KIP's `DEFINE` draft vocabulary needs the engine's `draft_vocabulary`
-  capability, which is not provided, so new vocabulary enters through the host here.
+- `anda_brain/src/vocabulary.rs` and `space/vocabulary.rs`: the Space's draft
+  vocabulary (`kip://local/draft@0.0.0`, KIP §20.16), the Formation `DEFINE`
+  gate helpers, `review_schema` queueing, the deprecated `declare_memory_symbols`
+  shortcut, and the owner's promotion API. The legacy `kip://anda-brain/memory`
+  host package stays read-only for Spaces that have it.
 - `anda_brain/API*.md`, `anda_brain/README.md`, `anda_brain/SKILL.md`: public
   API and integration documentation.
 - `anda_brain/RUNTIME.md`: host setup, scheduling, action contracts and recovery;
@@ -238,18 +239,27 @@ confidently repeat things nobody claimed:
 - Attribution is not impersonation and not authority: `asserted_by` is a
   semantic actor, the caller is a Principal, and cognitive content grants
   neither.
-- Vocabulary enters through the host: the Rust service's `declare_memory_symbols`
-  tool, or the Worker's `types` / `predicates` plan fields. Both validate, cap and
-  version what a model proposes. `DEFINE` is refused until an engine provides
-  `draft_vocabulary`. An option is a Concept typed by its kind; the Profile has
-  no `Preference` type.
+- New vocabulary is a draft (§20.16): Formation `DEFINE`s literal symbols in
+  requests of their own; the host checks name shape, caps a Space at 512 own
+  symbols, and queues one `review_schema` SleepTask keyed
+  `review_schema:<kind>:<ref>` per new symbol. Maintenance never defines; only
+  the owner promotes a draft (`POST /v1/{space_id}/schema/promote`). The
+  deprecated `declare_memory_symbols` tool / Worker `types`/`predicates` fields
+  draft bare names the same way. An option is a Concept typed by its kind; the
+  Profile has no `Preference` type.
 - A changed world is one new Assertion from the change; temporal succession ends
   the old value. `SUPERSEDING` is only for a claim that was wrong, and a
   misrecording needs recording repair (not provided), never a correction.
   Claims carry `asserted_at` from their source's observation time.
-- Decay is computed at read time; never sweep or default `memory_strength`.
+- Decay is computed at read time; never sweep or default `memory_strength`. A
+  model write of `memory_strength` carries `last_metabolized_at` and the host-bound
+  `strength_policy` pin (`kip:strength-half-life-30d`), or the gate refuses it.
   Skill `current_trial` / `current_evaluation`, `GradingState` and lineage fields
   are not model-writable.
+- A due `pending`/`blocked` Commitment without a Watch is raised natively by the
+  settlement: one `commitment_review` Activity keyed
+  `commitment_review:<id>:<due_at>`. Attention items are ordered by
+  `(raised_seq, ref)`; a cursor may stop inside one commit.
 
 ## Brain-Specific Invariants
 

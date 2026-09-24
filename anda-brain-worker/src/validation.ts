@@ -117,6 +117,21 @@ export interface KipBatch {
  * the envelope's own fields are this service's business rather than every
  * client's.
  */
+/** A draft symbol promotion (Spec §20.16): `{kind, from, to}`, nothing else. */
+export function parsePromoteInput(value: unknown): import('./types.js').PromoteDraftInput {
+  const body = object(value, 'promotion body must be a JSON object')
+  for (const key of Object.keys(body)) {
+    if (!['kind', 'from', 'to'].includes(key)) throw new ValidationError(`unknown field \`${key}\``)
+  }
+  if (body.kind !== 'ConceptType' && body.kind !== 'PredicateType') {
+    throw new ValidationError('`kind` must be ConceptType or PredicateType')
+  }
+  const from = requiredString(body.from, 'from', 1024).trim()
+  const to = requiredString(body.to, 'to', 1024).trim()
+  if (!from || !to) throw new ValidationError('`from` and `to` cannot be blank')
+  return { kind: body.kind, from, to }
+}
+
 export function parseKipInput(value: unknown): KipBatch {
   const body = object(value, 'KIP body must be a JSON object')
   const shared = body.parameters === undefined

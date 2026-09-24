@@ -30,7 +30,7 @@ const FORMATION_PLAN = `MUTATE {
   CREATE CONCEPT ?concise {
     TYPE "AnswerStyle"
     NAME "Alice concise answers"
-    SET FACET "MnemonicState" { memory_strength: 0.8, salience: 0.6 }
+    SET FACET "MnemonicState" { memory_strength: 0.8, last_metabolized_at: :now, strength_policy: :strength_policy, salience: 0.6 }
   }
   CREATE EVIDENCE ?e {
     CLIENT KEY "chat-42:1"
@@ -127,7 +127,7 @@ describe('Anda Brain Worker', () => {
             NAME "Alice concise answers"
           }
           ASSERT ?a (?alice, "prefers", ?concise) {
-            by: ?alice, mode: "stated", confidence: 0.95, evidence: :msg1
+            by: ?alice, mode: "stated", confidence: 0.95, evidence: :msg1, at: "2026-09-22T00:00:00.000Z"
           }
         }`,
       ],
@@ -181,7 +181,7 @@ describe('Anda Brain Worker', () => {
     expect(await read()).toHaveLength(1)
   })
 
-  it('publishes a symbol the Profile does not have, then writes with it', async () => {
+  it('drafts a symbol the Profile does not have, then writes with it', async () => {
     const space = uniqueSpace('vocabulary')
     const runtime = testEnv(
       new FakeAi([
@@ -211,18 +211,18 @@ describe('Anda Brain Worker', () => {
     expect(await text(formed)).toBe('')
     const body = await formed.json<Record<string, any>>()
     expect(body.result.vocabulary).toMatchObject({
-      package_ref: 'kip://anda-brain/memory@1.0.1',
-      types: ['Project'],
-      predicates: ['works_on'],
+      package_ref: null,
+      draft_types: ['Project'],
+      draft_predicates: ['works_on'],
+      defined: ['kip://local/draft@0.0.0/Project', 'kip://local/draft@0.0.0/works_on'],
       rejected: ['Assertion', 'Treats'],
     })
     expect(body.result.stored.propositions).toBe(1)
 
-    // The package is in force, not merely installed: the Space resolves the
-    // local name it published.
+    // The drafts are Space state: the Space resolves the local names.
     const listed = await get(runtime, space, 'vocabulary')
     expect(await listed.json<Record<string, any>>()).toMatchObject({
-      result: { types: ['Project'], predicates: ['works_on'] },
+      result: { draft_types: ['Project'], draft_predicates: ['works_on'] },
     })
   })
 
@@ -281,9 +281,10 @@ describe('Anda Brain Worker', () => {
     // Two active packages declaring one local name make every bare
     // `{type: "Person"}` ambiguous, so these are usable but not ours to publish.
     expect(body.result.vocabulary).toMatchObject({
-      package_ref: 'kip://anda-brain/memory@1.0.0',
-      types: [],
-      predicates: [],
+      package_ref: null,
+      draft_types: [],
+      draft_predicates: [],
+      defined: [],
       rejected: [],
     })
 
@@ -295,7 +296,7 @@ describe('Anda Brain Worker', () => {
     expect(results.result[0].error).toBeUndefined()
   })
 
-  it('versions the vocabulary forward and keeps what it already published', async () => {
+  it('drafts each symbol once and keeps what it drafted', async () => {
     const space = uniqueSpace('vocabulary-version')
     const runtime = testEnv(
       new FakeAi([
@@ -311,15 +312,17 @@ describe('Anda Brain Worker', () => {
       return (await response.json<Record<string, any>>()).result.vocabulary
     }
 
-    expect(await declare()).toMatchObject({ package_ref: 'kip://anda-brain/memory@1.0.1' })
+    expect(await declare()).toMatchObject({ defined: ['kip://local/draft@0.0.0/Project'] })
     expect(await declare()).toMatchObject({
-      package_ref: 'kip://anda-brain/memory@1.0.2',
-      types: ['Milestone', 'Project'],
+      draft_types: ['Milestone', 'Project'],
+      defined: ['kip://local/draft@0.0.0/Milestone'],
     })
-    // Re-declaring what is already there mints no version: every activation
-    // mints an environment version that transactions record, and a restart or
-    // a repeat is not a schema change.
-    expect(await declare()).toMatchObject({ package_ref: 'kip://anda-brain/memory@1.0.2' })
+    // Asking again for what is already there defines nothing: a draft symbol
+    // mints an environment version, and a repeat is not a schema change.
+    const before = (await (await get(runtime, space, 'info')).json<Record<string, any>>()).result.schema_environment_version
+    expect(await declare()).toMatchObject({ defined: [] })
+    const after = (await (await get(runtime, space, 'info')).json<Record<string, any>>()).result.schema_environment_version
+    expect(after).toBe(before)
   })
 
   it('refuses a plan before it publishes anything the plan asked for', async () => {
@@ -344,9 +347,81 @@ describe('Anda Brain Worker', () => {
     // write would be permanent.
     const listed = await (await get(runtime, space, 'vocabulary')).json<Record<string, any>>()
     expect(listed.result).toMatchObject({
-      package_ref: 'kip://anda-brain/memory@1.0.0',
-      types: [],
+      package_ref: null,
+      draft_types: [],
     })
+  })
+
+  it('runs a plan\'s DEFINEs first, queues their reviews, and leaves promotion to the owner', async () => {
+    const space = uniqueSpace('draft-define')
+    const runtime = testEnv(new FakeAi([
+      {
+        types: [],
+        predicates: [],
+        commands: [
+          'DEFINE CONCEPT TYPE "Human" {description: "A human being, as a source names one."}',
+          // Already the Profile's: no effect, and the plan goes on.
+          'DEFINE PREDICATE "prefers" {description: "Already in the Profile."}',
+          'DEFINE PREDICATE "mentors" {description: "The subject mentors the object."}',
+          `MUTATE {
+            CREATE CONCEPT ?ada { TYPE "Human" NAME "Ada" }
+            CREATE CONCEPT ?grace { TYPE "Human" NAME "Grace" }
+            ASSERT (?ada, "mentors", ?grace) { by: ?ada, mode: "stated", at: "2026-01-01T00:00:00.000Z" }
+          }`,
+        ],
+        summary: 'Drafted and used two symbols.',
+      },
+      // Maintenance reviews drafts; it never defines one.
+      { types: [], predicates: [], commands: ['DEFINE PREDICATE "coaches" {description: "x"}'], summary: 'no' },
+    ]))
+    const formed = await post(runtime, space, 'formation', {
+      messages: [{ role: 'user', content: 'Ada mentors Grace.' }],
+    })
+    expect(await text(formed)).toBe('')
+    const body = await formed.json<Record<string, any>>()
+    expect(body.result.operation_results.map((r: { status: string }) => r.status))
+      .toEqual(['succeeded', 'no_effect', 'succeeded', 'succeeded'])
+    expect(body.result.stored.propositions).toBe(1)
+
+    const reviews = await post(runtime, space, 'execute_kip_readonly', {
+      command: `FIND(?t.attributes.symbol_kind, ?t.attributes.symbol_ref, ?t.attributes.status) WHERE {
+        ?t CONCEPT {type: "SleepTask"}
+        FILTER(?t.attributes.task_class == "review_schema")
+      } ORDER BY ?t.attributes.symbol_ref ASC LIMIT 10`,
+    })
+    expect((await reviews.json<Record<string, any>>()).result[0].result).toEqual([
+      ['ConceptType', 'kip://local/draft@0.0.0/Human', 'pending'],
+      ['PredicateType', 'kip://local/draft@0.0.0/mentors', 'pending'],
+    ])
+
+    const maintained = await post(runtime, space, 'maintenance', { trigger: 'on_demand', scope: 'quick' })
+    expect(maintained.status).toBe(422)
+    expect(await maintained.text()).toContain('never defines')
+
+    const drafts = await (await get(runtime, space, 'schema/drafts')).json<Record<string, any>>()
+    expect(drafts.result.symbols.map((s: { name: string }) => s.name)).toEqual(['Human', 'mentors'])
+    expect(drafts.result.symbols.every((s: { promoted_to?: string }) => s.promoted_to === undefined)).toBe(true)
+
+    const promote = () => post(runtime, space, 'schema/promote', {
+      kind: 'ConceptType', from: 'Human', to: 'kip://profiles/cognitive-memory@2.0.0/Person',
+    })
+    const promoted = await promote()
+    expect(await text(promoted)).toBe('')
+    expect((await promoted.json<Record<string, any>>()).result).toMatchObject({
+      promoted: 'kip://local/draft@0.0.0/Human',
+      schema_environment_version: drafts.result.schema_environment_version + 1,
+    })
+    // Matching reads the two lineages as one; the element keeps its ref.
+    const people = await post(runtime, space, 'execute_kip_readonly', {
+      command: 'FIND(?c.name, ?c.schema_ref) WHERE { ?c CONCEPT {type: "Person"} FILTER(?c.name == "Ada") } LIMIT 5',
+    })
+    expect((await people.json<Record<string, any>>()).result[0].result)
+      .toEqual([['Ada', 'kip://local/draft@0.0.0/Human']])
+    const after = await (await get(runtime, space, 'schema/drafts')).json<Record<string, any>>()
+    expect(after.result.symbols[0].promoted_to).toBe('kip://profiles/cognitive-memory/Person')
+    // At most once, and only with the shape the API takes.
+    expect((await promote()).status).toBe(422)
+    expect((await post(runtime, space, 'schema/promote', { kind: 'Facet', from: 'x', to: 'y' })).status).toBe(400)
   })
 
   it('lets formation correct a claim by superseding it', async () => {
@@ -874,11 +949,23 @@ describe('Anda Brain Worker', () => {
     const runtime = testEnv(
       new FakeAi([
         {
+          // A base without its anchor and pin leaves strength unknown forever.
           types: [],
           predicates: [],
           commands: [
             `UPDATE ?c
              SET FACET "MnemonicState" { memory_strength: 0.5 }
+             WHERE { ?c CONCEPT {type: "AnswerStyle", name: "Alice style"} }
+             LIMIT 1`,
+          ],
+          summary: 'Metabolized one preference.',
+        },
+        {
+          types: [],
+          predicates: [],
+          commands: [
+            `UPDATE ?c
+             SET FACET "MnemonicState" { memory_strength: 0.5, last_metabolized_at: :now, strength_policy: :strength_policy }
              WHERE { ?c CONCEPT {type: "AnswerStyle", name: "Alice style"} }
              LIMIT 1`,
           ],
@@ -895,6 +982,13 @@ describe('Anda Brain Worker', () => {
       }`,
     })
 
+    const refused = await post(runtime, space, 'maintenance', {
+      trigger: 'on_demand',
+      scope: 'quick',
+    })
+    expect(refused.status).toBe(422)
+    expect(await refused.text()).toContain('last_metabolized_at')
+
     const response = await post(runtime, space, 'maintenance', {
       trigger: 'on_demand',
       scope: 'quick',
@@ -902,6 +996,15 @@ describe('Anda Brain Worker', () => {
     expect(await text(response)).toBe('')
     const body = await response.json<Record<string, any>>()
     expect(body.result.changed).toMatchObject({ total: 1, updated: 1 })
+    // The host pinned the standard policy, so the engine computes strength.
+    const read = await post(runtime, space, 'execute_kip_readonly', {
+      command: 'FIND(?c.facets) WHERE { ?c CONCEPT {type: "AnswerStyle"} } LIMIT 1',
+    })
+    const facets = (await read.json<Record<string, any>>()).result[0].result[0]
+    const state = facets['kip://profiles/cognitive-memory@2.0.0/MnemonicState']
+    expect(state.strength_policy.artifact_ref).toBe('kip:strength-half-life-30d')
+    expect(state.effective_strength).toBeGreaterThan(0.49)
+    expect(state.effective_strength).toBeLessThanOrEqual(0.5)
   })
 
   it('rejects non-string maintenance enums and invalid message roles', async () => {

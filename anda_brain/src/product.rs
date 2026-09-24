@@ -49,6 +49,11 @@ pub struct MemoryRecord {
     pub asserted_at: Option<String>,
     pub valid_from: Option<String>,
     pub valid_until: Option<String>,
+    /// The context set the claim was made in (`context_refs`), as Concept ids.
+    /// A revision keeps it: supersession and temporal succession both compare
+    /// the canonical context set (Spec §14.2, §25.4).
+    #[serde(default)]
+    pub context_refs: Vec<String>,
     pub updated_at: String,
     pub sources: Vec<RecordSource>,
     pub sources_complete: bool,
@@ -200,6 +205,16 @@ impl Space {
             asserted_at: nonempty(&row.asserted_at),
             valid_from: nonempty(&row.valid_from),
             valid_until: nonempty(&row.valid_until),
+            context_refs: row
+                .context_refs
+                .iter()
+                .filter_map(|reference| {
+                    reference
+                        .as_str()
+                        .or_else(|| reference.get("id").and_then(Value::as_str))
+                        .map(str::to_string)
+                })
+                .collect(),
             updated_at: row.updated_at.clone(),
             sources,
             sources_complete,

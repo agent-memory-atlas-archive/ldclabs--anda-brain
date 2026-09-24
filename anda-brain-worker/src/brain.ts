@@ -9,13 +9,16 @@ import {
   KipError,
   isJsonMap,
   tryParseElementId,
+  type JsonMap,
   type KipResult,
   type SchemaPackage,
 } from '@ldclabs/kip-do'
+import { DRAFT_PACKAGE_ID, DRAFT_PACKAGE_REF } from '@ldclabs/kip-do/schema'
 import {
   assertFormationOperations,
   assertMaintenanceOperations,
   assertReadonlyOperations,
+  isDefine,
   type IngestContext,
   type KipExecution,
   type KipOperation,
@@ -25,12 +28,25 @@ import { recallAttention, type AttentionRecall, type AttentionRecallInput } from
 import type {
   BrainStats,
   DeclaredVocabulary,
+  DraftSymbol,
   Env,
   MaintenanceAssessment,
+  PromoteDraftInput,
+  PromoteDraftOutput,
   RevisedRoot,
+  SchemaDrafts,
   SettlementReport,
 } from './types.js'
-import { MemoryVocabulary, activeSet, activeVocabulary } from './vocabulary.js'
+import {
+  MAX_SYMBOLS,
+  MemoryVocabulary,
+  activeSet,
+  activeVocabulary,
+  defineOf,
+  definedRef,
+  draftSymbols,
+  queueSchemaReview,
+} from './vocabulary.js'
 
 const APP_BOOTSTRAP_KEY = '__anda_brain_worker_bootstrap_version'
 const APP_BOOTSTRAP_VERSION = '3'
@@ -260,9 +276,36 @@ export class AndaBrain extends KipDatabase<Env> {
     assertFormationOperations(operations)
     this.ensureInitialized()
     this.product.capture(ingest)
-    return epoch > 0
-      ? executeAgentOperations(new CurrentMemorySession(this.nexus, this.authenticate(undefined)), operations, false, ingest)
-      : super.executeKipBatch(operations, undefined, undefined, { mode: 'sequence', onError: 'stop' }, ingest)
+    // Draft vocabulary (Spec §20.16): a DEFINE commits on its own and must
+    // exist before the commands that use it, so the plan's DEFINEs run first,
+    // one by one. One that already resolves (`SchemaSymbolConflict`) has no
+    // effect rather than stopping the plan; each new symbol queues a review.
+    const defines = operations.filter((operation) => isDefine(operation.command))
+    const writes = operations.filter((operation) => !isDefine(operation.command))
+    const results: KipResult[] = []
+    if (defines.length > 0) {
+      const vocabulary = MemoryVocabulary.load(this.nexus)
+      if (vocabulary.size + defines.length > MAX_SYMBOLS) {
+        throw new Error(`this Space's vocabulary holds ${vocabulary.size} of its ${MAX_SYMBOLS} symbols; ` +
+          'reuse an existing symbol instead of defining another')
+      }
+      for (const define of defines) {
+        const result = super.executeKip(define.command, define.parameters ?? {})
+        if (result.error?.code === 'SchemaSymbolConflict') {
+          results.push({ ...result, status: 'no_effect' })
+          continue
+        }
+        results.push(result)
+        if (result.status === 'failed') return results
+        const ref = definedRef(result)
+        const drafted = defineOf(define.command)
+        if (ref && drafted) queueSchemaReview(this.host, drafted.kind, ref, drafted.description)
+      }
+    }
+    if (writes.length === 0) return results
+    return [...results, ...(epoch > 0
+      ? executeAgentOperations(new CurrentMemorySession(this.nexus, this.authenticate(undefined)), writes, false, ingest)
+      : super.executeKipBatch(writes, undefined, undefined, { mode: 'sequence', onError: 'stop' }, ingest))]
   }
 
   executeMaintenancePlan(operations: readonly KipOperation[], runtime: readonly RuntimeOperation[] = [], epoch = 0, run?: string, reviewed: string[] = []): KipResult[] {
@@ -364,28 +407,60 @@ export class AndaBrain extends KipDatabase<Env> {
     return super.executeKip(operation.command, operation.parameters)
   }
 
+  /** The settlement port as a command runner, for host-written vocabulary work. */
+  private readonly host = (command: string, parameters: JsonMap): KipResult =>
+    this.run({ command, parameters })
+
   /**
-   * Publishes the symbols a plan asked for and puts them in force.
+   * Drafts the bare names a Formation plan asked for (Spec §20.16).
    *
-   * This is the whole reason the host is in the loop: KIP 2.0 took schema out
-   * of the language a model writes, so a model that needs `ships_to` has to
-   * ask. What the host adds on top — name validation, a cap, and a version — is
-   * what makes asking better than declaring, because the set of things this
-   * Brain can say stays a reviewable artifact rather than whatever its models
-   * happened to emit.
-   *
-   * A refused name is reported, not raised. The caller can still write every
-   * memory whose symbols were accepted.
+   * Formation's own `DEFINE` carries a real description; these names get the
+   * host's generic one. The host validates each name, caps the Space's
+   * vocabulary and queues one review per new symbol. A refused name is
+   * reported, not raised: the plan's other commands are still writable.
+   * Maintenance reviews drafts and never calls this.
    */
-  declareSymbols(types: readonly string[], predicates: readonly string[], epoch = 0, run?: string): DeclaredVocabulary {
+  declareSymbols(types: readonly string[], predicates: readonly string[], epoch = 0): DeclaredVocabulary {
     this.checkProcessing(epoch)
-    if (run) this.maintenance.check(run, epoch)
     this.ensureInitialized()
-    const vocabulary = MemoryVocabulary.load(this.nexus, true)
-    const before = vocabulary.revision
-    const rejected = vocabulary.extend(types, predicates)
-    if (vocabulary.revision !== before) vocabulary.activate(this.nexus)
-    return vocabulary.declared(rejected)
+    const { defined, rejected } = draftSymbols(this.host, MemoryVocabulary.load(this.nexus), types, predicates)
+    return MemoryVocabulary.load(this.nexus).declared(defined, rejected)
+  }
+
+  /** Every symbol this Space drafted, and the lineage each was promoted to. */
+  schemaDrafts(): SchemaDrafts {
+    this.ensureInitialized()
+    const env = this.nexus.environment()
+    const draft = env.lock.draft
+    const maps = env.lock.lineage_maps ?? []
+    const symbols: DraftSymbol[] = []
+    for (const [section, kind] of [['concept_types', 'ConceptType'], ['predicates', 'PredicateType']] as const) {
+      for (const [name, definition] of Object.entries(draft?.[section] ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+        const promoted = maps.find((map) => map.kind === kind && map.from === `${DRAFT_PACKAGE_ID}/${name}`)
+        symbols.push({ kind, name, ref: `${DRAFT_PACKAGE_REF}/${name}`, definition,
+          ...(promoted ? { promoted_to: promoted.to } : {}) })
+      }
+    }
+    return { package_ref: DRAFT_PACKAGE_REF, schema_environment_version: env.version, symbols }
+  }
+
+  /**
+   * Promotes one draft symbol onto an installed symbol of the same kind: the
+   * owner's Schema migration under `manage_schema`, never implicit, at most
+   * once per symbol (Spec §20.16).
+   */
+  promoteDraftSymbol(input: PromoteDraftInput): PromoteDraftOutput {
+    this.ensureInitialized()
+    if (input.kind !== 'ConceptType' && input.kind !== 'PredicateType') {
+      throw new KipError('ConstraintViolation', 'kind must be ConceptType or PredicateType')
+    }
+    if (typeof input.from !== 'string' || !input.from.trim() || typeof input.to !== 'string' || !input.to.trim()) {
+      throw new KipError('ConstraintViolation', 'from and to are required')
+    }
+    const version = this.nexus.session(this.authenticate(undefined))
+      .promoteDraftSymbol(input.kind, input.from, input.to)
+    const name = input.from.startsWith(`${DRAFT_PACKAGE_REF}/`) ? input.from.slice(DRAFT_PACKAGE_REF.length + 1) : input.from
+    return { promoted: `${DRAFT_PACKAGE_REF}/${name}`, to: input.to, schema_environment_version: version }
   }
 
   /** Attention recall (Memory Interface §4): read-only, ordered by `raised_seq`. */

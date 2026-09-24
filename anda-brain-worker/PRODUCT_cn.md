@@ -45,7 +45,8 @@ principal id。仅接受当前 Schema 支持的 Concept 值记录；`new_value` 
 字节。一个原生 `MUTATE` 创建新的用户 Evidence、带类型的值、归属明确的 Assertion 与来源
 Activity。`correct` 的新 Assertion supersede 旧主张并保留其世界时间区间（缺失的起点写成
 `{latest: <原 asserted_at>}`）；`world_change` 的新 Assertion 从现在开始，由时序继承结束
-旧值，旧值保持 active。不会覆盖 Assertion，也不会把其他 actor 的证言当作调用者的新陈述。
+旧值，旧值保持 active。两者都沿用记录的 `context_refs`（记录上已列出），带作用域的主张在
+自己的上下文集合里修订。不会覆盖 Assertion，也不会把其他 actor 的证言当作调用者的新陈述。
 
 抑制归档、删除清除已审阅闭包：Proposition、Assertion、引用的 Evidence 和记录的反向依赖，
 最多 128 个元素。共享 Evidence 会扩大范围，其来源身份会出现在预览。包含 Concept 的闭包、

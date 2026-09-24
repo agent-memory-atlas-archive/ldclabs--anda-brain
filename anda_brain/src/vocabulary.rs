@@ -1,4 +1,4 @@
-//! The Schema Package this brain's own memories are written against.
+//! The vocabulary this brain's memories are written against.
 //!
 //! A memory system meets vocabulary it was not designed with. A conversation
 //! introduces `ships_to`, a wiki page introduces `Drug` and `treats`. KIP 1.x
@@ -8,26 +8,33 @@
 //! injection could change it on purpose.
 //!
 //! KIP 2.0 will not do that. Authoritative Schema is an immutable, versioned
-//! Package resolved through the Space's Schema Environment, and KML cannot
-//! touch it: "a language a model writes must not be a language that can change
-//! who controls the Space". So new vocabulary enters through the **host**. The
-//! brain keeps one package per Space, publishes a new version when a symbol is
-//! genuinely new, and activates it alongside the Cognitive Memory Profile.
+//! Package resolved through the Space's Schema Environment. What a Space may
+//! add is its **draft vocabulary** (Spec §20.16): `DEFINE PREDICATE` /
+//! `DEFINE CONCEPT TYPE` add one symbol to the Space-local
+//! `kip://local/draft@0.0.0`, only ever adding, never changing or shadowing a
+//! symbol anything else defines, under `propose_schema` — which grants nothing
+//! over existing Schema. A draft symbol stays a draft until an owner holding
+//! `manage_schema` promotes it onto an installed package's symbol.
 //!
-//! The model still proposes the words — through a tool call, not through KML —
-//! and the host decides, caps and versions the result. What that buys is
-//! concrete: every element's `schema_ref` names an exact version forever, so a
-//! memory's meaning cannot drift underneath it, and the set of things this
-//! Brain can say is a reviewable artifact rather than an emergent property of
-//! whatever its models happened to write.
+//! The brain adds drafts from two places: Formation's own `DEFINE`, bounded by
+//! the cognition gate, and [`draft_symbols`] for names the host proposes (the
+//! `declare_memory_symbols` tool and the wiki digest). Either way the host
+//! caps the Space's vocabulary and queues one `review_schema` SleepTask per new
+//! symbol, keyed `review_schema:<kind>:<ref>`, so Maintenance reviews what was
+//! drafted and proposes promotions it cannot perform itself.
 //!
-//! The Space's Schema Environment is also the *only* store: the vocabulary is
-//! read back out of `LIST TYPES` / `LIST PREDICATES` rather than kept in a
-//! second place that could disagree with it.
+//! Spaces that grew vocabulary before the draft package existed keep their
+//! host package `kip://anda-brain/memory@1.0.N`: it stays in force and
+//! readable, and nothing is added to it any more.
+//!
+//! The Space's Schema Environment is the *only* store: the vocabulary is read
+//! back out of `LIST TYPES` / `LIST PREDICATES` rather than kept in a second
+//! place that could disagree with it.
 
 use anda_cognitive_nexus::CognitiveNexus;
 use anda_core::{BoxError, FunctionDefinition, Resource, Tool, ToolOutput};
 use anda_engine::{context::BaseCtx, memory::MemoryManagement};
+use anda_kip::DefineKind;
 use serde::Deserialize;
 use serde_json::{Map, Value as Json, json};
 use std::{
@@ -37,54 +44,48 @@ use std::{
 
 use crate::kip;
 
-/// The package id the brain publishes its own vocabulary under.
-///
-/// Deliberately outside `kip://core` and `kip://profiles`: those namespaces
-/// carry meanings other engines are expected to share, and a predicate one
-/// conversation happened to use is not one of them.
+/// The package id this brain published its vocabulary under before the
+/// draft vocabulary existed. Read-only now: it stays in force for the Spaces
+/// that have it, and nothing new is added to it.
 pub const MEMORY_PACKAGE_ID: &str = "kip://anda-brain/memory";
 
-/// Cap on how many symbols one Space's vocabulary may hold.
+/// Cap on how many symbols one Space's own vocabulary may hold: its drafts and
+/// its legacy host package together.
 ///
-/// The package is re-published on every extension, so an unbounded vocabulary
-/// would grow both the artifact and the Schema Environment history without
-/// limit. Past the cap the brain refuses the new symbol rather than the whole
-/// write: a Space that has already introduced this many distinct predicates is
-/// accumulating synonyms, and the answer is to reuse what it has.
+/// Draft symbols are never removed, so an unbounded vocabulary would grow the
+/// Schema Environment without limit. Past the cap the brain refuses the new
+/// symbol rather than the whole write: a Space that has already introduced this
+/// many distinct predicates is accumulating synonyms, and the answer is to
+/// reuse what it has. `@ldclabs/anda-brain-worker` enforces the same number.
 pub const MAX_SYMBOLS: usize = 512;
 
-/// Longest symbol name the brain will publish.
+/// The most `DEFINE`s one model request may carry.
+pub const MAX_DEFINES_PER_REQUEST: usize = 8;
+
+/// Longest symbol name the brain will define.
 pub const MAX_SYMBOL_CHARS: usize = 64;
 
 /// The vocabulary of one Space.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MemoryVocabulary {
-    /// Concept types this brain published, as UpperCamelCase local names.
+    /// Concept types in this Space's legacy host package.
     pub types: BTreeSet<String>,
 
-    /// Predicates this brain published, as snake_case local names.
+    /// Predicates in this Space's legacy host package.
     pub predicates: BTreeSet<String>,
 
-    /// How many times the package has been published — the version's patch
-    /// component. A counter rather than a content hash: a version must never go
-    /// backwards, and two vocabularies differing only in arrival order are
-    /// still two published artifacts in the environment's history.
+    /// Concept types this Space drafted (`kip://local/draft@0.0.0`).
+    pub draft_types: BTreeSet<String>,
+
+    /// Predicates this Space drafted.
+    pub draft_predicates: BTreeSet<String>,
+
+    /// The legacy host package's patch version in force, `0` when the Space
+    /// has none.
     pub revision: u32,
 
-    /// The highest revision this Space has ever *installed*, in force or not.
-    ///
-    /// `revision` is the one in force, which is what `package_ref()` has to
-    /// name. They differ after a partial publish: `install_and_activate`
-    /// installs the artifact and then activates it, and a failure between those
-    /// two leaves a version installed that never came into force. Re-minting
-    /// that number with a different symbol set is refused as a `DigestMismatch`
-    /// — a package version identifies one canonical content forever — and the
-    /// Space could then never grow its vocabulary again. Skipping the stranded
-    /// number costs one integer.
-    floor: u32,
-
     /// Symbols other active packages declare, chiefly the Cognitive Memory
-    /// Profile's. Writable, but not this package's to redeclare.
+    /// Profile's. Writable, but not this Space's to redefine.
     borrowed_types: BTreeSet<String>,
     borrowed_predicates: BTreeSet<String>,
 }
@@ -97,15 +98,17 @@ impl MemoryVocabulary {
     pub async fn load(nexus: &CognitiveNexus) -> Result<Self, BoxError> {
         let mut vocabulary = Self::default();
         let mut version = String::new();
-        for (command, mine, borrowed) in [
+        for (command, mine, drafted, borrowed) in [
             (
                 "LIST TYPES LIMIT 1000",
                 &mut vocabulary.types,
+                &mut vocabulary.draft_types,
                 &mut vocabulary.borrowed_types,
             ),
             (
                 "LIST PREDICATES LIMIT 1000",
                 &mut vocabulary.predicates,
+                &mut vocabulary.draft_predicates,
                 &mut vocabulary.borrowed_predicates,
             ),
         ] {
@@ -128,7 +131,11 @@ impl MemoryVocabulary {
                     .get("package_ref")
                     .and_then(Json::as_str)
                     .unwrap_or_default();
-                if let Some(declared) = reference.strip_prefix(&format!("{MEMORY_PACKAGE_ID}@")) {
+                if reference == anda_kip::DRAFT_PACKAGE_REF {
+                    drafted.insert(name.to_string());
+                } else if let Some(declared) =
+                    reference.strip_prefix(&format!("{MEMORY_PACKAGE_ID}@"))
+                {
                     version = declared.to_string();
                     mine.insert(name.to_string());
                 } else {
@@ -137,116 +144,66 @@ impl MemoryVocabulary {
             }
         }
         vocabulary.revision = patch_of(&version).unwrap_or(0);
-        vocabulary.floor = highest_installed_revision(nexus).await?;
         Ok(vocabulary)
     }
 
-    /// The exact version this vocabulary publishes as.
+    /// The legacy host package's exact version.
     pub fn version(&self) -> String {
         format!("1.0.{}", self.revision)
     }
 
-    /// The package reference — `kip://anda-brain/memory@1.0.7`.
+    /// The legacy host package's reference — `kip://anda-brain/memory@1.0.7`.
     pub fn package_ref(&self) -> String {
         format!("{MEMORY_PACKAGE_ID}@{}", self.version())
     }
 
     /// Whether the Space can already resolve every one of these symbols,
     /// whoever declares them.
-    #[cfg_attr(not(feature = "wiki"), allow(dead_code))]
     pub fn covers<'a>(
         &self,
         types: impl IntoIterator<Item = &'a str>,
         predicates: impl IntoIterator<Item = &'a str>,
     ) -> bool {
-        types
-            .into_iter()
-            .all(|name| self.types.contains(name) || self.borrowed_types.contains(name))
-            && predicates.into_iter().all(|name| {
-                self.predicates.contains(name) || self.borrowed_predicates.contains(name)
-            })
+        types.into_iter().all(|name| self.has_type(name))
+            && predicates.into_iter().all(|name| self.has_predicate(name))
     }
 
-    /// Adds symbols, bumping the revision when anything was genuinely new.
-    ///
-    /// Returns the names that were rejected: malformed, or past [`MAX_SYMBOLS`].
-    /// A symbol another active package already declares is *not* rejected and
-    /// not added — redeclaring it would make every reference to it ambiguous,
-    /// and the Profile's meaning is the better one anyway.
-    pub fn extend<'a>(
-        &mut self,
-        types: impl IntoIterator<Item = &'a str>,
-        predicates: impl IntoIterator<Item = &'a str>,
-    ) -> Vec<String> {
-        let mut rejected = Vec::new();
-        let mut changed = false;
-        let mut published = self.len();
-        for (names, valid, mine, borrowed) in [
-            (
-                types.into_iter().collect::<Vec<_>>(),
-                is_type_name as fn(&str) -> bool,
-                &mut self.types,
-                &self.borrowed_types,
-            ),
-            (
-                predicates.into_iter().collect::<Vec<_>>(),
-                is_predicate_name as fn(&str) -> bool,
-                &mut self.predicates,
-                &self.borrowed_predicates,
-            ),
-        ] {
-            for name in names {
-                if borrowed.contains(name) || mine.contains(name) {
-                    continue;
-                }
-                if !valid(name) {
-                    rejected.push(name.to_string());
-                    continue;
-                }
-                // The cap is on what *this package* declares — the artifact
-                // it re-publishes on every extension — so it counts types and
-                // predicates together and counts nothing another package
-                // declares. Reading `self.borrowed_types` here charged the
-                // Profile's types against the predicate budget and let each
-                // kind fill MAX_SYMBOLS on its own, so the real ceiling was
-                // twice the documented one. `@ldclabs/kip-do` checks
-                // `this.size`, and the two engines have to agree on a limit
-                // both READMEs quote.
-                if published >= MAX_SYMBOLS {
-                    rejected.push(name.to_string());
-                    continue;
-                }
-                mine.insert(name.to_string());
-                published += 1;
-                changed = true;
-            }
-        }
-        if changed {
-            // Past the highest number ever installed, not merely past the one
-            // in force: see `floor`.
-            self.revision = self.revision.max(self.floor).saturating_add(1);
-            self.floor = self.revision;
-        }
-        rejected
+    fn has_type(&self, name: &str) -> bool {
+        self.types.contains(name)
+            || self.draft_types.contains(name)
+            || self.borrowed_types.contains(name)
     }
 
-    /// How many symbols this package declares.
+    fn has_predicate(&self, name: &str) -> bool {
+        self.predicates.contains(name)
+            || self.draft_predicates.contains(name)
+            || self.borrowed_predicates.contains(name)
+    }
+
+    /// How many symbols this Space's own vocabulary holds: drafts and the
+    /// legacy host package together, which is what [`MAX_SYMBOLS`] caps.
     pub fn len(&self) -> usize {
+        self.package_len() + self.draft_types.len() + self.draft_predicates.len()
+    }
+
+    /// How many symbols the legacy host package declares.
+    pub fn package_len(&self) -> usize {
         self.types.len() + self.predicates.len()
     }
 
-    /// Publishes this vocabulary and puts it in force alongside the Cognitive
-    /// Memory Profile.
+    /// Puts the Cognitive Memory Profile in force, with the legacy host
+    /// package when this Space has one. The draft package is Space state the
+    /// engine keeps across every activation.
     ///
     /// `install_and_activate` re-activates only when the resulting lock differs
-    /// from the one already in force, so calling this with an unchanged
-    /// vocabulary does not walk the environment version forward.
+    /// from the one already in force, so calling this on every open does not
+    /// walk the environment version forward.
     pub async fn activate(&self, nexus: &CognitiveNexus) -> Result<(), BoxError> {
         let mut artifacts: Vec<(&str, String)> = vec![(
             "anda_brain",
             anda_cognitive_nexus::profiles::COGNITIVE_MEMORY.to_string(),
         )];
-        if self.len() > 0 {
+        if self.package_len() > 0 {
             artifacts.push(("anda_brain_memory", self.artifact()));
         }
         let artifacts: Vec<(&str, &str)> = artifacts
@@ -259,14 +216,12 @@ impl MemoryVocabulary {
         Ok(())
     }
 
-    /// Renders the Schema Package artifact.
+    /// Renders the legacy host package exactly as it was published, so
+    /// re-activating it installs nothing new.
     ///
     /// Every predicate accepts any Concept on both ends and is declared
-    /// `open_world` and non-`functional`. That is not laziness: these symbols
-    /// come from prose, so nothing here has a basis for claiming a relation
-    /// holds between exactly two types, or that what was written down was
-    /// everything — and a schema asserting either would turn a gap in what the
-    /// brain was told into a closed world.
+    /// `open_world` and non-`functional`: these symbols came from prose, so
+    /// nothing had a basis for claiming more.
     pub fn artifact(&self) -> String {
         let package_ref = self.package_ref();
         let mut concept_types = Map::new();
@@ -370,6 +325,258 @@ pub fn is_predicate_name(name: &str) -> bool {
         && !name.ends_with('_')
 }
 
+/// The label a symbol kind carries in a `review_schema` key and in the
+/// promotion API: `ConceptType` or `PredicateType` (Spec §20.16).
+pub fn kind_label(kind: DefineKind) -> &'static str {
+    match kind {
+        DefineKind::ConceptType => "ConceptType",
+        DefineKind::Predicate => "PredicateType",
+    }
+}
+
+/// Whether a name has the shape this brain gives a symbol of this kind.
+pub fn is_symbol_name(kind: DefineKind, name: &str) -> bool {
+    match kind {
+        DefineKind::ConceptType => is_type_name(name),
+        DefineKind::Predicate => is_predicate_name(name),
+    }
+}
+
+/// The description the host gives a symbol it drafts from a bare name.
+fn host_description(kind: DefineKind, name: &str) -> String {
+    match kind {
+        DefineKind::ConceptType => format!(
+            "Entity type `{name}`, met while forming this Space's memory. It means whatever the \
+             sources it came from meant by it; nothing here verifies that."
+        ),
+        DefineKind::Predicate => format!(
+            "Relation `{name}`, met while forming this Space's memory. A claim under it is \
+             somebody's statement, never a verified fact."
+        ),
+    }
+}
+
+/// What [`draft_symbols`] made of the names it was given.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Drafted {
+    /// Exact references of the symbols this call defined.
+    pub defined: Vec<String>,
+    /// Names refused: malformed, or past [`MAX_SYMBOLS`].
+    pub rejected: Vec<String>,
+}
+
+/// Drafts the host-proposed names the Space cannot yet resolve (Spec §20.16).
+///
+/// A name the Space already speaks, whoever defines it, is left alone; a
+/// malformed name or one past [`MAX_SYMBOLS`] is refused on its own rather than
+/// failing the rest. Each new symbol is one `DEFINE` with a host description —
+/// unconstrained endpoints, open world, open attributes — because these names
+/// come from prose and nothing here has a basis for claiming more. Every
+/// definition queues its `review_schema` SleepTask.
+pub async fn draft_symbols(
+    nexus: &CognitiveNexus,
+    types: &[&str],
+    predicates: &[&str],
+) -> Result<Drafted, BoxError> {
+    let vocabulary = MemoryVocabulary::load(nexus).await?;
+    let mut drafted = Drafted::default();
+    let mut size = vocabulary.len();
+    let mut seen = BTreeSet::new();
+    for (kind, names) in [
+        (DefineKind::ConceptType, types),
+        (DefineKind::Predicate, predicates),
+    ] {
+        for &name in names {
+            if !seen.insert((kind_label(kind), name)) {
+                continue;
+            }
+            let known = match kind {
+                DefineKind::ConceptType => vocabulary.has_type(name),
+                DefineKind::Predicate => vocabulary.has_predicate(name),
+            };
+            if known {
+                continue;
+            }
+            if !is_symbol_name(kind, name) || size >= MAX_SYMBOLS {
+                drafted.rejected.push(name.to_string());
+                continue;
+            }
+            let description = host_description(kind, name);
+            let command = match kind {
+                DefineKind::ConceptType => "DEFINE CONCEPT TYPE :name {description: :description}",
+                DefineKind::Predicate => "DEFINE PREDICATE :name {description: :description}",
+            };
+            let response = anda_kip::execute_request(
+                nexus,
+                &kip::request_with(
+                    command,
+                    Map::from_iter([
+                        ("name".to_string(), Json::from(name)),
+                        ("description".to_string(), Json::from(description.as_str())),
+                    ]),
+                ),
+            )
+            .await;
+            if kip::error_of(&response).is_some_and(|error| error.code == "SchemaSymbolConflict") {
+                // Defined meanwhile: the name resolves, which is all a caller
+                // asked for.
+                continue;
+            }
+            let Some(reference) = kip::ok_result(&response)
+                .and_then(|result| result.get("ref"))
+                .and_then(Json::as_str)
+                .map(str::to_string)
+            else {
+                return Err(format!(
+                    "defining {} `{name}` failed: {}",
+                    kind_label(kind),
+                    kip::error_message(&response)
+                )
+                .into());
+            };
+            size += 1;
+            queue_schema_review(nexus, kind, &reference, &description).await?;
+            drafted.defined.push(reference);
+        }
+    }
+    Ok(drafted)
+}
+
+/// Queues the review of one draft symbol: a `review_schema` SleepTask keyed
+/// `review_schema:<kind>:<exact ref>` (Spec §20.16, Profile §5.9), so a retry
+/// or a second definition attempt resolves to the same task. Maintenance
+/// reviews it and may propose a promotion; only an owner performs one.
+pub(crate) async fn queue_schema_review(
+    executor: &impl anda_kip::Executor,
+    kind: DefineKind,
+    reference: &str,
+    description: &str,
+) -> Result<(), BoxError> {
+    let label = kind_label(kind);
+    let name = reference.rsplit('/').next().unwrap_or(reference);
+    let summary: String = format!("Review the draft {label} `{name}`: {description}")
+        .chars()
+        .take(1024)
+        .collect();
+    let response = anda_kip::execute_request(
+        executor,
+        &kip::request_with(
+            r#"CREATE CONCEPT ?task {
+  TYPE "SleepTask"
+  CLIENT KEY :key
+  NAME :name
+  SET ATTRIBUTES { task_class: "review_schema", summary: :summary, status: "pending", created_at: :now, symbol_kind: :kind, symbol_ref: :ref }
+}"#,
+            Map::from_iter([
+                (
+                    "key".to_string(),
+                    Json::from(format!("review_schema:{label}:{reference}")),
+                ),
+                (
+                    "name".to_string(),
+                    Json::from(format!("Review draft {label} {name}")),
+                ),
+                ("summary".to_string(), Json::from(summary)),
+                (
+                    "now".to_string(),
+                    Json::from(kip::timestamp(anda_engine::unix_ms())),
+                ),
+                ("kind".to_string(), Json::from(label)),
+                ("ref".to_string(), Json::from(reference)),
+            ]),
+        ),
+    )
+    .await;
+    if kip::succeeded(&response) {
+        Ok(())
+    } else {
+        Err(format!(
+            "queueing the review of {reference} failed: {}",
+            kip::error_message(&response)
+        )
+        .into())
+    }
+}
+
+/// One `DEFINE` in a model's request, as the host queues its review.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ModelDefine {
+    /// The operation's position in the request.
+    pub index: usize,
+    pub kind: DefineKind,
+    pub description: String,
+}
+
+/// The `DEFINE`s a model request carries, in operation order. The Formation
+/// gate has already required each to be a literal standalone operation.
+pub(crate) fn model_defines(request: &anda_kip::Request) -> Vec<ModelDefine> {
+    request
+        .operations
+        .iter()
+        .enumerate()
+        .filter_map(|(index, operation)| {
+            let anda_kip::Command::Kml(statement) = operation.parse().ok()? else {
+                return None;
+            };
+            let [anda_kip::MutationClause::Define(define)] = statement.clauses.as_slice() else {
+                return None;
+            };
+            let description = match define.definition.get("description") {
+                Some(anda_kip::BoundValue::Value(anda_kip::KipValue::String(text))) => text.clone(),
+                _ => String::new(),
+            };
+            Some(ModelDefine {
+                index,
+                kind: define.kind,
+                description,
+            })
+        })
+        .collect()
+}
+
+/// Whether the Space's vocabulary has room for `count` more symbols.
+pub(crate) async fn check_define_budget(
+    nexus: &CognitiveNexus,
+    count: usize,
+) -> Result<(), String> {
+    let vocabulary = MemoryVocabulary::load(nexus)
+        .await
+        .map_err(|error| error.to_string())?;
+    if vocabulary.len() + count > MAX_SYMBOLS {
+        return Err(format!(
+            "this Space's vocabulary holds {} of its {MAX_SYMBOLS} symbols; reuse an existing \
+             symbol instead of defining another",
+            vocabulary.len()
+        ));
+    }
+    Ok(())
+}
+
+/// Queues a `review_schema` task for every model `DEFINE` that committed.
+pub(crate) async fn review_model_defines(
+    nexus: &CognitiveNexus,
+    defines: &[ModelDefine],
+    response: &anda_kip::Response,
+) {
+    for define in defines {
+        let Some(reference) = response
+            .results
+            .get(define.index)
+            .filter(|result| result.error.is_none())
+            .and_then(|result| result.result.as_ref())
+            .and_then(|result| result.get("ref"))
+            .and_then(Json::as_str)
+        else {
+            continue;
+        };
+        if let Err(error) =
+            queue_schema_review(nexus, define.kind, reference, &define.description).await
+        {
+            log::warn!(target: "brain", "{error}");
+        }
+    }
+}
+
 /// The model-facing arguments of [`DeclareSymbolsTool`].
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct DeclareSymbolsArgs {
@@ -384,14 +591,15 @@ pub struct DeclareSymbolsArgs {
 static DECLARE_SYMBOLS_DEFINITION: LazyLock<FunctionDefinition> = LazyLock::new(|| {
     serde_json::from_value(json!({
         "name": DeclareSymbolsTool::NAME,
-        "description": "Declares Concept types and predicates this memory needs before you can \
-                        write with them. KIP 2.0 resolves every symbol through the Space's Schema \
-                        Environment, so a KML command naming an undeclared type or predicate is \
-                        refused with SchemaSymbolNotFound — call this first, then write. Reuse an \
-                        existing symbol wherever one fits: `LIST TYPES` and `LIST PREDICATES` show \
-                        what this Space already speaks, and minting a synonym splits one memory in \
-                        two. Declaring a symbol says nothing about whether any claim using it is \
-                        true.",
+        "description": "Deprecated shortcut for DEFINE: drafts bare Concept type and predicate \
+                        names with a generic host description, for when you cannot write one. \
+                        Prefer `DEFINE CONCEPT TYPE` / `DEFINE PREDICATE` through execute_kip \
+                        with a real description. KIP 2.0 resolves every symbol through the \
+                        Space's Schema Environment, so a command naming an undefined type or \
+                        predicate is refused with SchemaSymbolNotFound. Reuse an existing symbol \
+                        wherever one fits: `LIST TYPES` and `LIST PREDICATES` show what this \
+                        Space already speaks, and minting a synonym splits one memory in two. \
+                        Defining a symbol says nothing about whether any claim using it is true.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -424,42 +632,18 @@ fn patch_of(version: &str) -> Option<u32> {
         .and_then(|patch| patch.parse().ok())
 }
 
-/// The highest revision of this package the Space has ever installed.
+/// Lets Formation draft names it cannot describe better.
 ///
-/// Read from the installed set rather than from what is in force, because the
-/// two differ exactly in the case this exists to survive — an artifact
-/// installed by a publish that then failed to activate. The installed set holds
-/// a handful of packages (Core, the Profile, this one), so enumerating it is
-/// cheaper than the failure it prevents.
-async fn highest_installed_revision(nexus: &CognitiveNexus) -> Result<u32, BoxError> {
-    let prefix = format!("{MEMORY_PACKAGE_ID}@");
-    Ok(nexus
-        .store
-        .installed_packages()
-        .await?
-        .keys()
-        .filter_map(|package_ref| patch_of(package_ref.strip_prefix(&prefix)?))
-        .max()
-        .unwrap_or(0))
-}
-
-/// Lets Formation and Maintenance grow this Space's vocabulary.
-///
-/// The tool exists because KIP 2.0 deliberately took schema out of the language
-/// a model writes: KML cannot declare a type, so a model that needs one has to
-/// ask the host. What the host adds on top is what makes that worth doing —
-/// name validation, a cap, and a version — so the set of things this Brain can
-/// say stays a reviewable artifact instead of whatever its models happened to
-/// emit.
-///
-/// Not registered for Recall, which is read-only.
+/// A deprecated shortcut: Formation's own `DEFINE` carries a real description
+/// and is the path the contract asks for. This one keeps its signature for one
+/// release so a model that still calls it gets a draft rather than an error.
+/// Maintenance reviews drafts and never defines one, and Recall is read-only,
+/// so neither may call it.
 #[derive(Clone)]
 pub struct DeclareSymbolsTool {
     memory: Arc<MemoryManagement>,
     product_control: Option<Arc<crate::product::control::Control>>,
-    /// Serializes publication. Two concurrent extends would each read the same
-    /// vocabulary, add their own symbol, and publish — the second overwriting
-    /// the first's, which is how a declared symbol quietly stops existing.
+    /// Serializes drafting, so two concurrent calls cannot both pass the cap.
     lock: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -484,29 +668,22 @@ impl DeclareSymbolsTool {
         self
     }
 
-    /// Publishes the symbols and returns the names it refused.
+    /// Drafts the symbols and returns the names it refused.
     pub async fn declare(
         &self,
         args: &DeclareSymbolsArgs,
     ) -> Result<(Json, Vec<String>), BoxError> {
         let _guard = self.lock.lock().await;
         let nexus = self.memory.nexus();
-        let mut vocabulary = MemoryVocabulary::load(nexus.as_ref()).await?;
-        let before = vocabulary.revision;
-        let rejected = vocabulary.extend(
-            args.types.iter().map(String::as_str),
-            args.predicates.iter().map(String::as_str),
-        );
-        if vocabulary.revision != before {
-            vocabulary.activate(nexus.as_ref()).await?;
-        }
+        let types: Vec<&str> = args.types.iter().map(String::as_str).collect();
+        let predicates: Vec<&str> = args.predicates.iter().map(String::as_str).collect();
+        let drafted = draft_symbols(nexus.as_ref(), &types, &predicates).await?;
         Ok((
             json!({
-                "package_ref": vocabulary.package_ref(),
-                "types": vocabulary.types,
-                "predicates": vocabulary.predicates,
+                "draft_package": anda_kip::DRAFT_PACKAGE_REF,
+                "defined": drafted.defined,
             }),
-            rejected,
+            drafted.rejected,
         ))
     }
 }
@@ -539,6 +716,13 @@ impl Tool<BaseCtx> for DeclareSymbolsTool {
         args: Self::Args,
         _resources: Vec<Resource>,
     ) -> Result<ToolOutput<Self::Output>, BoxError> {
+        if ctx.agent != crate::agents::FormationAgent::NAME {
+            return Err(
+                "only Formation drafts vocabulary; Maintenance reviews drafts and \
+                        records a near-synonym as an Insight about the existing symbol"
+                    .into(),
+            );
+        }
         let _guard = if let Some(control) = &self.product_control {
             let guard = control.gate.lock().await;
             control.check(&ctx)?;
@@ -571,7 +755,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_empty_vocabulary_publishes_as_the_first_revision() {
+    fn a_space_without_a_host_package_names_the_first_revision() {
         let vocabulary = MemoryVocabulary::default();
         assert_eq!(vocabulary.package_ref(), "kip://anda-brain/memory@1.0.0");
         assert!(vocabulary.covers([], []));
@@ -579,102 +763,53 @@ mod tests {
     }
 
     #[test]
-    fn adding_a_symbol_moves_the_version_forward_and_re_adding_does_not() {
-        let mut vocabulary = MemoryVocabulary::default();
-        assert!(vocabulary.extend(["Drug"], ["treats"]).is_empty());
-        assert_eq!(vocabulary.version(), "1.0.1");
-        // A version that went nowhere would still mint a new Schema
-        // Environment version on activation, invalidating every client's
-        // `schema_environment_version` precondition for no change at all.
-        assert!(vocabulary.extend(["Drug"], ["treats"]).is_empty());
-        assert_eq!(vocabulary.version(), "1.0.1");
-        assert!(vocabulary.covers(["Drug"], ["treats"]));
-    }
-
-    #[test]
-    fn a_symbol_another_package_declares_is_usable_but_never_redeclared() {
-        // Two active packages defining `Person` make every reference to it
-        // ambiguous, and the engine refuses the whole write rather than pick.
-        let mut vocabulary = MemoryVocabulary {
+    fn drafts_legacy_symbols_and_borrowed_ones_all_resolve() {
+        let vocabulary = MemoryVocabulary {
+            types: BTreeSet::from(["Project".to_string()]),
+            draft_types: BTreeSet::from(["Instrument".to_string()]),
+            draft_predicates: BTreeSet::from(["mentors".to_string()]),
             borrowed_types: BTreeSet::from(["Person".to_string()]),
             borrowed_predicates: BTreeSet::from(["prefers".to_string()]),
+            revision: 3,
             ..Default::default()
         };
-        assert!(vocabulary.covers(["Person"], ["prefers"]));
-        assert!(vocabulary.extend(["Person"], ["prefers"]).is_empty());
-        assert!(vocabulary.types.is_empty());
-        assert_eq!(vocabulary.revision, 0, "nothing was published");
+        assert!(vocabulary.covers(["Project", "Instrument", "Person"], ["mentors", "prefers"]));
+        assert!(!vocabulary.covers(["Drug"], []));
+        // The cap counts this Space's own symbols, drafts included, and never
+        // another package's.
+        assert_eq!(vocabulary.len(), 3);
+        assert_eq!(vocabulary.package_len(), 1);
+        assert_eq!(vocabulary.package_ref(), "kip://anda-brain/memory@1.0.3");
     }
 
     #[test]
-    fn malformed_names_are_reported_rather_than_published() {
-        let mut vocabulary = MemoryVocabulary::default();
-        let rejected = vocabulary.extend(["drug", "medical device", "Ok"], ["Treats", "fine_one"]);
-        assert_eq!(rejected, vec!["drug", "medical device", "Treats"]);
-        assert_eq!(vocabulary.types, BTreeSet::from(["Ok".to_string()]));
-        assert_eq!(
-            vocabulary.predicates,
-            BTreeSet::from(["fine_one".to_string()])
-        );
+    fn symbol_names_follow_their_kind() {
+        assert!(is_symbol_name(DefineKind::ConceptType, "MedicalDevice"));
+        assert!(is_symbol_name(DefineKind::Predicate, "works_on"));
+        for (kind, name) in [
+            (DefineKind::ConceptType, "drug"),
+            (DefineKind::ConceptType, "medical device"),
+            // §20.13: a reserved Core name is refused for every kind.
+            (DefineKind::ConceptType, "Assertion"),
+            (DefineKind::Predicate, "Treats"),
+            (DefineKind::Predicate, "ends_"),
+        ] {
+            assert!(!is_symbol_name(kind, name), "{name}");
+        }
+        assert!(!is_type_name(&"A".repeat(MAX_SYMBOL_CHARS + 1)));
     }
 
     #[test]
-    fn a_core_kind_is_not_a_concept_type_this_package_may_declare() {
-        // §20.13: a package MUST NOT shadow a reserved Core symbol name. Core
-        // exports no Concept types, so `LIST TYPES` never reports the five
-        // element kinds and the borrowed set cannot catch this. Refused here
-        // rather than at package installation, where it would take the whole
-        // publish down and leave the Space unable to grow its vocabulary at all.
-        let mut vocabulary = MemoryVocabulary::default();
-        let rejected = vocabulary.extend(["Assertion", "Evidence", "Project"], []);
-        assert_eq!(rejected, vec!["Assertion", "Evidence"]);
-        assert_eq!(vocabulary.types, BTreeSet::from(["Project".to_string()]));
-    }
-
-    #[test]
-    fn the_cap_counts_this_package_whole_and_nobody_else() {
-        let mut vocabulary = MemoryVocabulary::default();
-        // Another package's symbols are not this one's to be charged for.
-        vocabulary
-            .borrowed_types
-            .extend((0..40).map(|i| format!("Borrowed{i}")));
-
-        let types: Vec<String> = (0..MAX_SYMBOLS).map(|i| format!("T{i}")).collect();
-        let rejected = vocabulary.extend(types.iter().map(String::as_str), []);
-        assert!(rejected.is_empty(), "{} rejected", rejected.len());
-        assert_eq!(vocabulary.len(), MAX_SYMBOLS);
-
-        // Types and predicates share one budget: the cap is on the artifact
-        // this package republishes, and it holds both.
-        let rejected = vocabulary.extend(["OneMore"], ["one_more"]);
-        assert_eq!(rejected, vec!["OneMore", "one_more"]);
-        assert_eq!(vocabulary.len(), MAX_SYMBOLS);
-    }
-
-    #[test]
-    fn a_revision_never_reuses_a_number_already_installed() {
-        // The in-force package is 1.0.4, but 1.0.5 and 1.0.6 were installed by
-        // publishes that never activated. Re-minting either with different
-        // content is a permanent DigestMismatch.
-        let mut vocabulary = MemoryVocabulary {
-            revision: 4,
-            floor: 6,
+    fn the_legacy_artifact_declares_exactly_the_symbols_it_holds() {
+        let vocabulary = MemoryVocabulary {
+            types: BTreeSet::from(["Drug".to_string(), "Symptom".to_string()]),
+            predicates: BTreeSet::from(["treats".to_string()]),
+            // Drafts are the engine's, never part of this artifact.
+            draft_types: BTreeSet::from(["Instrument".to_string()]),
+            revision: 1,
             ..Default::default()
         };
-
-        assert!(vocabulary.extend(["Drug"], []).is_empty());
-        assert_eq!(vocabulary.version(), "1.0.7");
-
-        assert!(vocabulary.extend([], ["treats"]).is_empty());
-        assert_eq!(vocabulary.version(), "1.0.8");
-    }
-
-    #[test]
-    fn the_artifact_declares_exactly_the_symbols_it_holds() {
-        let mut vocabulary = MemoryVocabulary::default();
-        vocabulary.extend(["Drug", "Symptom"], ["treats"]);
         let package: Json = serde_json::from_str(&vocabulary.artifact()).unwrap();
-
         assert_eq!(
             package["manifest"]["package_ref"],
             "kip://anda-brain/memory@1.0.1"
@@ -691,11 +826,32 @@ mod tests {
     }
 
     #[test]
-    fn the_vocabulary_stops_widening_at_its_cap() {
-        let mut vocabulary = MemoryVocabulary::default();
-        let names: Vec<String> = (0..MAX_SYMBOLS + 10).map(|i| format!("Type{i}")).collect();
-        let rejected = vocabulary.extend(names.iter().map(String::as_str), []);
-        assert_eq!(vocabulary.len(), MAX_SYMBOLS);
-        assert_eq!(rejected.len(), 10);
+    fn a_model_define_is_read_with_its_position_and_description() {
+        let mut request = kip::request("DESCRIBE PRIMER");
+        request.operations.extend(
+            kip::request(
+                r#"DEFINE PREDICATE "mentors" {description: "The subject mentors the object."}"#,
+            )
+            .operations,
+        );
+        request.operations.extend(
+            kip::request(r#"DEFINE CONCEPT TYPE "Instrument" {description: "An instrument."}"#)
+                .operations,
+        );
+        assert_eq!(
+            model_defines(&request),
+            vec![
+                ModelDefine {
+                    index: 1,
+                    kind: DefineKind::Predicate,
+                    description: "The subject mentors the object.".into(),
+                },
+                ModelDefine {
+                    index: 2,
+                    kind: DefineKind::ConceptType,
+                    description: "An instrument.".into(),
+                },
+            ]
+        );
     }
 }

@@ -53,6 +53,17 @@ func (c *Client) GetMemoryStatus(ctx context.Context) (*RpcResponse[MemoryStatus
 	return callRPC[MemoryStatus](ctx, c, http.MethodGet, c.spacePath("/memory_status"), nil)
 }
 
+// SchemaDrafts lists the Space's draft vocabulary (KIP §20.16).
+func (c *Client) SchemaDrafts(ctx context.Context) (*RpcResponse[SchemaDrafts], error) {
+	return callRPC[SchemaDrafts](ctx, c, http.MethodGet, c.spacePath("/schema/drafts"), nil)
+}
+
+// PromoteDraftSymbol promotes one draft symbol onto an installed symbol of the
+// same kind. It is a Schema migration and needs the Space's management token.
+func (c *Client) PromoteDraftSymbol(ctx context.Context, input *PromoteDraftInput) (*RpcResponse[PromoteDraftOutput], error) {
+	return callRPC[PromoteDraftOutput](ctx, c, http.MethodPost, c.spacePath("/schema/promote"), input)
+}
+
 func (c *Client) ShadowEval(ctx context.Context, input *ShadowEvalInput) (*RpcResponse[ShadowReport], error) {
 	return callRPC[ShadowReport](ctx, c, http.MethodPost, c.spacePath("/management/shadow_eval"), input)
 }

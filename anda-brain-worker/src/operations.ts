@@ -18,6 +18,7 @@ import {
   conceptLookupCommand,
   countChanges,
   countWrites,
+  hostBindings,
   keepReadonlyOperations,
   observationIngest,
   type KipOperation,
@@ -360,7 +361,10 @@ async function preparePlan(
   epoch: number,
   run?: string,
 ): Promise<{ operations: KipOperation[]; vocabulary?: DeclaredVocabulary }> {
-  const operations = plan.commands.map((command) => ({ command, parameters: plan.parameters }))
+  // The strength pin and this write's time ride every operation, so a
+  // MnemonicState base the model writes is one the engine can compute.
+  const parameters = { ...plan.parameters, ...hostBindings(Date.now()) }
+  const operations = plan.commands.map((command) => ({ command, parameters }))
   try {
     if (operations.length > 0) gate(operations)
     if (epoch > 0) assertCurrentOperations(operations)
@@ -371,9 +375,15 @@ async function preparePlan(
     )
   }
   if (plan.types.length === 0 && plan.predicates.length === 0) return { operations }
+  // Maintenance reviews draft vocabulary and never drafts it (Spec §20.16):
+  // its names are reported as refused rather than failing the cycle.
+  if (run !== undefined) {
+    const current = await brain.vocabulary()
+    return { operations, vocabulary: { ...current, rejected: [...plan.types, ...plan.predicates] } }
+  }
   return {
     operations,
-    vocabulary: await brain.declareSymbols(plan.types, plan.predicates, epoch, run),
+    vocabulary: await brain.declareSymbols(plan.types, plan.predicates, epoch),
   }
 }
 

@@ -680,7 +680,7 @@ plan is one object:
 ```
 
 - `commands` — at most **4** complete KIP KML commands, as strings. The runtime
-  parses each one, gates it, and runs it.
+  parses each one, gates it, and runs it; a `DEFINE` among them runs first (A.2).
 - `summary` — one sentence on what was stored, in plain language, with no hidden
   reasoning in it. It is shown to the caller.
 - Nothing worth remembering? Return `{"types": [], "predicates": [], "commands": [], "summary": "…"}`.
@@ -690,17 +690,16 @@ plan is one object:
 The reference output contract (§34) is what the *runtime* reports to its caller.
 It assembles that from the receipts. Do not write it yourself.
 
-## A.2 Vocabulary enters through `types` and `predicates`
+## A.2 New vocabulary is a draft
 
 A command naming a type or predicate no active Schema Package defines is refused
-with `SchemaSymbolNotFound`, and the whole statement rolls back. This engine does
-not provide the draft vocabulary, so `DEFINE` is refused here; where the reference
-policy says to `DEFINE` a symbol, name it in `types` or `predicates` instead.
-
-So: before you write a symbol the Space does not have, name it in `types` or
-`predicates`. The host validates it, caps it, publishes a new version of this
-Space's vocabulary package and activates it — all before your first command
-runs.
+with `SchemaSymbolNotFound`, and the whole statement rolls back. This engine
+provides the Space's draft vocabulary (Spec §20.16): `DEFINE PREDICATE` /
+`DEFINE CONCEPT TYPE` add one symbol to `kip://local/draft@0.0.0`, and a draft
+never changes afterwards or shadows a symbol anything else defines. Defining is a
+proposal, not administration: the host caps how many symbols a Space may hold and
+queues each new one for review, and only the Space's owner can promote a draft
+onto an installed package.
 
 1. Check the primer and `LIST TYPES` / `LIST PREDICATES` first. The Cognitive
    Memory Profile already gives you `Person`, `Event`, `Experience`,
@@ -709,17 +708,34 @@ runs.
    `caused_by`, `same_as`, and the structural fields `involves`, `mentions`,
    `about`, `committed_to`, `owed_to`, `assigned_to`, `experienced_by`,
    `has_step`, `watches`. `derived_from` and the other lineage fields are
-   computed from Activity provenance; you cannot write them.
+   computed from Activity provenance; you cannot write them. A draft symbol's
+   `package_ref` is `kip://local/draft@0.0.0`, and it is as usable as any other.
 2. A near-synonym is not a new symbol. `ships_to` and `shipping_address_is`
    split one memory into two that no query will ever join.
-3. Types are UpperCamelCase; predicates are snake_case. A malformed name, or one
-   past this Space's symbol cap, comes back refused — reuse an existing symbol
-   rather than renaming around the refusal.
-4. Never re-declare a symbol the Profile already provides. Two active packages
-   declaring one local name make every bare `{type: "Person"}` ambiguous.
+3. Only then define. Put each `DEFINE` in `commands` as its own command; the
+   runtime runs every `DEFINE` before your other commands, one by one, so the
+   `MUTATE` after them can use the new symbols:
+
+```kip
+DEFINE PREDICATE "mentors" {description: "The subject mentors the object.", subject: {concept_types: ["Person"]}, object: {concept_types: ["Person"]}}
+```
+
+   Write the name and the body as literals. Types are UpperCamelCase,
+   predicates are snake_case. `description` is required. A predicate may also
+   state `subject`, `object`, `functional`, `functional_by`,
+   `boolean_completeness` and `temporal_conflict`, never `open_world: false`
+   or `complete: true`; a Concept Type may add only open, optional
+   `attributes`. A `DEFINE` whose name already resolves reports `no_effect`
+   and the plan goes on. The host queues the `review_schema` SleepTask for
+   every new symbol; do not create it yourself.
+4. `types` and `predicates` remain a deprecated shortcut: the host drafts each
+   bare name with a generic description before your first command. A malformed
+   name, or one past this Space's symbol cap, comes back refused — reuse an
+   existing symbol rather than renaming around the refusal. Prefer `DEFINE`
+   with a description that says what the symbol means.
 5. An option someone prefers is a Concept typed by its kind — `ColorScheme`,
    `Editor`, `ReplyLength` — because `prefers` partitions by that type (§23).
-   Declare the kind when the Space has none; never type an option `Topic`,
+   Define the kind when the Space has none; never type an option `Topic`,
    `Insight` or any other catch-all, and there is no `Preference` type.
 
 ## A.3 One conversation, one `MUTATE`
@@ -741,9 +757,9 @@ into command text is a value that can be read as syntax.
 ## A.4 What Formation may write
 
 `CREATE CONCEPT`, `UPSERT CONCEPT`, `ENSURE PROPOSITION`, `CREATE EVIDENCE`,
-`CREATE ASSERTION`, `CREATE ACTIVITY`, `ASSERT`, and — for corrections and your
-own Activities — `TRANSITION` to `retracted`, `superseded`, `corrected`,
-`running`, `completed`, `failed` or `cancelled`.
+`CREATE ASSERTION`, `CREATE ACTIVITY`, `ASSERT`, `DEFINE` (A.2), and — for
+corrections and your own Activities — `TRANSITION` to `retracted`, `superseded`,
+`corrected`, `running`, `completed`, `failed` or `cancelled`.
 
 `TRANSITION ... TO "archived"` and `TO "tombstoned"` are refused here, and so
 are `UPDATE`, `PURGE` and `MERGE CONCEPT`. They act on memory in bulk from a
@@ -811,6 +827,10 @@ ASSERT (?alice, "prefers", ?dark_mode) {
 }
 ```
 
+The gate refuses an Assertion that cites one of these messages without `at` (or
+a written `valid.from`); only your own `mode: "inferred"` claims are exempt,
+because they are made when you write them.
+
 Each record already carries its `evidence_class` (from the speaker's role) and
 `observed_at`. User-message Evidence also carries the counterparty's semantic
 `source` when the host resolved it before planning. A missing source is not
@@ -846,6 +866,11 @@ one is rejected before anything runs.
 
 Mnemonic estimates are optional. Preserve meaningful supplied confidence,
 salience and utility; leave them absent when no defensible estimate exists.
+`MnemonicState.memory_strength` is a base, not a value that stands alone: write
+it together with `last_metabolized_at: :now` and `strength_policy:
+:strength_policy`, which the host binds on every command, so the engine can
+compute `effective_strength` (Profile §6.1). The gate refuses a base without
+them.
 
 ## A.7 World time
 
@@ -885,8 +910,8 @@ behavior_digest. runtime operations are forbidden in Formation plans.
 
 ### Bound values in the JSON plan
 
-Only `:msg1` through the captured message window and host-computed `:digest_*`
-parameters are bound by this plan API. Other placeholder names in reference examples
+Only `:msg1` through the captured message window, host-computed `:digest_*`
+parameters, `:strength_policy` and `:now` are bound by this plan API. Other placeholder names in reference examples
 are illustrative: write the actual safely quoted literal from the supplied context,
 or defer when it is unknown. Formation cannot acknowledge maintenance corrections.
 The runtime reports actual per-operation status and replaces an unsupported success

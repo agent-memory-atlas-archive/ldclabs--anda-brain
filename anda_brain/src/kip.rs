@@ -80,6 +80,14 @@ pub(crate) fn observation_timestamp(value: Option<&str>, received_at: u64) -> St
         .unwrap_or_else(|| timestamp(received_at))
 }
 
+/// The Unix-millisecond instant of an RFC 3339 timestamp stored in memory, or
+/// `None` when it does not read as one.
+pub(crate) fn time_ms(value: &str) -> Option<u64> {
+    chrono::DateTime::parse_from_rfc3339(value.trim())
+        .ok()
+        .and_then(|instant| u64::try_from(instant.timestamp_millis()).ok())
+}
+
 /// Builds a single-operation request with its parameter bindings.
 ///
 /// Parameters are bound structurally to complete value positions, never spliced
@@ -326,6 +334,18 @@ pub fn observation_ingest(
     })
 }
 
+/// Whether a command writes memory in a transaction: a mutation other than a
+/// standalone `DEFINE`, which commits to the Schema Environment on its own
+/// and mints nothing (Spec §20.16).
+fn writes_memory(command: &Command) -> bool {
+    match command {
+        Command::Kml(statement) => {
+            !matches!(statement.clauses.as_slice(), [MutationClause::Define(_)])
+        }
+        _ => false,
+    }
+}
+
 /// Attach captured source bytes when a request opens a write transaction.
 /// Read-only requests must not carry ingest: KIP refuses observations that
 /// have no transaction to mint into. A model may neither replace the ingest
@@ -353,14 +373,174 @@ pub fn attach_observation(
     {
         return Err("captured observation bindings cannot be replaced".into());
     }
-    if request
-        .operations
-        .iter()
-        .any(|operation| operation.parse().is_ok_and(|command| command.is_mutation()))
-    {
+    if request.operations.iter().any(|operation| {
+        operation
+            .parse()
+            .is_ok_and(|command| writes_memory(&command))
+    }) {
         request.ingest = Some(observation.clone());
     }
     Ok(())
+}
+
+/// Request parameters the host binds on every gated model write.
+///
+/// `strength_policy` is this deployment's pin, so a `MnemonicState` base is
+/// written with the policy the engine computes `effective_strength` under
+/// (Profile §6.1); `now` is this write's host time, the anchor of a base
+/// written by it. The model cites them as `:strength_policy` and `:now`.
+pub const HOST_STRENGTH_POLICY: &str = "strength_policy";
+
+/// The host's time for this write; see [`HOST_STRENGTH_POLICY`].
+pub const HOST_NOW: &str = "now";
+
+/// Binds the host's strength-policy pin and write time into a request that
+/// writes. The pin is host-owned: a request binding its own is refused rather
+/// than overridden, so what a base is pinned to is never a model's choice. A
+/// model-bound `now` is its own business and is left as written.
+pub fn attach_host_bindings(request: &mut Request, now_ms: u64) -> Result<(), String> {
+    if !request.operations.iter().any(|operation| {
+        operation
+            .parse()
+            .is_ok_and(|command| writes_memory(&command))
+    }) {
+        return Ok(());
+    }
+    let binds = |parameters: Option<&Map<String, Json>>, name: &str| {
+        parameters.is_some_and(|parameters| parameters.contains_key(name))
+    };
+    if binds(request.parameters.as_ref(), HOST_STRENGTH_POLICY)
+        || request
+            .operations
+            .iter()
+            .any(|operation| binds(operation.parameters.as_ref(), HOST_STRENGTH_POLICY))
+    {
+        return Err("`:strength_policy` is bound by the host; cite it without binding it".into());
+    }
+    let parameters = request.parameters.get_or_insert_with(Map::new);
+    parameters.insert(
+        HOST_STRENGTH_POLICY.to_string(),
+        crate::cognitive::STRENGTH_POLICY.clone(),
+    );
+    parameters
+        .entry(HOST_NOW.to_string())
+        .or_insert_with(|| Json::from(timestamp(now_ms)));
+    Ok(())
+}
+
+/// Why a `MnemonicState` write leaves strength unknown, if it does.
+///
+/// `effective_strength` is computed from the base, its anchor and a pinned
+/// policy together, and reads `null` when any one is missing (Profile §6.1,
+/// Spec §59.1). A base written without the other two is therefore a memory
+/// whose strength nobody can ever read, so a write that sets
+/// `memory_strength` has to set `last_metabolized_at` and `strength_policy`
+/// with it. Checked on member names, which the grammar fixes.
+fn incomplete_strength(
+    command: &Command,
+    parameters: Option<&Map<String, Json>>,
+) -> Option<String> {
+    use anda_kip::{FacetAssignment, SymbolRef, UpdateAction};
+    let Command::Kml(statement) = command else {
+        return None;
+    };
+    let mut assignments: Vec<&FacetAssignment> = Vec::new();
+    for clause in &statement.clauses {
+        match clause {
+            MutationClause::CreateConcept(c) => assignments.extend(&c.set_facets),
+            MutationClause::UpsertConcept(c) => assignments.extend(&c.set_facets),
+            MutationClause::Update(c) => {
+                assignments.extend(c.actions.iter().filter_map(|action| match action {
+                    UpdateAction::SetFacet(facet) => Some(facet),
+                    _ => None,
+                }))
+            }
+            _ => {}
+        }
+    }
+    for assignment in assignments {
+        let name = match &assignment.facet {
+            SymbolRef::Name(name) => Some(name.as_str()),
+            SymbolRef::Param(name) => parameters.and_then(|p| p.get(name)).and_then(Json::as_str),
+        };
+        if name.is_none_or(|name| name.rsplit('/').next() != Some("MnemonicState")) {
+            continue;
+        }
+        let writes = |member: &str| assignment.values.iter().any(|(name, _)| name == member);
+        if writes("memory_strength")
+            && !(writes("last_metabolized_at") && writes("strength_policy"))
+        {
+            return Some(
+                "a MnemonicState memory_strength is a base: write it with its anchor and the \
+                 host's policy pin, `last_metabolized_at: :now, strength_policy: \
+                 :strength_policy`, or leave strength unwritten (Profile §6.1)"
+                    .to_string(),
+            );
+        }
+    }
+    None
+}
+
+/// Why a claim taken from a captured message is undated, if one is.
+///
+/// A claim's `asserted_at` is its start key for temporal succession, and it
+/// defaults to the transaction time (Spec §13.2, §25.4). A message processed
+/// late would then be read as said now, and could end a value that is newer
+/// than it — the case Memory Interface §5.1 warns about. So an Assertion
+/// citing one of this request's captured messages has to carry `at` (or a
+/// written `valid.from`). The Brain's own inferences are exempt: they are made
+/// when they are written. A parameter may carry either value, and is given the
+/// benefit of the doubt, as `anda_kip`'s own `KIP_2103` check does.
+fn undated_citation(command: &Command, captured: &[&str]) -> Option<String> {
+    use anda_kip::{BoundValue, MutationValue, SymbolRef};
+    let Command::Kml(statement) = command else {
+        return None;
+    };
+    for clause in &statement.clauses {
+        let MutationClause::CreateAssertion(record) = clause else {
+            continue;
+        };
+        let cites_capture = record.set_structural.iter().flatten().any(|edge| {
+            matches!(&edge.field, SymbolRef::Name(field) if field == "evidence")
+                && matches!(&edge.value, MutationValue::Param(name) if captured.contains(&name.as_str()))
+        });
+        if !cites_capture {
+            continue;
+        }
+        let fields = record.set_fields.as_deref().unwrap_or_default();
+        let field = |name: &str| {
+            fields
+                .iter()
+                .find(|(field, _)| field == name)
+                .map(|(_, value)| value)
+        };
+        if matches!(field("mode"), Some(MutationValue::Value(KipValue::String(mode))) if mode == "inferred")
+        {
+            continue;
+        }
+        let dated = field("asserted_at")
+            .is_some_and(|value| !matches!(value, MutationValue::Value(KipValue::Null)));
+        let starts = field("valid_time").is_some_and(|value| match value {
+            MutationValue::Value(KipValue::Object(members)) => members
+                .get("from")
+                .is_some_and(|from| !matches!(from, KipValue::Null)),
+            MutationValue::Value(_) => false,
+            MutationValue::Object(members) => members.iter().any(|(key, from)| {
+                key == "from" && !matches!(from, BoundValue::Value(KipValue::Null))
+            }),
+            _ => true,
+        });
+        if !dated && !starts {
+            return Some(
+                "an ASSERT citing a captured message needs `at:` — that message's observed_at \
+                 from the Captured Evidence list — or a `valid: {from: …}`; without it the \
+                 claim starts at this write's time and a late-processed message would end a \
+                 newer value (Spec §13.2, §25.4)"
+                    .to_string(),
+            );
+        }
+    }
+    None
 }
 
 /// Runs a whole request envelope on the cognition-only path.
@@ -401,10 +581,27 @@ pub async fn execute_cognition_request(executor: &impl Executor, request: &Reque
         Ok(commands) => commands,
         Err(err) => return Response::from(err).with_request_id(request.request_id.clone()),
     };
+    if let Some(refusal) = define_batch_refusal(&commands) {
+        return Response::from(KipError::not_authorized(refusal))
+            .with_request_id(request.request_id.clone());
+    }
+    let captured: Vec<&str> = request
+        .ingest
+        .iter()
+        .flat_map(|ingest| ingest.evidence.iter().map(|entry| entry.key.as_str()))
+        .collect();
     for (index, command) in commands.iter().enumerate() {
+        if let Some(refusal) = undated_citation(command, &captured) {
+            return Response::from(KipError::constraint_violation(refusal))
+                .with_request_id(request.request_id.clone());
+        }
         let parameters = operation_parameters(request, index);
         if let Some(refusal) = unsupported_cognitive_write(command, parameters.as_ref()) {
             return Response::from(KipError::unsupported_capability(refusal))
+                .with_request_id(request.request_id.clone());
+        }
+        if let Some(refusal) = incomplete_strength(command, parameters.as_ref()) {
+            return Response::from(KipError::constraint_violation(refusal))
                 .with_request_id(request.request_id.clone());
         }
         if let Some(refusal) = cognition_refusal(command, parameters.as_ref()) {
@@ -599,12 +796,18 @@ fn cognition_refusal(command: &Command, parameters: Option<&Map<String, Json>>) 
                 }
             }
 
+            MutationClause::Define(define) => {
+                if let Some(refusal) = define_refusal(define) {
+                    return Some(refusal);
+                }
+                continue;
+            }
+
             MutationClause::Update(_) => "UPDATE",
             MutationClause::SetRetention(_) => "SET RETENTION",
             MutationClause::Purge(_) => "PURGE",
             MutationClause::PurgePayload(_) => "PURGE PAYLOAD",
             MutationClause::MergeConcept(_) => "MERGE CONCEPT",
-            MutationClause::Define(_) => "DEFINE",
         };
 
         return Some(format!(
@@ -612,6 +815,67 @@ fn cognition_refusal(command: &Command, parameters: Option<&Map<String, Json>>) 
              ASSERT) and corrects it (TRANSITION to retracted / superseded / corrected). \
              Administering memory in bulk belongs to maintenance"
         ));
+    }
+    None
+}
+
+/// Why a request's `DEFINE`s cannot run as sent, if they cannot.
+///
+/// A draft symbol commits on its own and must exist before the `MUTATE` that
+/// uses it (Spec §20.16), so a request that defines is made of `DEFINE`s only
+/// — the host runs them independently, so one symbol that already exists does
+/// not stop the rest — and carries at most
+/// [`MAX_DEFINES_PER_REQUEST`](crate::vocabulary::MAX_DEFINES_PER_REQUEST).
+fn define_batch_refusal(commands: &[Command]) -> Option<String> {
+    let defines = commands
+        .iter()
+        .filter(|command| command.is_mutation() && !writes_memory(command))
+        .count();
+    if defines == 0 {
+        return None;
+    }
+    if defines != commands.len() {
+        return Some(
+            "send DEFINE in its own request, before the MUTATE that uses the symbol; a draft \
+             symbol commits on its own and resolves from the next request"
+                .to_string(),
+        );
+    }
+    let max = crate::vocabulary::MAX_DEFINES_PER_REQUEST;
+    (defines > max).then(|| {
+        format!("one request may define at most {max} symbols; reuse existing symbols first")
+    })
+}
+
+/// Why Formation may not send this `DEFINE`, if it may not.
+///
+/// The engine checks the body against §20.16 and the Schema Environment; the
+/// host adds what makes a draft reviewable. The name and body are literals, so
+/// what is defined is what the request says rather than what a binding
+/// resolves to later, and names keep this brain's shapes — `drug`, `Drug` and
+/// `medical device` would otherwise be three symbols meaning one thing, and a
+/// draft symbol is never removed.
+fn define_refusal(define: &anda_kip::DefineCommand) -> Option<String> {
+    let anda_kip::SymbolRef::Name(name) = &define.name else {
+        return Some("write the DEFINE name as a literal, not a parameter".to_string());
+    };
+    if !crate::vocabulary::is_symbol_name(define.kind, name) {
+        return Some(format!(
+            "`{name}` is not a symbol name this brain drafts: Concept types are UpperCamelCase \
+             letters and digits, predicates are snake_case, at most {} characters, and never a \
+             Core element kind",
+            crate::vocabulary::MAX_SYMBOL_CHARS
+        ));
+    }
+    if define
+        .definition
+        .values()
+        .any(|value| !matches!(value, anda_kip::BoundValue::Value(_)))
+    {
+        return Some(
+            "write the DEFINE body as literals; a bound body cannot be reviewed before it runs"
+                .to_string(),
+        );
     }
     None
 }
@@ -691,6 +955,10 @@ pub async fn execute_maintenance_request(executor: &impl Executor, request: &Req
             return Response::from(KipError::unsupported_capability(refusal))
                 .with_request_id(request.request_id.clone());
         }
+        if let Some(refusal) = incomplete_strength(command, parameters.as_ref()) {
+            return Response::from(KipError::constraint_violation(refusal))
+                .with_request_id(request.request_id.clone());
+        }
         if let Some(refusal) = maintenance_refusal(command, parameters.as_ref()) {
             return Response::from(KipError::not_authorized(refusal))
                 .with_request_id(request.request_id.clone());
@@ -710,6 +978,14 @@ fn maintenance_refusal(
     };
     for clause in &statement.clauses {
         match clause {
+            MutationClause::Define(_) => {
+                return Some(
+                    "maintenance reviews draft vocabulary and never defines it: record a \
+                     near-synonym as an Insight about the existing symbol, and put a symbol \
+                     worth keeping in the report as a proposed promotion {kind, from, to}"
+                        .to_string(),
+                );
+            }
             MutationClause::Purge(_) | MutationClause::PurgePayload(_) => {
                 return Some(
                     "maintenance cannot issue PURGE or PURGE PAYLOAD; erasure is irreversible \
@@ -795,6 +1071,7 @@ fn selection_limit(limit: Option<&Scalar>, parameters: Option<&Map<String, Json>
 mod tests {
     use super::*;
     use anda_kip::{KipError, OperationResult};
+    use serde_json::json;
 
     #[test]
     fn a_single_command_request_carries_one_operation() {
@@ -1240,6 +1517,146 @@ mod tests {
             invalid.parse_operations().is_err(),
             "syntax errors stay visible"
         );
+    }
+
+    #[test]
+    fn formation_defines_literal_symbols_in_their_own_request() {
+        let admitted = [
+            r#"DEFINE PREDICATE "mentors" {description: "The subject mentors the object.", subject: {concept_types: ["Person"]}}"#,
+            r#"DEFINE CONCEPT TYPE "Instrument" {description: "A musical instrument."}"#,
+        ];
+        for command in admitted {
+            assert_eq!(cognition_refusal(&parsed(command), None), None, "{command}");
+        }
+        let alone: Vec<Command> = admitted.iter().map(|c| parsed(c)).collect();
+        assert_eq!(define_batch_refusal(&alone), None);
+        // A DEFINE commits on its own, before the MUTATE that uses it.
+        let mixed = vec![
+            parsed(admitted[0]),
+            parsed(r#"MUTATE { ASSERT (:a, "mentors", :b) { by: :a, mode: "stated" } }"#),
+        ];
+        assert!(define_batch_refusal(&mixed).is_some());
+        let many = vec![parsed(admitted[1]); crate::vocabulary::MAX_DEFINES_PER_REQUEST + 1];
+        assert!(define_batch_refusal(&many).is_some());
+        assert_eq!(define_batch_refusal(&[parsed("DESCRIBE PRIMER")]), None);
+
+        for command in [
+            // Names keep this brain's shapes; the body and name are literals.
+            r#"DEFINE CONCEPT TYPE "instrument" {description: "x"}"#,
+            r#"DEFINE PREDICATE "Mentors" {description: "x"}"#,
+            r#"DEFINE PREDICATE :name {description: "x"}"#,
+            r#"DEFINE PREDICATE "mentors" {description: :description}"#,
+        ] {
+            assert!(
+                cognition_refusal(&parsed(command), None).is_some(),
+                "should be refused: {command}"
+            );
+        }
+        // Maintenance reviews drafts; it never defines one.
+        assert!(maintenance_refusal(&parsed(admitted[0]), None).is_some());
+        // A DEFINE mints nothing, so it carries no observation and no bindings.
+        let observation =
+            observation_ingest(&[said("user", "hi")], "2026-08-20T00:00:00.000Z", "o", None)
+                .unwrap();
+        let mut define = request(admitted[1]);
+        attach_observation(&mut define, &observation).unwrap();
+        attach_host_bindings(&mut define, 1_000).unwrap();
+        assert!(define.ingest.is_none() && define.parameters.is_none());
+    }
+
+    #[test]
+    fn a_claim_from_a_captured_message_carries_its_time() {
+        let captured = ["msg1", "msg2"];
+        // Undated: the claim would start at the write's time.
+        for command in [
+            r#"ASSERT (:a, "prefers", :b) { by: :a, mode: "stated", evidence: :msg1 }"#,
+            r#"MUTATE { ASSERT (:a, "prefers", :b) { by: :a, mode: "stated", evidence: [:x, :msg2] } }"#,
+            r#"CREATE ASSERTION ?c { SET FIELDS { proposition: :p, asserted_by: :a, stance: "support" } SET STRUCTURAL { ("evidence", :msg1) } }"#,
+        ] {
+            assert!(
+                undated_citation(&parsed(command), &captured).is_some(),
+                "should be refused: {command}"
+            );
+        }
+        for command in [
+            // Dated by `at`, or by a written start.
+            r#"ASSERT (:a, "prefers", :b) { by: :a, mode: "stated", evidence: :msg1, at: "2026-09-22T00:00:00.000Z" }"#,
+            r#"ASSERT (:a, "prefers", :b) { by: :a, mode: "stated", evidence: :msg1, at: :observed_at }"#,
+            r#"ASSERT (:a, "works_for", :b) { by: :a, mode: "stated", evidence: :msg1, valid: {from: "2026-01-01T00:00:00.000Z"} }"#,
+            // The Brain's own inference is made when it is written.
+            r#"ASSERT (:a, "prefers", :b) { by: :self, mode: "inferred", evidence: :msg1 }"#,
+            // Evidence this request did not capture is not a message's time.
+            r#"ASSERT (:a, "prefers", :b) { by: :a, mode: "stated", evidence: :e }"#,
+            r#"ASSERT (:a, "prefers", :b) { by: :a, mode: "stated" }"#,
+        ] {
+            assert_eq!(
+                undated_citation(&parsed(command), &captured),
+                None,
+                "should be admitted: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_strength_base_is_written_with_its_anchor_and_policy() {
+        for command in [
+            r#"CREATE CONCEPT ?c { TYPE "Event" SET FACET "MnemonicState" { memory_strength: 0.7 } }"#,
+            r#"UPSERT CONCEPT ?c { MATCH {type: "Person", key: "a"} SET FACET "MnemonicState" { memory_strength: 0.7, last_metabolized_at: :now } }"#,
+            r#"UPDATE :c SET FACET "MnemonicState" { memory_strength: 0.9, strength_policy: :strength_policy }"#,
+        ] {
+            assert!(
+                incomplete_strength(&parsed(command), None).is_some(),
+                "should be refused: {command}"
+            );
+        }
+        for command in [
+            r#"CREATE CONCEPT ?c { TYPE "Event" SET FACET "MnemonicState" { memory_strength: 0.7, last_metabolized_at: :now, strength_policy: :strength_policy } }"#,
+            // Salience and utility are not strength.
+            r#"UPDATE :c SET FACET "MnemonicState" { salience: 0.4 }"#,
+            r#"UPDATE :c SET FACET "MnemonicState" { utility: 0.4 }"#,
+        ] {
+            assert_eq!(
+                incomplete_strength(&parsed(command), None),
+                None,
+                "should be admitted: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_host_binds_its_strength_pin_and_write_time_on_writes_only() {
+        let mut read = request("DESCRIBE PRIMER");
+        attach_host_bindings(&mut read, 1_000).unwrap();
+        assert!(read.parameters.is_none());
+
+        let mut write = request(r#"UPDATE :c SET FACET "MnemonicState" { salience: 0.4 }"#);
+        attach_host_bindings(&mut write, 1_780_000_000_000).unwrap();
+        let parameters = write.parameters.as_ref().unwrap();
+        assert_eq!(
+            parameters[HOST_STRENGTH_POLICY],
+            json!({
+                "artifact_ref": "kip:strength-half-life-30d",
+                "content_digest": "sha256:a50a89b83f937c97cabf0f8371cccfd326f4fdd438b6d7b9ead507d77927b227",
+            })
+        );
+        assert_eq!(parameters[HOST_NOW], json!(timestamp(1_780_000_000_000)));
+        write.validate().unwrap();
+
+        // A model's own `now` is left alone; its own pin is refused.
+        let mut own_now = request_with(
+            r#"UPDATE :c SET FACET "MnemonicState" { salience: 0.4 }"#,
+            param(HOST_NOW, "2026-01-01T00:00:00.000Z"),
+        );
+        attach_host_bindings(&mut own_now, 1_000).unwrap();
+        assert_eq!(
+            own_now.parameters.as_ref().unwrap()[HOST_NOW],
+            "2026-01-01T00:00:00.000Z"
+        );
+        let mut own_pin = request_with(
+            r#"UPDATE :c SET FACET "MnemonicState" { salience: 0.4 }"#,
+            param(HOST_STRENGTH_POLICY, json!({"artifact_ref": "mine"})),
+        );
+        assert!(attach_host_bindings(&mut own_pin, 1_000).is_err());
     }
 
     #[test]

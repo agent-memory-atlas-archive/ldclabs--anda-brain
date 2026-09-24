@@ -166,6 +166,13 @@ impl Tool<BaseCtx> for GuardedMemory {
             Err(err) => return Ok(error_output(Response::from(err))),
         };
         self.clock.bind_read(&mut request)?;
+        // The strength-policy pin and this write's time, so a MnemonicState
+        // base the model writes is one the engine can compute strength for.
+        if let Err(error) = kip::attach_host_bindings(&mut request, self.clock.now_ms()) {
+            return Ok(error_output(Response::from(
+                anda_kip::KipError::not_authorized(error),
+            )));
+        }
         // The observation rides the envelope so the model's commands cite
         // `:msg1` instead of retyping what was said. Attached here rather than
         // where the request is built because this is the only seam that knows
@@ -180,11 +187,28 @@ impl Tool<BaseCtx> for GuardedMemory {
         }
         let nexus = self.memory.nexus();
         let nexus = nexus.as_ref();
-        Ok(error_output(if formation {
-            kip::execute_cognition_request(nexus, &request).await
-        } else {
-            kip::execute_maintenance_request(nexus, &request).await
-        }))
+        if !formation {
+            return Ok(error_output(
+                kip::execute_maintenance_request(nexus, &request).await,
+            ));
+        }
+        // Draft vocabulary (Spec §20.16): the host caps the Space's symbols,
+        // runs a request of DEFINEs independently so one that already exists
+        // does not stop the rest, and queues a review for each new symbol.
+        let defines = crate::vocabulary::model_defines(&request);
+        if !defines.is_empty() {
+            if let Err(error) = crate::vocabulary::check_define_budget(nexus, defines.len()).await {
+                return Ok(error_output(Response::from(
+                    anda_kip::KipError::constraint_violation(error),
+                )));
+            }
+            request.execution = Some(anda_kip::Execution::new(
+                anda_kip::ExecutionMode::Independent,
+            ));
+        }
+        let response = kip::execute_cognition_request(nexus, &request).await;
+        crate::vocabulary::review_model_defines(nexus, &defines, &response).await;
+        Ok(error_output(response))
     }
 }
 

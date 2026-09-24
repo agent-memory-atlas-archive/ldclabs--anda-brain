@@ -30,6 +30,11 @@ func TestExtendedClientRoutes(t *testing.T) {
 			return e
 		}},
 		{"memory status", "GET", "/v1/s1/memory_status", full, "", func(c *Client) error { _, e := c.GetMemoryStatus(ctx); return e }},
+		{"schema drafts", "GET", "/v1/s1/schema/drafts", full, "", func(c *Client) error { _, e := c.SchemaDrafts(ctx); return e }},
+		{"schema promote", "POST", "/v1/s1/schema/promote", full, `"kind":"ConceptType"`, func(c *Client) error {
+			_, e := c.PromoteDraftSymbol(ctx, &PromoteDraftInput{Kind: "ConceptType", From: "Human", To: "Person"})
+			return e
+		}},
 		{"shadow", "POST", "/v1/s1/management/shadow_eval", full, `"policy"`, func(c *Client) error {
 			_, e := c.ShadowEval(ctx, &ShadowEvalInput{Policy: MemoryPolicy{}, ReplaySample: &sample})
 			return e

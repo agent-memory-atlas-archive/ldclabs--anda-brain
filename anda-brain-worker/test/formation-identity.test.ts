@@ -20,7 +20,7 @@ const plan = {
   commands: [`MUTATE {
     UPSERT CONCEPT ?alice { MATCH {type: "Person", key: "alice"} SET FIELDS {name: "Alice"} }
     CREATE CONCEPT ?preference { TYPE "AnswerStyle" NAME "current preference" }
-    ASSERT ?a (?alice, "prefers", ?preference) { by: ?alice, mode: "stated", evidence: :msg1 }
+    ASSERT ?a (?alice, "prefers", ?preference) { by: ?alice, mode: "stated", evidence: :msg1, at: "2026-09-22T00:00:00.000Z" }
   }`],
 }
 

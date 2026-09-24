@@ -945,6 +945,11 @@ impl Space {
             ("subject".into(), preview.record.subject.clone()),
             ("predicate".into(), json!(preview.record.predicate)),
             ("actor".into(), json!({"id":preview.record.actor_id})),
+            // The revision speaks in the claim's own context set: a Correct
+            // outside it is `SupersessionMismatch` (§14.2), and a WorldChange
+            // outside it would start a second succession line that never ends
+            // the old value (§25.4).
+            ("contexts".into(), json!(preview.record.context_refs)),
         ]);
         let command = if input.kind == ChangeKind::Correct {
             // §14.2: a value-only correction keeps the interval it corrects.
@@ -954,7 +959,7 @@ impl Space {
             r#"MUTATE {
             CREATE EVIDENCE ?input { CLIENT KEY :source_key SET FIELDS { evidence_class:"user_statement", payload: :statement, observed_at: :at } }
             CREATE CONCEPT ?value { TYPE :object_type NAME :new_value }
-            ASSERT ?new (:subject, :predicate, ?value) {by: :actor, mode:"stated", evidence:?input, at: :at, valid: :valid}
+            ASSERT ?new (:subject, :predicate, ?value) {by: :actor, mode:"stated", evidence:?input, at: :at, valid: :valid, context: :contexts}
             TRANSITION :old TO "superseded" BY ?new EXPECT VERSION :version
             CREATE ACTIVITY ?change { SET FIELDS {activity_class:"belief_revision",status:"completed",started_at: :at,ended_at: :at} SET STRUCTURAL {("inputs", :old) ("inputs", ?input) ("outputs", ?new)} }
         }"#
@@ -968,7 +973,7 @@ impl Space {
             r#"MUTATE {
             CREATE EVIDENCE ?input { CLIENT KEY :source_key SET FIELDS { evidence_class:"user_statement", payload: :statement, observed_at: :at } }
             CREATE CONCEPT ?value { TYPE :object_type NAME :new_value }
-            ASSERT ?new (:subject, :predicate, ?value) {by: :actor, mode:"stated", evidence:?input, at: :at}
+            ASSERT ?new (:subject, :predicate, ?value) {by: :actor, mode:"stated", evidence:?input, at: :at, context: :contexts}
             CREATE ACTIVITY ?change { SET FIELDS {activity_class:"user_memory_change",status:"completed",started_at: :at,ended_at: :at} SET STRUCTURAL {("inputs", :old) ("inputs", ?input) ("outputs", ?new)} }
         }"#
         };

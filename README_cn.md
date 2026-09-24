@@ -19,8 +19,8 @@ Cloudflare Worker 的对应能力和限制见[逐提交核对](anda-brain-worker
 
 ## KIP 2.0 更新
 
-本版本对齐 KIP `3251912` 与 Cognitive Memory Profile
-`kip://profiles/cognitive-memory@2.0.0`（修订 `sha256:3ea9e459…`；草案原地重写了
+本版本对齐 KIP `597db44` 与 Cognitive Memory Profile
+`kip://profiles/cognitive-memory@2.0.0`（修订 `sha256:734aa0fd…`；草案原地重写了
 2.0.0，只能靠摘要区分修订）。Rust 基于 `anda_kip` / `anda_cognitive_nexus` 0.14，
 Worker 基于 `@ldclabs/kip-do` 0.14。用早先 2.1.0 草案激活过的 Space 不做迁移，请使用
 新 Space；KIP 1.x 的 Space 仍会自动升级。
@@ -30,12 +30,17 @@ Worker 基于 `@ldclabs/kip-do` 0.14。用早先 2.1.0 草案激活过的 Space 
   的观察时间写入每条主张的 `asserted_at`，消息自带的 `timestamp` 即其观察时间。无法
   解析的请求 `timestamp` 现在直接返回 400，不再悄悄变成接收时间。
 - **选项按类别定型。** Profile 已没有 `Preference` 类型：选项是按类别定型的 Concept
-  （`ColorScheme`、`Editor`），需要时通过 Space 词汇包声明；`prefers` 在同一类别内是函数型的。
-- **衰减改为计算。** 结算不再扫盘写 `memory_strength`；强度由引擎按基值、锚点和钉住
-  的策略计算，缺失即未知。`memory_strength_decay_factor` 已弃用并被忽略。
-- **注意力召回。** `GET /v1/{space_id}/memory/attention` 按提起它们的提交顺序返回已触发
-  的 Watch 与到期的 Commitment，游标由调用方保存。Maintenance 用 `commitment_review`
-  Activity 提起到期的 Commitment。
+  （`ColorScheme`、`Editor`），需要时起草；`prefers` 在同一类别内是函数型的。
+- **草稿词汇。** 新类型和谓词用 `DEFINE` 起草到 Space 的 `kip://local/draft@0.0.0`
+  （KIP §20.16）：只增不改，由宿主校验名称、限制数量，并为每个新符号排一个
+  `review_schema`。`GET /v1/{space_id}/schema/drafts` 列出草稿，所有者用
+  `POST /v1/{space_id}/schema/promote` 把草稿晋升到已安装的符号。
+- **衰减改为计算。** 结算不再扫盘写 `memory_strength`；引擎按基值、锚点和宿主在每次
+  模型写入时绑定的 `kip:strength-half-life-30d` 策略计算 `effective_strength`，缺失即未知。
+  `memory_strength_decay_factor` 已弃用并被忽略。
+- **注意力召回。** `GET /v1/{space_id}/memory/attention` 按 `(raised_seq, ref)` 返回已触发
+  的 Watch 与到期的 Commitment，游标由调用方保存。settlement 为每个没有 Watch 的到期
+  Commitment 按 `due_at` 写一次 `commitment_review` Activity 提起它。
 - **学习指针。** Skill 指向其 `current_trial` / `current_evaluation`；`GradingState`
   与血缘字段为计算值，从不写入。
 

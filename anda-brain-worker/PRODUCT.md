@@ -57,9 +57,10 @@ UTF-8 bytes. One native `MUTATE` creates new user Evidence, a new typed value, a
 attributed Assertion and a provenance Activity. For `correct` the new Assertion
 supersedes the old one and keeps the world interval it covered (an absent start
 becomes `{latest: <original asserted_at>}`); for `world_change` the new Assertion
-starts now and temporal succession ends the old value, which stays active. It never
-overwrites an Assertion or treats another actor's testimony as the caller's own
-statement.
+starts now and temporal succession ends the old value, which stays active. Both keep
+the record's `context_refs` (listed on the record), so a scoped claim is revised in
+its own context set. It never overwrites an Assertion or treats another actor's
+testimony as the caller's own statement.
 
 Suppression archives and deletion purges the reviewed closure: the Proposition,
 Assertions, cited Evidence and recorded referrers, bounded to 128 elements. Shared

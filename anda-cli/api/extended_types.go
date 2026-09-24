@@ -377,3 +377,37 @@ type WikiDigestReport struct {
 	CitationsInvalid int   `json:"citations_invalid"`
 	Usage            Usage `json:"usage"`
 }
+
+// SchemaDrafts is the Space's draft vocabulary (KIP §20.16).
+type SchemaDrafts struct {
+	PackageRef               string        `json:"package_ref"`
+	SchemaEnvironmentVersion uint64        `json:"schema_environment_version"`
+	Symbols                  []DraftSymbol `json:"symbols"`
+}
+
+// DraftSymbol is one drafted symbol and, once promoted, the lineage it joined.
+type DraftSymbol struct {
+	Kind       string          `json:"kind"`
+	Name       string          `json:"name"`
+	Ref        string          `json:"ref"`
+	Definition json.RawMessage `json:"definition,omitempty"`
+	PromotedTo string          `json:"promoted_to,omitempty"`
+}
+
+// PromoteDraftInput names a draft symbol and the installed symbol it joins.
+type PromoteDraftInput struct {
+	// Kind is ConceptType or PredicateType.
+	Kind string `json:"kind"`
+	// From is the draft's local name or exact kip://local/draft@0.0.0/... ref.
+	From string `json:"from"`
+	// To is an installed symbol of the same kind: an exact ref, or a local
+	// name exactly one installed package defines.
+	To string `json:"to"`
+}
+
+// PromoteDraftOutput is what a promotion recorded.
+type PromoteDraftOutput struct {
+	Promoted                 string `json:"promoted"`
+	To                       string `json:"to"`
+	SchemaEnvironmentVersion uint64 `json:"schema_environment_version"`
+}

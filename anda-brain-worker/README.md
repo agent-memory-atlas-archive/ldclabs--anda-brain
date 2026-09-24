@@ -15,8 +15,8 @@
 
 ## KIP 2.0 更新
 
-本 Worker 对齐 KIP `3251912` 与 `kip://profiles/cognitive-memory@2.0.0`（修订
-`sha256:3ea9e459…`，只能靠摘要区分修订），使用 `@ldclabs/kip-do` 0.14。用 2.1.0 草案
+本 Worker 对齐 KIP `597db44` 与 `kip://profiles/cognitive-memory@2.0.0`（修订
+`sha256:734aa0fd…`，只能靠摘要区分修订），使用 `@ldclabs/kip-do` 0.14。用 2.1.0 草案
 激活过的 Space 不做迁移。世界变化记为一条新 Assertion，由时序继承结束旧值；主张的
 `at` 取所引用消息的观察时间；选项按类别定型，Profile 没有 `Preference` 类型；衰减在
 读取时计算；新增 `GET /v1/{space}/memory/attention` 注意力召回。Skill 行为保存为不可变的
@@ -33,7 +33,7 @@ Brain API 保持可用；这两个适配器**未声明支持**可选的五意图
 - 一条事实是「truth-neutral 的 Proposition」加上「携带某个 actor 立场、模式、置信度与 Evidence 的 Assertion」。主张写错了是**新增一条 Assertion 并 SUPERSEDE**；世界变了是**从变化时刻起的一条新 Assertion**，由时序继承结束旧值。两者都绝不改写原有记录。
 - 永远不要随时间衰减 Assertion 的 confidence。衰减在读取时由 `MnemonicState` 的基值、锚点与钉住的策略计算，那是可及性，不是真假。
 - 元素 id 形如 `C-7`、`P-11`、`A-3`、`E-2`、`X-1`。
-- **Schema 是受保护的控制状态。** kip-do 未提供 `draft_vocabulary`，`DEFINE` 会被拒绝；新词汇经由宿主进入，见下文。
+- **Schema 是受保护的控制状态。** 新词汇是 Space 草稿词汇（KIP §20.16）：Formation 用 `DEFINE` 起草，宿主校验、限量并排队审阅，只有所有者能晋升，见下文。
 
 ## 依赖：kip-do 0.14
 
@@ -81,8 +81,11 @@ pnpm --filter @ldclabs/anda-brain-worker check
 每次 maintenance 在模型调用前执行更正发现和结构化 Watch 推进。没有衰减扫盘：强度在
 读取时由基值、锚点与钉住的 `strength_policy` 计算，缺失即未知，绝不衰减 Assertion
 confidence。读取不强化记忆。`parameters.memory_strength_decay_factor` 已弃用，仍做范围
-校验但不生效。到期且没有 Watch 的 Commitment 由 Maintenance 写一条 `commitment_review`
-Activity 提起为注意力。
+校验但不生效。宿主在每条模型命令里绑定 `:strength_policy`（标准 `kip:strength-half-life-30d`）
+与 `:now`；模型写 `memory_strength` 时必须同时写 `last_metabolized_at` 与 `strength_policy`，
+否则闸门拒绝。到期、状态为 `pending`/`blocked` 且没有 Watch 的 Commitment 由 settlement
+原生写一条 `commitment_review` Activity 提起为注意力，键为 `commitment_review:<id>:<due_at>`：
+重放不再提起，改期后才再次提起（报告字段 `commitments`）。
 更正扫描通过 `(space_seq, assertion_id)` 继续分页，同一事务超过 20 条也不会丢弃尾部。
 响应中的 `settlement.corrections.incomplete` 表示尚未证明 backlog 已读完；`cursor_after_id`
 在需要从事务内部继续时出现。发现进度不表示模型已处理这些更正。
@@ -132,28 +135,35 @@ receipt，错误数据保留已执行的结果。整个计划不是事务，不�
 Nexus 的虚拟 dependency_validity 决定派生内容能否使用，存储的 review 不能覆盖它。
 快照里的 space_seq 也不等于 WorkingState 的真实计算依据；缺少实际版本/basis 时推迟刷新。
 
-## 词汇表：新类型和新谓词
+## 词汇表：草稿词汇
 
-Cognitive Memory Profile 提供标准记忆类型和谓词，业务领域仍可能需要新符号。KIP 2.0 又禁止 KML 声明类型，所以新词汇必须从宿主进入。
+Cognitive Memory Profile 提供标准记忆类型和谓词，业务领域仍可能需要新符号。KIP 2.0 的
+Space 草稿词汇（§20.16）让 `DEFINE PREDICATE` / `DEFINE CONCEPT TYPE` 往本空间的
+`kip://local/draft@0.0.0` 添加一个符号：只增不改，也不会遮蔽任何已有符号。
 
-每个 Durable Object 维护一个 `kip://anda-brain/memory` 包，与 Profile 并行激活。模型在计划 JSON 里提出符号，宿主校验、限量、发版：
+Formation 计划里的 `DEFINE` 命令会先于其他命令逐条执行，随后的 `MUTATE` 就能使用新符号：
 
 ```json
 {
-  "types": ["Project"],
-  "predicates": ["works_on"],
-  "commands": ["MUTATE { … }"],
+  "types": [],
+  "predicates": [],
+  "commands": [
+    "DEFINE PREDICATE \"works_on\" {description: \"The subject works on the object.\"}",
+    "MUTATE { … }"
+  ],
   "summary": "记录了 Alice 在做 Aurora 项目。"
 }
 ```
 
-- 类型必须 UpperCamelCase，谓词必须 snake_case；不合法的名字会出现在 `rejected` 里，不会被「顺手改成合法的」发布出去。
-- 每个空间最多 512 个符号。
-- **Profile 已有的符号不会被重新声明**：两个激活的包声明同一个本地名，会让每一次裸写 `{type: "Person"}` 都变成 `SchemaSymbolAmbiguous`。
-- 只有 Formation 和 Maintenance 能扩展词汇；Recall 是只读的。
-- `GET /v1/{space}/vocabulary` 可以查看当前词汇表。
+- 名称与定义体必须是字面量；类型必须 UpperCamelCase，谓词必须 snake_case，且不能是 Core 元素种类。
+- 名称已能解析（`SchemaSymbolConflict`）时该命令记为 `no_effect`，计划继续执行。
+- 每个空间自有符号（草稿加旧宿主包）最多 512 个。
+- 每个新符号排一个 `review_schema` SleepTask（键 `review_schema:<kind>:<ref>`）。Maintenance 审阅它、在总结里提议晋升，但不能定义或晋升符号：它的 `DEFINE` 被拒绝，`types` / `predicates` 字段记为 `rejected`。
+- `types` / `predicates` 字段作为已弃用的快捷方式保留一个版本：宿主用通用描述起草这些裸名称。
+- `GET /v1/{space}/vocabulary` 查看草稿与旧宿主包的符号；`GET /v1/{space}/schema/drafts` 列出草稿定义及晋升去向；`POST /v1/{space}/schema/promote`（`{kind, from, to}`）由持有 API key 的所有者把草稿晋升到已安装符号，至多一次。
 
-Durable Object 在构造时重新激活「Profile + 本空间词汇包」这一整套。只激活 Profile 会**收窄**环境：锁里会丢掉本空间的包，已发布的本地名会突然解析不了，而且没有任何错误会说出原因。
+早先已有 `kip://anda-brain/memory` 包的空间会继续激活它（只读，不再添加符号）。Durable
+Object 构造时重新激活「Profile + 该旧包」；草稿包是 Space 状态，任何激活都会保留它。
 
 ## 检索
 
@@ -322,10 +332,12 @@ Maintenance 可以使用受限的维护 KML，学习和运行时 Facet 由宿主
 ### 注意力召回
 
 `GET /v1/{space}/memory/attention?attention_cursor=attention:41&limit=20` 返回游标之后
-已触发的 Watch（`watch_fired`）与到期的 Commitment（`commitment_due`），按提起它们的
-`watch_fire` / `commitment_review` Activity 的 `space_seq`（`raised_seq`）排序，并返回新的
-`attention_cursor`。游标由调用方在取走条目后保存，不会过期；缺省或 `attention:-1` 表示从头
-读起。读取不改变记忆，条目不授予任何权限。与 Rust 服务的同名接口形状一致。
+已触发的 Watch（`watch_fired`）与到期的 Commitment（`commitment_due`），按
+`(raised_seq, ref)` 排序（`raised_seq` 是提起它们的 `watch_fire` / `commitment_review`
+Activity 的 `space_seq`），并返回新的 `attention_cursor`。一次提交可以提起多个条目，页面
+可以停在它们中间（游标形如 `attention:<seq>:<ref>`），下一页从最后交付的条目之后继续。
+游标由调用方在取走条目后保存，不会过期；缺省、`attention:start` 或旧的 `attention:-1`
+表示从头读起。读取不改变记忆，条目不授予任何权限。与 Rust 服务的同名接口形状一致。
 
 ### 显式图谱擦除
 
@@ -347,7 +359,9 @@ Maintenance 可以使用受限的维护 KML，学习和运行时 Facet 由宿主
 | --- | --- | --- |
 | `GET` | `/healthz` | 健康检查，不需要鉴权 |
 | `GET` | `/v1/{space}/info` | 元素计数、Schema 环境版本和初始化时间 |
-| `GET` | `/v1/{space}/vocabulary` | 本空间已发布的类型与谓词 |
+| `GET` | `/v1/{space}/vocabulary` | 本空间的草稿符号与旧宿主包符号 |
+| `GET` | `/v1/{space}/schema/drafts` | 草稿定义及晋升去向 |
+| `POST` | `/v1/{space}/schema/promote` | 所有者把草稿晋升到已安装符号 |
 | `GET` | `/v1/{space}/formation_status` | 同步模式状态 |
 | `POST` | `/v1/{space}/memory/forget` | 显式图谱擦除与逐种类计数 |
 | `POST` | `/v1/{space}/probe` | 不调用 LLM 的轻量记忆查找 |

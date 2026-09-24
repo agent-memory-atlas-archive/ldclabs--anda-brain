@@ -37,7 +37,6 @@ export interface BrainRpc {
     types: readonly string[],
     predicates: readonly string[],
     epoch?: number,
-    run?: string,
   ): Promise<DeclaredVocabulary>
   describePrimer(): Promise<KipResult>
   executeFormationPlan(
@@ -65,7 +64,42 @@ export interface BrainRpc {
   settleMemory(nowMs: number, run?: string, epoch?: number): Promise<SettlementReport>
   stats(): Promise<BrainStats>
   vocabulary(): Promise<DeclaredVocabulary>
+  schemaDrafts(): Promise<SchemaDrafts>
+  promoteDraftSymbol(input: PromoteDraftInput): Promise<PromoteDraftOutput>
   recallAttention(input: AttentionRecallInput): Promise<AttentionRecall>
+}
+
+/** This Space's draft vocabulary (Spec §20.16), as its owner reviews it. */
+export interface SchemaDrafts {
+  /** Always `kip://local/draft@0.0.0`. */
+  package_ref: string
+  schema_environment_version: number
+  symbols: DraftSymbol[]
+}
+
+export interface DraftSymbol {
+  kind: 'ConceptType' | 'PredicateType'
+  name: string
+  /** The exact reference elements written under it keep forever. */
+  ref: string
+  definition: unknown
+  /** The lineage it was promoted to, once promoted. */
+  promoted_to?: string
+}
+
+/** A draft symbol promotion (Spec §20.16), the owner's Schema migration. */
+export interface PromoteDraftInput {
+  kind: 'ConceptType' | 'PredicateType'
+  /** The draft symbol's local name or exact `kip://local/draft@0.0.0/…` ref. */
+  from: string
+  /** The installed symbol of the same kind: an exact ref, or an unambiguous local name. */
+  to: string
+}
+
+export interface PromoteDraftOutput {
+  promoted: string
+  to: string
+  schema_environment_version: number
 }
 
 export interface BrainStats {
@@ -80,11 +114,19 @@ export interface BrainStats {
   kip: string
 }
 
-/** What this Space can say, after a declaration and before the next one. */
+/** What this Space's own vocabulary holds, and what one drafting call did. */
 export interface DeclaredVocabulary {
-  package_ref: string
+  /** The legacy host package in force, or null for a Space that never had one. */
+  package_ref: string | null
+  /** Symbols of the legacy host package; nothing is added to it any more. */
   types: string[]
   predicates: string[]
+  /** Always `kip://local/draft@0.0.0` (Spec §20.16). */
+  draft_package: string
+  draft_types: string[]
+  draft_predicates: string[]
+  /** Exact references this call drafted. */
+  defined: string[]
   /** Names refused as malformed, or past the Space's symbol cap. */
   rejected: string[]
 }
@@ -236,9 +278,22 @@ export interface SkillSettlement {
 }
 
 /** What the deterministic settlement did before the cycle's completion. */
+/**
+ * What the Commitment review raised this cycle (Profile §5.7, §17): one
+ * `commitment_review` Activity per due `pending` / `blocked` Commitment without
+ * a Watch, keyed `commitment_review:<id>:<due_at>`, so a replay raises nothing
+ * and only a new `due_at` raises a Commitment again.
+ */
+export interface CommitmentSettlement {
+  due: number
+  raised: number
+  error?: string
+}
+
 export interface SettlementReport {
   settled_at: string
   watches: WatchSettlement
+  commitments: CommitmentSettlement
   skills: SkillSettlement
   corrections: CorrectionScan
   error?: string
@@ -286,10 +341,11 @@ export interface Usage {
 /**
  * What a mutation plan asks for.
  *
- * `types` and `predicates` are the plan's schema request. KML cannot declare a
- * symbol in KIP 2.0, so a plan that needs one names it here and the host
- * publishes it before running a single command — otherwise every write using it
- * would fail with `SchemaSymbolNotFound`.
+ * `types` and `predicates` are bare names Formation wants drafted without
+ * writing a `DEFINE` of its own: the host drafts each with a generic
+ * description before running a single command (Spec §20.16). A `DEFINE`
+ * among the commands does the same with the model's own description.
+ * Maintenance never drafts.
  */
 export interface MutationPlan {
   /** Host-computed digest bindings; never model-supplied authentication. */

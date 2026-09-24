@@ -6,7 +6,6 @@ import type { BrainRpc, Env } from '../src/types.js'
 import type { AndaBrain } from '../src/brain.js'
 import { AiResponseError, ModelDeadline, addUsage, createRecallPlan, createRecallAnswer } from '../src/ai.js'
 import { handleRequest } from '../src/index.js'
-import { MemoryVocabulary } from '../src/vocabulary.js'
 import { MemoryProduct } from '../src/product.js'
 import { forget } from '../src/forget.js'
 
@@ -21,7 +20,7 @@ it('excludes suppressed records before structural joins, id reads and aggregatio
   await formMemory(runtime(async () => ({response:{...empty, types:['WritingStyle'], commands:[`MUTATE {
     UPSERT CONCEPT ?person {MATCH {type:"Person",key:"${SYSTEM_PRINCIPAL}"}}
     CREATE CONCEPT ?value {TYPE "WritingStyle" NAME "old preference"}
-    ASSERT ?claim (?person,"prefers",?value) {by:?person,mode:"stated",evidence: :msg1}
+    ASSERT ?claim (?person,"prefers",?value) {by:?person,mode:"stated",evidence: :msg1,at:"2026-09-22T00:00:00.000Z"}
   }`]}})), brain as unknown as BrainRpc, {messages:[{role:'user',content:'private source text'}]})
   const record = (await brain.productRecords(auth)).records[0]!
   const preview = await brain.productPrepare(auth,{operation_id:'hide',record_id:record.id,expected_revision:record.revision,kind:'suppress'})
@@ -46,7 +45,7 @@ it('excludes suppressed records before structural joins, id reads and aggregatio
   const formed = await formMemory(runtime(async () => ({response:{...empty,commands:[`MUTATE {
     CREATE CONCEPT ?value {TYPE "WritingStyle" NAME "fresh preference"}
     UPSERT CONCEPT ?person {MATCH {type:"Person",key:"${SYSTEM_PRINCIPAL}"}}
-    ASSERT ?claim (?person,"prefers",?value) {by:?person,mode:"stated",evidence: :msg1}
+    ASSERT ?claim (?person,"prefers",?value) {by:?person,mode:"stated",evidence: :msg1,at:"2026-09-22T00:00:00.000Z"}
   }`]}})),brain as unknown as BrainRpc,{messages:[{role:'user',content:'fresh independent observation'}]}) as any
   expect(formed.stored.assertions).toBe(1)
   const search = await brain.executeAgentRead([{command:'SEARCH CONCEPT "fresh preference" LIMIT 5'}],epoch)
@@ -184,26 +183,33 @@ it('loads only the active schema packages when inspecting vocabulary', async () 
     }
     try {
       const result=(instance as unknown as AndaBrain).vocabulary()
-      expect(result.types).toHaveLength(8)
+      expect(result.draft_types).toHaveLength(8)
       expect(loaded).toBe(0)
       expect(bytes).toBe(0)
     } finally {nexus.store.packages=packages}
   })
 })
 
-it('skips a stranded installed vocabulary revision without losing active symbols', async () => {
+it('keeps drafted vocabulary and one review per symbol across an eviction', async () => {
   const brain = makeBrain()
-  await brain.declareSymbols(['Project'], [])
-  await runInDurableObject(brain as never, instance => {
-    const nexus = (instance as unknown as {nexus:CognitiveNexus}).nexus
-    const stranded = MemoryVocabulary.load(nexus, true)
-    stranded.extend(['Stranded'], [])
-    nexus.installPackage(stranded.artifact(), 'test')
+  expect(await brain.declareSymbols(['Project'], ['works_on', 'bad name'])).toMatchObject({
+    package_ref: null, draft_types: ['Project'], draft_predicates: ['works_on'],
+    defined: ['kip://local/draft@0.0.0/Project', 'kip://local/draft@0.0.0/works_on'], rejected: ['bad name'],
   })
   await evictDurableObject(brain as never)
-  expect(await brain.declareSymbols(['Milestone'], [])).toMatchObject({
-    package_ref:'kip://anda-brain/memory@1.0.3', types:['Milestone','Project'],
+  // Already drafted: nothing new, and the review is not queued twice.
+  expect(await brain.declareSymbols(['Project', 'Milestone'], [])).toMatchObject({
+    draft_types: ['Milestone', 'Project'], defined: ['kip://local/draft@0.0.0/Milestone'], rejected: [],
   })
+  const [reviews] = await brain.executeKipReadonlyBatch([{command:`FIND(?t.attributes.symbol_kind, ?t.attributes.symbol_ref) WHERE {
+    ?t CONCEPT {type: "SleepTask"}
+    FILTER(?t.attributes.task_class == "review_schema")
+  } ORDER BY ?t.attributes.symbol_ref ASC LIMIT 10`}])
+  expect(reviews!.result).toEqual([
+    ['ConceptType', 'kip://local/draft@0.0.0/Milestone'],
+    ['ConceptType', 'kip://local/draft@0.0.0/Project'],
+    ['PredicateType', 'kip://local/draft@0.0.0/works_on'],
+  ])
 })
 
 it('persists maintenance admission and fences an expired owner after takeover', async () => {
@@ -291,7 +297,7 @@ it('aggregates erasure cleanup and scrubs every preview page, including expired 
   await formMemory(runtime(async()=>({response:{...empty,types:['WritingStyle'],commands:[`MUTATE {
     UPSERT CONCEPT ?person {MATCH {type:"Person",key:"${SYSTEM_PRINCIPAL}"}}
     CREATE CONCEPT ?value {TYPE "WritingStyle" NAME "old"}
-    ASSERT ?claim (?person,"prefers",?value) {by:?person,mode:"stated",evidence: :msg1}
+    ASSERT ?claim (?person,"prefers",?value) {by:?person,mode:"stated",evidence: :msg1,at:"2026-09-22T00:00:00.000Z"}
   }`]}})),brain as unknown as BrainRpc,{messages:[{role:'user',content:'source'}]})
   const record = (await brain.productRecords(auth)).records[0]!
   const preview = await brain.productPrepare(auth,{operation_id:'draft',record_id:record.id,expected_revision:record.revision,kind:'correct',new_value:'private draft'})

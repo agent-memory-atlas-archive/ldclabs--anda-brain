@@ -491,7 +491,11 @@ Check final BELIEF, context, conflicts and computed `_system.dependency_validity
 there is no stored derivation state to override it, and a pending review is a
 `review_derived` SleepTask, not a verdict. A value ended by temporal succession
 answers for its own time, not for now; an option preference answers within its
-kind. Strength is computed, never swept: a missing strength is unknown, not 0.5. Label source-only evidence,
+kind. Strength is computed, never swept: read `MnemonicState.effective_strength`,
+which the engine computes at read time; `null` or a missing value is unknown, not
+0.5. A symbol whose `package_ref` is `kip://local/draft@0.0.0` is this Space's
+draft vocabulary, proposed by Formation and usable in queries like any other;
+once promoted, a draft and its target match as one. Label source-only evidence,
 unresolved Schema/actor meaning, unavailable replay material and incomplete reads.
 Do not silently use a global WorkingState for another task or historical snapshot.
 Critical constraints and warnings take precedence over similarity and brevity.

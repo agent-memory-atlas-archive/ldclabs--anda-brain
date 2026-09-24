@@ -1,9 +1,10 @@
 /** Bounded maintenance. Nexus owns Watch generations and authorized coverage.
  * No local outcome-count rule can confer validated Skill standing. */
 import { KipError, isJsonMap, type JsonMap, type KipResult } from '@ldclabs/kip-do'
-import type { KipOperation } from './kip.js'
+import { countChanges, type KipOperation } from './kip.js'
 import type {
   ArmedWatch,
+  CommitmentSettlement,
   CorrectionScan,
   CorrectionCursor,
   Dependent,
@@ -33,6 +34,7 @@ export function settle(run: RunKip, nowMs: number, position: SettlePosition = {}
   return {
     settled_at: now,
     watches: sweepWatches(run, position.advanceWatch),
+    commitments: raiseDueCommitments(run, nowMs),
     skills: {
       graded: 0, transitions: 0, conflicted: 0,
       unsupported_reason: 'memory_learning requires configured independent observers, frozen trials and replayable evaluations',
@@ -55,6 +57,55 @@ export function assess(
   }
 }
 
+
+/** How many due Commitments one cycle raises; the rest wait for the next. */
+const COMMITMENT_REVIEW_LIMIT = 50
+
+/**
+ * Raises every due Commitment without a Watch as `commitment_due` attention.
+ *
+ * Native rather than left to the maintenance model: the attention stream is
+ * what a business agent acts on, so a Commitment has to reach it whether or
+ * not a model thought to look, and exactly once per `due_at`. The CLIENT KEY
+ * `commitment_review:<id>:<due_at>` makes a replay `no_effect` and a
+ * rescheduled Commitment rise again (Profile §5.7, §17; Memory Interface §4).
+ * Mirrors `raise_due_commitments` in `anda_brain/src/settlement/mod.rs`.
+ */
+export function raiseDueCommitments(run: RunKip, nowMs: number): CommitmentSettlement {
+  const now = new Date(nowMs).toISOString()
+  const report: CommitmentSettlement = { due: 0, raised: 0 }
+  // The `due_at` comparison is lexical here and re-checked as a time below.
+  const found = run({
+    command: `FIND(?c.id, ?c.attributes.due_at) WHERE {
+  ?c CONCEPT {type: "Commitment"}
+  FILTER((?c.attributes.status == "pending" || ?c.attributes.status == "blocked") && ?c.attributes.due_at <= :now)
+  NOT { ?w CONCEPT {type: "Watch"} STRUCTURAL (?w, "watches", ?c) }
+} ORDER BY ?c.attributes.due_at ASC LIMIT :limit`,
+    parameters: { now, limit: COMMITMENT_REVIEW_LIMIT },
+  })
+  if (found.status === 'failed') {
+    report.error = found.error?.message ?? 'commitment scan failed'
+    return report
+  }
+  for (const row of Array.isArray(found.result) ? found.result : []) {
+    if (!Array.isArray(row) || typeof row[0] !== 'string' || typeof row[1] !== 'string') continue
+    const [id, dueAt] = [row[0], row[1]]
+    const due = Date.parse(dueAt)
+    if (!Number.isFinite(due) || due > nowMs) continue
+    report.due += 1
+    const raised = run({
+      command: `CREATE ACTIVITY ?review {
+  CLIENT KEY :key
+  SET FIELDS { activity_class: "commitment_review", status: "completed", started_at: :now, ended_at: :now }
+  SET STRUCTURAL { ("inputs", :commitment) }
+}`,
+      parameters: { key: `commitment_review:${id}:${dueAt}`, commitment: id, now },
+    })
+    if (raised.status === 'failed') report.error = raised.error?.message ?? 'commitment review failed'
+    else if (countChanges([raised]).created > 0) report.raised += 1
+  }
+  return report
+}
 
 const WATCH_SWEEP_LIMIT = 20
 

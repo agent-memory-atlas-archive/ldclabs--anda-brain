@@ -1261,6 +1261,23 @@ pub struct WatchSettlement {
     pub error: Option<String>,
 }
 
+/// What the Commitment review raised this cycle (Profile §5.7, §17).
+///
+/// Each due `pending` / `blocked` Commitment without a Watch is raised by one
+/// `commitment_review` Activity keyed `commitment_review:<id>:<due_at>`, so a
+/// Commitment already raised for this `due_at` replays as `no_effect` and only
+/// a new `due_at` raises it again.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+pub struct CommitmentSettlement {
+    /// Due Commitments this cycle read, raised before or not.
+    pub due: u64,
+    /// New `commitment_review` Activities committed this cycle.
+    pub raised: u64,
+    /// Scan or write failure; the remaining Commitments wait for the next cycle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// What one Skill lifecycle pass decided.
 ///
 /// Counts remain for compatibility; unsupported_reason distinguishes an
@@ -1321,6 +1338,10 @@ pub struct MemorySettlementReport {
     #[serde(default)]
     pub watches: WatchSettlement,
 
+    /// What the Commitment review raised as attention this cycle.
+    #[serde(default)]
+    pub commitments: CommitmentSettlement,
+
     /// What the Skill lifecycle pass did this cycle.
     #[serde(default)]
     pub skills: SkillSettlement,
@@ -1341,27 +1362,83 @@ pub struct MemorySettlementReport {
     pub retention: RetentionSettlement,
 }
 
+/// This Space's draft vocabulary (Spec §20.16), as its owner reviews it.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct SchemaDrafts {
+    /// Always `kip://local/draft@0.0.0`.
+    pub package_ref: String,
+    /// The Schema Environment version the listing was read at.
+    pub schema_environment_version: u64,
+    /// Every drafted symbol, promoted or not.
+    pub symbols: Vec<DraftSymbol>,
+}
+
+/// One drafted symbol.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct DraftSymbol {
+    /// `ConceptType` or `PredicateType`.
+    pub kind: String,
+    /// The local name.
+    pub name: String,
+    /// The exact reference elements written under it keep forever.
+    #[serde(rename = "ref")]
+    pub reference: String,
+    /// The definition as drafted.
+    pub definition: serde_json::Value,
+    /// The lineage it was promoted to, once promoted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promoted_to: Option<String>,
+}
+
+/// Input of a draft symbol promotion (Spec §20.16).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromoteDraftInput {
+    /// `ConceptType` or `PredicateType`.
+    pub kind: String,
+    /// The draft symbol: its local name or exact `kip://local/draft@0.0.0/…`
+    /// reference.
+    pub from: String,
+    /// The installed symbol of the same kind: an exact reference, or a local
+    /// name exactly one installed package defines.
+    pub to: String,
+}
+
+/// What a promotion recorded.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct PromoteDraftOutput {
+    /// The draft symbol's exact reference.
+    pub promoted: String,
+    /// The target as given.
+    pub to: String,
+    /// The Schema Environment version the promotion created.
+    pub schema_environment_version: u64,
+}
+
 /// Input of attention recall (KIP Memory Interface §4).
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[cfg_attr(feature = "mcp", derive(JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct AttentionRecallInput {
-    /// The cursor the host kept from the last page it consumed; absent reads
-    /// from the first raise.
+    /// The cursor the host kept from the last page it consumed; absent (or
+    /// `attention:start`) reads from the first raise.
     pub attention_cursor: Option<String>,
 
-    /// Raising Activities to read, `1..=50`; default 20.
+    /// Items to deliver, `1..=50`; default 20.
     pub limit: Option<usize>,
 }
 
 /// One page of attention the Brain raised. Reading changes nothing in memory.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct AttentionRecall {
-    /// Ordered by `raised_seq`.
+    /// Ordered by `(raised_seq, ref)`.
     pub items: Vec<AttentionRecallItem>,
 
-    /// The cursor after these items, `attention:<highest delivered raised_seq>`.
-    /// The host keeps it once it has taken the items; it does not expire.
+    /// The position after these items: `attention:<seq>:<ref>` when the page
+    /// stopped inside a commit, `attention:<seq>` when every item raised up to
+    /// that commit was delivered, and the input cursor (or `attention:start`)
+    /// when there was nothing new. Opaque to the host, which keeps it once it
+    /// has taken the items; it does not expire.
     pub attention_cursor: String,
 
     /// Whether every raise after the input cursor was read.

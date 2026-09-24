@@ -27,6 +27,32 @@ async function watch(stub: BrainRpc, condition: unknown, watchClass = 'silence')
   return id
 }
 
+describe('model write gates', () => {
+  it('dates claims from captured messages and completes strength writes', () => {
+    const run = (command: string) => () => assertFormationOperations([{command}])
+    expect(run('ASSERT (:a, "prefers", :b) { by: :a, mode: "stated", evidence: :msg1 }')).toThrow('observed_at')
+    expect(run('ASSERT (:a, "prefers", :b) { by: :a, mode: "stated", evidence: :msg1, at: "2026-01-01T00:00:00.000Z" }')).not.toThrow()
+    expect(run('ASSERT (:a, "works_for", :b) { by: :a, mode: "stated", evidence: :msg1, valid: {from: "2026-01-01T00:00:00.000Z"} }')).not.toThrow()
+    expect(run('ASSERT (:a, "prefers", :b) { by: :self, mode: "inferred", evidence: :msg1 }')).not.toThrow()
+    expect(run('ASSERT (:a, "prefers", :b) { by: :a, mode: "stated", evidence: :e }')).not.toThrow()
+    expect(run('CREATE CONCEPT ?c { TYPE "Event" SET FACET "MnemonicState" { memory_strength: 0.7 } }')).toThrow('last_metabolized_at')
+    expect(run('CREATE CONCEPT ?c { TYPE "Event" SET FACET "MnemonicState" { memory_strength: 0.7, last_metabolized_at: :now, strength_policy: :strength_policy } }')).not.toThrow()
+    expect(() => assertMaintenanceOperations([{command:'UPDATE :c SET FACET "MnemonicState" { memory_strength: 0.9 }'}])).toThrow('strength_policy')
+    expect(() => assertMaintenanceOperations([{command:'UPDATE :c SET FACET "MnemonicState" { salience: 0.9 }'}])).not.toThrow()
+  })
+
+  it('lets formation define literal symbols and never maintenance', () => {
+    const define = 'DEFINE PREDICATE "mentors" {description: "The subject mentors the object."}'
+    expect(() => assertFormationOperations([{command:define}])).not.toThrow()
+    for (const command of [
+      'DEFINE CONCEPT TYPE "instrument" {description: "x"}',
+      'DEFINE PREDICATE :name {description: "x"}',
+      'DEFINE PREDICATE "mentors" {description: :d}',
+    ]) expect(() => assertFormationOperations([{command}])).toThrow()
+    expect(() => assertMaintenanceOperations([{command:define}])).toThrow('never defines')
+  })
+})
+
 describe('Cognitive Memory host contracts', () => {
   it('computes immutable revision digests and never promotes descriptive feedback', async () => {
     const stub = brain()
@@ -71,7 +97,7 @@ describe('Cognitive Memory host contracts', () => {
 
   it('recalls raised attention in commit order without changing memory', async () => {
     const stub = brain()
-    expect(await stub.recallAttention({})).toEqual({items:[],attention_cursor:'attention:-1',complete:true})
+    expect(await stub.recallAttention({})).toEqual({items:[],attention_cursor:'attention:start',complete:true})
     const target = await created(stub,'CREATE CONCEPT ?item {TYPE "Person" NAME "vendor"}')
     const id = await created(stub, `CREATE CONCEPT ?item { TYPE "Watch" SET ATTRIBUTES {
       watch_class: "delta", summary: "vendor changed", status: "disarmed", condition: {element: :target, ops: ["update"]}
@@ -80,8 +106,16 @@ describe('Cognitive Memory host contracts', () => {
     expect(armed[0]?.status, JSON.stringify(armed)).toBe('succeeded')
     await stub.executeKip('UPDATE :id SET FIELDS {name:"vendor changed"}',{id:target})
     expect((await stub.settleMemory(Date.now())).watches.fired).toBe(1)
+    // A due Commitment with no Watch is raised natively, once per `due_at`;
+    // one a Watch covers, one not yet due and one no longer pending are not.
     const commitment = await created(stub,'CREATE CONCEPT ?item {TYPE "Commitment" SET ATTRIBUTES {summary:"Send the report",status:"pending",due_at:"2026-01-01T00:00:00.000Z"}}')
-    await created(stub,'CREATE ACTIVITY ?item {SET FIELDS {activity_class:"commitment_review",status:"completed"} SET STRUCTURAL {("inputs", :commitment)}}',{commitment})
+    const watched = await created(stub,'CREATE CONCEPT ?item {TYPE "Commitment" SET ATTRIBUTES {summary:"Renew the lease",status:"pending",due_at:"2026-01-01T00:00:00.000Z"}}')
+    await created(stub,'CREATE CONCEPT ?item {TYPE "Watch" SET ATTRIBUTES {watch_class:"delta",summary:"lease",status:"disarmed",condition:{element: :target,ops:["update"]}} SET STRUCTURAL {("watches", :target)}}',{target:watched})
+    await created(stub,'CREATE CONCEPT ?item {TYPE "Commitment" SET ATTRIBUTES {summary:"Later",status:"pending",due_at:"2999-01-01T00:00:00.000Z"}}')
+    await created(stub,'CREATE CONCEPT ?item {TYPE "Commitment" SET ATTRIBUTES {summary:"Done",status:"fulfilled",due_at:"2026-01-01T00:00:00.000Z"}}')
+    const now = Date.parse('2026-05-28T00:00:00.000Z')
+    expect((await stub.settleMemory(now)).commitments).toEqual({due:1,raised:1})
+    expect((await stub.settleMemory(now)).commitments).toEqual({due:1,raised:0})
     const page = await stub.recallAttention({})
     expect(page.items.map((item) => [item.kind, item.ref])).toEqual([['watch_fired', id], ['commitment_due', commitment]])
     expect(page.items[0]!.target_refs).toEqual([target])
@@ -90,12 +124,31 @@ describe('Cognitive Memory host contracts', () => {
     expect(await stub.recallAttention({attention_cursor:page.attention_cursor})).toEqual({items:[],attention_cursor:page.attention_cursor,complete:true})
     const first = await stub.recallAttention({limit:1})
     expect(first.complete).toBe(false)
+    expect(first.attention_cursor).toBe(`attention:${first.items[0]!.raised_seq}:${id}`)
     expect((await stub.recallAttention({attention_cursor:first.attention_cursor})).items.map((item) => item.ref)).toEqual([commitment])
     let refused: unknown
     const bad = stub.recallAttention({attention_cursor:'42'})
     try { await bad } catch (error) { refused = error }
     finally { (bad as PromiseLike<unknown> & { [Symbol.dispose]?: () => void })[Symbol.dispose]?.() }
     expect((refused as Error).message).toContain('invalid attention cursor')
+
+    // A rescheduled Commitment rises again under its new `due_at`.
+    await stub.executeKip('UPDATE :id SET ATTRIBUTES {due_at:"2026-02-01T00:00:00.000Z"}',{id:commitment})
+    expect((await stub.settleMemory(now)).commitments.raised).toBe(1)
+    const again = await stub.recallAttention({attention_cursor:page.attention_cursor})
+    expect(again.items.map((item) => [item.ref, item.due_at])).toEqual([[commitment, '2026-02-01T00:00:00.000Z']])
+
+    // One commit may raise several items; a page can stop between them (MI §4).
+    const a = await created(stub,'CREATE CONCEPT ?item {TYPE "Commitment" SET ATTRIBUTES {summary:"A",status:"blocked",due_at:"2026-01-01T00:00:00.000Z"}}')
+    const b = await created(stub,'CREATE CONCEPT ?item {TYPE "Commitment" SET ATTRIBUTES {summary:"B",status:"blocked",due_at:"2026-01-01T00:00:00.000Z"}}')
+    await created(stub,'CREATE ACTIVITY ?item {SET FIELDS {activity_class:"commitment_review",status:"completed"} SET STRUCTURAL {("inputs", :a) ("inputs", :b)}}',{a,b})
+    const expected = [a, b].sort()
+    const one = await stub.recallAttention({attention_cursor:again.attention_cursor,limit:1})
+    expect(one.items.map((item) => item.ref)).toEqual([expected[0]])
+    expect(one.complete).toBe(false)
+    expect(one.attention_cursor).toBe(`attention:${one.items[0]!.raised_seq}:${expected[0]}`)
+    const two = await stub.recallAttention({attention_cursor:one.attention_cursor,limit:1})
+    expect(two.items.map((item) => [item.ref, item.raised_seq])).toEqual([[expected[1], one.items[0]!.raised_seq]])
   })
 
   it('does not let a full page of deferred text Watches starve structured work', async () => {

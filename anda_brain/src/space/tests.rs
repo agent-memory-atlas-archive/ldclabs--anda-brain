@@ -1257,6 +1257,198 @@ WHERE { ?c CONCEPT {type: "Person", key: "victim"} } LIMIT 1"#;
 /// did not (§88.12). The command below never contains the sentence — it
 /// cites `:msg1` — so finding the sentence verbatim proves it did not pass
 /// through model-generated text on the way in.
+/// Draft vocabulary end to end (Spec §20.16): Formation defines symbols in
+/// their own request, the host queues one review per new symbol, Maintenance
+/// may not define, and only the owner's promotion joins a draft to an
+/// installed symbol.
+#[tokio::test(flavor = "multi_thread")]
+async fn formation_drafts_vocabulary_that_only_an_owner_promotes() {
+    use anda_core::Tool;
+    use anda_engine::memory::KipArgs;
+
+    let app = test_app_state("draft_vocabulary");
+    let space = create_loaded_space(&app, "draft_vocabulary").await;
+    let guarded = crate::agents::GuardedMemory::new(space.memory.clone());
+    let formation = space
+        .ctx_for_test(SELF_USER_ID, FormationAgent::NAME)
+        .unwrap();
+    let batch = |commands: &[&str]| -> KipArgs {
+        serde_json::from_value(serde_json::json!({ "operations": commands })).unwrap()
+    };
+    let read = async |command: &str| -> serde_json::Value {
+        let response = space
+            .execute_kip_readonly(kip::request(command))
+            .await
+            .unwrap();
+        assert!(kip::succeeded(&response), "{command}: {response:?}");
+        kip::ok_result(&response).cloned().unwrap_or_default()
+    };
+    const REVIEWS: &str = r#"FIND(?t.attributes.symbol_kind, ?t.attributes.symbol_ref, ?t.attributes.status) WHERE {
+  ?t CONCEPT {type: "SleepTask"}
+  FILTER(?t.attributes.task_class == "review_schema")
+} ORDER BY ?t.attributes.symbol_ref ASC LIMIT 10"#;
+
+    // A request of DEFINEs runs independently: one that already resolves
+    // (the Profile's `prefers`) does not stop the rest.
+    let out = guarded
+        .call(
+            formation.child_base("execute_kip").unwrap(),
+            batch(&[
+                r#"DEFINE CONCEPT TYPE "Human" {description: "A human being, as a source names one."}"#,
+                r#"DEFINE PREDICATE "prefers" {description: "Already in the Profile."}"#,
+                r#"DEFINE PREDICATE "mentors" {description: "The subject mentors the object."}"#,
+            ]),
+            vec![],
+        )
+        .await
+        .unwrap();
+    let results = &out.output.results;
+    assert_eq!(results.len(), 3, "{:?}", out.output);
+    assert_eq!(
+        results[0].result.as_ref().unwrap()["ref"],
+        "kip://local/draft@0.0.0/Human"
+    );
+    assert_eq!(
+        results[1].error.as_ref().unwrap().code,
+        "SchemaSymbolConflict"
+    );
+    assert_eq!(
+        results[2].result.as_ref().unwrap()["ref"],
+        "kip://local/draft@0.0.0/mentors"
+    );
+
+    // One review per new symbol, keyed so a second attempt resolves to it.
+    let expected = serde_json::json!([
+        ["ConceptType", "kip://local/draft@0.0.0/Human", "pending"],
+        [
+            "PredicateType",
+            "kip://local/draft@0.0.0/mentors",
+            "pending"
+        ],
+    ]);
+    assert_eq!(read(REVIEWS).await, expected);
+    crate::vocabulary::queue_schema_review(
+        space.memory.nexus().as_ref(),
+        anda_kip::DefineKind::ConceptType,
+        "kip://local/draft@0.0.0/Human",
+        "A human being, as a source names one.",
+    )
+    .await
+    .unwrap();
+    assert_eq!(read(REVIEWS).await, expected);
+
+    // A DEFINE is its own request, before the MUTATE that uses it.
+    let mixed = guarded
+        .call(
+            formation.child_base("execute_kip").unwrap(),
+            batch(&[
+                r#"DEFINE PREDICATE "coaches" {description: "The subject coaches the object."}"#,
+                r#"MUTATE { CREATE CONCEPT ?h { TYPE "Human" NAME "Ada" } }"#,
+            ]),
+            vec![],
+        )
+        .await
+        .unwrap();
+    assert_eq!(mixed.is_error, Some(true));
+
+    // The drafted symbols resolve from the next request on.
+    let write = guarded
+        .call(
+            formation.child_base("execute_kip").unwrap(),
+            batch(&[r#"MUTATE {
+  CREATE CONCEPT ?ada { TYPE "Human" NAME "Ada" }
+  CREATE CONCEPT ?grace { TYPE "Human" NAME "Grace" }
+  ASSERT (?ada, "mentors", ?grace) { by: ?ada, mode: "stated", at: "2026-01-01T00:00:00.000Z" }
+}"#]),
+            vec![],
+        )
+        .await
+        .unwrap();
+    assert_eq!(write.is_error, None, "{:?}", write.output);
+
+    // The deprecated tool drafts only what the Space cannot yet say.
+    let (drafted, rejected) = crate::vocabulary::DeclareSymbolsTool::new(space.memory.clone())
+        .declare(&crate::vocabulary::DeclareSymbolsArgs {
+            types: vec!["Human".into(), "Guitar".into(), "bad name".into()],
+            predicates: vec!["mentors".into()],
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        drafted["defined"],
+        serde_json::json!(["kip://local/draft@0.0.0/Guitar"])
+    );
+    assert_eq!(rejected, vec!["bad name"]);
+
+    // Maintenance reviews drafts; it never defines one.
+    let maintenance = space
+        .ctx_for_test(SELF_USER_ID, MaintenanceAgent::NAME)
+        .unwrap();
+    let refused = guarded
+        .call(
+            maintenance.child_base("execute_kip").unwrap(),
+            batch(&[r#"DEFINE PREDICATE "coaches" {description: "x"}"#]),
+            vec![],
+        )
+        .await
+        .unwrap();
+    assert_eq!(refused.is_error, Some(true));
+    assert!(
+        kip::error_message(&refused.output).contains("never defines"),
+        "{:?}",
+        refused.output
+    );
+
+    // The owner promotes a draft onto an installed symbol of the same kind:
+    // matching reads the two lineages as one, and elements keep their refs.
+    let drafts = space.schema_drafts().await.unwrap();
+    let names: Vec<_> = drafts.symbols.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["Guitar", "Human", "mentors"]);
+    assert!(drafts.symbols.iter().all(|s| s.promoted_to.is_none()));
+    let promoted = space
+        .promote_draft_symbol(crate::types::PromoteDraftInput {
+            kind: "ConceptType".into(),
+            from: "Human".into(),
+            to: profile!("Person").into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(promoted.promoted, "kip://local/draft@0.0.0/Human");
+    assert!(promoted.schema_environment_version > drafts.schema_environment_version);
+    let people = read(
+        r#"FIND(?c.name, ?c.schema_ref) WHERE { ?c CONCEPT {type: "Person"} FILTER(?c.name == "Ada") } LIMIT 5"#,
+    )
+    .await;
+    assert_eq!(
+        people,
+        serde_json::json!([["Ada", "kip://local/draft@0.0.0/Human"]])
+    );
+    let human = space
+        .schema_drafts()
+        .await
+        .unwrap()
+        .symbols
+        .into_iter()
+        .find(|s| s.name == "Human")
+        .unwrap();
+    assert_eq!(
+        human.promoted_to.as_deref(),
+        Some("kip://profiles/cognitive-memory/Person")
+    );
+    // A draft is promoted at most once.
+    assert!(
+        space
+            .promote_draft_symbol(crate::types::PromoteDraftInput {
+                kind: "ConceptType".into(),
+                from: "Human".into(),
+                to: profile!("Person").into(),
+            })
+            .await
+            .is_err()
+    );
+    space.close().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_runtime_mints_the_observation_the_model_only_cites() {
     use anda_core::Tool;
@@ -1296,13 +1488,29 @@ async fn the_runtime_mints_the_observation_the_model_only_cites() {
     NAME "Alice concise answers"
   }
   ASSERT ?a (?alice, "prefers", ?concise) {
-    by: ?alice, mode: "stated", confidence: 0.95, evidence: :msg1
+    by: ?alice, mode: "stated", confidence: 0.95, evidence: :msg1, at: "2026-08-20T00:00:00.000Z"
   }
 }"#
             .to_string(),
         ),
         ..Default::default()
     };
+    // The gate refuses a claim from a captured message that carries no time.
+    let undated = guarded
+        .call(
+            ctx.child_base("execute_kip").unwrap(),
+            KipArgs {
+                command: plan()
+                    .command
+                    .map(|command| command.replace(r#", at: "2026-08-20T00:00:00.000Z""#, "")),
+                ..Default::default()
+            },
+            vec![],
+        )
+        .await
+        .unwrap();
+    assert_eq!(undated.is_error, Some(true));
+    assert!(kip::error_message(&undated.output).contains("observed_at"));
     let written = guarded
         .call(ctx.child_base("execute_kip").unwrap(), plan(), vec![])
         .await
@@ -1530,7 +1738,7 @@ async fn attention_recall_orders_raised_items_by_their_commit_and_changes_nothin
         .await
         .unwrap();
     assert!(empty.items.is_empty() && empty.complete);
-    assert_eq!(empty.attention_cursor, "attention:-1");
+    assert_eq!(empty.attention_cursor, "attention:start");
 
     let target = created_ref(
         &space,
@@ -1549,16 +1757,20 @@ async fn attention_recall_orders_raised_items_by_their_commit_and_changes_nothin
     )
     .await;
     assert_eq!(settlement::sweep_watches(space.as_ref()).await.fired, 1);
-    // A due Commitment with no Watch is raised by Maintenance's review.
+    // A due Commitment with no Watch is raised natively, once per `due_at`.
     let commitment = created_ref(&space,r#"CREATE CONCEPT ?item {TYPE "Commitment" SET ATTRIBUTES {summary:"Send the report",status:"pending",due_at:"2026-01-01T00:00:00.000Z"}}"#,Default::default()).await;
-    seed_kip(
-        &space,
-        kip::request_with(
-            r#"CREATE ACTIVITY ?review {SET FIELDS {activity_class:"commitment_review",status:"completed"} SET STRUCTURAL {("inputs", :commitment)}}"#,
-            kip::param("commitment", commitment.clone()),
-        ),
-    )
-    .await;
+    // A Commitment a Watch covers reaches attention when its Watch fires, and
+    // one not yet due or no longer pending is not raised at all.
+    let watched = created_ref(&space,r#"CREATE CONCEPT ?item {TYPE "Commitment" SET ATTRIBUTES {summary:"Renew the lease",status:"pending",due_at:"2026-01-01T00:00:00.000Z"}}"#,Default::default()).await;
+    created_ref(&space,r#"CREATE CONCEPT ?item {TYPE "Watch" SET ATTRIBUTES {watch_class:"delta",summary:"lease",status:"disarmed",condition:{element: :target,ops:["update"]}} SET STRUCTURAL {("watches", :target)}}"#,kip::param("target",watched)).await;
+    created_ref(&space,r#"CREATE CONCEPT ?item {TYPE "Commitment" SET ATTRIBUTES {summary:"Later",status:"pending",due_at:"2999-01-01T00:00:00.000Z"}}"#,Default::default()).await;
+    created_ref(&space,r#"CREATE CONCEPT ?item {TYPE "Commitment" SET ATTRIBUTES {summary:"Done",status:"fulfilled",due_at:"2026-01-01T00:00:00.000Z"}}"#,Default::default()).await;
+    let now = 1_780_000_000_000; // 2026-05-28
+    let review = settlement::raise_due_commitments(space.as_ref(), now).await;
+    assert_eq!((review.due, review.raised, review.error), (1, 1, None));
+    // The key makes the next cycle's review a replay.
+    let replay = settlement::raise_due_commitments(space.as_ref(), now).await;
+    assert_eq!((replay.due, replay.raised), (1, 0), "{replay:?}");
 
     let before = space
         .memory
@@ -1641,6 +1853,77 @@ async fn attention_recall_orders_raised_items_by_their_commit_and_changes_nothin
             .await
             .is_err()
     );
+
+    // A rescheduled Commitment is raised again under its new `due_at`.
+    seed_kip(
+        &space,
+        kip::request_with(
+            r#"UPDATE :id SET ATTRIBUTES {due_at:"2026-02-01T00:00:00.000Z"}"#,
+            kip::param("id", commitment.clone()),
+        ),
+    )
+    .await;
+    assert_eq!(
+        settlement::raise_due_commitments(space.as_ref(), now)
+            .await
+            .raised,
+        1
+    );
+    let again = space
+        .recall_attention(crate::types::AttentionRecallInput {
+            attention_cursor: Some(page.attention_cursor.clone()),
+            limit: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(again.items.len(), 1);
+    assert_eq!(again.items[0].reference, commitment);
+    assert_eq!(
+        again.items[0].due_at.as_deref(),
+        Some("2026-02-01T00:00:00.000Z")
+    );
+
+    // One commit may raise several items; a page can stop between them and
+    // the next page continues after the last one delivered (MI §4).
+    let first_due = created_ref(&space,r#"CREATE CONCEPT ?item {TYPE "Commitment" SET ATTRIBUTES {summary:"A",status:"blocked",due_at:"2026-01-01T00:00:00.000Z"}}"#,Default::default()).await;
+    let second_due = created_ref(&space,r#"CREATE CONCEPT ?item {TYPE "Commitment" SET ATTRIBUTES {summary:"B",status:"blocked",due_at:"2026-01-01T00:00:00.000Z"}}"#,Default::default()).await;
+    seed_kip(
+        &space,
+        kip::request_with(
+            r#"CREATE ACTIVITY ?review {SET FIELDS {activity_class:"commitment_review",status:"completed"} SET STRUCTURAL {("inputs", :a) ("inputs", :b)}}"#,
+            serde_json::Map::from_iter([
+                ("a".to_string(), serde_json::json!(first_due)),
+                ("b".to_string(), serde_json::json!(second_due)),
+            ]),
+        ),
+    )
+    .await;
+    let mut expected = [first_due, second_due];
+    expected.sort();
+    let one = space
+        .recall_attention(crate::types::AttentionRecallInput {
+            attention_cursor: Some(again.attention_cursor.clone()),
+            limit: Some(1),
+        })
+        .await
+        .unwrap();
+    assert_eq!(one.items.len(), 1);
+    assert!(!one.complete);
+    assert_eq!(one.items[0].reference, expected[0]);
+    assert_eq!(
+        one.attention_cursor,
+        format!("attention:{}:{}", one.items[0].raised_seq, expected[0])
+    );
+    let two = space
+        .recall_attention(crate::types::AttentionRecallInput {
+            attention_cursor: Some(one.attention_cursor),
+            limit: Some(1),
+        })
+        .await
+        .unwrap();
+    assert_eq!(two.items.len(), 1);
+    assert_eq!(two.items[0].reference, expected[1]);
+    assert_eq!(two.items[0].raised_seq, one.items[0].raised_seq);
 }
 
 #[tokio::test]

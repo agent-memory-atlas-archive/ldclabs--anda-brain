@@ -483,10 +483,16 @@ absence.
 
 Rank by task relevance first, then by `MnemonicState.salience` and strength —
 how noteworthy and how available a memory is. Strength is computed, not swept:
-read `MnemonicState.effective_strength` when the engine provides it; a stored
-`memory_strength` is only the last written base. A missing value is unknown,
-never a default such as 0.5. Neither is truth: the factual answer still comes
-from `BELIEF`, never from rank.
+read `MnemonicState.effective_strength`, which the engine computes at read time
+from the base, its anchor and the pinned policy; a stored `memory_strength` is
+only the last written base. `null` or a missing value is unknown, never a
+default such as 0.5. Neither is truth: the factual answer still comes from
+`BELIEF`, never from rank.
+
+A symbol whose `package_ref` is `kip://local/draft@0.0.0` is this Space's draft
+vocabulary: Formation proposed it and the owner has not necessarily reviewed
+it. Query with it like any other symbol; once promoted, a draft and its target
+match as one.
 
 A `Commitment` is exempt. A promise nobody has asked about in months may be
 weakly available and is exactly what a "what do I owe?" question is for.

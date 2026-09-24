@@ -535,8 +535,8 @@ impl Space {
         let tasks = crate::runtime::RuntimeTasks::default();
         let memory_tool = MemoryTool::new(memory.clone());
         let note_tool = crate::product::control::ControlledNotes::new(product_control.clone());
-        // Formation and Maintenance may grow this Space's vocabulary; Recall
-        // may not, and gets the tool nowhere.
+        // Formation may draft vocabulary; Maintenance reviews drafts and
+        // Recall is read-only, so neither gets the tool.
         let declare_tool = crate::vocabulary::DeclareSymbolsTool::new(memory.clone())
             .with_product_control(product_control.clone());
 

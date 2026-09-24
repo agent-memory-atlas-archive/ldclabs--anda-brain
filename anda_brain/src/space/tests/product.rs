@@ -52,8 +52,16 @@ async fn product_record_sources_use_host_evidence_bindings_and_preserve_claim_se
 async fn managed_record(
     space: &std::sync::Arc<Space>,
 ) -> (crate::product::MemoryRecord, crate::product::SourceIdentity) {
+    managed_record_in(space, false).await
+}
+
+/// A managed claim, optionally made inside a `Project` context.
+async fn managed_record_in(
+    space: &std::sync::Arc<Space>,
+    scoped: bool,
+) -> (crate::product::MemoryRecord, crate::product::SourceIdentity) {
     let caller = anda_core::Principal::management_canister();
-    declare_types(space, &["WritingStyle"]).await;
+    declare_types(space, &["WritingStyle", "Project"]).await;
     let source = crate::product::SourceIdentity {
         key: "fixture-conversation".into(),
         parents: vec!["fixture-session".into()],
@@ -86,11 +94,20 @@ async fn managed_record(
         .await
         .unwrap();
     let mut request = kip::request_with(
-        r#"MUTATE {
+        if scoped {
+            r#"MUTATE {
+        CREATE CONCEPT ?owner { TYPE "Person" NAME "Owner" SET FIELDS {key: :owner} }
+        CREATE CONCEPT ?task { TYPE "Project" NAME "Release planning" }
+        CREATE CONCEPT ?value { TYPE "WritingStyle" NAME "Concise release notes" }
+        ASSERT ?claim (?owner, "prefers", ?value) { by: ?owner, mode: "stated", confidence: 0.9, evidence: :msg1, at: "2026-09-22T00:00:00.000Z", context: [?task] }
+    }"#
+        } else {
+            r#"MUTATE {
         CREATE CONCEPT ?owner { TYPE "Person" NAME "Owner" SET FIELDS {key: :owner} }
         CREATE CONCEPT ?value { TYPE "WritingStyle" NAME "Concise release notes" }
         ASSERT ?claim (?owner, "prefers", ?value) { by: ?owner, mode: "stated", confidence: 0.9, evidence: :msg1 }
-    }"#,
+    }"#
+        },
         kip::param("owner", caller.to_string()),
     );
     request.ingest = kip::observation_ingest(
@@ -266,11 +283,27 @@ async fn stale_model_tools_cannot_publish_symbols_or_lease_tasks() {
     state.epoch += 1;
     space.product_control.save(state).await.unwrap();
 
+    // Formation is the one agent that drafts vocabulary.
+    let formation = space
+        .engine
+        .ctx_with(
+            SELF_USER_ID,
+            crate::agents::FormationAgent::NAME,
+            "",
+            anda_core::RequestMeta::default(),
+        )
+        .unwrap();
+    formation
+        .base
+        .set_state(crate::product::control::ProcessingEpoch(
+            space.product_epoch() - 1,
+        ));
     let vocabulary = crate::vocabulary::DeclareSymbolsTool::new(space.memory.clone())
         .with_product_control(space.product_control.clone());
     let error = vocabulary
         .call(
-            ctx.child_base(crate::vocabulary::DeclareSymbolsTool::NAME)
+            formation
+                .child_base(crate::vocabulary::DeclareSymbolsTool::NAME)
                 .unwrap(),
             crate::vocabulary::DeclareSymbolsArgs {
                 types: vec!["StaleType".into()],
@@ -391,6 +424,64 @@ async fn product_correction_preserves_old_claim_and_rejects_stale_or_changed_int
         Some(crate::product::SourceAdmissionError::Suppressed)
     ));
     assert_eq!(space.conversations.len(), before);
+    space.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn product_revisions_keep_the_claims_context_set() {
+    // §14.2: a supersession across context sets is `SupersessionMismatch`;
+    // §25.4: succession only ends a value on the same context line. So both
+    // revisions speak in the original claim's context set.
+    let app = test_app_state("product_context");
+    let space = create_loaded_space(&app, "product_context").await;
+    let caller = anda_core::Principal::management_canister();
+    let (record, _) = managed_record_in(&space, true).await;
+    assert_eq!(record.context_refs.len(), 1, "{record:?}");
+
+    let correct = crate::product::ChangeInput {
+        operation_id: "scoped-correct".into(),
+        record_id: record.id.clone(),
+        expected_revision: record.revision,
+        kind: crate::product::ChangeKind::Correct,
+        new_value: Some("Risk section first".into()),
+    };
+    let preview = space
+        .product_prepare(caller, correct.clone())
+        .await
+        .unwrap();
+    let receipt = space
+        .product_commit(caller, correct.operation_id, preview.preview_digest)
+        .await
+        .unwrap();
+    assert_eq!(receipt.state, "confirmed", "{receipt:?}");
+    let corrected = space
+        .product_record(receipt.replacement_record.as_deref().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(corrected.context_refs, record.context_refs);
+    assert_eq!(
+        space.product_record(&record.id).await.unwrap().status,
+        "superseded"
+    );
+
+    let change = crate::product::ChangeInput {
+        operation_id: "scoped-change".into(),
+        record_id: corrected.id.clone(),
+        expected_revision: corrected.revision,
+        kind: crate::product::ChangeKind::WorldChange,
+        new_value: Some("Summary first".into()),
+    };
+    let preview = space.product_prepare(caller, change.clone()).await.unwrap();
+    let receipt = space
+        .product_commit(caller, change.operation_id, preview.preview_digest)
+        .await
+        .unwrap();
+    assert_eq!(receipt.state, "confirmed", "{receipt:?}");
+    let changed = space
+        .product_record(receipt.replacement_record.as_deref().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(changed.context_refs, record.context_refs);
     space.close().await.unwrap();
 }
 

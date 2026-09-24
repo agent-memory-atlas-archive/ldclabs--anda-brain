@@ -20,7 +20,7 @@ const empty = {types:[],predicates:[],commands:[],summary:'no additional changes
 const plan = {...empty, types:['AnswerStyle'], commands:[`MUTATE {
   CREATE CONCEPT ?actor {TYPE "Person" NAME "Alice"}
   CREATE CONCEPT ?value {TYPE "AnswerStyle" NAME "concise"}
-  ASSERT ?claim (?actor,"prefers",?value) {by:?actor,mode:"stated",evidence: :msg1}
+  ASSERT ?claim (?actor,"prefers",?value) {by:?actor,mode:"stated",evidence: :msg1,at:"2026-09-22T00:00:00.000Z"}
 }`],summary:'stored'}
 function post(ai: Ai, space: string, action: string, body: unknown) {
   return handleRequest(new Request(`https://test/v1/${space}/${action}`,{method:'POST',body:JSON.stringify(body)}),{BRAIN:env.BRAIN,AI:ai} as Env)

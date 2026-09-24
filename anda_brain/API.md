@@ -30,6 +30,8 @@ The Rust `product` module provides Assertion-backed `MemoryRecord` projections, 
 
 - `Correct` — the caller's own claim was wrong. A new claim with a user-statement Evidence supersedes the old Assertion and keeps the world interval it covered (an absent start is materialized as `{latest: <original asserted_at>}`); a `belief_revision` Activity records it. The old Assertion reads `superseded`.
 - `WorldChange` — the world moved on. One new claim from now; temporal succession ends the old value, which stays `active` and true for its time.
+
+Both revisions keep the record's `context_refs` (exposed on `MemoryRecord`): supersession across context sets fails `SupersessionMismatch` (Spec §14.2), and a new value outside the old context set would start a second succession line instead of ending the old value (Spec §25.4).
 - `Misrecorded` — the Brain recorded what the caller never said. That needs recording repair, which this deployment does not provide, so prepare fails `unsupported_capability`; it is never written as a correction or a world change.
 
 None of them rewrites a Concept label or creates an illegal cross-Proposition supersession. Undo is another conditional change.
@@ -60,13 +62,19 @@ Anda Bot currently consumes these contracts through a temporary sibling patch. R
 - Most business endpoints return an RPC envelope: `RpcResponse<T>`
 - MCP clients can use the built-in Streamable HTTP endpoint: `/mcp/<space_id>`, or the local stdio server: `anda_brain mcp --space-id <space_id> [local|aws]`
 
-The KIP `3251912` / `cognitive-memory@2.0.0` synchronization preserves authentication
+The KIP `597db44` / `cognitive-memory@2.0.0` synchronization preserves authentication
 and JSON/CBOR/Markdown negotiation. It adds `GET /v1/{space_id}/memory/attention`,
 removes the settlement's decay fields and `retention.expired_assertions` (decay and
 claim expiry are computed at read time), deprecates `memory_strength_decay_factor`,
 and rejects an unparseable formation `timestamp` with 400. No five-intent Memory
 Interface or standard after barrier is added; a conversation id is not a processing
-receipt. Settlement `skills`
+receipt. The KIP `597db44` follow-up adds the draft vocabulary (`GET
+/v1/{space_id}/schema/drafts`, `POST /v1/{space_id}/schema/promote`), orders
+attention by `(raised_seq, ref)` with cursors that may stop inside one commit,
+raises due Commitments natively (settlement `commitments`), and gates model writes:
+an Assertion citing a captured message needs `at` (or `valid.from`), and a
+`MnemonicState.memory_strength` needs `last_metabolized_at` and the host-bound
+`strength_policy` (both `ConstraintViolation`). Settlement `skills`
 adds optional `unsupported_reason` when no trusted learning pipeline is configured;
 legacy counters stay zero. Watch `disarmed` also counts Nexus expiry, while text
 conditions remain deferred without a configured semantic evaluator. Model-generated Formation requests cannot replace captured
@@ -268,6 +276,7 @@ export interface MemorySettlementReport {
   revised_roots?: unknown[];
   new_corrections: number;
   watches: WatchSettlement;
+  commitments: { due: number; raised: number; error?: string }; // due Commitments raised as commitment_review Activities
   skills: SkillSettlement;
   correction_scan_error?: string;
   correction_scan_incomplete: boolean;
@@ -972,20 +981,23 @@ Saved product previews that reference successfully purged elements are scrubbed 
 
 ### GET `/v1/{space_id}/memory/attention`
 
-- Purpose: Attention recall (KIP Memory Interface §4): the Watches that fired and the Commitments Maintenance found due, after the cursor the caller kept.
+- Purpose: Attention recall (KIP Memory Interface §4): the Watches that fired and the Commitments the settlement found due, after the cursor the caller kept.
 - Auth: SpaceToken/CWT `read`; public spaces permit anonymous reads.
-- Query: `AttentionRecallInput` — `attention_cursor` (optional), `limit` (1–50 raising Activities, default 20).
+- Query: `AttentionRecallInput` — `attention_cursor` (optional), `limit` (1–50 items, default 20).
 - Response: `RpcResponse<AttentionRecall>`, with existing JSON/CBOR/Markdown negotiation. An invalid cursor or limit is 400.
 
 ```ts
 export interface AttentionRecallInput {
-  attention_cursor?: string; // "attention:<n>"; absent or "attention:-1" reads from the first raise
-  limit?: number; // 1–50; default 20
+  attention_cursor?: string; // opaque; absent, "attention:start" or the older "attention:-1" reads from the first raise
+  limit?: number; // 1–50 items; default 20
 }
 
 export interface AttentionRecall {
-  items: AttentionItem[]; // ordered by raised_seq
-  attention_cursor: string; // "attention:<highest delivered raised_seq>"; keep it after taking the items
+  items: AttentionItem[]; // ordered by (raised_seq, ref)
+  // The last delivered position: "attention:<seq>:<ref>" when the page stopped
+  // inside one commit, "attention:<seq>" when every item up to that commit was
+  // delivered, the input cursor (or "attention:start") when nothing was new.
+  attention_cursor: string;
   complete: boolean; // every raise after the input cursor was read
 }
 
@@ -1000,7 +1012,38 @@ export interface AttentionItem {
 }
 ```
 
-Every item is raised by a commit: a `watch_fire` Activity, or a `commitment_review` Activity in which Maintenance named the Commitments it found due. The passing of `due_at` alone raises nothing. Reading changes nothing in memory, and the cursor does not expire; the caller keeps it once it has taken the items. An item grants nothing: acting on it passes the action gate and Governance like any other act. This is separate from the authenticated runtime inbox (`GET /v1/{space_id}/attention`), which pages the action gate's wake records.
+Every item is raised by a commit: a `watch_fire` Activity, or a `commitment_review` Activity naming a due Commitment. The settlement raises each due `pending`/`blocked` Commitment without a Watch natively, with one Activity keyed `commitment_review:<commitment id>:<due_at>` (Profile §17): a replay raises nothing, and only a new `due_at` raises the Commitment again. The Commitment's status is not changed. One commit may raise several items, and a page may stop between them; the next page continues after the last item delivered. Reading changes nothing in memory, and the cursor does not expire; the caller keeps it once it has taken the items. An item grants nothing: acting on it passes the action gate and Governance like any other act. This is separate from the authenticated runtime inbox (`GET /v1/{space_id}/attention`), which pages the action gate's wake records.
+
+### GET `/v1/{space_id}/schema/drafts`
+
+- Purpose: The Space's draft vocabulary (KIP §20.16): every symbol Formation drafted with `DEFINE` (or the deprecated `declare_memory_symbols`), its definition and, once promoted, the lineage it joined.
+- Auth: SpaceToken/CWT `read`; public spaces permit anonymous reads.
+- Response: `RpcResponse<SchemaDrafts>`.
+
+```ts
+export interface SchemaDrafts {
+  package_ref: 'kip://local/draft@0.0.0';
+  schema_environment_version: number;
+  symbols: DraftSymbol[];
+}
+
+export interface DraftSymbol {
+  kind: 'ConceptType' | 'PredicateType';
+  name: string;
+  ref: string; // kip://local/draft@0.0.0/<name>; elements keep it forever
+  definition: object; // as drafted
+  promoted_to?: string; // the target lineage, e.g. kip://profiles/cognitive-memory/Person
+}
+```
+
+Each new draft queues one `review_schema` SleepTask keyed `review_schema:<kind>:<ref>` (with `symbol_kind` / `symbol_ref` attributes). Maintenance reviews it and may propose a promotion in its summary; it never defines or promotes a symbol. A Formation request that defines symbols contains only `DEFINE`s (at most eight), with literal names and bodies in this deployment's name shapes; the Space holds at most 512 symbols of its own.
+
+### POST `/v1/{space_id}/schema/promote`
+
+- Purpose: Promote one draft symbol onto an installed symbol of the same kind (KIP §20.16). This is a Schema migration: elements written under the draft keep their exact `schema_ref` / `predicate_ref`, and type and predicate matching read the two lineages as one from the new Schema Environment version on. A draft is promoted at most once; nothing promotes implicitly.
+- Auth: management CWT `write` (it stands for `manage_schema`); Space tokens cannot promote.
+- Request body: `{kind: 'ConceptType' | 'PredicateType', from: string, to: string}` — `from` is the draft's local name or exact ref, `to` the installed symbol's exact ref or an unambiguous local name.
+- Response: `RpcResponse<{promoted: string, to: string, schema_environment_version: number}>`. An unknown draft, a kind mismatch, an unresolved target or a repeat promotion is 400.
 
 ### GET `/v1/{space_id}/memory_status`
 

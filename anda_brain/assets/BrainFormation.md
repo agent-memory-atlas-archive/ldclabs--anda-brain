@@ -690,7 +690,8 @@ UPSERT CONCEPT ?alice { MATCH {type: "Person", key: :counterparty} SET FIELDS {n
   `CREATE ASSERTION`, `CREATE ACTIVITY`, `ASSERT`, and — for corrections and
   your own Activities — `TRANSITION` to `retracted`, `superseded`,
   `corrected`, `running`, `completed`, `failed` or `cancelled`. A `TRANSITION`
-  that selects with `WHERE` must carry `LIMIT 20` or less.
+  that selects with `WHERE` must carry `LIMIT 20` or less. `DEFINE PREDICATE` /
+  `DEFINE CONCEPT TYPE` draft new vocabulary in a request of their own (A.3).
 
   `TRANSITION ... TO "archived"` and `TO "tombstoned"` are refused here, and so
   are `UPDATE`, `SET RETENTION`, `PURGE`, `PURGE PAYLOAD` and `MERGE CONCEPT`.
@@ -701,35 +702,53 @@ UPSERT CONCEPT ?alice { MATCH {type: "Person", key: :counterparty} SET FIELDS {n
   summary. Write the state as a literal: a `TRANSITION` whose state arrives as
   a parameter this request does not bind is refused, because the gate cannot
   check what it cannot read.
-- `declare_memory_symbols { types, predicates }` — see A.3.
+- `declare_memory_symbols { types, predicates }` — deprecated shortcut, see A.3.
 - The note tool, for working state that is not memory.
 
-## A.3 Vocabulary is a host decision
+## A.3 New vocabulary is a draft
 
 KIP 2.0 resolves every symbol through this Space's Schema Environment, so a
-command naming an undeclared type or predicate is refused with
-`SchemaSymbolNotFound`. This engine does not provide the draft vocabulary, so
-`DEFINE PREDICATE` / `DEFINE CONCEPT TYPE` is refused here; where the reference
-policy says to `DEFINE` a symbol, use `declare_memory_symbols` instead.
-
-`declare_memory_symbols` asks the *host* to publish a symbol into this Space's
-own package. The reference policy (§30) says Formation is not normally the
-Schema administrator, and that still holds — this is a bounded request, not
-administration: the host validates the name's shape, caps how many a Space may
-hold, versions the result, and can refuse. Before asking:
+command naming an undefined type or predicate is refused with
+`SchemaSymbolNotFound`. This engine provides the Space's draft vocabulary
+(Spec §20.16): `DEFINE PREDICATE` / `DEFINE CONCEPT TYPE` add one symbol to
+`kip://local/draft@0.0.0`, and a draft never changes afterwards or shadows a
+symbol anything else defines. Defining is a proposal, not administration: the
+host caps how many symbols a Space may hold and queues each new one for review,
+and only the Space's owner can promote a draft onto an installed package.
+Before defining:
 
 1. Check what the Space already speaks — `LIST TYPES`, `LIST PREDICATES`, and
-   the primer. Reuse a symbol that fits.
+   the primer. Reuse a symbol that fits. A draft symbol's `package_ref` is
+   `kip://local/draft@0.0.0`, and it is as usable as any other.
 2. A near-synonym is not a new symbol. `ships_to` and `shipping_address_is` split
    one memory into two that no query will ever join.
-3. Only then declare, in one call for everything the batch needs:
+3. Only then define. Send a request made of `DEFINE`s only — at most eight —
+   before the `MUTATE` that uses them; each commits on its own and resolves from
+   the next request:
 
-```json
-{"types": ["Project"], "predicates": ["works_on"]}
+```kip
+DEFINE CONCEPT TYPE "Instrument" {description: "A musical instrument someone plays or owns."}
 ```
 
-Types are UpperCamelCase, predicates are snake_case. A rejected name comes back
-in `rejected` — reuse an existing symbol rather than renaming around the refusal.
+```kip
+DEFINE PREDICATE "mentors" {
+  description: "The subject mentors the object.",
+  subject: {concept_types: ["Person"]},
+  object: {concept_types: ["Person"]}
+}
+```
+
+Write the name and the body as literals. Types are UpperCamelCase, predicates
+are snake_case. `description` is required. A predicate may also state
+`subject`, `object`, `functional`, `functional_by`, `boolean_completeness` and
+`temporal_conflict`, never `open_world: false` or `complete: true`; a Concept
+Type may add only open, optional `attributes`. `SchemaSymbolConflict` means the
+name already resolves: use it. The host queues the `review_schema` SleepTask
+for every new symbol (`review_schema:<kind>:<ref>`); do not create it yourself.
+
+`declare_memory_symbols {types, predicates}` remains for one release as a
+deprecated shortcut: it drafts bare names with a generic description. Prefer
+`DEFINE` with a description that says what the symbol means.
 
 An option someone prefers is a Concept typed by its kind — `ColorScheme`,
 `Editor`, `ReplyLength` — because `prefers` partitions by that type (§23). Declare
@@ -772,6 +791,10 @@ ASSERT (?alice, "prefers", ?dark_mode) {
   at: "2026-09-22T08:15:00.000Z"
 }
 ```
+
+The gate refuses an Assertion that cites one of these messages without `at` (or
+a written `valid.from`); only your own `mode: "inferred"` claims are exempt,
+because they are made when you write them.
 
 Each record already carries its `evidence_class` (from the speaker's role) and
 `observed_at`. User-message Evidence also carries the counterparty's semantic
@@ -821,6 +844,11 @@ operations can each stand alone.
 
 Mnemonic estimates are optional. Preserve meaningful supplied confidence,
 salience and utility; leave them absent when no defensible estimate exists.
+`MnemonicState.memory_strength` is a base, not a value that stands alone: write
+it together with `last_metabolized_at: :now` and `strength_policy:
+:strength_policy`, which the host binds on every write, so the engine can
+compute `effective_strength` (Profile §6.1). The gate refuses a base without
+them.
 
 ## A.6 World time
 

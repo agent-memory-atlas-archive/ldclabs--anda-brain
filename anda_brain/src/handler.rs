@@ -349,6 +349,43 @@ pub async fn get_memory_attention(
     Ok(ct.response(RpcResponse::success(rt)))
 }
 
+/// GET /v1/{space_id}/schema/drafts
+///
+/// The Space's draft vocabulary (Spec §20.16): every symbol Formation drafted,
+/// its definition and, once promoted, the lineage it was promoted to.
+pub async fn get_schema_drafts(
+    State(app): State<AppState>,
+    AppPath(space_id): AppPath<String>,
+    Accept(ct, _): Accept,
+    HeaderVals(token, sharding): HeaderVals,
+) -> Result<impl IntoResponse, AppError> {
+    let space = read_lenient(&app, &space_id, &token, sharding, unix_ms()).await?;
+    let rt = space.schema_drafts().await.map_err(AppError::bad_request)?;
+    Ok(ct.response(RpcResponse::success(rt)))
+}
+
+/// POST /v1/{space_id}/schema/promote
+///
+/// Promotes one draft symbol onto an installed package's symbol of the same
+/// kind: a Schema migration, so it takes the management credential that
+/// stands for `manage_schema` here. Formation and Maintenance can only draft
+/// and propose.
+pub async fn post_schema_promote(
+    State(app): State<AppState>,
+    AppPath(space_id): AppPath<String>,
+    Accept(ct, _): Accept,
+    HeaderVals(token, sharding): HeaderVals,
+    AppBytes(body): AppBytes,
+) -> Result<impl IntoResponse, AppError> {
+    let (space, input): (_, PromoteDraftInput) =
+        cwt_write_prelude(&app, &space_id, &token, sharding, &ct, &body, unix_ms()).await?;
+    let rt = space
+        .promote_draft_symbol(input)
+        .await
+        .map_err(AppError::bad_request)?;
+    Ok(ct.response(RpcResponse::success(rt)))
+}
+
 /// POST /v1/{space_id}/management/shadow_eval
 ///
 /// On-demand shadow evaluation (memory evolution plan, M11): compares a

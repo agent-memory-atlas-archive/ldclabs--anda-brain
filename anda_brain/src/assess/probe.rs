@@ -171,8 +171,10 @@ pub fn probe_observation(
                     );
                 };
                 let projection: Projection = serde_json::from_value(row.clone())?;
-                if projection.basis.is_none()
-                    || projection.policy.is_none()
+                if projection
+                    .basis
+                    .as_ref()
+                    .is_none_or(|basis| basis.policy.id.is_empty())
                     || projection
                         .slot_status
                         .is_some_and(|status| status != projection.status)

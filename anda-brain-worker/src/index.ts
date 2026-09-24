@@ -15,6 +15,7 @@ import {
   parseFormationInput,
   parseKipInput,
   parseMaintenanceInput,
+  parsePromoteInput,
   parseRecallInput,
   ValidationError,
 } from './validation.js'
@@ -23,7 +24,7 @@ export { AndaBrain }
 
 const MAX_BODY_BYTES = 256 * 1024
 const SPACE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
-const GET_ONLY = new Set(['info', 'formation_status', 'vocabulary', 'memory/attention'])
+const GET_ONLY = new Set(['info', 'formation_status', 'vocabulary', 'memory/attention', 'schema/drafts'])
 const POST_ACTIONS = new Set([
   'formation',
   'memory/forget',
@@ -33,6 +34,7 @@ const POST_ACTIONS = new Set([
   'probe',
   'execute_kip_readonly',
   'execute_kip',
+  'schema/promote',
 ])
 
 class ApiError extends Error {
@@ -86,6 +88,9 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       if (action === 'vocabulary') {
         return ok(await brain.vocabulary())
       }
+      if (action === 'schema/drafts') {
+        return ok(await brain.schemaDrafts())
+      }
       if (action === 'memory/attention') {
         const cursor = url.searchParams.get('attention_cursor') ?? undefined
         const limitText = url.searchParams.get('limit')
@@ -137,6 +142,17 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
           )
         }
         return ok(await brain.executeKipReadonlyBatch(batch.operations, batch.execution))
+      }
+      case 'schema/promote': {
+        // The owner's Schema migration (Spec §20.16): this API key already
+        // holds the administrative `execute_kip`, which is where
+        // `manage_schema` lives on this deployment.
+        const input = parsePromoteInput(body)
+        try {
+          return ok(await brain.promoteDraftSymbol(input))
+        } catch (error) {
+          throw new ApiError(error instanceof Error ? error.message : 'promotion failed', 422)
+        }
       }
       case 'execute_kip': {
         const batch = parseKipInput(body)

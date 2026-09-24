@@ -247,7 +247,6 @@ impl Agent<AgentCtx> for MaintenanceAgent {
         vec![
             "execute_kip".to_string(),
             NoteTool::NAME.to_string(),
-            crate::vocabulary::DeclareSymbolsTool::NAME.to_string(),
             crate::cognitive::MemoryRuntimeTool::NAME.to_string(),
             crate::kip_reference::KipReferenceTool::NAME.to_string(),
         ]

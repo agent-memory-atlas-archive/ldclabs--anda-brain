@@ -429,6 +429,14 @@ fn build_router(
             routing::get(get_memory_attention),
         )
         .route(
+            "/v1/{space_id}/schema/drafts",
+            routing::get(get_schema_drafts),
+        )
+        .route(
+            "/v1/{space_id}/schema/promote",
+            routing::post(post_schema_promote),
+        )
+        .route(
             "/v1/{space_id}/wiki/docs",
             routing::post(post_wiki_commit).get(list_wiki_docs),
         )

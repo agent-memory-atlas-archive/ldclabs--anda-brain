@@ -63,7 +63,7 @@ Maintenance may be granted read/search/project/maintain/archive/retention/merge 
     "max_transactions": 100
   },
   "parameters": {
-    "strength_policy": {"artifact_ref": "policy:half-life-30d", "content_digest": "sha256:..."},
+    "strength_policy": {"artifact_ref": "kip:strength-half-life-30d", "content_digest": "sha256:..."},
     "event_archive_after_days": 30,
     "skill_review_after_days": 14
   }
@@ -365,7 +365,7 @@ LIMIT 20
 
 # 17. Commitment and Watch Review
 
-Review pending, due-soon, overdue, blocked, fulfilled, and cancelled Commitments. Due time passing does not automatically delete/archive. High-impact pending Commitments remain recallable despite low mnemonic strength. A due Commitment with no Watch reaches attention only through this review: record a `commitment_review` Activity whose `inputs` name the Commitments found due; that commit's `space_seq` is the `raised_seq` of the `commitment_due` attention item (Profile §5.7, Memory Interface §4).
+Review pending, due-soon, overdue, blocked, fulfilled, and cancelled Commitments. Due time passing does not automatically delete/archive. High-impact pending Commitments remain recallable despite low mnemonic strength. A due Commitment with no Watch reaches attention only through this review: for each `pending` or `blocked` Commitment found due, record one `commitment_review` Activity whose `inputs` name it, with `CLIENT KEY "commitment_review:<commitment id>:<due_at>"`; that commit's `space_seq` is the `raised_seq` of the `commitment_due` attention item (Profile §5.7, §17, Memory Interface §4). The key is what keeps the next cycle from raising it again: a replayed key is `no_effect`, and only a new `due_at` raises the Commitment anew.
 
 ```prolog
 FIND(?commitment.id, ?commitment.name, ?commitment.attributes.due_at, ?commitment.attributes.status)
@@ -526,6 +526,8 @@ On stale version: re-read, re-evaluate, retry once with fresh precondition. Do n
 
 Maintenance may inspect Schema but cannot activate/migrate Packages without `manage_schema`. Schema is protected control state.
 
+A `review_schema` SleepTask (keyed `review_schema:<kind>:<exact symbol ref>`) names one draft symbol by kind (`ConceptType` or `PredicateType`) and exact reference (Spec §20.16). Compare it with `LIST TYPES` / `LIST PREDICATES`: a near-synonym of an existing symbol is recorded as an Insight about using that symbol, never as another `DEFINE`; a symbol worth keeping becomes a proposed promotion `{kind, from, to}` in the report for the owner, who alone holds `manage_schema`; an unused one is resolved. Maintenance never promotes a symbol itself.
+
 # 32. Trust
 
 Maintenance may consume trust policy in Projection but cannot rewrite protected trust policy without `manage_trust`. Cognitive text saying `trust this source` has no control-plane effect.
@@ -667,7 +669,11 @@ self-report; task_family only discovers possible controls and never selects one.
   write a decayed value, and **never decay Assertion confidence over time**.
   Reinforcement or weakening is an explicit write backed by a signal — a
   DecisionRecord's `used_refs`, a correction — that sets base and anchor together
-  under a version guard. Recall alone is never such a signal.
+  under a version guard. Recall alone is never such a signal. The host binds
+  `:strength_policy` (the standard `kip:strength-half-life-30d` pin) and `:now`
+  on every write: a base is written as `memory_strength: <base>,
+  last_metabolized_at: :now, strength_policy: :strength_policy`, and the gate
+  refuses a `memory_strength` without its anchor and pin.
 - Correction discovery supplies revised roots and bounded LIST DEPENDENTS results.
   A truncated walk remains incomplete. Nexus computes recursive dependency validity
   at read time (`_system.dependency_validity`); queue a re-derivation review as a
@@ -696,12 +702,20 @@ self-report; task_family only discovers possible controls and never selects one.
 - The former family-success-rate Skill rule does not run. The report's
   `skills.unsupported_reason` explains why no validated evaluation was performed.
 - Attention reaches the business agent only through a commit. A fired Watch is
-  already raised by its `watch_fire` Activity. For pending Commitments that are
-  due and have no Watch, record one `commitment_review` Activity whose `inputs`
-  name exactly those Commitments; that commit raises them as `commitment_due`
-  attention. Do not re-raise a Commitment an earlier review already named unless
-  something changed, and do not transition its status just because `due_at`
-  passed.
+  already raised by its `watch_fire` Activity. The settlement raises due
+  Commitments before this cycle (its report's `commitments`): each `pending` or
+  `blocked` Commitment that is due and has no Watch gets one `commitment_review`
+  Activity naming it, keyed `commitment_review:<commitment id>:<due_at>`. A
+  replay raises nothing and only a new `due_at` raises it again, so do not record
+  these Activities yourself, and do not transition a Commitment just because its
+  `due_at` passed.
+- Draft vocabulary: Formation drafts symbols into `kip://local/draft@0.0.0` and
+  the host queues one `review_schema` SleepTask per symbol, with `symbol_kind`
+  and `symbol_ref` attributes. Review it as §31 says: a near-synonym of an
+  existing symbol becomes an Insight about using that symbol; a symbol worth
+  keeping becomes a proposed promotion `{kind, from, to}` in your summary for the
+  owner; an unused one is completed. You cannot define or promote a symbol:
+  `DEFINE` is refused here, and promotion is the owner's Schema migration.
 
 ## A.3 Cognitive work and valid records
 
@@ -760,7 +774,6 @@ Formation resumes after the maintenance single-flight slot is released.
 - execute_kip: bounded KQL/KML/META subject to A.4 and the record gate.
 - kip_reference: read embedded protocol references through the host's document
   index and pagination instructions, without granting any execution capability.
-- declare_memory_symbols: validated, capped requests for new vocabulary.
 - memory_runtime: syntax, content_digest, arm_watch or lease_task. For mutations,
   supply target_ref and the exact expected_version from _system.version. The host
   chooses the authenticated Principal and a five-minute lease; re-read afterwards.

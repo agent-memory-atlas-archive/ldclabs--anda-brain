@@ -346,6 +346,16 @@ impl Space {
             );
         }
 
+        // Due Commitments reach attention through a commit (Profile §5.7).
+        report.commitments = settlement::raise_due_commitments(self, now_ms).await;
+        if let Some(error) = &report.commitments.error {
+            log::warn!(
+                target: "brain",
+                space_id = self.id;
+                "commitment review failed — some due Commitments were not raised: {error}"
+            );
+        }
+
         report.skills = settlement::skill_settlement();
         #[cfg(feature = "learning")]
         if self.learning.is_configured() {

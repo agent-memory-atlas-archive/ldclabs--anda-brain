@@ -10,7 +10,7 @@ const auth = systemAuth()
 const plan = { types: ['WritingStyle'], predicates: [], summary: 'stored', commands: [`MUTATE {
   UPSERT CONCEPT ?person {MATCH {type:"Person",key:"${SYSTEM_PRINCIPAL}"} SET FIELDS {name:"owner"}}
   CREATE CONCEPT ?preference {TYPE "WritingStyle" NAME "old preference"}
-  ASSERT ?claim (?person,"prefers",?preference) {by:?person,mode:"stated",evidence: :msg1}
+  ASSERT ?claim (?person,"prefers",?preference) {by:?person,mode:"stated",evidence: :msg1,at:"2026-09-22T00:00:00.000Z"}
 }`] }
 type Brain = { [K in keyof AndaBrain]: AndaBrain[K] extends (...args: infer A) => infer R ? (...args: A) => Promise<Awaited<R>> : never }
 function stub() { return env.BRAIN.getByName(crypto.randomUUID()) as unknown as Brain }

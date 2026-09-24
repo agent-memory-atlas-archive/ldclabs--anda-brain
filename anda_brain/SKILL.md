@@ -23,7 +23,7 @@ metadata:
 
 # 🧠 Anda Brain
 
-This skill targets the Rust **Anda Brain 0.12.1** service with KIP 2.0 (`3251912`),
+This skill targets the Rust **Anda Brain 0.12.1** service with KIP 2.0 (`597db44`),
 `cognitive-memory@2.0.0`, Nexus 0.14 and KIP 0.14. The Cloudflare Worker uses a
 separate engine and does not acquire these Rust runtime capabilities automatically.
 Check the deployed service and its configuration before choosing an optional path.
@@ -642,9 +642,15 @@ If `ED25519_PUBKEYS` is empty, core local MCP memory tools can omit tokens; runt
 
 Attention recall is a separate, read-only view: `GET /v1/{space_id}/memory/attention`
 with `attention_cursor` (optional) and `limit` (1–50) returns fired Watches
-(`watch_fired`) and due Commitments (`commitment_due`) ordered by `raised_seq`,
-plus a new `attention_cursor`. Keep that cursor after taking the items and pass it
-next time; it never expires, and reading changes nothing. An item grants nothing.
+(`watch_fired`) and due Commitments (`commitment_due`) ordered by
+`(raised_seq, ref)`, plus a new opaque `attention_cursor`. Keep that cursor after
+taking the items and pass it next time; it never expires, a page may stop inside
+one commit, and reading changes nothing. An item grants nothing.
+
+`GET /v1/{space_id}/schema/drafts` lists the vocabulary Formation drafted
+(`kip://local/draft@0.0.0`). Only the Space's owner, with the management token,
+promotes a draft onto an installed symbol: `POST /v1/{space_id}/schema/promote`
+with `{kind, from, to}`.
 
 These routes use structured JSON/CBOR POST bodies and JSON/CBOR/Markdown responses.
 Runtime credentials are mandatory even on public/local Spaces. Configuration is

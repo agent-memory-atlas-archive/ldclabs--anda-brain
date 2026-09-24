@@ -19,8 +19,8 @@ The [offline Eval API and CLI have been retired](anda_brain/README.md#offline-re
 
 ## KIP 2.0 update
 
-This release tracks KIP `3251912` and the Cognitive Memory Profile
-`kip://profiles/cognitive-memory@2.0.0` (revision `sha256:3ea9e459…`; the draft
+This release tracks KIP `597db44` and the Cognitive Memory Profile
+`kip://profiles/cognitive-memory@2.0.0` (revision `sha256:734aa0fd…`; the draft
 rewrote 2.0.0 in place, so only the digest names the revision). Rust builds on
 `anda_kip` / `anda_cognitive_nexus` 0.14 and the Worker on `@ldclabs/kip-do` 0.14.
 Spaces activated under the earlier 2.1.0 draft are not migrated; use new Spaces.
@@ -33,14 +33,21 @@ KIP 1.x Spaces still upgrade automatically.
   own `timestamp` is its observation time. An unparseable request `timestamp`
   is now rejected (400) instead of silently becoming the receipt time.
 - **Options are typed by kind.** The Profile has no `Preference` type: an option
-  is a Concept typed by its kind (`ColorScheme`, `Editor`), declared through the
-  Space's vocabulary package when needed, and `prefers` is functional within one kind.
+  is a Concept typed by its kind (`ColorScheme`, `Editor`), drafted when needed,
+  and `prefers` is functional within one kind.
+- **Draft vocabulary.** New types and predicates are drafted with `DEFINE` into the
+  Space's `kip://local/draft@0.0.0` (KIP §20.16): additive, name-checked and
+  capped by the host, each queued for a `review_schema`. `GET
+  /v1/{space_id}/schema/drafts` lists them and the owner promotes one onto an
+  installed symbol with `POST /v1/{space_id}/schema/promote`.
 - **Decay is computed.** No settlement sweep writes `memory_strength`; the engine
-  derives strength from base, anchor and a pinned policy, and a missing value is
-  unknown. `memory_strength_decay_factor` is deprecated and ignored.
+  derives `effective_strength` from base, anchor and the pinned
+  `kip:strength-half-life-30d` policy the host binds on every model write, and a
+  missing value is unknown. `memory_strength_decay_factor` is deprecated and ignored.
 - **Attention recall.** `GET /v1/{space_id}/memory/attention` returns fired Watches
-  and due Commitments ordered by the commit that raised them, with a cursor the
-  caller keeps. Maintenance raises a due Commitment with a `commitment_review` Activity.
+  and due Commitments ordered by `(raised_seq, ref)`, with a cursor the caller
+  keeps. The settlement raises each due Commitment without a Watch once per
+  `due_at` with a `commitment_review` Activity.
 - **Learning pointers.** Skills point at their `current_trial` / `current_evaluation`;
   `GradingState` and lineage fields are computed and never written.
 

@@ -36,10 +36,8 @@ pub(super) fn earliest_basis(request: &Request, response: &Response) -> Option<P
                 let Ok(projection) = serde_json::from_value::<Projection>(value.clone()) else {
                     continue;
                 };
-                if projection.policy.is_none() {
-                    continue;
-                }
-                let Some(basis) = projection.basis else {
+                let Some(basis) = projection.basis.filter(|basis| !basis.policy.id.is_empty())
+                else {
                     continue;
                 };
                 let Some(due) = basis
