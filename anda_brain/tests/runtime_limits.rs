@@ -88,7 +88,7 @@ fn app(calls: Arc<AtomicUsize>, pending: bool) -> AppState {
         Arc::new(models),
         Arc::new(vec![]),
         "review".into(),
-        "0.12.1".into(),
+        "0.13.0".into(),
         0,
     )
     .with_llm_concurrency(1)

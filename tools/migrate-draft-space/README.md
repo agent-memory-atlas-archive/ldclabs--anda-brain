@@ -9,8 +9,7 @@ would be reinterpreted under it.
 
 It is a standalone crate, outside the repository workspace, because it links both engines:
 the 0.13 engine that wrote the Space (read side) and the 0.14 engine it is rebuilt on
-(write side). Until 0.14 is published the write side builds from the sibling `anda-db`
-checkout, as the workspace does.
+(write side). Both come from crates.io.
 
 ## What it does
 

@@ -73,7 +73,7 @@ func TestCLISecretEnvironmentAndFlagPrecedence(t *testing.T) {
 	auth := make(chan string, 3)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth <- r.Header.Get("Authorization")
-		_, _ = w.Write([]byte(`{"name":"brain","version":"0.12.1","sharding":0}`))
+		_, _ = w.Write([]byte(`{"name":"brain","version":"0.13.0","sharding":0}`))
 	}))
 	defer server.Close()
 	for _, tc := range []struct {

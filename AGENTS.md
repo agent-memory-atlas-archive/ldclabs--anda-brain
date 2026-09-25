@@ -33,11 +33,10 @@ write KIP directly.
 The service tracks KIP `11a82ec` and `kip://profiles/cognitive-memory@2.0.0`
 (content digest `sha256:734aa0fd…`; the draft rewrote 2.0.0 in place, so only the
 digest names a revision). It pins `anda_kip = "=0.14.0"` and requires
-`anda_cognitive_nexus = "0.14.0"`; the Worker uses `@ldclabs/kip-do` 0.14. Until
-those and a matching `anda_engine` are published, `Cargo.toml` patches the sibling
-`anda-db` and `anda` checkouts and the Worker links `../../anda-db/ts/kip-do`
-(run its `pnpm run build` after syncing). Patch the shared DB/KIP stack together;
-verify one type identity with Cargo metadata.
+`anda_cognitive_nexus = "0.14.0"` with `anda_engine` 0.16 from crates.io; the Worker
+uses `@ldclabs/kip-do` 0.14 from npm. The commented `[patch.crates-io]` block in
+`Cargo.toml` is for developing against sibling `anda-db` / `anda` checkouts: enable
+the shared DB/KIP stack together and verify one type identity with Cargo metadata.
 KIP v2 has not been deployed. Use fresh v2 Spaces for current acceptance;
 do not add pre-release old-data migration work (including 2.1.0-draft Spaces)
 unless explicitly requested. The one requested exception is the standalone
@@ -178,9 +177,7 @@ you touch `anda-brain-worker/`:
 CI=true pnpm --filter @ldclabs/anda-brain-worker check
 ```
 
-The Worker links the sibling `anda-db/ts/kip-do` (0.14, unpublished) until that
-release reaches npm; build its `dist/` first, use the repository's pnpm lockfile and
-run `CI=true pnpm install --frozen-lockfile`.
+Install with the repository's pnpm lockfile: `CI=true pnpm install --frozen-lockfile`.
 The check includes generated-asset verification, TypeScript, tests and a deployment
 dry run; it does not deploy the Worker.
 
@@ -329,7 +326,7 @@ or endpoints:
 - Keep English and Chinese runtime guides in separate files, with language links
   and matching formulas, limits, API names and examples. Chinese entry points link
   to `_cn.md`; never remove necessary detail while separating translations.
-- Keep the release version at 0.12.1 until explicitly asked to change it. Record completed
+- Keep the release version at 0.13.0 until explicitly asked to change it. Record completed
   behavior and known limits in `CHANGELOG.md`; do not list planned work as shipped.
 
 ## Prompt and Asset Changes

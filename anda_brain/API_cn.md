@@ -40,7 +40,7 @@ Rust `product` 模块提供由 Assertion 支撑的 `MemoryRecord`、稳定修订
 
 `RuntimeConfig::validate` 静态校验不加载 Space、不运行模型、不探测业务服务、不配置授权。可选学习运行时的 `product_readiness` 表示已安装隔离工作流的准备度，区分服务缺失、身份摘要不匹配、校准未审阅及批准门槛。ready 不授予业务部署权限，每项工作的服务与原生权限检查仍必须执行。
 
-Anda Bot 当前通过同级临时 patch 使用这些合同。改用已发布的 0.12.1 crate 后再移除 patch，并保持 registry DB/KIP/Core 的单一类型身份。机制测试不证明真实学习收益或完整成本计量。
+Anda Bot 通过已发布的 crate 使用这些合同，并保持 DB/KIP/Core 的单一类型身份。机制测试不证明真实学习收益或完整成本计量。
 
 
 ## 1) 通用约定

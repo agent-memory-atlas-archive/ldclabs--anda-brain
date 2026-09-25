@@ -22,8 +22,8 @@ Cloudflare Worker 的对应能力和限制见[逐提交核对](anda-brain-worker
 本版本对齐 KIP `11a82ec` 与 Cognitive Memory Profile
 `kip://profiles/cognitive-memory@2.0.0`（修订 `sha256:734aa0fd…`；草案原地重写了
 2.0.0，只能靠摘要区分修订）。Rust 基于 `anda_kip` / `anda_cognitive_nexus` 0.14，
-Worker 基于 `@ldclabs/kip-do` 0.14。用早先 2.1.0 草案激活过的 Space 不做迁移，请使用
-新 Space；KIP 1.x 的 Space 仍会自动升级。
+Worker 基于 `@ldclabs/kip-do` 0.14。用早先 2.1.0 草案激活过的 Space 不会自动迁移，请使用
+新 Space，或用独立工具 `tools/migrate-draft-space` 迁移；KIP 1.x 的 Space 仍会自动升级。
 
 - **世界时间。** 世界变化记为从变化时刻起的一条新 Assertion，时序继承结束旧值，旧值
   仍回答它所在时段的问题；只有主张本身有误时才用 supersede。Formation 按所引用消息

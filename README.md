@@ -23,7 +23,8 @@ This release tracks KIP `11a82ec` and the Cognitive Memory Profile
 `kip://profiles/cognitive-memory@2.0.0` (revision `sha256:734aa0fd…`; the draft
 rewrote 2.0.0 in place, so only the digest names the revision). Rust builds on
 `anda_kip` / `anda_cognitive_nexus` 0.14 and the Worker on `@ldclabs/kip-do` 0.14.
-Spaces activated under the earlier 2.1.0 draft are not migrated; use new Spaces.
+Spaces activated under the earlier 2.1.0 draft are not migrated automatically; use new
+Spaces, or move one with the standalone `tools/migrate-draft-space`.
 KIP 1.x Spaces still upgrade automatically.
 
 - **World time.** A changed world is one new Assertion from the change; temporal

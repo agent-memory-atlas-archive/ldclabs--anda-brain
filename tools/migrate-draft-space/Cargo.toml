@@ -26,12 +26,3 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 
-# Until 0.14 is published, the write side builds from the sibling checkout, as
-# the repository workspace does.
-[patch.crates-io]
-anda_cognitive_nexus = { path = "../../../anda-db/rs/anda_cognitive_nexus" }
-anda_db = { path = "../../../anda-db/rs/anda_db" }
-anda_db_schema = { path = "../../../anda-db/rs/anda_db_schema" }
-anda_db_tfs = { path = "../../../anda-db/rs/anda_db_tfs" }
-anda_kip = { path = "../../../anda-db/rs/anda_kip" }
-anda_object_store = { path = "../../../anda-db/rs/anda_object_store" }

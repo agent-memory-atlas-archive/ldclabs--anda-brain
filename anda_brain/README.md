@@ -28,7 +28,7 @@ Removal does not erase an embedding application's original chat/files/logs/backu
 
 `RuntimeConfig::validate` performs static validation without loading a Space, running models, probing services or provisioning grants. The optional learning runtime reports `product_readiness` for installed isolated workflow bindings, including missing services, mismatched pins, missing reviewed calibration and approval gates. Ready is not business deployment authority; native per-item service/permission checks remain mandatory.
 
-Anda Bot currently consumes these contracts through a temporary sibling patch. Replace it with the published 0.12.1 crate before removing the patch, while keeping the shared registry DB/KIP/Core type identity. No empirical learning improvement or full cost accounting is implied by these mechanism tests.
+Anda Bot consumes these contracts from the published crate and keeps one shared DB/KIP/Core type identity. No empirical learning improvement or full cost accounting is implied by these mechanism tests.
 
 
 ## KIP 2.0 update
@@ -1010,16 +1010,14 @@ their HTTP routes. Everything else is opt-in:
 
 ```toml
 # Embedding the library: memory only
-anda_brain = "0.12"
+anda_brain = "0.13"
 
 # …or the full surface
-anda_brain = { version = "0.12", features = ["mcp", "wiki"] }
+anda_brain = { version = "0.13", features = ["mcp", "wiki"] }
 ```
 
-To use development APIs before a crate release, build this checkout. Until
-`anda_kip` / `anda_cognitive_nexus` 0.14 and a matching `anda_engine` are
-published, `Cargo.toml` patches the sibling `anda-db` and `anda` checkouts. Trusted experiment hosts add `experiments`; it is independent of the
-`learning` feature.
+To use development APIs before a crate release, build this checkout. Trusted
+experiment hosts add `experiments`; it is independent of the `learning` feature.
 
 The `anda_brain` **binary** is the full product and declares
 `required-features = ["mcp", "wiki"]`, so every command below passes

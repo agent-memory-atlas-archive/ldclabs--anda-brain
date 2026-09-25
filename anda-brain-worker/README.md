@@ -37,18 +37,15 @@ Brain API 保持可用。两个适配器现在还在 `memory_basic` 级别提供
 
 ## 依赖：kip-do 0.14
 
-`@ldclabs/kip-do` 0.14 发布到 npm 之前，`package.json` 链接同级
-`anda-db/ts/kip-do`。它的入口是 `dist/`，所以同步 anda-db 后先在那边构建：
+`@ldclabs/kip-do` 0.14 来自 npm，安装、测试和部署不需要同级检出：
 
 ```bash
-(cd ../anda-db/ts/kip-do && pnpm run build)
 pnpm install --frozen-lockfile
 pnpm --filter @ldclabs/anda-brain-worker check
 ```
 
-发布后改回 registry 版本，普通安装、测试和部署即不再需要同级检出。主动刷新 vendored KIP
-提示资产时，`sync:assets` 默认使用同级源码；也可用 `ANDA_KIP_SOURCE` 指向
-已下载的 `anda_kip` crate 目录，按发布版本同步。
+主动刷新 vendored KIP 提示资产时，`sync:assets` 默认使用同级 `anda-db` 源码；也可用
+`ANDA_KIP_SOURCE` 指向已下载的 `anda_kip` crate 目录，按发布版本同步。
 
 ## 与完整版的边界
 
@@ -248,7 +245,7 @@ Formation、Maintenance、Recall 规划及回答阶段均支持查阅。查阅�
 digest 或运行时动作。最终结果省略 `references` 或使用 `[]`，才会进入原有校验及执行流程。
 查阅不会读取图谱、更新快照、扩展权限，也不构成记忆证据或变更覆盖。
 
-`@ldclabs/kip-do` 暂时链接同级 0.14（未发布）；协议参考独立锁定为 Cargo 中的 `anda_kip = 0.14.0`。
+`@ldclabs/kip-do` 使用 npm 上的 0.14；协议参考独立锁定为 Cargo 中的 `anda_kip = 0.14.0`。
 生成检查验证协议 pin、各参考文件 SHA-256 与生成文件；引擎补丁版本不改变协议资料来源。
 从仓库根目录刷新资源：
 

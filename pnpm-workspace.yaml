@@ -8,7 +8,10 @@ allowBuilds:
   protobufjs: true
   sharp: true
   workerd: true
+# pnpm refuses versions published less than a day ago. The KIP toolkit and its
+# engine ship release-for-release with this repository, so trust them by name.
 minimumReleaseAgeExclude:
-  - '@ldclabs/kip-do@0.13.2'
+  - '@ldclabs/kip-do'
+  - '@ldclabs/kip-lang'
 onlyBuiltDependencies:
   - esbuild

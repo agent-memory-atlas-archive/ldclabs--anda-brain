@@ -46,7 +46,7 @@ Removal does not erase an embedding application's original chat/files/logs/backu
 
 `RuntimeConfig::validate` performs static validation without loading a Space, running models, probing services or provisioning grants. The optional learning runtime reports `product_readiness` for installed isolated workflow bindings, including missing services, mismatched pins, missing reviewed calibration and approval gates. Ready is not business deployment authority; native per-item service/permission checks remain mandatory.
 
-Anda Bot currently consumes these contracts through a temporary sibling patch. Replace it with the published 0.12.1 crate before removing the patch, while keeping the shared registry DB/KIP/Core type identity. No empirical learning improvement or full cost accounting is implied by these mechanism tests.
+Anda Bot consumes these contracts from the published crate and keeps one shared DB/KIP/Core type identity. No empirical learning improvement or full cost accounting is implied by these mechanism tests.
 
 
 ## 1) Common Conventions

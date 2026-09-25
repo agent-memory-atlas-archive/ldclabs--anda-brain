@@ -2,18 +2,18 @@
 
 All notable changes to the Anda Brain project.
 
-## [Unreleased] — KIP `11a82ec` synchronization
+## [0.13.0] — 2026-09-25
 
 **Breaking for draft data.** The service now tracks KIP `11a82ec` (following the
 earlier `3251912` and `597db44` passes) and
 `kip://profiles/cognitive-memory@2.0.0` (content digest
 `sha256:734aa0fd93b6258d433a6f71915d9d5118552e2ea0458a3050d368dcfcc1d1b3`). The draft
 rewrote 2.0.0 in place and dropped 2.1.0, so Spaces activated under the 2.1.0 draft
-are not compatible and are not migrated; use new Spaces. KIP 1.x Spaces still upgrade
+are not compatible and are not migrated automatically; use new Spaces, or move one with
+the standalone `tools/migrate-draft-space` (below). KIP 1.x Spaces still upgrade
 automatically, and a 1.x `Preference` keeps an open legacy type. Rust depends on
-`anda_kip =0.14.0` / `anda_cognitive_nexus 0.14.0` and the Worker on `@ldclabs/kip-do`
-0.14; until they and a matching `anda_engine` are published, the workspace patches the
-sibling `anda-db` and `anda` checkouts and the Worker links the sibling kip-do.
+`anda_kip =0.14.0`, `anda_cognitive_nexus` 0.14 and `anda_engine` 0.16 from crates.io,
+and the Worker on `@ldclabs/kip-do` 0.14 from npm.
 
 ### Memory semantics
 
@@ -222,9 +222,11 @@ sibling `anda-db` and `anda` checkouts and the Worker links the sibling kip-do.
   that forms nothing. KIP2-MIF-002, KIP2-MIF-005 and KIP2-REL-013 pass through the
   KIP runner (mechanism evidence); the other MIF/REL vectors depend on what a model
   extracts and were not run (no live provider run is recorded here).
-- A promoted draft does not yet re-key existing Propositions (anda-db N6b):
-  `ENSURE PROPOSITION` after a promotion may create a second tuple for one written
-  under the draft. Capsule import mapping is not exposed by this service.
+- Capsule import mapping is not exposed by this service.
+- A build with `wiki` (including the service binary) does not open a Space whose wiki
+  collections Brain 0.11 created: they lack `generation` / `digest_pending`, which
+  0.12.0 added as required fields. The lean library, which Anda Bot embeds, is not
+  affected.
 - Behavioral gains from these changes are not measured here (`not_run` until MIB).
 
 ## [0.12.1] — 2026-09-23

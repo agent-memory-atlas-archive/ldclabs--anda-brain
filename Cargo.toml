@@ -85,15 +85,15 @@ schemars = "1"
 # Optional local overrides: enable the shared DB/KIP stack together, and the
 # Anda engine built against it.
 [patch.crates-io]
-anda_core = { path = "../anda/anda_core" }
-anda_engine = { path = "../anda/anda_engine" }
-anda_cognitive_nexus = { path = "../anda-db/rs/anda_cognitive_nexus" }
-anda_db = { path = "../anda-db/rs/anda_db" }
-anda_db_schema = { path = "../anda-db/rs/anda_db_schema" }
-anda_db_tfs = { path = "../anda-db/rs/anda_db_tfs" }
+# anda_core = { path = "../anda/anda_core" }
+# anda_engine = { path = "../anda/anda_engine" }
+# anda_cognitive_nexus = { path = "../anda-db/rs/anda_cognitive_nexus" }
+# anda_db = { path = "../anda-db/rs/anda_db" }
+# anda_db_schema = { path = "../anda-db/rs/anda_db_schema" }
+# anda_db_tfs = { path = "../anda-db/rs/anda_db_tfs" }
 # anda_db_utils = { path = "../anda-db/rs/anda_db_utils" }
-anda_object_store = { path = "../anda-db/rs/anda_object_store" }
-anda_kip = { path = "../anda-db/rs/anda_kip" }
+# anda_object_store = { path = "../anda-db/rs/anda_object_store" }
+# anda_kip = { path = "../anda-db/rs/anda_kip" }
 
 [profile.dev.package."*"]
 # Shrink dependency code and unwind tables so macOS debug builds fit the
