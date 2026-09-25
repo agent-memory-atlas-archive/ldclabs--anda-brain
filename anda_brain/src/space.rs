@@ -2122,6 +2122,10 @@ pub(crate) async fn reset_v1_bookkeeping(db: &Arc<AndaDB>) -> Result<(), BoxErro
             }
         }
         usage.flush(unix_ms()).await?;
+        // This handle carries the stored schema; the ledger reopens the
+        // collection with its current one, which AndaDB refuses while an older
+        // handle is still open.
+        db.close_collection("memory_usage").await?;
     }
     if db.metadata().collections.contains("recall_misses") {
         db.delete_collection("recall_misses").await?;

@@ -201,6 +201,12 @@ sibling `anda-db` and `anda` checkouts and the Worker links the sibling kip-do.
 - The usage ledger's `last_self_test_at` (added after 0.12.1) is optional, so a
   Space created by 0.12.1 opens again: a schema upgrade may only add optional
   fields, and the required one refused the `memory_usage` collection.
+- A KIP 1.x Space opens again. The one-time bookkeeping reset read the usage ledger
+  under its stored schema and left that handle open, so the ledger's schema upgrade
+  was refused and the Space failed to load. Verified on a copy of an Anda Bot
+  database written by Brain 0.11.
+- The lean library build no longer warns about a vocabulary helper only the wiki
+  digest uses.
 
 ### Known limits
 

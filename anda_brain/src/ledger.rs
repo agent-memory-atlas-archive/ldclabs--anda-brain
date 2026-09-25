@@ -480,25 +480,52 @@ impl MissCache {
     }
 }
 
+/// The ledger as published Brains stored it (0.11 through 0.12.1, schema v2),
+/// for upgrade tests.
+#[cfg(test)]
+pub(crate) mod v2 {
+    use super::*;
+
+    #[derive(Debug, Clone, Default, Serialize, Deserialize, AndaDBSchema)]
+    pub(crate) struct MemoryUsageV2 {
+        pub _id: u64,
+        pub entity: String,
+        pub recall_count: u64,
+        pub self_test_count: u64,
+        pub last_recalled_at: u64,
+        pub correction_count: u64,
+        pub last_corrected_at: u64,
+        pub flushed_recall_count: u64,
+        pub dirty: u64,
+        pub updated_at: u64,
+    }
+
+    /// Creates a v2 `memory_usage` collection holding `rows` and flushes it.
+    pub(crate) async fn create(db: &AndaDB, rows: &[MemoryUsageV2]) -> Result<(), DBError> {
+        let mut schema = MemoryUsageV2::schema()?;
+        schema.with_version(2);
+        let collection = db
+            .open_or_create_collection(
+                schema,
+                CollectionConfig {
+                    name: "memory_usage".to_string(),
+                    description: "Memory usage ledger (recall/correction counters)".to_string(),
+                },
+                async |collection| collection.create_btree_index_nx(&["entity"]).await,
+            )
+            .await?;
+        for row in rows {
+            collection.add_from(row).await?;
+        }
+        collection.flush(anda_engine::unix_ms()).await?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use anda_db::database::DBConfig;
-
-    /// The ledger row as Brain 0.12.1 stored it (schema v2).
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, AndaDBSchema)]
-    struct MemoryUsageV2 {
-        _id: u64,
-        entity: String,
-        recall_count: u64,
-        self_test_count: u64,
-        last_recalled_at: u64,
-        correction_count: u64,
-        last_corrected_at: u64,
-        flushed_recall_count: u64,
-        dirty: u64,
-        updated_at: u64,
-    }
 
     #[tokio::test]
     async fn a_v2_ledger_upgrades_in_place() {
@@ -508,25 +535,15 @@ mod tests {
             ..Default::default()
         };
         let db = Arc::new(AndaDB::create(store.clone(), config.clone()).await.unwrap());
-        let mut schema = MemoryUsageV2::schema().unwrap();
-        schema.with_version(2);
-        let v2 = db
-            .open_or_create_collection(
-                schema,
-                CollectionConfig {
-                    name: "memory_usage".to_string(),
-                    description: "Memory usage ledger (recall/correction counters)".to_string(),
-                },
-                async |collection| collection.create_btree_index_nx(&["entity"]).await,
-            )
-            .await
-            .unwrap();
-        v2.add_from(&MemoryUsageV2 {
-            entity: "C:7".into(),
-            self_test_count: 1,
-            updated_at: 1,
-            ..Default::default()
-        })
+        v2::create(
+            &db,
+            &[v2::MemoryUsageV2 {
+                entity: "C:7".into(),
+                self_test_count: 1,
+                updated_at: 1,
+                ..Default::default()
+            }],
+        )
         .await
         .unwrap();
         db.close().await.unwrap();

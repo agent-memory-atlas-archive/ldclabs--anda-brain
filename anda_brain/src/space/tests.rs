@@ -997,11 +997,20 @@ async fn a_published_v1_space_resets_only_legacy_bookkeeping_once() {
         .await
         .unwrap(),
     );
-    let ledger = crate::ledger::UsageLedger::connect(&db).await.unwrap();
-    ledger
-        .record_recall(&BTreeSet::from(["C:1".into(), "C-999".into()]), unix_ms())
-        .await
-        .unwrap();
+    // The usage ledger as the published Brain stored it (schema v2): the
+    // bookkeeping reset reads it before the Space upgrades it in place.
+    crate::ledger::v2::create(
+        &db,
+        &["C:1", "C-999"].map(|entity| crate::ledger::v2::MemoryUsageV2 {
+            entity: entity.into(),
+            recall_count: 1,
+            last_recalled_at: unix_ms(),
+            updated_at: unix_ms(),
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
     let misses = crate::ledger::MissCache::connect(&db).await.unwrap();
     misses.record_miss("old search", unix_ms()).await.unwrap();
     db.save_extension_from(
@@ -1014,7 +1023,6 @@ async fn a_published_v1_space_resets_only_legacy_bookkeeping_once() {
     .await
     .unwrap();
     db.close().await.unwrap();
-    drop(ledger);
     drop(misses);
     drop(db);
     let space = app
