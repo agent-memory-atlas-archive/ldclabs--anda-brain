@@ -198,6 +198,10 @@ and the Worker on `@ldclabs/kip-do` 0.14 from npm.
 
 ### Fixes
 
+- Core and Engine require at least 0.16.1, so downstream lockfiles cannot retain
+  the 0.16.0 releases that use incompatible DB/KIP 0.13 types.
+- The tokenizer is pinned to `tiktoken-rs =0.12.0`, matching the implementation
+  version advertised by Recall budgets, receipts and the Memory Interface.
 - The usage ledger's `last_self_test_at` (added after 0.12.1) is optional, so a
   Space created by 0.12.1 opens again: a schema upgrade may only add optional
   fields, and the required one refused the `memory_usage` collection.

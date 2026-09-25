@@ -33,8 +33,9 @@ axum = { version = "0.8", features = [
   "tokio",
   "query",
 ], default-features = true }
-anda_core = { version = "0.16" }
-anda_engine = { version = "0.16" }
+# 0.16.1 is the first published Core/Engine pair using the DB/KIP 0.14 stack.
+anda_core = { version = "0.16.1" }
+anda_engine = { version = "0.16.1" }
 anda_engine_server = { version = "0.16" }
 anda_web3_client = { version = "0.16" }
 anda_object_store = "0.14"
@@ -69,7 +70,8 @@ log = { version = "0.4", features = ["kv_serde"] }
 clap = { version = "4.6", features = ["derive", "env"] }
 tower = { version = "0.5", features = ["limit", "load-shed", "util"] }
 tower-http = { version = "0.7", features = ["compression-gzip", "cors"] }
-tiktoken-rs = "0.12"
+# Keep the implementation aligned with recall_budget::TOKENIZER and its public contract.
+tiktoken-rs = "=0.12.0"
 markdown = "1"
 mimalloc = { version = "0.1", features = ["v3"] }
 rand = "0.10"
