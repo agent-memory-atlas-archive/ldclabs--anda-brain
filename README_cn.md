@@ -19,7 +19,7 @@ Cloudflare Worker 的对应能力和限制见[逐提交核对](anda-brain-worker
 
 ## KIP 2.0 更新
 
-本版本对齐 KIP `597db44` 与 Cognitive Memory Profile
+本版本对齐 KIP `11a82ec` 与 Cognitive Memory Profile
 `kip://profiles/cognitive-memory@2.0.0`（修订 `sha256:734aa0fd…`；草案原地重写了
 2.0.0，只能靠摘要区分修订）。Rust 基于 `anda_kip` / `anda_cognitive_nexus` 0.14，
 Worker 基于 `@ldclabs/kip-do` 0.14。用早先 2.1.0 草案激活过的 Space 不做迁移，请使用

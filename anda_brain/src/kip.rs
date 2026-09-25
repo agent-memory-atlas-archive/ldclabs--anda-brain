@@ -334,21 +334,12 @@ pub fn observation_ingest(
     })
 }
 
-/// Whether a command writes memory in a transaction: a mutation other than a
-/// standalone `DEFINE`, which commits to the Schema Environment on its own
-/// and mints nothing (Spec §20.16).
-fn writes_memory(command: &Command) -> bool {
-    match command {
-        Command::Kml(statement) => {
-            !matches!(statement.clauses.as_slice(), [MutationClause::Define(_)])
-        }
-        _ => false,
-    }
-}
-
 /// Attach captured source bytes when a request opens a write transaction.
 /// Read-only requests must not carry ingest: KIP refuses observations that
-/// have no transaction to mint into. A model may neither replace the ingest
+/// have no transaction to mint into. A request with several writes is several
+/// transactions, and each entry's `client_key` is what makes them resolve one
+/// Evidence rather than mint a copy each (Spec §71.1); [`observation_ingest`]
+/// always sets it. A model may neither replace the ingest
 /// block nor shadow a captured source handle at either parameter level.
 pub fn attach_observation(
     request: &mut Request,
@@ -376,7 +367,7 @@ pub fn attach_observation(
     if request.operations.iter().any(|operation| {
         operation
             .parse()
-            .is_ok_and(|command| writes_memory(&command))
+            .is_ok_and(|command| command.opens_write_transaction())
     }) {
         request.ingest = Some(observation.clone());
     }
@@ -402,7 +393,7 @@ pub fn attach_host_bindings(request: &mut Request, now_ms: u64) -> Result<(), St
     if !request.operations.iter().any(|operation| {
         operation
             .parse()
-            .is_ok_and(|command| writes_memory(&command))
+            .is_ok_and(|command| command.opens_write_transaction())
     }) {
         return Ok(());
     }
@@ -439,7 +430,7 @@ pub fn attach_intent_bindings(
     if !request.operations.iter().any(|operation| {
         operation
             .parse()
-            .is_ok_and(|command| writes_memory(&command))
+            .is_ok_and(|command| command.opens_write_transaction())
     }) {
         return Ok(());
     }
@@ -867,7 +858,7 @@ fn cognition_refusal(command: &Command, parameters: Option<&Map<String, Json>>) 
 fn define_batch_refusal(commands: &[Command]) -> Option<String> {
     let defines = commands
         .iter()
-        .filter(|command| command.is_mutation() && !writes_memory(command))
+        .filter(|command| command.is_mutation() && !command.opens_write_transaction())
         .count();
     if defines == 0 {
         return None;
@@ -1548,6 +1539,27 @@ mod tests {
         attach_observation(&mut mixed, &observation).unwrap();
         assert!(mixed.ingest.is_some());
         mixed.validate().unwrap();
+
+        // Two writes are two transactions, and both mint the observation. Its
+        // client_key makes the second resolve the first one's Evidence; KIP
+        // refuses the batch without it rather than recording one message twice
+        // (Spec §71.1).
+        let mut writes = request("CREATE ACTIVITY ?a { SET FIELDS {} }");
+        writes
+            .operations
+            .extend(request("CREATE ACTIVITY ?b { SET FIELDS {} }").operations);
+        writes.execution = Some(anda_kip::Execution::new(anda_kip::ExecutionMode::Sequence));
+        attach_observation(&mut writes, &observation).unwrap();
+        writes
+            .validate()
+            .expect("every captured message carries a client_key");
+        for entry in &mut writes.ingest.as_mut().unwrap().evidence {
+            entry.client_key = None;
+        }
+        assert_eq!(
+            writes.validate().unwrap_err().code,
+            anda_kip::KipErrorCode::InvalidRequestEnvelope
+        );
 
         let mut invalid = request("not a KIP command");
         attach_observation(&mut invalid, &observation).unwrap();

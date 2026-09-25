@@ -15,7 +15,7 @@
 
 ## KIP 2.0 更新
 
-本 Worker 对齐 KIP `597db44` 与 `kip://profiles/cognitive-memory@2.0.0`（修订
+本 Worker 对齐 KIP `11a82ec` 与 `kip://profiles/cognitive-memory@2.0.0`（修订
 `sha256:734aa0fd…`，只能靠摘要区分修订），使用 `@ldclabs/kip-do` 0.14。用 2.1.0 草案
 激活过的 Space 不做迁移。世界变化记为一条新 Assertion，由时序继承结束旧值；主张的
 `at` 取所引用消息的观察时间；选项按类别定型，Profile 没有 `Preference` 类型；衰减在

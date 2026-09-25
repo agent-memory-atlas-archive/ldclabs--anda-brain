@@ -30,7 +30,7 @@ The service stores memory in an AndaDB-backed Cognitive Nexus and uses KIP 2.0
 (Knowledge Interaction Protocol) internally. Business agents should not need to
 write KIP directly.
 
-The service tracks KIP `597db44` and `kip://profiles/cognitive-memory@2.0.0`
+The service tracks KIP `11a82ec` and `kip://profiles/cognitive-memory@2.0.0`
 (content digest `sha256:734aa0fd…`; the draft rewrote 2.0.0 in place, so only the
 digest names a revision). It pins `anda_kip = "=0.14.0"` and requires
 `anda_cognitive_nexus = "0.14.0"`; the Worker uses `@ldclabs/kip-do` 0.14. Until

@@ -19,7 +19,7 @@ The [offline Eval API and CLI have been retired](anda_brain/README.md#offline-re
 
 ## KIP 2.0 update
 
-This release tracks KIP `597db44` and the Cognitive Memory Profile
+This release tracks KIP `11a82ec` and the Cognitive Memory Profile
 `kip://profiles/cognitive-memory@2.0.0` (revision `sha256:734aa0fd…`; the draft
 rewrote 2.0.0 in place, so only the digest names the revision). Rust builds on
 `anda_kip` / `anda_cognitive_nexus` 0.14 and the Worker on `@ldclabs/kip-do` 0.14.

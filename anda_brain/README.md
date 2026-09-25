@@ -33,7 +33,7 @@ Anda Bot currently consumes these contracts through a temporary sibling patch. R
 
 ## KIP 2.0 update
 
-The service tracks KIP `597db44` and `kip://profiles/cognitive-memory@2.0.0`
+The service tracks KIP `11a82ec` and `kip://profiles/cognitive-memory@2.0.0`
 (revision `sha256:734aa0fd…`; only the digest names the revision). Rust uses
 `anda_kip`, Cognitive Nexus and AndaDB 0.14; the Worker uses `@ldclabs/kip-do`
 0.14. Spaces activated under the earlier 2.1.0 draft are not migrated. A changed

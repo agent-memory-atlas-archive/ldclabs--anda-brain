@@ -2,10 +2,10 @@
 
 All notable changes to the Anda Brain project.
 
-## [Unreleased] — KIP `597db44` synchronization
+## [Unreleased] — KIP `11a82ec` synchronization
 
-**Breaking for draft data.** The service now tracks KIP `597db44` (following the
-earlier `3251912` pass) and
+**Breaking for draft data.** The service now tracks KIP `11a82ec` (following the
+earlier `3251912` and `597db44` passes) and
 `kip://profiles/cognitive-memory@2.0.0` (content digest
 `sha256:734aa0fd93b6258d433a6f71915d9d5118552e2ea0458a3050d368dcfcc1d1b3`). The draft
 rewrote 2.0.0 in place and dropped 2.1.0, so Spaces activated under the 2.1.0 draft
@@ -17,6 +17,13 @@ sibling `anda-db` and `anda` checkouts and the Worker links the sibling kip-do.
 
 ### Memory semantics
 
+- An ingested message is one Evidence per request (KIP §71.1). A Formation
+  request with several writes is several transactions, and KIP now refuses it
+  unless every ingest entry carries `client_key`. The host already keys each
+  captured message, so a pass that writes in several statements still records
+  each message once. The host classifies writes with `anda_kip`'s
+  `Command::opens_write_transaction`, which also keeps an observation off a
+  request whose only KML operation is a standalone `DEFINE`.
 - World changes are one new Assertion from the change; the engine's temporal
   succession ends the older value, which keeps answering for its time. Supersession
   is reserved for a claim that was wrong. Formation prompts, the review pass and
