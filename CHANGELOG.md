@@ -15,6 +15,9 @@ All notable changes to the Anda Brain project.
   along that path); the same path now uses about 137 KiB in the Bot's release
   build and about 1.05 MiB in a development build, where the Bot's own
   unoptimized frames dominate.
+- The memory self-test no longer sends `max_output_tokens`: some OpenAI-style
+  backends reject the parameter, which failed every self-test there. The output
+  share is still reserved from the budget, as budgeted Recall already does.
 
 ## [0.13.0] — 2026-09-25
 

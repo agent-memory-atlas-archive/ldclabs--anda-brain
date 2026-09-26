@@ -299,15 +299,17 @@ fn self_test_request(
         if candidates.is_empty() {
             return Err("self-test candidate does not fit the token budget".into());
         }
+        // The output share is reserved here, not sent: some backends reject
+        // `max_output_tokens` entirely (as budgeted Recall notes), and the
+        // verdicts are short.
         let request = anda_core::CompletionRequest {
             instructions: SELF_TEST_INSTRUCTIONS.into(),
             prompt: serde_json::to_string(candidates)?,
-            max_output_tokens: Some(output_tokens),
             effort: Some(anda_core::ModelEffort::Low),
             ..Default::default()
         };
         let text = serde_json::json!({"instructions":request.instructions,"prompt":request.prompt,
-            "max_output_tokens":request.max_output_tokens,"effort":request.effort})
+            "effort":request.effort})
         .to_string();
         if crate::recall_budget::count(&text)? + output_tokens <= budget {
             return Ok(request);
@@ -495,9 +497,10 @@ mod tests {
         ];
         let request = self_test_request(&mut candidates, 1000).unwrap();
         assert_eq!(candidates.len(), 1);
-        assert_eq!(request.max_output_tokens, Some(250));
+        // Reserved from the budget, never sent to the provider.
+        assert_eq!(request.max_output_tokens, None);
         let text = serde_json::json!({"instructions":request.instructions,"prompt":request.prompt,
-            "max_output_tokens":request.max_output_tokens,"effort":request.effort})
+            "effort":request.effort})
         .to_string();
         assert!(crate::recall_budget::count(&text).unwrap() + 250 <= 1000);
         assert_eq!(
