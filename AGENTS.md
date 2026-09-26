@@ -143,8 +143,13 @@ cargo clippy -p anda_brain --all-targets --all-features -- -D warnings
 RUST_MIN_STACK=16777216 cargo test -p anda_brain --all-features
 ```
 
-The Cognitive Memory Profile schema paths can exceed Rust's 2 MiB test-thread stack
-in debug builds, so keep `RUST_MIN_STACK=16777216` on Rust test commands.
+Unoptimized async frames on the Space-loading and KIP paths can exceed Rust's 2 MiB
+test-thread stack in debug builds, so keep `RUST_MIN_STACK=16777216` on Rust test
+commands. Release code must fit the 2 MiB default worker stack: keep the
+`crate::boxed` inlining barriers where a subsystem is entered (Memory Interface
+dispatch, the recall pass and its channels, read-only KIP execution). Without
+them, the optimizer merges async poll frames into one frame that keeps a slot
+for every await.
 `cargo test -p anda_brain --all-features` includes a bin test that binds an
 ephemeral localhost port. In restricted sandboxes it may fail with
 `PermissionDenied`; rerun it with the required permission rather than treating

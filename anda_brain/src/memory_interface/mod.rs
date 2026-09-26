@@ -229,7 +229,7 @@ impl Space {
         owner: bool,
         request: Request,
     ) -> Response {
-        match self.memory_request_inner(namespace, owner, &request).await {
+        match crate::boxed(self.memory_request_inner(namespace, owner, &request)).await {
             Ok(response) => response,
             Err(error) => Response::failed(&request, &error),
         }
@@ -253,12 +253,15 @@ impl Space {
         if let Some(budget) = &request.budget {
             check_budget(budget)?;
         }
+        // Each intent is its own subsystem; see `crate::boxed`.
         match intent {
-            wire::Intent::Recall(input) => self.memory_recall(namespace, request, input).await,
-            wire::Intent::Forget(input) => {
-                self.memory_forget(namespace, owner, request, input).await
+            wire::Intent::Recall(input) => {
+                crate::boxed(self.memory_recall(namespace, request, input)).await
             }
-            intent => self.memory_intake(namespace, request, intent).await,
+            wire::Intent::Forget(input) => {
+                crate::boxed(self.memory_forget(namespace, owner, request, input)).await
+            }
+            intent => crate::boxed(self.memory_intake(namespace, request, intent)).await,
         }
     }
 

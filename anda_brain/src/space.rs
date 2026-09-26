@@ -1871,7 +1871,7 @@ impl Space {
         let nexus = self.memory.nexus();
         match timeout(
             READONLY_KIP_TIMEOUT,
-            kip::execute_readonly_request(nexus.as_ref(), &req),
+            crate::boxed(kip::execute_readonly_request(nexus.as_ref(), &req)),
         )
         .await
         {

@@ -2,6 +2,20 @@
 
 All notable changes to the Anda Brain project.
 
+## [Unreleased]
+
+### Fixes
+
+- Memory Interface requests stay well within a 2 MiB worker stack. The intent
+  dispatch, the recall pass and its channels, attention, basis and retention,
+  and read-only KIP execution are polled behind type-erased boxes, so an
+  optimizer can no longer fold them into one poll frame that keeps a slot for
+  every await. An Anda Bot development build aborted its daemon on the default
+  worker stack when an agent turn opened a session briefing (about 2.0 MiB
+  along that path); the same path now uses about 137 KiB in the Bot's release
+  build and about 1.05 MiB in a development build, where the Bot's own
+  unoptimized frames dominate.
+
 ## [0.13.0] — 2026-09-25
 
 **Breaking for draft data.** The service now tracks KIP `11a82ec` (following the

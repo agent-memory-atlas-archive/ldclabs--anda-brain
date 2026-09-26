@@ -272,13 +272,12 @@ impl Space {
         let started = tokio::time::Instant::now();
         let until = started + Duration::from_millis(deadline_ms);
         if let Some(target) = &input.target_ref {
-            let briefing = self
-                .expand(
-                    namespace,
-                    target,
-                    input.detail == Some(wire::RecallDetail::Evidence),
-                )
-                .await?;
+            let briefing = crate::boxed(self.expand(
+                namespace,
+                target,
+                input.detail == Some(wire::RecallDetail::Evidence),
+            ))
+            .await?;
             // An expansion has its own budget (MI §6).
             let max_tokens = budget.max_output_tokens.unwrap_or(EXPANSION_OUTPUT_TOKENS);
             return self.briefing_response(request, briefing, max_tokens, vec![]);
@@ -352,26 +351,24 @@ impl Space {
         let mode = input.mode();
 
         if mode == RecallMode::Attention {
-            let page = self
-                .scoped_attention(&scope, input.attention_cursor.clone())
-                .await?;
+            let page =
+                crate::boxed(self.scoped_attention(&scope, input.attention_cursor.clone())).await?;
             let coverage = Coverage::new(
                 scope.requested.clone(),
                 Channels::all(ChannelState::NotApplicable),
                 pending.clone(),
                 vec![],
             );
-            let basis_ref = self
-                .retain(
-                    namespace,
-                    snapshot_seq,
-                    &scope,
-                    json!(null),
-                    &coverage,
-                    &[],
-                    &after,
-                )
-                .await?;
+            let basis_ref = crate::boxed(self.retain(
+                namespace,
+                snapshot_seq,
+                &scope,
+                json!(null),
+                &coverage,
+                &[],
+                &after,
+            ))
+            .await?;
             let briefing = Briefing {
                 summary: format!(
                     "{} attention item(s) raised since the cursor. An item is a prompt to think, \
@@ -407,14 +404,14 @@ impl Space {
             let prompt = recall_prompt(query, mode, &scope, valid_at.as_deref(), as_of, &input);
             let pass = tokio::time::timeout(
                 remaining,
-                self.query_structured(
+                crate::boxed(self.query_structured(
                     crate::agents::SELF_USER_ID,
                     StringOr::Value(BrainRecallInput {
                         query: prompt,
                         context: None,
                         budget: None,
                     }),
-                ),
+                )),
             )
             .await;
             match pass {
@@ -496,31 +493,28 @@ impl Space {
 
         // Host channels.
         let query = input.query.clone().unwrap_or_default();
-        let (constraint_items, constraints_plan) = self
-            .exact_channel(
-                "FIND(?c) WHERE { ?c {type: \"Insight\"} FILTER(?c.attributes.insight_class == \"constraint\") }",
-                &scope,
-                as_of,
-                ItemRole::Constraint,
-            )
-            .await;
-        let (commitment_items, commitments_plan) = self
-            .exact_channel(
-                "FIND(?c) WHERE { ?c {type: \"Commitment\"} FILTER(IN(?c.attributes.status, [\"pending\", \"blocked\"])) }",
-                &scope,
-                as_of,
-                ItemRole::Constraint,
-            )
-            .await;
-        let (failure_items, failures_plan) = self
-            .search_channel(&query, "Experience", Some(true), &scope, as_of)
-            .await;
-        let (experience_items, experiences_plan) = self
-            .search_channel(&query, "Experience", Some(false), &scope, as_of)
-            .await;
-        let (skill_items, skills_plan) = self
-            .search_channel(&query, "Skill", None, &scope, as_of)
-            .await;
+        let (constraint_items, constraints_plan) = crate::boxed(self.exact_channel(
+            "FIND(?c) WHERE { ?c {type: \"Insight\"} FILTER(?c.attributes.insight_class == \"constraint\") }",
+            &scope,
+            as_of,
+            ItemRole::Constraint,
+        ))
+        .await;
+        let (commitment_items, commitments_plan) = crate::boxed(self.exact_channel(
+            "FIND(?c) WHERE { ?c {type: \"Commitment\"} FILTER(IN(?c.attributes.status, [\"pending\", \"blocked\"])) }",
+            &scope,
+            as_of,
+            ItemRole::Constraint,
+        ))
+        .await;
+        let (failure_items, failures_plan) =
+            crate::boxed(self.search_channel(&query, "Experience", Some(true), &scope, as_of))
+                .await;
+        let (experience_items, experiences_plan) =
+            crate::boxed(self.search_channel(&query, "Experience", Some(false), &scope, as_of))
+                .await;
+        let (skill_items, skills_plan) =
+            crate::boxed(self.search_channel(&query, "Skill", None, &scope, as_of)).await;
         for channel in [
             constraint_items,
             commitment_items,
@@ -592,10 +586,7 @@ impl Space {
 
         // resume: the scoped attention since the task's last cursor.
         let attention = if mode == RecallMode::Resume {
-            Some(
-                self.scoped_attention(&scope, input.attention_cursor.clone())
-                    .await?,
-            )
+            Some(crate::boxed(self.scoped_attention(&scope, input.attention_cursor.clone())).await?)
         } else {
             None
         };
@@ -612,9 +603,8 @@ impl Space {
         // Budget: required items stay; optional ones go lowest-value first.
         candidates.sort_by_key(|c| (!c.required, role_rank(c.item.role)));
         candidates.truncate(MAX_ITEMS);
-        let basis = self
-            .basis_for(&candidates, &scope, valid_at.as_deref(), as_of)
-            .await;
+        let basis =
+            crate::boxed(self.basis_for(&candidates, &scope, valid_at.as_deref(), as_of)).await;
         let summary_fallback = || {
             let mut lines: Vec<String> = candidates
                 .iter()
@@ -672,21 +662,19 @@ impl Space {
                     .zip(&candidates)
                     .map(|(item, c)| (item.reference.clone(), c.pins.clone()))
                     .collect();
-                let basis_ref = self
-                    .retain_as(
-                        &basis_id,
-                        namespace,
-                        snapshot_seq,
-                        &scope,
-                        basis.clone(),
-                        &coverage,
-                        &pins,
-                        &plans,
-                    )
-                    .await?;
+                let basis_ref = crate::boxed(self.retain_as(
+                    &basis_id,
+                    namespace,
+                    snapshot_seq,
+                    &scope,
+                    basis.clone(),
+                    &coverage,
+                    &pins,
+                    &plans,
+                ))
+                .await?;
                 briefing.basis_ref = basis_ref;
-                self.record_exposure(&briefing, &candidates, snapshot_seq)
-                    .await;
+                crate::boxed(self.record_exposure(&briefing, &candidates, snapshot_seq)).await;
                 return self.briefing_response(request, briefing, max_tokens, warnings);
             }
             // Drop the lowest-priority optional item; its channel is now

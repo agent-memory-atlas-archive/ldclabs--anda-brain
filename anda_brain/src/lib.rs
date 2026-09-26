@@ -19,6 +19,21 @@ macro_rules! profile {
 /// The Cognitive Memory Profile prefix every Profile symbol lives under.
 pub(crate) const PROFILE: &str = profile!();
 
+/// Polls `future` behind a type-erased box, as an inlining barrier.
+///
+/// An optimizer inlines an async function's state machine into its only
+/// caller, and the merged poll frame keeps a separate slot for every await it
+/// absorbed: in an Anda Bot development build (dependencies at opt-level 1),
+/// one agent turn that opened a Memory Interface session briefing reached
+/// 2 MiB, the default worker stack. A virtual call cannot be inlined, so the
+/// caller's frame stays its own size. Use it where a subsystem is entered,
+/// not on every await.
+pub(crate) fn boxed<'a, T>(
+    future: impl Future<Output = T> + Send + 'a,
+) -> anda_core::BoxFut<'a, T> {
+    Box::pin(future)
+}
+
 pub mod action;
 pub mod agents;
 pub mod assess;
