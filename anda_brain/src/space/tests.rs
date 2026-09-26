@@ -495,6 +495,54 @@ fn app_state_accepts_valid_signed_tokens_and_rejects_scope_mismatches() {
     );
 }
 
+#[test]
+fn audience_free_tokens_need_the_host_opt_in() {
+    let signing_key = signing_key(7);
+    let now_ms = 1_725_000_000_000;
+    let unscoped = crate::testkit::signed_token_for(&signing_key, SELF_USER_ID, None, "read");
+    let strict = test_app_state_with_signing_key("audience_strict", &signing_key);
+    assert!(
+        strict
+            .check_auth(&unscoped, "space-a", TokenScope::Read, now_ms)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("invalid audience")
+    );
+
+    let embedded =
+        test_app_state_with_signing_key("audience_embedded", &signing_key).with_audience_free_cwt();
+    let auth = embedded
+        .check_auth(&unscoped, "space-a", TokenScope::Read, now_ms)
+        .unwrap();
+    assert_eq!(auth.user, SELF_USER_ID);
+    assert_eq!(auth.scope, TokenScope::Read);
+    // Everything else is still verified: the scope, another named audience,
+    // and a signature from an untrusted key.
+    assert!(
+        embedded
+            .check_auth(&unscoped, "space-a", TokenScope::Write, now_ms)
+            .is_err()
+    );
+    let other = signed_token(&signing_key, SELF_USER_ID, "space-b", "read");
+    assert!(
+        embedded
+            .check_auth(&other, "space-a", TokenScope::Read, now_ms)
+            .is_err()
+    );
+    let forged = crate::testkit::signed_token_for(
+        &crate::testkit::signing_key(8),
+        SELF_USER_ID,
+        None,
+        "read",
+    );
+    assert!(
+        embedded
+            .check_auth(&forged, "space-a", TokenScope::Read, now_ms)
+            .is_err()
+    );
+}
+
 #[tokio::test]
 async fn app_state_loads_spaces_once_and_rejects_duplicate_loaded_space() {
     let app = test_app_state("load_cache");

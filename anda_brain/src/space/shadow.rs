@@ -189,6 +189,7 @@ impl AppState {
             llm_semaphore: self.llm_semaphore.clone(),
             llm_request_semaphore: self.llm_request_semaphore.clone(),
             ed25519_pubkeys: self.ed25519_pubkeys.clone(),
+            accept_audience_free_cwt: self.accept_audience_free_cwt,
             management: self.management.clone(),
             app_name: self.app_name.clone(),
             app_version: self.app_version.clone(),

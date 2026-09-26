@@ -4,6 +4,15 @@ All notable changes to the Anda Brain project.
 
 ## [Unreleased]
 
+### Added
+
+- `AppState::with_audience_free_cwt` lets an embedded single-Space host accept a
+  trusted user's CWT that names no audience as addressed to the requested Space,
+  for credentials issued before audiences existed (Anda Bot browser tokens before
+  0.13). Signature, expiry, subject and scope are still verified and a token
+  naming another audience is still refused. It is off by default: a shared service
+  keeps refusing unscoped tokens.
+
 ### Fixes
 
 - Memory Interface requests stay well within a 2 MiB worker stack. The intent

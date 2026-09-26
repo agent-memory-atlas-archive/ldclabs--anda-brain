@@ -104,6 +104,8 @@ pub struct AppState {
     http_client: reqwest::Client,
     models: Arc<Models>,
     ed25519_pubkeys: Arc<Vec<VerifyingKey>>,
+    /// See [`AppState::with_audience_free_cwt`].
+    accept_audience_free_cwt: bool,
     management: Arc<dyn Management>,
     /// Independent judge model (plan M9), installed on every space this
     /// state loads — service mode included, so shadow-eval verdicts stop
@@ -172,6 +174,7 @@ impl AppState {
             http_client,
             models,
             ed25519_pubkeys,
+            accept_audience_free_cwt: false,
             judge_model: Arc::new(None),
             prompts: Default::default(),
             clock: Arc::new(crate::runtime::BusinessClock::default()),
@@ -204,6 +207,20 @@ impl AppState {
         }
         self.prompts = prompts;
         Ok(self)
+    }
+
+    /// Accepts a CWT that names no audience as addressed to the requested
+    /// Space (consuming builder; call before the state is cloned).
+    ///
+    /// For an embedded single-Space host whose trusted users hold credentials
+    /// issued before audiences existed, such as Anda Bot browser tokens exported
+    /// before 0.13. The signature, expiry, subject and scope are still verified,
+    /// and a token that names another audience is still refused. Off by default:
+    /// a shared service must not treat one trusted key's unscoped token as valid
+    /// for every Space it hosts.
+    pub fn with_audience_free_cwt(mut self) -> Self {
+        self.accept_audience_free_cwt = true;
+        self
     }
 
     /// Configures the independent judge model this state installs on every
@@ -370,7 +387,10 @@ impl AppState {
         let cs1 = cose_sign1_from(data, &[], &[], &self.ed25519_pubkeys)?;
         let claims = cwt_from(&cs1.payload.unwrap_or_default(), (now_ms / 1000) as i64)?;
         let token = CWToken::from_claims(claims)?;
-        if token.audience != audience && token.audience != "*" {
+        if token.audience != audience
+            && token.audience != "*"
+            && !(self.accept_audience_free_cwt && token.audience.is_empty())
+        {
             return Err("invalid audience".into());
         }
 

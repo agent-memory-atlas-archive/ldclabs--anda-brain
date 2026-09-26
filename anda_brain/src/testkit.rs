@@ -117,9 +117,20 @@ pub(crate) fn signed_token(
     audience: &str,
     scope: &str,
 ) -> String {
+    signed_token_for(signing_key, user, Some(audience), scope)
+}
+
+/// [`signed_token`] with an optional audience: `None` mints the unscoped
+/// credential that clients issued before audiences existed.
+pub(crate) fn signed_token_for(
+    signing_key: &SigningKey,
+    user: Principal,
+    audience: Option<&str>,
+    scope: &str,
+) -> String {
     let claims = Claims {
         subject: Some(user.to_string()),
-        audience: Some(audience.to_string().into()),
+        audience: audience.map(|audience| audience.to_string().into()),
         extra: CoseMap::from_iter([(
             Label::Int(iana::CWTClaimScope),
             Value::Text(scope.to_string()),
