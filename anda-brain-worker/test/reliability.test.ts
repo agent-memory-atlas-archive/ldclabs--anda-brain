@@ -2,12 +2,13 @@ import { env, runInDurableObject, evictDurableObject } from 'cloudflare:test'
 import { expect, it, vi } from 'vitest'
 import { systemAuth, SYSTEM_PRINCIPAL, type CognitiveNexus } from '@ldclabs/kip-do'
 import { maintainMemory, formMemory, recallMemory } from '../src/operations.js'
-import type { BrainRpc, Env } from '../src/types.js'
+import type { BrainRpc, Env, Message } from '../src/types.js'
 import type { AndaBrain } from '../src/brain.js'
 import { AiResponseError, ModelDeadline, addUsage, createRecallPlan, createRecallAnswer } from '../src/ai.js'
 import { handleRequest } from '../src/index.js'
 import { MemoryProduct } from '../src/product.js'
 import { forget } from '../src/forget.js'
+import { capturedEvidence } from '../src/kip.js'
 
 type Brain = { [K in keyof AndaBrain]: AndaBrain[K] extends (...args: infer A) => infer R ? (...args: A) => Promise<Awaited<R>> : never }
 const makeBrain = () => env.BRAIN.getByName(crypto.randomUUID()) as unknown as Brain
@@ -396,6 +397,7 @@ it('reads superseded claims and raising Activities through their indexes', async
   })
 })
 
+// Drafting 512 symbols takes several seconds, close to Vitest's 5 s default.
 it('refuses a DEFINE past the vocabulary cap as a plan error, not a host failure', async () => {
   const space = crypto.randomUUID()
   const brain = env.BRAIN.getByName(space) as unknown as Brain
@@ -406,7 +408,7 @@ it('refuses a DEFINE past the vocabulary cap as a plan error, not a host failure
   }), runtime(async () => ({response:{...empty, commands:['DEFINE PREDICATE "mentors" {description: "The subject mentors the object."}']}})))
   expect(response.status).toBe(422)
   expect(await response.json()).toMatchObject({error:{data:{error:{code:'ResourceExhausted'}}}})
-})
+}, 30_000)
 
 it('treats a blank model timeout as the default and caps it at a caller budget', () => {
   const unset = new ModelDeadline('')
@@ -465,4 +467,12 @@ it('fences in-flight passes and scrubs previews when execute_kip purges', async 
     method: 'POST', body: JSON.stringify({command: 'CREATE CONCEPT ?c {TYPE "Person" NAME "Kept"}'}),
   }), runtime(async () => { throw new Error('unexpected AI call') }))
   expect((await brain.productStatus()).epoch).toBe(epoch + 1)
+})
+
+it('classes an unknown or inherited message role as a plain message', () => {
+  const at = '2026-09-27T00:00:00.000Z'
+  const roles = ['user', 'constructor', '__proto__', 'toString', 'narrator']
+  const captured = capturedEvidence(roles.map((role) => ({ role, content: 'x' }) as unknown as Message), at)
+  expect(captured.map((evidence) => evidence.evidence_class))
+    .toEqual(['user_statement', 'message', 'message', 'message', 'message'])
 })

@@ -332,7 +332,7 @@ or endpoints:
 - Keep English and Chinese runtime guides in separate files, with language links
   and matching formulas, limits, API names and examples. Chinese entry points link
   to `_cn.md`; never remove necessary detail while separating translations.
-- Keep the release version at 0.13.0 until explicitly asked to change it. Record completed
+- Keep the release version at 0.13.1 until explicitly asked to change it. Record completed
   behavior and known limits in `CHANGELOG.md`; do not list planned work as shipped.
 
 ## Prompt and Asset Changes

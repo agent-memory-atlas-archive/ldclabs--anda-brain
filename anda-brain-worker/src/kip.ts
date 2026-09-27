@@ -69,9 +69,13 @@ const EVIDENCE_CLASS: Record<string, string> = {
   system: 'message',
 }
 
-/** The Evidence class a message's role makes it. */
+/**
+ * The Evidence class a message's role makes it. Staged-source roles are not
+ * validated, so only the table's own entries count: `constructor` or
+ * `__proto__` must not reach an inherited member.
+ */
 export function evidenceClassOf(role: string): string {
-  return EVIDENCE_CLASS[role] ?? 'message'
+  return Object.hasOwn(EVIDENCE_CLASS, role) ? EVIDENCE_CLASS[role]! : 'message'
 }
 
 /** Commands this long are parsed afresh every time rather than cached. */

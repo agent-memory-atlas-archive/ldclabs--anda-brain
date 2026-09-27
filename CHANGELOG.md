@@ -2,7 +2,12 @@
 
 All notable changes to the Anda Brain project.
 
-## [Unreleased]
+## [0.13.1] — 2026-09-27
+
+`anda_brain` 0.13.1 on the same KIP `11a82ec` / `cognitive-memory@2.0.0` stack, now
+requiring `anda_core` / `anda_engine` 0.16.2 and pinning `anda_cognitive_nexus`
+`=0.14.0`; the CLI reports 0.13.1 and the Worker package is 0.1.1. A few public Rust
+items were removed or narrowed (listed under Changed); Anda Bot uses none of them.
 
 ### Added
 
@@ -52,6 +57,7 @@ All notable changes to the Anda Brain project.
   `ErrorObject` in `RpcError.data` and its message in `RpcError.message`.
 - Removed `RecallAgent::with_schema_generation` (a no-op) and
   `memory_interface::caller_namespace` (use `Caller::namespace`).
+  `payload::AppError::bad_request` takes `impl Display` instead of `impl Debug`.
 
 ### Fixes
 
@@ -90,6 +96,10 @@ All notable changes to the Anda Brain project.
 
 ### Cloudflare Worker
 
+- Evidence capture classes a message by its role through the role table's own
+  entries. Staged-source roles are not validated, and a role such as `constructor`
+  or `__proto__` resolved through the object prototype to a non-string Evidence
+  class; any role outside the table is now a plain `message`.
 - A staged-source forget verifies each indexed receipt still belongs to that
   source. Retrying rejected feedback with the same key and a different source
   no longer lets the old source's forget erase the new source's Evidence.

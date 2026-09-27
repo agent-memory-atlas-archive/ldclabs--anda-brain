@@ -73,7 +73,7 @@ func TestCLISecretEnvironmentAndFlagPrecedence(t *testing.T) {
 	auth := make(chan string, 3)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth <- r.Header.Get("Authorization")
-		_, _ = w.Write([]byte(`{"name":"brain","version":"0.13.0","sharding":0}`))
+		_, _ = w.Write([]byte(`{"name":"brain","version":"0.13.1","sharding":0}`))
 	}))
 	defer server.Close()
 	for _, tc := range []struct {
@@ -280,7 +280,7 @@ func TestCLIHelpAndCompletionNeedNoSpace(t *testing.T) {
 func TestCLIOutputKeepsUnmodeledServerFields(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/info" {
-			_, _ = io.WriteString(w, `{"name":"brain","version":"0.13.0","sharding":0,"memory_interface":{"kip_memory":"2.0"}}`)
+			_, _ = io.WriteString(w, `{"name":"brain","version":"0.13.1","sharding":0,"memory_interface":{"kip_memory":"2.0"}}`)
 			return
 		}
 		_, _ = io.WriteString(w, `{"result":{"id":"s1","memory_interface":{"kip_memory":"2.0"},"future_field":9007199254740993}}`)
