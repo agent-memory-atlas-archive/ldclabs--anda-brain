@@ -146,26 +146,34 @@ impl Tool<BaseCtx> for GuardedMemory {
         resources: Vec<Resource>,
     ) -> Result<ToolOutput<Self::Output>, BoxError> {
         let _gate = if let Some(control) = &self.product_control {
-            let guard = control.gate.lock().await;
+            let guard = control.gate.read().await;
             control.check(&ctx)?;
             Some(guard)
         } else {
             None
         };
-        if let Some(control) = &self.product_control
-            && control.epoch() > 0
-        {
-            control.current_request(&args.clone().into_request()?)?;
-        }
+        // After a managed change, a request must not continue an older read.
+        let fenced = self
+            .product_control
+            .as_ref()
+            .filter(|control| control.epoch() > 0);
         let formation = ctx.agent == FormationAgent::NAME;
         if !formation && ctx.agent != MaintenanceAgent::NAME {
+            if let Some(control) = fenced {
+                control.current_request(&args.clone().into_request()?)?;
+            }
             return self.memory.call(ctx, args, resources).await;
         }
 
+        // Parsed once: a malformed request is the model's to fix, reported as
+        // a tool result rather than failing the pass.
         let mut request = match args.into_request() {
             Ok(request) => request,
             Err(err) => return Ok(error_output(Response::from(err))),
         };
+        if let Some(control) = fenced {
+            control.current_request(&request)?;
+        }
         self.clock.bind_read(&mut request)?;
         // The strength-policy pin and this write's time, so a MnemonicState
         // base the model writes is one the engine can compute strength for.

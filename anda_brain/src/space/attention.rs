@@ -73,95 +73,117 @@ impl AppState {
             .page(self.attention_policy.spaces_per_tick)
             .await?;
         let mut report = AttentionTick::default();
+        let mut visited = None;
+        let mut outcome = Ok(());
         for slot in slots {
             if tokio::time::Instant::now() >= deadline {
                 report.budget_exhausted = true;
                 break;
             }
             report.visited += 1;
-            match self.attention_directory.read_slot(slot).await {
-                Ok(Some(mut row)) => {
-                    let now = unix_ms();
-                    let r = &row.registration;
-                    let due = r.next_check_ms <= now
-                        || r.dirty_generation > r.reconciled_generation
-                        || now.saturating_sub(row.last_scan_ms)
-                            >= self.attention_policy.reconcile_ms;
-                    if !r.enabled || !due || (row.failures > 0 && r.next_check_ms > now) {
-                        report.skipped += 1;
-                    } else {
-                        let id = r.scope.space_id.clone();
-                        match self.load_space_mode(&id, false, false, false).await {
-                            Ok(space) => {
-                                report.loaded += 1;
-                                #[cfg(feature = "learning")]
-                                match space.learning.attention_reviews().await {
-                                    Ok(hints) => {
-                                        for hint in hints {
-                                            if tokio::time::Instant::now() >= deadline {
-                                                report.budget_exhausted = true;
-                                                break;
-                                            }
-                                            space.attention.schedule_recheck(hint).await?;
+            if let Err(err) = self.attention_visit(slot, deadline, &mut report).await {
+                outcome = Err(err);
+                break;
+            }
+            visited = Some(slot);
+        }
+        // One cursor write per pass rather than one per slot: the root is a
+        // conditional object-store write. A pass cut short by an error resumes
+        // at the slot that failed, as it did when every slot advanced it.
+        if let Some(slot) = visited {
+            self.attention_directory.advance_cursor(slot).await?;
+        }
+        outcome.map(|()| report)
+    }
+
+    /// One directory slot of an attention pass: load the Space when its
+    /// registration is due and run its bounded scan.
+    async fn attention_visit(
+        &self,
+        slot: u64,
+        deadline: tokio::time::Instant,
+        report: &mut AttentionTick,
+    ) -> Result<(), BoxError> {
+        match self.attention_directory.read_slot(slot).await {
+            Ok(Some(mut row)) => {
+                let now = unix_ms();
+                let r = &row.registration;
+                let due = r.next_check_ms <= now
+                    || r.dirty_generation > r.reconciled_generation
+                    || now.saturating_sub(row.last_scan_ms) >= self.attention_policy.reconcile_ms;
+                if !r.enabled || !due || (row.failures > 0 && r.next_check_ms > now) {
+                    report.skipped += 1;
+                } else {
+                    let id = r.scope.space_id.clone();
+                    match self.load_space_mode(&id, false, false, false).await {
+                        Ok(space) => {
+                            report.loaded += 1;
+                            #[cfg(feature = "learning")]
+                            match space.learning.attention_reviews().await {
+                                Ok(hints) => {
+                                    for hint in hints {
+                                        if tokio::time::Instant::now() >= deadline {
+                                            report.budget_exhausted = true;
+                                            break;
                                         }
-                                    }
-                                    Err(err) => {
-                                        report.failed += 1;
-                                        log::warn!(target: "brain", space_id = id; "learning review discovery failed: {err}");
+                                        space.attention.schedule_recheck(hint).await?;
                                     }
                                 }
-                                match space.attention.scan(deadline).await {
-                                    Ok(pass) => {
-                                        report.fired += pass.fired;
-                                        if pass.error.is_some() {
-                                            report.failed += 1;
-                                        }
-                                    }
-                                    Err(err) => {
-                                        report.failed += 1;
-                                        log::warn!(target: "brain", space_id = id; "attention pass failed: {err}");
-                                    }
+                                Err(err) => {
+                                    report.failed += 1;
+                                    log::warn!(target: "brain", space_id = id; "learning review discovery failed: {err}");
                                 }
-                                #[cfg(feature = "learning")]
-                                space.learning.kick(
-                                    space.memory_runtime().map(|r| r.consequences()),
-                                    self.automatic,
-                                );
-                                space
-                                    .utility
-                                    .kick(space.memory_runtime().map(|r| r.consequences()));
-                                space
-                                    .trust
-                                    .kick(space.memory_runtime().map(|r| r.consequences()));
-                                if let Some(semantic) = space.attention.semantic() {
-                                    semantic.kick();
-                                }
-                                drop(space);
                             }
-                            Err(err) => {
-                                report.failed += 1;
-                                row.failures = row.failures.saturating_add(1);
-                                row.registration.next_check_ms =
-                                    now + self.attention_policy.blocked_retry_ms;
-                                row.last_report.error = Some(err.to_string());
-                                row.last_report.scan_complete = false;
-                                self.attention_directory.finish(row).await?;
-                                log::warn!(target: "brain", space_id = id; "attention Space load failed: {err}");
+                            match space.attention.scan(deadline).await {
+                                Ok(pass) => {
+                                    report.fired += pass.fired;
+                                    if pass.error.is_some() {
+                                        report.failed += 1;
+                                    }
+                                }
+                                Err(err) => {
+                                    report.failed += 1;
+                                    log::warn!(target: "brain", space_id = id; "attention pass failed: {err}");
+                                }
                             }
+                            #[cfg(feature = "learning")]
+                            space.learning.kick(
+                                space.memory_runtime().map(|r| r.consequences()),
+                                self.automatic,
+                            );
+                            space
+                                .utility
+                                .kick(space.memory_runtime().map(|r| r.consequences()));
+                            space
+                                .trust
+                                .kick(space.memory_runtime().map(|r| r.consequences()));
+                            if let Some(semantic) = space.attention.semantic() {
+                                semantic.kick();
+                            }
+                            drop(space);
+                        }
+                        Err(err) => {
+                            report.failed += 1;
+                            row.failures = row.failures.saturating_add(1);
+                            row.registration.next_check_ms =
+                                now + self.attention_policy.blocked_retry_ms;
+                            row.last_report.error = Some(err.to_string());
+                            row.last_report.scan_complete = false;
+                            self.attention_directory.finish(row).await?;
+                            log::warn!(target: "brain", space_id = id; "attention Space load failed: {err}");
                         }
                     }
                 }
-                Ok(None) => {
-                    report.skipped += 1;
-                }
-                Err(err) => {
-                    report.failed += 1;
-                    log::warn!(target: "brain", slot; "attention directory entry rejected: {err}");
-                }
             }
-            self.attention_directory.advance_cursor(slot).await?;
+            Ok(None) => {
+                report.skipped += 1;
+            }
+            Err(err) => {
+                report.failed += 1;
+                log::warn!(target: "brain", slot; "attention directory entry rejected: {err}");
+            }
         }
-        Ok(report)
+        Ok(())
     }
 }
 

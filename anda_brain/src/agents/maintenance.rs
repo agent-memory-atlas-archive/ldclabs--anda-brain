@@ -11,6 +11,7 @@ use anda_engine::{
     unix_ms,
 };
 use parking_lot::RwLock;
+use serde::Deserialize;
 use serde_json::json;
 use std::{
     collections::VecDeque,
@@ -400,7 +401,7 @@ impl MaintenanceAgent {
         let prompt = match conversation
             .messages
             .first()
-            .and_then(|v| serde_json::from_value::<Message>(v.clone()).ok())
+            .and_then(|v| Message::deserialize(v).ok())
             .and_then(|v| v.text())
         {
             Some(p) => p,

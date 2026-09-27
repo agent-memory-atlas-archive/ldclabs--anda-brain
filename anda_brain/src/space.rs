@@ -26,6 +26,7 @@ use ic_cose_types::cose::{
 #[cfg(feature = "learning")]
 use object_store::ObjectStoreExt;
 use object_store::{ObjectStore, memory::InMemory};
+use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
     str::FromStr,
@@ -1039,19 +1040,25 @@ impl Space {
         if let Some(reason) = output.failed_reason.take() {
             output.failed_reason = Some(assess::split_recall_meta(&reason).0);
         }
-        // Plain recalls feed the calibration counters (plan M12) exactly
-        // like structured ones — else most production traffic is a blind
-        // spot — but only successful runs: a failed recall's self-report is
-        // not a calibration sample.
-        if output.failed_reason.is_none()
-            && let Some(uncertainty) = meta.and_then(|meta| meta.uncertainty)
-        {
+        // Plain recalls feed the calibration counters exactly like
+        // structured ones — else most production traffic is a blind spot.
+        self.record_uncertainty(
+            output.failed_reason.is_some(),
+            meta.and_then(|meta| meta.uncertainty),
+        );
+        Ok(output)
+    }
+
+    /// Calibration raw material (plan M12): predicted uncertainty is later
+    /// audited against actual correction rates. Only successful recalls
+    /// count; a failed recall's self-report is not a calibration sample.
+    fn record_uncertainty(&self, failed: bool, uncertainty: Option<f64>) {
+        if !failed && let Some(uncertainty) = uncertainty {
             self.bump_metrics(|metrics| {
                 metrics.uncertainty_reports += 1;
                 metrics.uncertainty_sum += uncertainty;
             });
         }
-        Ok(output)
     }
 
     /// Recall with machine-readable provenance (plan M4): the answer plus
@@ -1107,17 +1114,7 @@ impl Space {
             None => Vec::new(),
         };
         let meta = meta.unwrap_or_default();
-        if output.failed_reason.is_none()
-            && let Some(uncertainty) = meta.uncertainty
-        {
-            // Calibration raw material (plan M12): predicted uncertainty is
-            // later audited against actual correction rates. Failed recalls
-            // are excluded — their self-report is not a calibration sample.
-            self.bump_metrics(|metrics| {
-                metrics.uncertainty_reports += 1;
-                metrics.uncertainty_sum += uncertainty;
-            });
-        }
+        self.record_uncertainty(output.failed_reason.is_some(), meta.uncertainty);
         Ok(RecallOutput {
             recall_receipt,
             answer,
@@ -1182,7 +1179,7 @@ impl Space {
     async fn record_recall_usage(&self, messages: &[serde_json::Value]) -> Result<u64, BoxError> {
         let messages: Vec<Message> = messages
             .iter()
-            .filter_map(|message| serde_json::from_value::<Message>(message.clone()).ok())
+            .filter_map(|message| Message::deserialize(message).ok())
             .collect();
         let entities = assess::RecallTrace::from_messages(&messages).entity_ids();
         let touched = if entities.is_empty() {
@@ -1454,7 +1451,7 @@ impl Space {
         let _product_guard = if input.dry_run {
             None
         } else {
-            let guard = self.product_control.gate.lock().await;
+            let guard = self.product_control.gate.write().await;
             if !self.product_control.available() {
                 return Err("memory_change_pending".into());
             }
@@ -1533,14 +1530,6 @@ impl Space {
                 continue;
             }
 
-            // Purging a concept cascades to its propositions; their ledger
-            // rows must be removed too. Enumerate ids before PURGE removes
-            // their graph links.
-            let mut cascade: Vec<String> = vec![entity.clone()];
-            if assess::is_concept_entity_id(&entity) {
-                cascade.extend(self.concept_proposition_ids(&entity).await);
-            }
-
             // `PURGE` is the only removal that satisfies a forget request:
             // archive keeps the content recallable and tombstone keeps it
             // stored. `authorized_cascade` is what makes purging a Concept
@@ -1560,7 +1549,9 @@ impl Space {
                     report.deleted_assertions += purged_of_kind(&response, "assertion");
                     report.deleted_evidence += purged_of_kind(&response, "evidence");
                     report.deleted_activities += purged_of_kind(&response, "activity");
-                    let erased = kip::ok_result(&response)
+                    // Every element the cascade erased, the target included:
+                    // their saved previews and ledger rows go with them.
+                    let erased: BTreeSet<String> = kip::ok_result(&response)
                         .and_then(|result| result.get("changes"))
                         .and_then(serde_json::Value::as_array)
                         .into_iter()
@@ -1572,7 +1563,7 @@ impl Space {
                         entry.error =
                             Some(format!("graph purged, saved preview cleanup failed: {err}"));
                     }
-                    for gone in &cascade {
+                    for gone in &erased {
                         let _ = self.ledger.forget_entity(gone).await;
                     }
                 }
@@ -1604,67 +1595,6 @@ impl Space {
             }
         }
         Ok(report)
-    }
-
-    /// Ids of every proposition attached to a concept (either slot); used by
-    /// forget to cascade ledger rows for purged propositions. Best-effort:
-    /// an enumeration failure only leaves ledger rows behind, never blocks
-    /// the deletion itself.
-    async fn concept_proposition_ids(&self, concept_id: &str) -> Vec<String> {
-        let mut ids = BTreeSet::new();
-        for base_command in [
-            "FIND(?link) WHERE { ?c CONCEPT {id: :id} ?link (?c, ?p, ?o) } LIMIT 1000",
-            "FIND(?link) WHERE { ?c CONCEPT {id: :id} ?link (?s, ?p, ?c) } LIMIT 1000",
-        ] {
-            // Paginate with CURSOR: a concept with more than one page of
-            // propositions must still cascade all of its ledger rows.
-            let mut cursor: Option<String> = None;
-            loop {
-                let mut parameters = kip::param("id", concept_id);
-                let command = match &cursor {
-                    Some(token) => {
-                        parameters.insert("cursor".to_string(), token.clone().into());
-                        format!("{base_command} CURSOR :cursor")
-                    }
-                    None => base_command.to_string(),
-                };
-                let response = self
-                    .execute_kip_readonly(kip::request_with(command, parameters))
-                    .await;
-                match response {
-                    Ok(response) if kip::succeeded(&response) => {
-                        if let Some(result) = kip::ok_result(&response) {
-                            assess::collect_entity_objects(result, &mut |id, _| {
-                                if assess::is_proposition_entity_id(id) {
-                                    ids.insert(id.to_string());
-                                }
-                            });
-                        }
-                        // A single-operation response reports its cursor at the
-                        // operation level; the request level carries it only
-                        // when the whole envelope paged.
-                        let next = response
-                            .results
-                            .first()
-                            .and_then(|result| result.next_cursor.clone())
-                            .or_else(|| response.next_cursor.clone());
-                        match next {
-                            Some(next) => cursor = Some(next),
-                            None => break,
-                        }
-                    }
-                    other => {
-                        log::warn!(
-                            target: "brain",
-                            space_id = self.id;
-                            "enumerating propositions of {concept_id} for forget cascade failed: {other:?}"
-                        );
-                        break;
-                    }
-                }
-            }
-        }
-        ids.into_iter().collect()
     }
 
     /// Whether this Space is overdue a maintenance cycle on the clock.
@@ -1796,20 +1726,15 @@ impl Space {
     /// only at startup, so long-running spaces reclaim commit-crash leftovers
     /// too), audit-log retention pruning, the stale-document report, and the
     /// citation sample check (independent of the digest switch). Cheap enough
-    /// to run alongside every digest kick.
+    /// to run alongside every digest kick. `orphan_sweep` is false where the
+    /// caller has just swept (startup repair).
     #[cfg(feature = "wiki")]
-    fn kick_wiki_housekeeping(self: &Arc<Self>) {
+    fn kick_wiki_housekeeping(self: &Arc<Self>, orphan_sweep: bool) {
         let space = self.clone();
         self.tasks.spawn(async move {
             let now_ms = unix_ms();
-            match space.wiki.orphan_sweep(now_ms).await {
-                Ok(report) if !report.is_empty() => {
-                    log::warn!(target: "brain", space_id = space.id, report:serde = report; "wiki orphan sweep repaired state");
-                }
-                Ok(_) => {}
-                Err(err) => {
-                    log::warn!(target: "brain", space_id = space.id; "wiki orphan sweep failed: {err:?}");
-                }
+            if orphan_sweep {
+                space.sweep_wiki_orphans(now_ms).await;
             }
             if let Err(err) = space
                 .wiki
@@ -1835,6 +1760,20 @@ impl Space {
                 }
             }
         });
+    }
+
+    /// Reclaims wiki commit-crash leftovers, logging what it repaired.
+    #[cfg(feature = "wiki")]
+    async fn sweep_wiki_orphans(&self, now_ms: u64) {
+        match self.wiki.orphan_sweep(now_ms).await {
+            Ok(report) if !report.is_empty() => {
+                log::warn!(target: "brain", space_id = self.id, report:serde = report; "wiki orphan sweep repaired state");
+            }
+            Ok(_) => {}
+            Err(err) => {
+                log::warn!(target: "brain", space_id = self.id; "wiki orphan sweep failed: {err:?}");
+            }
+        }
     }
 
     /// Fire-and-forget digest kick used by startup and post-maintenance

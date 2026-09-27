@@ -110,14 +110,14 @@ impl DurableTasks {
         let handle = {
             let closing = self.inner.closing.lock();
             if *closing {
-                return Err("attention runtime is closing".into());
+                return Err("durable host work is closing".into());
             }
             let slot = self
                 .inner
                 .slots
                 .clone()
                 .try_acquire_owned()
-                .map_err(|_| "attention operation queue is full")?;
+                .map_err(|_| "durable host work queue is full; retry later")?;
             self.inner.tasks.spawn(async move {
                 let _slot = slot;
                 work.await

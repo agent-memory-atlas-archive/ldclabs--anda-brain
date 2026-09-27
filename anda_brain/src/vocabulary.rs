@@ -725,7 +725,7 @@ impl Tool<BaseCtx> for DeclareSymbolsTool {
             );
         }
         let _guard = if let Some(control) = &self.product_control {
-            let guard = control.gate.lock().await;
+            let guard = control.gate.read().await;
             control.check(&ctx)?;
             Some(guard)
         } else {

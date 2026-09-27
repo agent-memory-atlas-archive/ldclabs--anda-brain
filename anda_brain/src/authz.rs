@@ -141,7 +141,9 @@ impl Caller {
 
     /// The identity Memory Interface handles are scoped to: the CWT subject,
     /// a Space token by name, or the anonymous reader (the same spelling the
-    /// wiki audit trail uses).
+    /// wiki audit trail uses). Idempotency keys, staged sources, receipts and
+    /// retained recall bases are all scoped to it, so a handle issued to one
+    /// caller is not visible to another (MI §3, §5).
     pub fn namespace(&self) -> String {
         caller_identity(&self.cwt, self.st.as_ref())
     }

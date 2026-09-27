@@ -773,18 +773,10 @@ impl Space {
             // space serves queries built on them.
             #[cfg(feature = "wiki")]
             {
-                match this_clone.wiki.orphan_sweep(unix_ms()).await {
-                    Ok(report) if !report.is_empty() => {
-                        log::warn!(target: "brain", space_id = this_clone.id, report:serde = report; "wiki orphan sweep repaired state");
-                    }
-                    Ok(_) => {}
-                    Err(err) => {
-                        log::warn!(target: "brain", space_id = this_clone.id; "wiki orphan sweep failed: {err:?}");
-                    }
-                }
+                this_clone.sweep_wiki_orphans(unix_ms()).await;
                 // Resume any wiki digest backlog left from before the restart.
                 this_clone.kick_wiki_digest();
-                this_clone.kick_wiki_housekeeping();
+                this_clone.kick_wiki_housekeeping(false);
             }
             // Resume formation if it was interrupted before. A missing marker
             // means nothing was processed yet, so resume from the beginning.

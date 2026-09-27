@@ -9,6 +9,7 @@ use anda_kip::{
     AggregationFunction, BeliefStatus, Command, FindExpression, MetaCommand, OperationStatus,
     Projection, Request, Response, TopLevelStatus, WhereClause,
 };
+use serde::Deserialize;
 
 /// The successful value of one read operation. Partial/unknown envelopes and
 /// operation-level failures are not empty successful reads.
@@ -170,7 +171,7 @@ pub fn probe_observation(
                             .into(),
                     );
                 };
-                let projection: Projection = serde_json::from_value(row.clone())?;
+                let projection = Projection::deserialize(row)?;
                 if projection
                     .basis
                     .as_ref()

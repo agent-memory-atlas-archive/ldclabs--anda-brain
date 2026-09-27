@@ -120,6 +120,20 @@ pub fn error_of(response: &Response) -> Option<&ErrorObject> {
         .or_else(|| response.results.first().and_then(|r| r.error.as_ref()))
 }
 
+/// The error a failed response reports, as a [`KipError`] keeping its code,
+/// or an internal error saying `fallback` when the response names none.
+pub(crate) fn response_error(response: &Response, fallback: &str) -> KipError {
+    error_of(response)
+        .map(|error| {
+            KipError::new(
+                anda_kip::KipErrorCode::from_name(&error.code)
+                    .unwrap_or(anda_kip::KipErrorCode::InternalError),
+                error.message.clone(),
+            )
+        })
+        .unwrap_or_else(|| KipError::internal_error(fallback))
+}
+
 /// The first operation's result value, or `None` when the request did not
 /// succeed.
 ///

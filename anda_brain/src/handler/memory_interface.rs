@@ -3,7 +3,7 @@
 //! receipt progress and erasure plans. Every handle is readable only by the
 //! caller that received it.
 use super::*;
-use crate::memory_interface::{StageSourceInput, caller_namespace};
+use crate::memory_interface::StageSourceInput;
 use anda_kip::memory::binding::{Operation, Request as MemoryRequest, Response as MemoryResponse};
 
 /// A KIP error as an HTTP error, for the helper endpoints (the intent
@@ -18,10 +18,12 @@ fn kip_status(error: anda_kip::KipError) -> AppError {
         anda_kip::KipErrorCode::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
         _ => StatusCode::BAD_REQUEST,
     };
-    AppError::with_status(
+    let message = error.message.clone();
+    AppError {
         status,
-        serde_json::to_string(&anda_kip::ErrorObject::from(error)).unwrap_or_default(),
-    )
+        message,
+        data: serde_json::to_value(anda_kip::ErrorObject::from(error)).ok(),
+    }
 }
 
 /// POST /v1/{space_id}/memory
@@ -62,7 +64,7 @@ pub async fn post_memory(
         )
         .await?
     };
-    let namespace = caller_namespace(&caller);
+    let namespace = caller.namespace();
     // A recall runs a model pass; it shares the LLM request budget.
     let _permit = if request.operation == Operation::Recall {
         Some(
@@ -111,7 +113,7 @@ pub async fn post_memory_source(
     )
     .await?;
     let staged = space
-        .stage_memory_source(&caller_namespace(&caller), input)
+        .stage_memory_source(&caller.namespace(), input)
         .await
         .map_err(kip_status)?;
     Ok(ct.response(RpcResponse::success(staged)))
@@ -134,7 +136,7 @@ pub async fn get_memory_source(
     )
     .await?;
     let staged = space
-        .staged_memory_source(&caller_namespace(&caller), &source_ref)
+        .staged_memory_source(&caller.namespace(), &source_ref)
         .await
         .map_err(kip_status)?;
     Ok(ct.response(RpcResponse::success(staged)))
@@ -159,7 +161,7 @@ pub async fn get_memory_receipt(
     )
     .await?;
     let view = space
-        .memory_receipt_view(&caller_namespace(&caller), &receipt_ref)
+        .memory_receipt_view(&caller.namespace(), &receipt_ref)
         .await
         .map_err(kip_status)?;
     Ok(ct.response(RpcResponse::success(view)))
@@ -184,7 +186,7 @@ pub async fn get_memory_plan(
     )
     .await?;
     let plan = space
-        .memory_plan(&caller_namespace(&caller), &plan_ref)
+        .memory_plan(&caller.namespace(), &plan_ref)
         .await
         .map_err(kip_status)?;
     Ok(ct.response(RpcResponse::success(plan)))

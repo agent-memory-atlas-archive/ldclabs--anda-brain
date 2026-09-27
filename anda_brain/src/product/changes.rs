@@ -154,7 +154,7 @@ impl Space {
             return Err("unsupported_capability".into());
         }
         let digest = anda_cognitive_nexus::content_digest(&serde_json::to_value(&input)?)?;
-        let _guard = self.product_control.gate.lock().await;
+        let _guard = self.product_control.gate.write().await;
         let path = format!("changes/{key}");
         if self
             .product_control
@@ -270,7 +270,7 @@ impl Space {
         self.product_control
             .tasks
             .run(async move {
-                let _guard = this.product_control.gate.lock().await;
+                let _guard = this.product_control.gate.write().await;
                 if this.product_control.snapshot().pending.as_deref() == Some(&key) {
                     return Err("memory_change_pending".into());
                 }
@@ -346,7 +346,7 @@ impl Space {
         self.product_control
             .tasks
             .run(async move {
-                let _guard = this.product_control.gate.lock().await;
+                let _guard = this.product_control.gate.write().await;
                 let mut stored = this
                     .product_control
                     .journal
@@ -437,7 +437,7 @@ impl Space {
             self.product_control
                 .tasks
                 .run(async move {
-                    let _guard = this.product_control.gate.lock().await;
+                    let _guard = this.product_control.gate.write().await;
                     this.apply_change_locked(&key).await.map(|_| ())
                 })
                 .await?;
@@ -791,7 +791,7 @@ impl Space {
                 .messages
                 .first()
                 .and_then(|message| {
-                    serde_json::from_value::<anda_core::Message>(message.clone()).ok()
+                    <anda_core::Message as serde::Deserialize>::deserialize(message).ok()
                 })
                 .and_then(|message| message.text())
                 .ok_or("unsupported_scope")?;

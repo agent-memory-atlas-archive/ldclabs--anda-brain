@@ -261,6 +261,12 @@ pub struct RpcError {
     pub data: Option<Value>,
 }
 
+impl fmt::Display for RpcError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 impl RpcError {
     /// Create a new RPC error with the given code and message.
     fn new(message: impl Into<String>) -> Self {
@@ -416,10 +422,12 @@ impl AppError {
         }
     }
 
-    pub fn bad_request(e: impl std::fmt::Debug) -> Self {
+    /// A 400 carrying the error's display text. Not its `Debug` form, which
+    /// quoted and escaped plain messages and could render storage detail.
+    pub fn bad_request(e: impl std::fmt::Display) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
-            message: format!("{e:?}"),
+            message: e.to_string(),
             data: None,
         }
     }

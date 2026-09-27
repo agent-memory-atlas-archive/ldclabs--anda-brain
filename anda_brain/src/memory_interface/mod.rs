@@ -54,6 +54,20 @@ pub use sources::{
 /// Native facts stay in the Nexus.
 pub(crate) const JOURNAL_PREFIX: &str = "memory-interface/v1";
 
+/// How many times a conditional update of one journal record is tried. A lost
+/// race resolves on the next read; a write that keeps failing is a storage
+/// fault, reported instead of retried forever.
+pub(crate) const JOURNAL_UPDATE_ATTEMPTS: usize = 8;
+
+/// The error after [`JOURNAL_UPDATE_ATTEMPTS`] failed conditional updates.
+pub(crate) fn journal_update_failed(last: Option<BoxError>) -> KipError {
+    KipError::internal_error(format!(
+        "a memory journal record could not be updated after {JOURNAL_UPDATE_ATTEMPTS} attempts: {}",
+        last.map(|error| error.to_string())
+            .unwrap_or_else(|| "no attempt was made".into())
+    ))
+}
+
 /// The output budget a request gets when it names none.
 pub const DEFAULT_OUTPUT_TOKENS: u64 = 4096;
 /// The deadline a recall gets when it names none.
@@ -179,14 +193,6 @@ fn check_handle(handle: &str) -> Result<(), KipError> {
         ));
     }
     Ok(())
-}
-
-/// The identity a request is attributed to: an authenticated CWT subject, a
-/// Space token by name, or the anonymous reader. Idempotency keys, staged
-/// sources, receipts and retained recall bases are all scoped to it, so a
-/// handle issued to one caller is not visible to another (MI §3, §5).
-pub fn caller_namespace(caller: &crate::authz::Caller) -> String {
-    caller.namespace()
 }
 
 /// Maps an internal failure onto a KIP error, keeping a KIP error's own code.
@@ -369,17 +375,7 @@ impl Space {
         crate::kip::ok_result(&response)
             .and_then(|result| result["handles"]["scope"].as_str())
             .map(str::to_string)
-            .ok_or_else(|| {
-                crate::kip::error_of(&response)
-                    .map(|error| {
-                        KipError::new(
-                            KipErrorCode::from_name(&error.code)
-                                .unwrap_or(KipErrorCode::InternalError),
-                            error.message.clone(),
-                        )
-                    })
-                    .unwrap_or_else(|| KipError::internal_error("scope Concept was not created"))
-            })
+            .ok_or_else(|| crate::kip::response_error(&response, "scope Concept was not created"))
     }
 }
 

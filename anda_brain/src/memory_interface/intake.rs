@@ -62,7 +62,7 @@ impl MemoryIntent {
             .extra
             .as_ref()
             .and_then(|extra| extra.get(INTENT_KEY))
-            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .and_then(|value| Deserialize::deserialize(value).ok())
     }
 
     fn misrecorded(&self) -> bool {
@@ -350,7 +350,7 @@ impl FormationTrace {
             .extra
             .as_ref()
             .and_then(|extra| extra.get(TRACE_KEY))
-            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .and_then(|value| Deserialize::deserialize(value).ok())
             .unwrap_or_default();
         Self(Arc::new(parking_lot::Mutex::new(data)))
     }
@@ -410,7 +410,7 @@ fn digest(value: &Json) -> Result<String, KipError> {
 
 /// The journal id of a key: a digest of its full scope, so a key never
 /// collides across callers, Spaces or intents.
-fn key_id(
+pub(super) fn key_id(
     namespace: &str,
     space: &str,
     operation: Operation,
@@ -464,7 +464,8 @@ impl Space {
     ) -> Result<IntakeRecord, KipError> {
         let path = receipt_path(receipt_ref)?;
         let journal = &self.memory_interface.journal;
-        loop {
+        let mut last = None;
+        for _ in 0..JOURNAL_UPDATE_ATTEMPTS {
             let stored = journal
                 .read::<IntakeRecord>(&path)
                 .await
@@ -483,14 +484,15 @@ impl Space {
                     record.warnings.push(warning.clone());
                 }
             }
-            if journal
+            match journal
                 .put(&path, &record, PutMode::Update(stored.version))
                 .await
-                .is_ok()
             {
-                return Ok(record);
+                Ok(()) => return Ok(record),
+                Err(error) => last = Some(error),
             }
         }
+        Err(journal_update_failed(last))
     }
 
     /// Current progress of a receipt (MI §5). Reading never moves it back.
@@ -614,7 +616,7 @@ impl Space {
             .extra
             .as_ref()
             .and_then(|extra| extra.get(TRACE_KEY))
-            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .and_then(|value| Deserialize::deserialize(value).ok())
             .unwrap_or_default();
         let receipt_ref = record.receipt.receipt_ref.clone();
         let accepted = record.receipt.accepted_seq;
@@ -1257,15 +1259,10 @@ impl Space {
                         .await
                         .map_err(kip_error)?;
                 let Some(result) = crate::kip::ok_result(&response) else {
-                    return Err(crate::kip::error_of(&response)
-                        .map(|error| {
-                            KipError::new(
-                                KipErrorCode::from_name(&error.code)
-                                    .unwrap_or(KipErrorCode::InternalError),
-                                error.message.clone(),
-                            )
-                        })
-                        .unwrap_or_else(|| KipError::internal_error("Evidence capture failed")));
+                    return Err(crate::kip::response_error(
+                        &response,
+                        "Evidence capture failed",
+                    ));
                 };
                 if let Some(id) = result["handles"]["e"].as_str() {
                     evidence.push(id.to_string());

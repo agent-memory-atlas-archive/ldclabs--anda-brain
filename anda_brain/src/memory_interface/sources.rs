@@ -371,14 +371,11 @@ impl Space {
         if row.space != DEFAULT_SPACE || row.state != "active" || row.payload_mode != "inline" {
             return Err(not_found());
         }
-        let message =
-            serde_json::from_value::<Message>(row.payload_inline.clone()).unwrap_or_else(|_| {
-                Message {
-                    role: "user".into(),
-                    content: vec![row.payload_inline.to_string().into()],
-                    ..Default::default()
-                }
-            });
+        let message = Message::deserialize(&row.payload_inline).unwrap_or_else(|_| Message {
+            role: "user".into(),
+            content: vec![row.payload_inline.to_string().into()],
+            ..Default::default()
+        });
         Ok(ResolvedSource {
             source_ref: id.to_string(),
             digest: row.content_digest.clone(),
@@ -398,7 +395,8 @@ impl Space {
     pub(crate) async fn erase_staged_source(&self, source_ref: &str) -> Result<bool, KipError> {
         let path = source_path(source_ref)?;
         let journal = &self.memory_interface.journal;
-        loop {
+        let mut last = None;
+        for _ in 0..JOURNAL_UPDATE_ATTEMPTS {
             let Some(stored) = journal
                 .read::<StagedSource>(&path)
                 .await
@@ -415,14 +413,15 @@ impl Space {
             if let Some(host) = &mut staged.host {
                 host.context = None;
             }
-            if journal
+            match journal
                 .put(&path, &staged, PutMode::Update(stored.version))
                 .await
-                .is_ok()
             {
-                return Ok(true);
+                Ok(()) => return Ok(true),
+                Err(error) => last = Some(error),
             }
         }
+        Err(journal_update_failed(last))
     }
 }
 

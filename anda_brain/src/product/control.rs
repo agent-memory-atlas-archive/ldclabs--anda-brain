@@ -37,7 +37,7 @@ impl SourceIdentity {
         conversation: &anda_engine::memory::Conversation,
     ) -> Result<Self, BoxError> {
         let source = match conversation.extra.as_ref().and_then(|v| v.get(SOURCE_KEY)) {
-            Some(value) => serde_json::from_value(value.clone())?,
+            Some(value) => Self::deserialize(value)?,
             None => Self {
                 key: format!("formation:{}", conversation._id),
                 parents: vec![],
@@ -74,7 +74,11 @@ impl Default for ControlState {
 pub(crate) struct ProcessingEpoch(pub u64);
 
 pub(crate) struct Control {
-    pub gate: tokio::sync::Mutex<()>,
+    /// Fences memory work against managed changes. Agent reads and writes,
+    /// notes and runtime tools hold it shared and run concurrently; a product
+    /// change, a forget and source suppression hold it exclusively, so none
+    /// of them interleaves with work that checked the epoch before it.
+    pub gate: tokio::sync::RwLock<()>,
     pub journal: crate::journal::Journal,
     state: parking_lot::RwLock<ControlState>,
     pub tasks: crate::runtime::DurableTasks,
@@ -94,7 +98,7 @@ impl Control {
             return Err("unsupported memory product state version".into());
         }
         Ok(Arc::new(Self {
-            gate: tokio::sync::Mutex::new(()),
+            gate: tokio::sync::RwLock::new(()),
             journal,
             state: parking_lot::RwLock::new(state),
             tasks: Default::default(),
@@ -128,7 +132,8 @@ impl Control {
     pub fn available(&self) -> bool {
         self.state.read().pending.is_none()
     }
-    /// Call with gate held. Publish only after conditional durable write/readback.
+    /// Call with the gate held exclusively. Publish only after conditional
+    /// durable write/readback.
     pub async fn save(&self, state: ControlState) -> Result<(), BoxError> {
         let old = self
             .journal
@@ -187,7 +192,7 @@ impl Tool<BaseCtx> for ControlledNotes {
         args: NoteArgs,
         resources: Vec<Resource>,
     ) -> Result<ToolOutput<NoteOutput>, BoxError> {
-        let _gate = self.control.gate.lock().await;
+        let _gate = self.control.gate.read().await;
         self.control.check(&ctx)?;
         self.inner.call(ctx, args, resources).await
     }

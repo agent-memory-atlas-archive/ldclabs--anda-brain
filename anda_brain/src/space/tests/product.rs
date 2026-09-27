@@ -564,7 +564,7 @@ async fn product_admitted_write_survives_a_lost_api_waiter() {
         )
         .await
         .unwrap();
-    let guard = space.product_control.gate.lock().await;
+    let guard = space.product_control.gate.write().await;
     let task_space = space.clone();
     let task = tokio::spawn(async move {
         task_space

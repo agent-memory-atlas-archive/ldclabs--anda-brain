@@ -24,9 +24,10 @@ use anda_kip::memory::binding::{
     AttentionItem, AttentionKind, Briefing, ChannelState, Channels, Coverage, Details,
     EpistemicStatus, ItemRole, MemoryItem, RecallInput, RecallMode, Standing,
 };
+use futures::StreamExt;
 use object_store::PutMode;
 use serde_json::Map;
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 /// The most rows one channel read returns; one more marks it truncated.
 const CHANNEL_LIMIT: usize = 32;
@@ -100,6 +101,18 @@ impl Plan {
             ChannelState::Incomplete
         }
     }
+}
+
+type RowKey = (String, Option<u64>);
+
+/// Host reads one briefing already made. Every read of a briefing is at the
+/// same snapshot, scope and world time, so repeating one cannot answer
+/// differently; the cache only saves the round trip.
+#[derive(Default)]
+struct ReadCache {
+    /// By element id and `AS OF` sequence; `None` is a row the Space lacks.
+    rows: parking_lot::Mutex<HashMap<RowKey, Option<Json>>>,
+    beliefs: parking_lot::Mutex<HashMap<String, Json>>,
 }
 
 fn truncate(text: &str, max: usize) -> String {
@@ -183,14 +196,7 @@ impl Space {
             .await
             .map_err(kip_error)?;
         if !kip::succeeded(&response) {
-            return Err(kip::error_of(&response)
-                .map(|error| {
-                    KipError::new(
-                        KipErrorCode::from_name(&error.code).unwrap_or(KipErrorCode::InternalError),
-                        error.message.clone(),
-                    )
-                })
-                .unwrap_or_else(|| KipError::internal_error("read failed")));
+            return Err(kip::response_error(&response, "read failed"));
         }
         Ok(kip::ok_result(&response)
             .and_then(Json::as_array)
@@ -219,14 +225,46 @@ impl Space {
             .next()
     }
 
-    async fn endpoint_text(&self, value: &Json, as_of: Option<u64>) -> String {
+    /// [`Self::element_row`] through one briefing's [`ReadCache`].
+    async fn cached_row(&self, cache: &ReadCache, id: &str, as_of: Option<u64>) -> Option<Json> {
+        let key = (id.to_string(), as_of);
+        if let Some(row) = cache.rows.lock().get(&key) {
+            return row.clone();
+        }
+        let row = self.element_row(id, as_of).await;
+        cache.rows.lock().insert(key, row.clone());
+        row
+    }
+
+    async fn endpoint_text(&self, cache: &ReadCache, value: &Json, as_of: Option<u64>) -> String {
         if let Some(id) = reference_id(value)
-            && let Some(row) = self.element_row(id, as_of).await
+            && let Some(row) = self.cached_row(cache, id, as_of).await
             && let Some(name) = row["name"].as_str()
         {
             return name.to_string();
         }
         value.to_string()
+    }
+
+    /// [`Self::belief`] through one briefing's [`ReadCache`]: its scope and
+    /// times are fixed, so a Proposition's projection is read once.
+    async fn cached_belief(
+        &self,
+        cache: &ReadCache,
+        proposition: &str,
+        scope: &ResolvedScope,
+        valid_at: Option<&str>,
+        as_of: Option<u64>,
+    ) -> Result<Json, KipError> {
+        if let Some(belief) = cache.beliefs.lock().get(proposition) {
+            return Ok(belief.clone());
+        }
+        let belief = self.belief(proposition, scope, valid_at, as_of).await?;
+        cache
+            .beliefs
+            .lock()
+            .insert(proposition.to_string(), belief.clone());
+        Ok(belief)
     }
 
     /// Final belief in a Proposition under the request's scope and time.
@@ -366,7 +404,6 @@ impl Space {
                 json!(null),
                 &coverage,
                 &[],
-                &after,
             ))
             .await?;
             let briefing = Briefing {
@@ -391,6 +428,7 @@ impl Space {
         // All host reads and retained pins use this same snapshot. Search is
         // permitted only while the live index still corresponds to it.
         let as_of = Some(snapshot_seq);
+        let cache = ReadCache::default();
 
         // The Recall pass: the model finds what bears on the question. Its
         // prose is used only when every memory it cited is in scope.
@@ -440,21 +478,26 @@ impl Space {
                             }
                         }
                     }
-                    for (id, version) in reads {
-                        if version > 0
-                            && self
-                                .element_row(&id, as_of)
-                                .await
-                                .as_ref()
-                                .is_none_or(|row| version_of(row) != version)
-                        {
-                            dropped = true;
-                            continue;
-                        }
-                        match self
-                            .cited_item(&id, &scope, valid_at.as_deref(), as_of)
-                            .await
-                        {
+                    // Independent reads, a few at a time, kept in trace order.
+                    let (cache, scope, valid_at) = (&cache, &scope, valid_at.as_deref());
+                    let cited: Vec<Option<Option<Candidate>>> = futures::stream::iter(reads)
+                        .map(|(id, version)| async move {
+                            if version > 0
+                                && self
+                                    .cached_row(cache, &id, as_of)
+                                    .await
+                                    .as_ref()
+                                    .is_none_or(|row| version_of(row) != version)
+                            {
+                                return Some(None);
+                            }
+                            crate::boxed(self.cited_item(cache, &id, scope, valid_at, as_of)).await
+                        })
+                        .buffered(8)
+                        .collect()
+                        .await;
+                    for item in cited {
+                        match item {
                             Some(Some(candidate)) => candidates.push(candidate),
                             Some(None) => dropped = true,
                             None => {}
@@ -491,30 +534,45 @@ impl Space {
             );
         }
 
-        // Host channels.
+        // Host channels: independent reads, run together.
         let query = input.query.clone().unwrap_or_default();
-        let (constraint_items, constraints_plan) = crate::boxed(self.exact_channel(
-            "FIND(?c) WHERE { ?c {type: \"Insight\"} FILTER(?c.attributes.insight_class == \"constraint\") }",
-            &scope,
-            as_of,
-            ItemRole::Constraint,
-        ))
-        .await;
-        let (commitment_items, commitments_plan) = crate::boxed(self.exact_channel(
-            "FIND(?c) WHERE { ?c {type: \"Commitment\"} FILTER(IN(?c.attributes.status, [\"pending\", \"blocked\"])) }",
-            &scope,
-            as_of,
-            ItemRole::Constraint,
-        ))
-        .await;
-        let (failure_items, failures_plan) =
-            crate::boxed(self.search_channel(&query, "Experience", Some(true), &scope, as_of))
-                .await;
-        let (experience_items, experiences_plan) =
-            crate::boxed(self.search_channel(&query, "Experience", Some(false), &scope, as_of))
-                .await;
-        let (skill_items, skills_plan) =
-            crate::boxed(self.search_channel(&query, "Skill", None, &scope, as_of)).await;
+        let (
+            (constraint_items, constraints_plan),
+            (commitment_items, commitments_plan),
+            (failure_items, failures_plan),
+            (experience_items, experiences_plan),
+            (skill_items, skills_plan),
+        ) = tokio::join!(
+            crate::boxed(self.exact_channel(
+                &cache,
+                "FIND(?c) WHERE { ?c {type: \"Insight\"} FILTER(?c.attributes.insight_class == \"constraint\") }",
+                &scope,
+                as_of,
+            )),
+            crate::boxed(self.exact_channel(
+                &cache,
+                "FIND(?c) WHERE { ?c {type: \"Commitment\"} FILTER(IN(?c.attributes.status, [\"pending\", \"blocked\"])) }",
+                &scope,
+                as_of,
+            )),
+            crate::boxed(self.search_channel(
+                &cache,
+                &query,
+                "Experience",
+                Some(true),
+                &scope,
+                as_of
+            )),
+            crate::boxed(self.search_channel(
+                &cache,
+                &query,
+                "Experience",
+                Some(false),
+                &scope,
+                as_of
+            )),
+            crate::boxed(self.search_channel(&cache, &query, "Skill", None, &scope, as_of)),
+        );
         for channel in [
             constraint_items,
             commitment_items,
@@ -534,7 +592,7 @@ impl Space {
         let mut dependency_warnings = Vec::new();
         for candidate in &candidates {
             for (id, _) in &candidate.pins {
-                if let Some(row) = self.element_row(id, as_of).await
+                if let Some(row) = self.cached_row(&cache, id, as_of).await
                     && let Some(status) = dependency_caveat(&row)
                 {
                     let note = format!(
@@ -591,7 +649,7 @@ impl Space {
             None
         };
 
-        let mut plans = [
+        let plans = [
             ("constraints", constraints_plan),
             ("commitments", commitments_plan),
             ("dependencies", Plan::exact(false)),
@@ -604,7 +662,8 @@ impl Space {
         candidates.sort_by_key(|c| (!c.required, role_rank(c.item.role)));
         candidates.truncate(MAX_ITEMS);
         let basis =
-            crate::boxed(self.basis_for(&candidates, &scope, valid_at.as_deref(), as_of)).await;
+            crate::boxed(self.basis_for(&cache, &candidates, &scope, valid_at.as_deref(), as_of))
+                .await;
         let summary_fallback = || {
             let mut lines: Vec<String> = candidates
                 .iter()
@@ -624,98 +683,106 @@ impl Space {
             },
             "No recorded memory bears on this in scope.",
         );
-        loop {
-            let channels = channels_of(&plans);
+        let basis_id = format!("basis-{}", hex_id());
+        // Required items sort first, so a briefing keeps a prefix of the
+        // candidates; every optional item past it marks its channel truncated
+        // by the budget.
+        let briefing_of = |kept: usize| {
+            let mut plans = plans;
+            for removed in &candidates[kept..] {
+                let channel = match removed.item.role {
+                    ItemRole::Experience => "experiences",
+                    ItemRole::Procedure => "skills",
+                    _ => "evidence",
+                };
+                for (name, plan) in plans.iter_mut() {
+                    if *name == channel {
+                        plan.complete = false;
+                        plan.truncation = Some("budget");
+                    }
+                }
+            }
             let coverage = Coverage::new(
                 scope.requested.clone(),
-                channels,
+                channels_of(&plans),
                 pending.clone(),
                 unverified.clone(),
             );
-            let mut items: Vec<MemoryItem> = Vec::new();
-            let basis_id = format!("basis-{}", hex_id());
-            for (index, candidate) in candidates.iter().enumerate() {
-                let mut item = candidate.item.clone();
-                item.reference = format!("{basis_id}:{index}");
-                item.action_eligible = coverage.action_eligible
-                    && item.epistemic_status == EpistemicStatus::Accepted
-                    && matches!(item.role, ItemRole::Fact | ItemRole::Constraint);
-                items.push(item);
-            }
-            let mut briefing = Briefing {
+            let items = candidates[..kept]
+                .iter()
+                .enumerate()
+                .map(|(index, candidate)| {
+                    let mut item = candidate.item.clone();
+                    item.reference = format!("{basis_id}:{index}");
+                    item.action_eligible = coverage.action_eligible
+                        && item.epistemic_status == EpistemicStatus::Accepted
+                        && matches!(item.role, ItemRole::Fact | ItemRole::Constraint);
+                    item
+                })
+                .collect();
+            let briefing = Briefing {
                 summary: summary.clone(),
                 items,
                 uncertainties: dedup(uncertainties.clone()),
                 basis_ref: basis_id.clone(),
-                coverage: coverage.clone(),
+                coverage,
                 after: after.clone(),
                 continuation_ref: None,
                 details: None,
                 attention: attention.as_ref().map(|page| page.0.clone()),
                 attention_cursor: attention.as_ref().map(|page| page.1.clone()),
             };
-            let tokens = count_tokens(&briefing)?;
-            if tokens <= max_tokens as usize {
-                let pins: Vec<(String, Vec<(String, u64)>)> = briefing
-                    .items
-                    .iter()
-                    .zip(&candidates)
-                    .map(|(item, c)| (item.reference.clone(), c.pins.clone()))
-                    .collect();
-                let basis_ref = crate::boxed(self.retain_as(
-                    &basis_id,
-                    namespace,
-                    snapshot_seq,
-                    &scope,
-                    basis.clone(),
-                    &coverage,
-                    &pins,
-                    &plans,
-                ))
-                .await?;
-                briefing.basis_ref = basis_ref;
-                crate::boxed(self.record_exposure(&briefing, &candidates, snapshot_seq)).await;
-                return self.briefing_response(request, briefing, max_tokens, warnings);
-            }
-            // Drop the lowest-priority optional item; its channel is now
-            // truncated by the budget. Required items never go.
-            match candidates.iter().rposition(|c| !c.required) {
-                Some(index) => {
-                    let removed = candidates.remove(index);
-                    let channel = match removed.item.role {
-                        ItemRole::Experience => "experiences",
-                        ItemRole::Procedure => "skills",
-                        _ => "evidence",
-                    };
-                    for (name, plan) in plans.iter_mut() {
-                        if *name == channel {
-                            plan.complete = false;
-                            plan.truncation = Some("budget");
-                        }
-                    }
-                }
-                None => {
-                    return Err(KipError::result_limit_exceeded(format!(
-                        "the required constraints, warnings and coverage need more than {max_tokens} \
-                         tokens under {}",
-                        crate::recall_budget::TOKENIZER
-                    )));
-                }
-            }
-        }
+            (briefing, plans)
+        };
+        let fitting = |kept: usize| -> Result<Option<(Briefing, _)>, KipError> {
+            let (briefing, plans) = briefing_of(kept);
+            Ok((count_tokens(&briefing)? <= max_tokens as usize).then_some((briefing, plans)))
+        };
+        let required = candidates.iter().take_while(|c| c.required).count();
+        let Some((kept, (mut briefing, plans))) =
+            crate::recall_budget::longest_fitting(required, candidates.len(), fitting)?
+        else {
+            return Err(KipError::result_limit_exceeded(format!(
+                "the required constraints, warnings and coverage need more than {max_tokens} \
+                 tokens under {}",
+                crate::recall_budget::TOKENIZER
+            )));
+        };
+        candidates.truncate(kept);
+        let pins: Vec<(String, Vec<(String, u64)>)> = briefing
+            .items
+            .iter()
+            .zip(&candidates)
+            .map(|(item, c)| (item.reference.clone(), c.pins.clone()))
+            .collect();
+        let basis_ref = crate::boxed(self.retain_as(
+            &basis_id,
+            namespace,
+            snapshot_seq,
+            &scope,
+            basis,
+            &briefing.coverage,
+            &pins,
+            &plans,
+        ))
+        .await?;
+        briefing.basis_ref = basis_ref;
+        crate::boxed(self.record_exposure(&briefing, &candidates, snapshot_seq)).await;
+        self.briefing_response(request, briefing, max_tokens, warnings)
     }
 
     /// Turns one cited element into a briefing item. `None` when it is not
     /// memory a briefing reports; `Some(None)` when it is out of scope.
     async fn cited_item(
         &self,
+        cache: &ReadCache,
         id: &str,
         scope: &ResolvedScope,
         valid_at: Option<&str>,
         as_of: Option<u64>,
     ) -> Option<Option<Candidate>> {
         let parsed: ElementId = id.parse().ok()?;
-        let Some(row) = self.element_row(id, as_of).await else {
+        let Some(row) = self.cached_row(cache, id, as_of).await else {
             return Some(None);
         };
         if row["_system"]["state"] != "active" {
@@ -738,14 +805,16 @@ impl Space {
                 }
                 let proposition =
                     reference_id(&row["proposition"]).or_else(|| row["proposition_id"].as_str())?;
-                let prop = self.element_row(proposition, as_of).await?;
+                let prop = self.cached_row(cache, proposition, as_of).await?;
                 let belief = self
-                    .belief(proposition, scope, valid_at, as_of)
+                    .cached_belief(cache, proposition, scope, valid_at, as_of)
                     .await
                     .ok()?;
-                let actor = self.endpoint_text(&row["asserted_by"], as_of).await;
-                let subject = self.endpoint_text(&prop["subject"], as_of).await;
-                let object = self.endpoint_text(&prop["object"], as_of).await;
+                let (actor, subject, object) = tokio::join!(
+                    self.endpoint_text(cache, &row["asserted_by"], as_of),
+                    self.endpoint_text(cache, &prop["subject"], as_of),
+                    self.endpoint_text(cache, &prop["object"], as_of),
+                );
                 let predicate = prop["predicate_ref"].as_str().map(local).unwrap_or("?");
                 Some(Some(Candidate {
                     item: MemoryItem {
@@ -802,7 +871,10 @@ impl Space {
                 if !in_scope {
                     return Some(None);
                 }
-                let belief = self.belief(id, scope, valid_at, as_of).await.ok()?;
+                let belief = self
+                    .cached_belief(cache, id, scope, valid_at, as_of)
+                    .await
+                    .ok()?;
                 let status = status_of(belief["status"].as_str().unwrap_or(""));
                 let evidence: Vec<String> = belief["support"]
                     .as_array()
@@ -862,10 +934,10 @@ impl Space {
     /// An exact channel: every matching Concept in scope, up to the page.
     async fn exact_channel(
         &self,
+        cache: &ReadCache,
         command: &str,
         scope: &ResolvedScope,
         as_of: Option<u64>,
-        _role: ItemRole,
     ) -> (Vec<Candidate>, Plan) {
         let command = match as_of {
             Some(seq) => format!("{command} AS OF SEQ {seq} LIMIT {}", CHANNEL_LIMIT + 1),
@@ -878,6 +950,13 @@ impl Space {
         let truncated = rows.len() > CHANNEL_LIMIT;
         let mut items = Vec::new();
         for row in rows.into_iter().take(CHANNEL_LIMIT) {
+            // The dependency check reads these same rows at this snapshot.
+            if let Some(id) = row["id"].as_str() {
+                cache
+                    .rows
+                    .lock()
+                    .insert((id.to_string(), as_of), Some(row.clone()));
+            }
             let (task, contexts) = concept_scope(&row);
             if !scope.admits(task.as_deref(), &contexts) {
                 continue;
@@ -893,6 +972,7 @@ impl Space {
     /// bounded plan may complete; it never claims semantic exhaustiveness.
     async fn search_channel(
         &self,
+        cache: &ReadCache,
         query: &str,
         type_name: &str,
         failures: Option<bool>,
@@ -942,7 +1022,7 @@ impl Space {
         let mut items = Vec::new();
         for row in rows.into_iter().take(SEARCH_LIMIT) {
             let Some(row) = self
-                .element_row(row["id"].as_str().unwrap_or(""), as_of)
+                .cached_row(cache, row["id"].as_str().unwrap_or(""), as_of)
                 .await
             else {
                 continue;
@@ -970,6 +1050,7 @@ impl Space {
     /// The ProjectionBasis a briefing's beliefs were read under.
     async fn basis_for(
         &self,
+        cache: &ReadCache,
         candidates: &[Candidate],
         scope: &ResolvedScope,
         valid_at: Option<&str>,
@@ -978,7 +1059,7 @@ impl Space {
         for candidate in candidates {
             for (id, _) in &candidate.pins {
                 if id.starts_with("P-")
-                    && let Ok(belief) = self.belief(id, scope, valid_at, as_of).await
+                    && let Ok(belief) = self.cached_belief(cache, id, scope, valid_at, as_of).await
                     && belief.get("basis").is_some()
                 {
                     return belief["basis"].clone();
@@ -1050,7 +1131,6 @@ impl Space {
     }
 
     /// Retains a briefing's basis for expansion and returns its ref.
-    #[allow(clippy::too_many_arguments)]
     async fn retain(
         &self,
         namespace: &str,
@@ -1059,7 +1139,6 @@ impl Space {
         basis: Json,
         coverage: &Coverage,
         items: &[(String, Vec<(String, u64)>)],
-        _after: &[wire::Progress],
     ) -> Result<String, KipError> {
         let id = format!("basis-{}", hex_id());
         let plans = [

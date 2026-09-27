@@ -172,7 +172,7 @@ impl Tool<BaseCtx> for MemoryRuntimeTool {
     ) -> Result<ToolOutput<Json>, BoxError> {
         let _guard = if matches!(args.operation.as_str(), "arm_watch" | "lease_task") {
             if let Some(control) = &self.product_control {
-                let guard = control.gate.lock().await;
+                let guard = control.gate.read().await;
                 control.check(&ctx)?;
                 Some(guard)
             } else {

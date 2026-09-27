@@ -123,7 +123,8 @@ the Response as `status: "failed"` with a KIP `error`
 `NotFoundOrNotVisible`, `PreconditionFailed`, `ResultLimitExceeded`,
 `CursorInvalid`, `NotAuthorized`, `OutcomeUnknown`, `LegalHoldConflict` …). The
 helper endpoints use the ordinary HTTP error mapping (404 for an unknown or
-foreign handle, 409 for a staging-key conflict).
+foreign handle, 409 for a staging-key conflict); their `RpcError.message` is the
+KIP error message and `RpcError.data` the KIP `ErrorObject` with its `code`.
 
 **Handles are scoped to the caller.** Staged sources, idempotency keys, receipts,
 retained recall bases and erasure plans belong to the authenticated caller — the
@@ -1600,7 +1601,7 @@ if (recall.error) {
 ## 6) Error Semantics
 
 - Authentication failure: HTTP `401`, response body is `RpcError`
-- Invalid request/parameters: HTTP `400`, response body is `RpcError`
+- Invalid request/parameters: HTTP `400`, response body is `RpcError`; `RpcError.message` is plain human-readable text, not a quoted or debug rendering
 - Forbidden access: HTTP `403`; missing space or wiki document: HTTP `404`
 - Wiki commit conflicts: HTTP `409`, with the current version in `RpcError.data.current_version`; oversized wiki content: HTTP `413`
 - LLM request load shedding: HTTP `429`; global HTTP load shedding: HTTP `503`. These middleware responses are plain text.

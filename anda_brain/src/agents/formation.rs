@@ -14,6 +14,7 @@ use anda_engine::{
     unix_ms,
 };
 use parking_lot::RwLock;
+use serde::Deserialize;
 use serde_json::json;
 use std::{
     collections::VecDeque,
@@ -27,6 +28,23 @@ use super::{BrainHook, PERSON_BY_KEY, RunnerFlow, RunnerHost, drive_runner_loop,
 use crate::types::FormationInput;
 
 const REVIEW_INSTRUCTIONS: &str = include_str!("../../assets/BrainFormationReview.md");
+
+/// The conversation `extra` member counting its failed processing rounds.
+const FAILED_ROUNDS_KEY: &str = "formation_failed_rounds";
+/// Failed rounds (an attempt and its retry each) before Formation stops
+/// retrying a conversation and lets the queue move past it.
+const MAX_FAILED_ROUNDS: u64 = 3;
+/// The least time those failures must span, so a short provider outage does
+/// not discard the conversations queued through it.
+const GIVE_UP_AFTER_MS: u64 = 30 * 60 * 1000;
+
+/// How often, and since when, a conversation has failed a whole round.
+#[derive(Debug, Default, PartialEq, Eq, serde::Serialize, Deserialize)]
+struct FailedRounds {
+    rounds: u64,
+    first_failed_at: u64,
+}
+
 // A cost heuristic for one semantic omission check, not a completeness guarantee.
 // KIP validates writes, but cannot tell which source facts the model overlooked.
 const REVIEW_MIN_INPUT_TOKENS: usize = 10_000;
@@ -114,13 +132,6 @@ impl FormationAgent {
         }
     }
 
-    /// Backfills the completed-conversation ring after a restart, mirroring
-    /// recall/maintenance `init` — without it the `history_formation` context
-    /// block stays empty until the next conversation completes. Formation
-    /// conversations live in the shared memory store under their ingesting
-    /// user, so there is no single-user list to query; walk backwards from
-    /// the newest conversation and keep the latest completed formation ones.
-    /// The scan is bounded: this is best-effort context, not recovery state.
     pub(crate) fn with_prompt(mut self, prompt: Arc<str>) -> Self {
         self.prompt = prompt;
         self
@@ -147,11 +158,22 @@ impl FormationAgent {
         self.history.write().clear();
     }
 
+    /// Backfills the completed-conversation ring after a restart, mirroring
+    /// recall/maintenance `init` — without it the `history_formation` context
+    /// block stays empty until the next conversation completes. Formation
+    /// conversations live in the shared memory store under their ingesting
+    /// user, so there is no single-user list to query; walk backwards from
+    /// the newest conversation and keep the latest completed formation ones.
+    /// The scan is bounded: this is best-effort context, not recovery state.
     pub async fn init(&self) -> Result<(), BoxError> {
         // Matches the `push_completed_history` cap in `drive_runner_loop`.
         const HISTORY_LEN: usize = 2;
         const SCAN_LIMIT: u64 = 32;
 
+        let boundary = self
+            .conversations
+            .get_extension_as::<u64>("history_boundary")
+            .unwrap_or(0);
         // Collected newest-first; the runtime ring runs oldest -> newest.
         let mut newest: Vec<Document> = Vec::with_capacity(HISTORY_LEN);
         let mut id = self.memory.max_conversation_id();
@@ -159,11 +181,7 @@ impl FormationAgent {
         while id > 0 && scanned < SCAN_LIMIT && newest.len() < HISTORY_LEN {
             scanned += 1;
             if let Ok(conv) = self.memory.get_conversation(id).await
-                && conv._id
-                    > self
-                        .conversations
-                        .get_extension_as::<u64>("history_boundary")
-                        .unwrap_or(0)
+                && conv._id > boundary
                 && conv.status == ConversationStatus::Completed
                 && conv
                     .label
@@ -351,6 +369,11 @@ impl FormationAgent {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await; // 避免快速失败循环
                 // 重试一次
                 self.process_one(&ctx, &mut conversation).await;
+                // Counted before the hook, so a conversation given up on
+                // settles its receipt with this same callback.
+                if conversation.status == ConversationStatus::Failed {
+                    self.record_failed_round(&mut conversation).await;
+                }
                 self.hook
                     .on_conversation_end(Self::NAME, &conversation)
                     .await;
@@ -494,6 +517,53 @@ impl FormationAgent {
         }
     }
 
+    /// Records one failed round (an attempt and its retry) on the conversation.
+    ///
+    /// A conversation that fails every time — a provider refusal, an input
+    /// over the model's context, a missing prompt — would otherwise stay the
+    /// first pending id forever: the watermark cannot move past it, so every
+    /// later conversation waits behind it. After [`MAX_FAILED_ROUNDS`] rounds
+    /// spanning at least [`GIVE_UP_AFTER_MS`] it is cancelled with the last
+    /// failure as its reason, which its receipt reports as failed, and the
+    /// queue moves on.
+    async fn record_failed_round(&self, conversation: &mut Conversation) {
+        let now_ms = unix_ms();
+        let extra = conversation.extra.get_or_insert_with(|| json!({}));
+        let Some(extra) = extra.as_object_mut() else {
+            return;
+        };
+        let mut failed: FailedRounds = extra
+            .get(FAILED_ROUNDS_KEY)
+            .and_then(|value| FailedRounds::deserialize(value).ok())
+            .unwrap_or_default();
+        failed.rounds += 1;
+        if failed.first_failed_at == 0 {
+            failed.first_failed_at = now_ms;
+        }
+        let give_up = failed.rounds >= MAX_FAILED_ROUNDS
+            && now_ms.saturating_sub(failed.first_failed_at) >= GIVE_UP_AFTER_MS;
+        extra.insert(FAILED_ROUNDS_KEY.into(), json!(failed));
+        if give_up {
+            let reason = format!(
+                "formation_failed: gave up after {} failed rounds; last failure: {}",
+                failed.rounds,
+                conversation
+                    .failed_reason
+                    .as_deref()
+                    .unwrap_or("unknown failure")
+            );
+            log::error!(
+                target: "brain",
+                "formation conversation {} cancelled: {reason}",
+                conversation._id
+            );
+            conversation.status = ConversationStatus::Cancelled;
+            conversation.failed_reason = Some(reason);
+            conversation.updated_at = now_ms;
+        }
+        self.persist_conversation_snapshot(conversation).await;
+    }
+
     async fn mark_conversation_failed(&self, conversation: &mut Conversation, reason: String) {
         super::mark_conversation_failed(
             |id, changes| self.memory.update_conversation(id, changes),
@@ -556,7 +626,7 @@ impl FormationAgent {
         let prompt = match conversation
             .messages
             .first()
-            .and_then(|v| serde_json::from_value::<Message>(v.clone()).ok())
+            .and_then(|v| Message::deserialize(v).ok())
             .and_then(|v| v.text())
         {
             Some(p) => p,
@@ -2184,6 +2254,128 @@ mod tests {
         let stored = space.memory.get_conversation(pending._id).await.unwrap();
         assert_eq!(stored.status, ConversationStatus::Completed);
         assert_eq!(stored.failed_reason, None);
+    }
+
+    /// Fails every pass whose input mentions "poison" and completes the rest.
+    #[derive(Debug)]
+    struct PoisonCompleter {
+        calls: Arc<AtomicU64>,
+    }
+
+    impl CompletionFeaturesDyn for PoisonCompleter {
+        fn model_name(&self) -> String {
+            "poison-test-model".to_string()
+        }
+
+        fn completion(&self, req: CompletionRequest) -> BoxPinFut<Result<AgentOutput, BoxError>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let poisoned = req.prompt.contains("poison pill");
+            Box::pin(async move {
+                Ok(AgentOutput {
+                    content: if poisoned { "" } else { "formation done" }.to_string(),
+                    failed_reason: poisoned.then(|| "provider refused the input".to_string()),
+                    // Like a provider, the history returned opens with the
+                    // input, which a retry reads its prompt from.
+                    chat_history: vec![
+                        Message {
+                            role: "user".to_string(),
+                            content: vec![req.prompt.into()],
+                            ..Default::default()
+                        },
+                        Message {
+                            role: "assistant".to_string(),
+                            content: vec!["done".to_string().into()],
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                })
+            })
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_conversation_that_keeps_failing_stops_blocking_the_queue() {
+        let calls = Arc::new(AtomicU64::new(0));
+        let app = test_app_state_with_completer(
+            "formation_poison",
+            PoisonCompleter {
+                calls: calls.clone(),
+            },
+        );
+        let space = create_loaded_space(&app, "formation_poison").await;
+        let input = |text: &str| {
+            vec![json!(Message {
+                role: "user".to_string(),
+                content: vec![formation_prompt_with_text(text, None).into()],
+                ..Default::default()
+            })]
+        };
+        let poison = stored_conversation(&space, input("poison pill")).await;
+        let next = stored_conversation(&space, input("remember this preference")).await;
+        let run = |conversation: Conversation| {
+            let space = space.clone();
+            async move {
+                let ctx = space
+                    .ctx_for_test(SELF_USER_ID, FormationAgent::NAME)
+                    .unwrap();
+                space
+                    .formation
+                    .processing_conversation
+                    .store(conversation._id, Ordering::SeqCst);
+                space.formation.process_loop(ctx, conversation).await;
+                space.memory.get_conversation(poison._id).await.unwrap()
+            }
+        };
+
+        // A failed round stays retryable, and the queue waits behind it.
+        let mut stored = run(poison.clone()).await;
+        assert_eq!(stored.status, ConversationStatus::Failed);
+        assert_eq!(
+            stored.extra.as_ref().unwrap()[super::FAILED_ROUNDS_KEY]["rounds"],
+            1
+        );
+        assert_eq!(space.formation.get_processed(), None);
+
+        // Enough rounds inside a short outage are still retried.
+        stored.extra.as_mut().unwrap()[super::FAILED_ROUNDS_KEY]["rounds"] =
+            json!(super::MAX_FAILED_ROUNDS - 1);
+        let mut stored = run(stored).await;
+        assert_eq!(stored.status, ConversationStatus::Failed);
+        assert_eq!(
+            space
+                .memory
+                .get_conversation(next._id)
+                .await
+                .unwrap()
+                .status,
+            ConversationStatus::Submitted
+        );
+
+        // Rounds spanning the give-up window cancel it, and the queue moves on.
+        stored.extra.as_mut().unwrap()[super::FAILED_ROUNDS_KEY]["first_failed_at"] = json!(1);
+        let stored = run(stored).await;
+        assert_eq!(stored.status, ConversationStatus::Cancelled);
+        assert!(
+            stored
+                .failed_reason
+                .as_deref()
+                .unwrap()
+                .starts_with("formation_failed: gave up after 4 failed rounds"),
+            "{:?}",
+            stored.failed_reason
+        );
+        assert_eq!(
+            space
+                .memory
+                .get_conversation(next._id)
+                .await
+                .unwrap()
+                .status,
+            ConversationStatus::Completed
+        );
+        assert_eq!(space.formation.get_processed(), Some(next._id));
+        assert_eq!(calls.load(Ordering::SeqCst), 7);
     }
 
     #[tokio::test]

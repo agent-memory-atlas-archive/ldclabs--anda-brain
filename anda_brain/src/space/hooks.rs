@@ -208,7 +208,7 @@ impl BrainHook for Hooks {
         {
             if space.automatic {
                 space.kick_wiki_digest();
-                space.kick_wiki_housekeeping();
+                space.kick_wiki_housekeeping(true);
             }
         }
     }

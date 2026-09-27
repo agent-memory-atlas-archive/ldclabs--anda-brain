@@ -108,7 +108,8 @@ KIP `597db44` / `cognitive-memory@2.0.0` 对齐说明：鉴权与 JSON/CBOR/Mark
 并带 KIP `error`（`InvalidRequestEnvelope`、`UnsupportedCapability`、`IdempotencyConflict`、
 `NotFoundOrNotVisible`、`PreconditionFailed`、`ResultLimitExceeded`、`CursorInvalid`、
 `NotAuthorized`、`OutcomeUnknown`、`LegalHoldConflict` 等）。辅助端点使用常规 HTTP 错误映射
-（未知或他人的句柄为 404，暂存键冲突为 409）。
+（未知或他人的句柄为 404，暂存键冲突为 409）；其 `RpcError.message` 为 KIP 错误信息，
+`RpcError.data` 为带 `code` 的 KIP `ErrorObject`。
 
 **句柄归属调用方。** 暂存来源、幂等键、回执、保留的召回依据与擦除计划属于已认证的调用方
 （CWT 主体、按名称区分的 Space token，或匿名读者）和该 Space。其他调用方或其他 Space 只会得到
@@ -1528,7 +1529,7 @@ if (recall.error) {
 ## 6) 错误语义
 
 - 认证失败：HTTP `401`，响应体为 `RpcError`
-- 参数错误：HTTP `400`，响应体为 `RpcError`
+- 参数错误：HTTP `400`，响应体为 `RpcError`；`RpcError.message` 为可读的纯文本，而非带引号的调试格式
 - 无权访问：HTTP `403`；空间或 wiki 文档不存在：HTTP `404`
 - Wiki 提交冲突：HTTP `409`，当前版本位于 `RpcError.data.current_version`；wiki 内容超限：HTTP `413`
 - 模型请求限流：HTTP `429`；全局 HTTP 限流：HTTP `503`。这些中间件响应是纯文本。

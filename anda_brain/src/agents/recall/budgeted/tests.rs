@@ -1,4 +1,5 @@
 use super::*;
+use crate::PROFILE;
 use crate::{
     payload::{ContentType, StringOr},
     recall_budget::MemoryPacket,
@@ -1044,6 +1045,59 @@ async fn different_questions_discover_different_records_before_model_selection()
         );
     }
     assert_eq!(requests.lock().len(), 2); // no model-controlled lookup was needed
+    space.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_tight_planning_budget_evicts_only_optional_items_until_the_request_fits() {
+    let (_app, space, requests) = setup("p5_partial_eviction", Behavior::Select).await;
+    let budget = RecallBudget::default();
+    // The same optional history item before each pass, so the two planner
+    // requests differ only by what the tighter budget evicts.
+    let history = || {
+        let mut history = space.recall.history.write();
+        history.clear();
+        history.push_back(Document::from_text("old", "An earlier conversation."));
+    };
+    history();
+    space
+        .query(SELF_USER_ID, input(Some(budget.clone())))
+        .await
+        .unwrap();
+    let full = requests.lock()[0].clone();
+    let full_tokens = budget::count(&normalized_request(&full).unwrap()).unwrap();
+    let items_of = |request: &CompletionRequest| {
+        let snapshot: Json = serde_json::from_str(&request.prompt).unwrap();
+        let items: Vec<MemoryItem> =
+            serde_json::from_value(snapshot["memory_items"].clone()).unwrap();
+        (items, snapshot["coverage"]["omitted"].clone())
+    };
+    let (all, _) = items_of(&full);
+    let pinned =
+        |item: &MemoryItem| matches!(item.priority, Priority::Required | Priority::Warning);
+    assert!(all.iter().any(|item| !pinned(item)));
+
+    history();
+    let output = space
+        .query(
+            SELF_USER_ID,
+            input(Some(limits(budget.max_tokens, full_tokens as u32 - 1))),
+        )
+        .await
+        .unwrap();
+    assert!(output.failed_reason.is_none(), "{}", output.content);
+    let tight = requests.lock()[1].clone();
+    assert!(budget::count(&normalized_request(&tight).unwrap()).unwrap() < full_tokens);
+    let (kept, omitted) = items_of(&tight);
+    assert!(kept.len() < all.len());
+    for item in all.iter().filter(|item| pinned(item)) {
+        assert!(
+            kept.contains(item),
+            "a required item was evicted: {}",
+            item.id
+        );
+    }
+    assert!(!omitted.as_array().unwrap().is_empty());
     space.close().await.unwrap();
 }
 

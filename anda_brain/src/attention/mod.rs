@@ -42,7 +42,11 @@ impl Default for AttentionPolicy {
             changes_per_watch: crate::settlement::watch::CHANGES_PAGE_LIMIT,
             wakes_per_space: 200,
             wall_time_ms: 10_000,
-            reconcile_ms: 60_000,
+            // A safety net for a missed hint, not the scheduler: due Watches
+            // and dirty generations already set `next_check_ms`. Every
+            // reconcile opens a cold Space, which an idle eviction then
+            // closes again.
+            reconcile_ms: 15 * 60_000,
             blocked_retry_ms: 60_000,
         }
     }

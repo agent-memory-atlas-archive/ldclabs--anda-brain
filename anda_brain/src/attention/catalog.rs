@@ -90,13 +90,17 @@ impl Directory {
             .read::<Root>("root")
             .await?
             .ok_or("attention root unavailable")?;
-        if root.value.format != DIRECTORY_FORMAT
-            || root.value.allocated > MAX_SLOTS
-            || root.value.cursor > root.value.allocated
+        Self::check_root(&root.value)?;
+        Ok(root)
+    }
+    fn check_root(root: &Root) -> Result<(), BoxError> {
+        if root.format != DIRECTORY_FORMAT
+            || root.allocated > MAX_SLOTS
+            || root.cursor > root.allocated
         {
             return Err("invalid attention root".into());
         }
-        Ok(root)
+        Ok(())
     }
     pub(super) async fn entry(&self, id: &str) -> Result<Option<Versioned<Entry>>, BoxError> {
         let result = self.read::<Entry>(&Self::entry_key(id)?).await?;
@@ -181,17 +185,17 @@ impl Directory {
     pub async fn page(&self, limit: usize) -> Result<Vec<u64>, BoxError> {
         let _g = self.gate.lock().await;
         // No root means no registered work, not a request to initialize a store.
-        if self.read::<Root>("root").await?.is_none() {
+        let Some(root) = self.read::<Root>("root").await? else {
             return Ok(vec![]);
-        }
-        let root = self.root().await?;
-        let start = if root.value.cursor == root.value.allocated {
+        };
+        let root = root.value;
+        Self::check_root(&root)?;
+        let start = if root.cursor == root.allocated {
             1
         } else {
-            root.value.cursor + 1
+            root.cursor + 1
         };
         let end = root
-            .value
             .allocated
             .min(start.saturating_add(limit as u64).saturating_sub(1));
         Ok((start..=end).collect())

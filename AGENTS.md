@@ -32,8 +32,9 @@ write KIP directly.
 
 The service tracks KIP `11a82ec` and `kip://profiles/cognitive-memory@2.0.0`
 (content digest `sha256:734aa0fd…`; the draft rewrote 2.0.0 in place, so only the
-digest names a revision). It pins `anda_kip = "=0.14.0"` and requires
-`anda_cognitive_nexus = "0.14.0"` with `anda_engine` 0.16 from crates.io; the Worker
+digest names a revision). It pins `anda_kip = "=0.14.0"` and
+`anda_cognitive_nexus = "=0.14.0"` (0.14.1 regresses promoted-draft lineage
+matching) with `anda_engine` 0.16 from crates.io; the Worker
 uses `@ldclabs/kip-do` 0.14 from npm. The commented `[patch.crates-io]` block in
 `Cargo.toml` is for developing against sibling `anda-db` / `anda` checkouts: enable
 the shared DB/KIP stack together and verify one type identity with Cargo metadata.

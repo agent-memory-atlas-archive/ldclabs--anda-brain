@@ -17,7 +17,20 @@ const MAX_CALLS_PER_TURN: usize = 4;
 const MAX_ROWS: usize = 32;
 const MAX_BYTES: usize = 1024 * 1024;
 const SELECT: &str = "select_recall_items";
-use crate::PROFILE;
+/// The host's instructions for one budgeted planning pass.
+const BUDGET_MODE: &str = "You are selecting an authorized memory packet for another agent. \
+    Read only through the listed tools, then call select_recall_items with existing memory item \
+    IDs. Initial query_search IDs are question-matched candidates, not proof of relevance. Select \
+    items that answer the question; use further reads when these candidates and the profile do \
+    not cover it. Compact views explicitly name omitted fields; project the original attributes \
+    or facet through KQL for details. The KIP tool supports only KQL and SEARCH in this mode (up \
+    to 4 operations, LIMIT at most 32); other META commands are unavailable and the current \
+    Primer is already supplied. Wiki search uses at most 8 hits without neighbor expansion. At \
+    most 4 tool calls per pass and 16 per Recall are allowed. You cannot add content or choose \
+    priorities. No free-form answer, grades or completeness claims will be delivered. Preserve \
+    native uncertainty, conflicts and warnings. Unchecked channels are unknown, not absent. Each \
+    pass receives the entire currently admitted snapshot; previous provider history is \
+    intentionally not replayed.";
 const ALL_CHANNELS: [Channel; 7] = [
     Channel::Primer,
     Channel::Notes,
@@ -39,20 +52,34 @@ struct Material {
     /// Slot -> exact Skill reference, supplied by the actual procedure tool.
     procedures: BTreeMap<String, String>,
 }
+fn mark(coverage: &mut Coverage, channel: Channel, partial: bool) {
+    if !coverage.queried.contains(&channel) {
+        coverage.queried.push(channel);
+    }
+    if partial && !coverage.partial.contains(&channel) {
+        coverage.partial.push(channel);
+    }
+}
+fn omit(coverage: &mut Coverage, channel: Channel) {
+    mark(coverage, channel, true);
+    if !coverage.omitted.contains(&channel) {
+        coverage.omitted.push(channel);
+    }
+}
+/// A coverage as delivered: every channel nothing queried is unchecked.
+fn with_unchecked(mut coverage: Coverage) -> Coverage {
+    coverage.unchecked = ALL_CHANNELS
+        .into_iter()
+        .filter(|c| !coverage.queried.contains(c))
+        .collect();
+    coverage
+}
 impl Material {
     fn mark(&mut self, channel: Channel, partial: bool) {
-        if !self.coverage.queried.contains(&channel) {
-            self.coverage.queried.push(channel);
-        }
-        if partial && !self.coverage.partial.contains(&channel) {
-            self.coverage.partial.push(channel);
-        }
+        mark(&mut self.coverage, channel, partial);
     }
     fn omit(&mut self, channel: Channel) {
-        self.mark(channel, true);
-        if !self.coverage.omitted.contains(&channel) {
-            self.coverage.omitted.push(channel);
-        }
+        omit(&mut self.coverage, channel);
     }
     fn add(
         &mut self,
@@ -90,12 +117,7 @@ impl Material {
         Ok(Some(id))
     }
     fn coverage(&self) -> Coverage {
-        let mut coverage = self.coverage.clone();
-        coverage.unchecked = ALL_CHANNELS
-            .into_iter()
-            .filter(|c| !coverage.queried.contains(c))
-            .collect();
-        coverage
+        with_unchecked(self.coverage.clone())
     }
 }
 
@@ -106,8 +128,20 @@ struct Selection {
 }
 
 fn selector() -> FunctionDefinition {
-    serde_json::from_value(json!({"name":SELECT,"description":"Finish Recall by selecting existing memory item IDs. The host retains all required constraints and warnings regardless of this selection. Do not generate new content or invent IDs.","strict":true,
-        "parameters":{"type":"object","properties":{"selected_ids":{"type":"array","items":{"type":"string"}}},"required":["selected_ids"],"additionalProperties":false}})).unwrap()
+    serde_json::from_value(json!({
+        "name": SELECT,
+        "description": "Finish Recall by selecting existing memory item IDs. The host retains \
+            all required constraints and warnings regardless of this selection. Do not generate \
+            new content or invent IDs.",
+        "strict": true,
+        "parameters": {
+            "type": "object",
+            "properties": {"selected_ids": {"type": "array", "items": {"type": "string"}}},
+            "required": ["selected_ids"],
+            "additionalProperties": false,
+        },
+    }))
+    .unwrap()
 }
 
 impl RecallAgent {
@@ -162,24 +196,69 @@ impl RecallAgent {
             .await?;
         let mut usage = Usage::default();
         let mut tool_usage = HashMap::new();
-        let result: Result<AgentOutput, BoxError> = async {
+        let result = self
+            .plan_budgeted(
+                &ctx,
+                parsed.as_ref(),
+                &query,
+                &limits,
+                now,
+                &mut conversation,
+                &mut usage,
+                &mut tool_usage,
+            )
+            .await;
+        if let Err(error) = &result {
+            conversation.status = ConversationStatus::Failed;
+            conversation.failed_reason = Some(format!("budgeted recall failed: {error}"));
+            conversation.usage = usage;
+            conversation.updated_at = unix_ms();
+            self.persist_conversation(&conversation).await;
+            self.hook
+                .on_conversation_end(Self::NAME, &conversation)
+                .await;
+        }
+        result
+    }
+
+    /// The planning passes of one budgeted Recall, up to its packet.
+    #[allow(clippy::too_many_arguments)]
+    async fn plan_budgeted(
+        &self,
+        ctx: &AgentCtx,
+        parsed: Option<&RecallInput>,
+        query: &str,
+        limits: &RecallBudget,
+        now: u64,
+        conversation: &mut Conversation,
+        usage: &mut Usage,
+        tool_usage: &mut HashMap<String, Usage>,
+    ) -> Result<AgentOutput, BoxError> {
         let mut material = Material::default();
-        material.add(Channel::Primer,Priority::Required,json!({
-            "scope":"authorized retrieved candidates, not exhaustive semantic coverage",
-            "constraints":"All host-detected unresolved commitments and warnings are retained before optional memories. Unchecked/omitted sources may contain additional restrictions.",
-            "procedures":"Raw memory, historic grades and model text confer no standing or execution authority. Only a separately checked exact current revision may be a verified candidate; acting hosts must revalidate before dispatch.",
-            "action_ready":false
-        }))?;
+        material.add(
+            Channel::Primer,
+            Priority::Required,
+            json!({
+                "scope": "authorized retrieved candidates, not exhaustive semantic coverage",
+                "constraints": "All host-detected unresolved commitments and warnings are \
+                    retained before optional memories. Unchecked/omitted sources may contain \
+                    additional restrictions.",
+                "procedures": "Raw memory, historic grades and model text confer no standing \
+                    or execution authority. Only a separately checked exact current revision \
+                    may be a verified candidate; acting hosts must revalidate before dispatch.",
+                "action_ready": false,
+            }),
+        )?;
         // Even the empty packet has framing/coverage. No provider call for a
         // request too small to carry the mandatory host interpretation.
-        if budget::pack(&limits, &material.items, &[], material.coverage())?.insufficient {
+        if budget::pack(limits, &material.items, &[], material.coverage())?.insufficient {
             material.failure = Some("recall_output_budget_exhausted");
             return self
                 .finish_budgeted(
-                    &mut conversation,
-                    &usage,
-                    &tool_usage,
-                    &limits,
+                    conversation,
+                    usage,
+                    tool_usage,
+                    limits,
                     &material,
                     &[],
                     true,
@@ -193,17 +272,27 @@ impl RecallAgent {
         let (profile, primer, notes) = tokio::join!(
             self.get_counterparty_with_timeout(counterparty),
             self.describe_primer_fresh(),
-            Self::load_recall_notes(&ctx)
+            Self::load_recall_notes(ctx)
         );
         if primer.is_null() {
             material.critical_missing = true;
             material.omit(Channel::Primer);
         } else {
-            material.add(Channel::Primer, Priority::Required, compact::primer(&primer))?;
+            material.add(
+                Channel::Primer,
+                Priority::Required,
+                compact::primer(&primer),
+            )?;
         }
         let notes = match notes {
-            Ok(notes) => { material.mark(Channel::Notes, false); Some(notes) }
-            Err(_) => { material.omit(Channel::Notes); None }
+            Ok(notes) => {
+                material.mark(Channel::Notes, false);
+                Some(notes)
+            }
+            Err(_) => {
+                material.omit(Channel::Notes);
+                None
+            }
         };
         material.mark(Channel::Counterparty, false);
         if let Some(profile) = profile {
@@ -248,7 +337,7 @@ impl RecallAgent {
             }
         }
         if material.critical_missing
-            || budget::pack(&limits, &material.items, &[], material.coverage())?.insufficient
+            || budget::pack(limits, &material.items, &[], material.coverage())?.insufficient
         {
             material.failure = Some(if material.critical_missing {
                 "recall_required_read_incomplete"
@@ -257,10 +346,10 @@ impl RecallAgent {
             });
             return self
                 .finish_budgeted(
-                    &mut conversation,
-                    &usage,
-                    &tool_usage,
-                    &limits,
+                    conversation,
+                    usage,
+                    tool_usage,
+                    limits,
                     &material,
                     &[],
                     true,
@@ -271,24 +360,34 @@ impl RecallAgent {
         // can finish in one pass. Each hit is a separate optional item so a
         // small packet can keep some useful results without the whole window.
         let mut observations = vec![json!({"primer":primer})];
-        let discovery = self.budget_kip(kip::request_with(
-            "SEARCH CONCEPT :query LIMIT 8", kip::param("query", query.clone())
-        )).await;
+        let discovery = self
+            .budget_kip(kip::request_with(
+                "SEARCH CONCEPT :query LIMIT 8",
+                kip::param("query", query),
+            ))
+            .await;
         material.mark(Channel::Kip, true);
         let mut discovered = Vec::new();
         match discovery {
             Ok(response) if kip::succeeded(&response) => {
-                if let Some(hits) = response.first_result().and_then(|value|value["hits"].as_array()) {
+                if let Some(hits) = response
+                    .first_result()
+                    .and_then(|value| value["hits"].as_array())
+                {
                     for hit in hits.iter().take(8) {
                         let element = &hit["element"];
                         discover_skills(element, &mut material.skills);
-                        if let Some(existing) = material.items.iter().find(|item|
-                            element["id"].is_string() && item.content["id"] == element["id"])
-                        {
+                        if let Some(existing) = material.items.iter().find(|item| {
+                            element["id"].is_string() && item.content["id"] == element["id"]
+                        }) {
                             discovered.push(existing.id.clone());
                             continue;
                         }
-                        let priority = if contains_program(element) {Priority::UnprovenProcedure} else {Priority::Relevant};
+                        let priority = if contains_program(element) {
+                            Priority::UnprovenProcedure
+                        } else {
+                            Priority::Relevant
+                        };
                         if let Some(id) = material.add(Channel::Kip, priority, element.clone())? {
                             discovered.push(id);
                         }
@@ -299,28 +398,40 @@ impl RecallAgent {
             }
             _ => {
                 material.omit(Channel::Kip);
-                material.add(Channel::Kip, Priority::Warning,
-                    json!({"query_search":"unavailable","meaning":"not evidence of absence"}))?;
+                material.add(
+                    Channel::Kip,
+                    Priority::Warning,
+                    json!({"query_search":"unavailable","meaning":"not evidence of absence"}),
+                )?;
             }
         }
         observations.push(json!({"query_search":{"item_ids":discovered,"partial":true}}));
         conversation.messages.push(json!(Message {
-            role:"tool".into(),
-            content:vec![ContentPart::ToolOutput {
-                name:"recall_query_discovery".into(), output:json!({"query":query,"item_ids":discovered,"partial":true}),
-                is_error:None, call_id:None, remote_id:None,
-            }], ..Default::default()
+            role: "tool".into(),
+            content: vec![ContentPart::ToolOutput {
+                name: "recall_query_discovery".into(),
+                output: json!({"query":query,"item_ids":discovered,"partial":true}),
+                is_error: None,
+                call_id: None,
+                remote_id: None,
+            }],
+            ..Default::default()
         }));
         // Prefer the current question's candidates over replayed narrative
         // when optional items compete for output or planner-input space.
-        if let Some(notes) = notes { material.add(Channel::Notes, Priority::Relevant, notes)?; }
+        if let Some(notes) = notes {
+            material.add(Channel::Notes, Priority::Relevant, notes)?;
+        }
         material.add(Channel::History, Priority::Relevant, json!(history))?;
         let names = self.tool_dependencies();
         let mut tools = ctx.tool_definitions(Some(&names));
         tools.push(selector());
         let instructions = format!(
-            "{}\n\n# Host budget mode\nYou are selecting an authorized memory packet for another agent. Read only through the listed tools, then call {SELECT} with existing memory item IDs. Initial query_search IDs are question-matched candidates, not proof of relevance. Select items that answer the question; use further reads when these candidates and the profile do not cover it. Compact views explicitly name omitted fields; project the original attributes or facet through KQL for details. The KIP tool supports only KQL and SEARCH in this mode (up to 4 operations, LIMIT at most 32); other META commands are unavailable and the current Primer is already supplied. Wiki search uses at most 8 hits without neighbor expansion. At most 4 tool calls per pass and 16 per Recall are allowed. You cannot add content or choose priorities. No free-form answer, grades or completeness claims will be delivered. Preserve native uncertainty, conflicts and warnings. Unchecked channels are unknown, not absent. Each pass receives the entire currently admitted snapshot; previous provider history is intentionally not replayed.",
-            super::super::prompts::system_prompt(super::super::prompts::PromptTarget::Recall, &self.prompt)
+            "{}\n\n# Host budget mode\n{BUDGET_MODE}",
+            super::super::prompts::system_prompt(
+                super::super::prompts::PromptTarget::Recall,
+                &self.prompt
+            )
         );
         let template = CompletionRequest {
             instructions,
@@ -345,39 +456,67 @@ impl RecallAgent {
         let mut context_fallback = None;
         for _ in 0..self.max_model_turns().min(8) {
             let mut request = template.clone();
-            // Optional items can be evicted, never a required item/warning.
-            let candidates = material.items.clone();
+            // Optional items can be evicted, never a required item/warning,
+            // lowest value first.
+            let visible = material.items.clone();
             let coverage_before = material.coverage.clone();
-            let mut visible = candidates.clone();
-            loop {
-                request.prompt=json!({"query":query.as_str(),"context":parsed.as_ref().and_then(|i|i.context.as_ref()),"memory_items":visible,"observations":observations,"coverage":material.coverage()}).to_string();
-                let encoded = normalized_request(&request)?;
+            let mut order: Vec<usize> = (0..visible.len())
+                .filter(|&i| !matches!(visible[i].priority, Priority::Required | Priority::Warning))
+                .collect();
+            order.sort_by(|&a, &b| {
+                (visible[b].priority, &visible[b].id).cmp(&(visible[a].priority, &visible[a].id))
+            });
+            let room = (limits.context_tokens as usize).saturating_sub(context_spent);
+            let mut probe = template.clone();
+            // The request that keeps the `kept` optional items evicted last.
+            let fit = |kept: usize| -> Result<Option<(usize, String)>, BoxError> {
+                let evicted = &order[..order.len() - kept];
+                let mut coverage = coverage_before.clone();
+                for &i in evicted {
+                    omit(&mut coverage, visible[i].channel);
+                }
+                let items: Vec<&MemoryItem> = visible
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| !evicted.contains(i))
+                    .map(|(_, item)| item)
+                    .collect();
+                probe.prompt = json!({
+                    "query": query,
+                    "context": parsed.and_then(|i| i.context.as_ref()),
+                    "memory_items": items,
+                    "observations": observations,
+                    "coverage": with_unchecked(coverage),
+                })
+                .to_string();
+                let encoded = normalized_request(&probe)?;
                 let tokens = if encoded.len() <= 4 * MAX_BYTES {
                     budget::count(&encoded)?
                 } else {
                     usize::MAX
                 };
-                if tokens <= (limits.context_tokens as usize).saturating_sub(context_spent) {
+                Ok((tokens <= room).then(|| (tokens, std::mem::take(&mut probe.prompt))))
+            };
+            let evicted = match budget::longest_fitting(0, order.len(), fit)? {
+                Some((kept, (tokens, prompt))) => {
+                    request.prompt = prompt;
                     context_spent += tokens;
-                    break;
+                    order.len() - kept
                 }
-                let remove = visible
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, i)| !matches!(i.priority, Priority::Required | Priority::Warning))
-                    .max_by_key(|(_, i)| (i.priority, i.id.clone()))
-                    .map(|(index, _)| index);
-                let Some(index) = remove else {
+                None => {
                     failed = true;
                     material.failure = Some("recall_context_budget_exhausted");
-                    context_fallback = Some((candidates, coverage_before));
-                    break;
-                };
-                let removed = visible.remove(index);
-                material.omit(removed.channel);
+                    order.len()
+                }
+            };
+            for &i in &order[..evicted] {
+                material.omit(visible[i].channel);
                 // Also remove it from the final candidate pool: selection
                 // cannot reference a record the planner was denied here.
-                material.items.retain(|i| i.id != removed.id);
+                material.items.retain(|item| item.id != visible[i].id);
+            }
+            if failed {
+                context_fallback = Some((visible, coverage_before));
             }
             if failed || material.critical_missing {
                 failed = true;
@@ -457,17 +596,28 @@ impl RecallAgent {
                     // observations pass through the cumulative token admission
                     // check before the next model call, and count as tool calls.
                     let response = self
-                        .budget_tool_before_deadline(&ctx, &tool.name, tool.args, now)
+                        .budget_tool_before_deadline(ctx, &tool.name, tool.args, now)
                         .await;
                     let (value, is_error) = match response {
                         Ok((value, measured, is_error)) => {
                             usage.accumulate(&measured);
-                            tool_usage.entry(tool.name.clone()).or_insert_with(Usage::default).accumulate(&measured);
+                            tool_usage
+                                .entry(tool.name.clone())
+                                .or_default()
+                                .accumulate(&measured);
                             (value, is_error)
                         }
-                        Err(_) => (json!({"status":"unavailable","hint":"Use document=index, or section=index for exact headings, with offset=0."}), true),
+                        Err(_) => (
+                            json!({
+                                "status": "unavailable",
+                                "hint": "Use document=index, or section=index for exact \
+                                         headings, with offset=0.",
+                            }),
+                            true,
+                        ),
                     };
-                    observations.push(json!({"tool":tool.name,"reference":value,"is_error":is_error}));
+                    observations
+                        .push(json!({"tool":tool.name,"reference":value,"is_error":is_error}));
                     conversation.messages.push(json!(Message {
                         role: "tool".into(),
                         content: vec![ContentPart::ToolOutput {
@@ -491,7 +641,7 @@ impl RecallAgent {
                     }
                 };
                 let response = self
-                    .budget_tool_before_deadline(&ctx, &tool.name, tool.args.clone(), now)
+                    .budget_tool_before_deadline(ctx, &tool.name, tool.args.clone(), now)
                     .await;
                 material.mark(channel, false);
                 match response {
@@ -499,7 +649,7 @@ impl RecallAgent {
                         usage.accumulate(&measured);
                         tool_usage
                             .entry(tool.name.clone())
-                            .or_insert_with(Usage::default)
+                            .or_default()
                             .accumulate(&measured);
                         if tool_error {
                             material.omit(channel);
@@ -541,7 +691,15 @@ impl RecallAgent {
                     }
                     Err(_) => {
                         material.omit(channel);
-                        material.add(channel,Priority::Warning,json!({"tool":tool.name,"status":"unavailable","meaning":"not evidence of absence or complete coverage"}))?;
+                        material.add(
+                            channel,
+                            Priority::Warning,
+                            json!({
+                                "tool": tool.name,
+                                "status": "unavailable",
+                                "meaning": "not evidence of absence or complete coverage",
+                            }),
+                        )?;
                         observations.push(json!({"tool":tool.name,"status":"unavailable"}));
                     }
                 }
@@ -558,7 +716,8 @@ impl RecallAgent {
         // An exhausted planning-input budget can still deliver host-read
         // candidates. Keep every constraint/warning, mark partial coverage, and
         // never invent a summary or promote a procedure into executable standing.
-        if material.failure == Some("recall_context_budget_exhausted") && !material.critical_missing {
+        if material.failure == Some("recall_context_budget_exhausted") && !material.critical_missing
+        {
             if let Some((items, coverage)) = context_fallback {
                 material.items = items;
                 material.coverage = coverage;
@@ -567,15 +726,25 @@ impl RecallAgent {
             // constraints, not opaque notes or prior conversational narratives.
             for channel in [Channel::Notes, Channel::History] {
                 let before = material.items.len();
-                material.items.retain(|item| item.channel != channel || item.priority <= Priority::Warning);
-                if material.items.len() != before { material.omit(channel); }
+                material
+                    .items
+                    .retain(|item| item.channel != channel || item.priority <= Priority::Warning);
+                if material.items.len() != before {
+                    material.omit(channel);
+                }
             }
-            material.add(Channel::Primer, Priority::Warning, json!({
-                "status":"partial", "reason":"recall_context_budget_exhausted",
-                "selection":"host-read candidates; model planning was incomplete", "action_ready":false
-            }))?;
+            material.add(
+                Channel::Primer,
+                Priority::Warning,
+                json!({
+                    "status": "partial",
+                    "reason": "recall_context_budget_exhausted",
+                    "selection": "host-read candidates; model planning was incomplete",
+                    "action_ready": false,
+                }),
+            )?;
             material.mark(Channel::Kip, true);
-            selected = material.items.iter().map(|item|item.id.clone()).collect();
+            selected = material.items.iter().map(|item| item.id.clone()).collect();
             material.failure = None;
             finished = true;
             failed = false;
@@ -586,37 +755,24 @@ impl RecallAgent {
         }
         selected.retain(|id| material.items.iter().any(|item| &item.id == id));
         if !failed {
-            self.refresh_budget_procedures(&ctx, &mut material, &mut usage, &mut tool_usage, now)
+            self.refresh_budget_procedures(ctx, &mut material, usage, tool_usage, now)
                 .await?;
         }
         self.finish_budgeted(
-            &mut conversation,
-            &usage,
-            &tool_usage,
-            &limits,
+            conversation,
+            usage,
+            tool_usage,
+            limits,
             &material,
             &selected,
             failed,
         )
         .await
-        }
-        .await;
-        if let Err(error) = &result {
-            conversation.status = ConversationStatus::Failed;
-            conversation.failed_reason = Some(format!("budgeted recall failed: {error}"));
-            conversation.usage = usage;
-            conversation.updated_at = unix_ms();
-            self.persist_conversation(&conversation).await;
-            self.hook
-                .on_conversation_end(Self::NAME, &conversation)
-                .await;
-        }
-        result
     }
 
     async fn budget_kip(&self, mut request: Request) -> Result<Response, BoxError> {
         let _guard = if let Some(control) = &self.product_control {
-            let guard = control.gate.lock().await;
+            let guard = control.gate.read().await;
             if !control.available() {
                 return Err("memory_change_pending".into());
             }
@@ -651,12 +807,21 @@ impl RecallAgent {
             let parsed = request.parse_operations()?;
             let global = request.parameters.clone();
             for (op, mut cmd) in request.operations.iter_mut().zip(parsed) {
-                match &mut cmd {
-                    Command::Kql(query)=>query.limit=Some(capped_limit(query.limit.as_ref(),op.parameters.as_ref(),global.as_ref())?),
-                    Command::Meta(MetaCommand::Search(search))=>search.limit=Some(capped_limit(search.limit.as_ref(),op.parameters.as_ref(),global.as_ref())?),
-                    Command::Meta(_)=>return Err("bounded Recall supports KQL and SEARCH; broad metadata expansion is unavailable".into()),
-                    Command::Kml(_)=>return Err("Recall is read-only".into()),
-                }
+                let limit = match &mut cmd {
+                    Command::Kql(query) => &mut query.limit,
+                    Command::Meta(MetaCommand::Search(search)) => &mut search.limit,
+                    Command::Meta(_) => {
+                        return Err("bounded Recall supports KQL and SEARCH; broad metadata \
+                                    expansion is unavailable"
+                            .into());
+                    }
+                    Command::Kml(_) => return Err("Recall is read-only".into()),
+                };
+                *limit = Some(capped_limit(
+                    limit.as_ref(),
+                    op.parameters.as_ref(),
+                    global.as_ref(),
+                )?);
                 op.command = None;
                 op.ast = Some(cmd);
             }
@@ -700,8 +865,10 @@ impl RecallAgent {
         let remaining = recall_time_remaining(started_at).ok_or("Recall read deadline reached")?;
         let cancel = ctx.cancellation_token();
         tokio::select! {
-            _=cancel.cancelled()=>Err("Recall read cancelled".into()),
-            result=timeout(remaining,self.budget_tool(ctx,name,args))=>result.map_err(|_|"Recall read deadline reached")?,
+            _ = cancel.cancelled() => Err("Recall read cancelled".into()),
+            result = timeout(remaining, self.budget_tool(ctx, name, args)) => {
+                result.map_err(|_| "Recall read deadline reached")?
+            }
         }
     }
 
@@ -766,7 +933,11 @@ impl RecallAgent {
                     }
                 }
                 _ => (
-                    json!({"skill_ref":skill,"recommendation_allowed":false,"reason":"current procedure verification unavailable"}),
+                    json!({
+                        "skill_ref": skill,
+                        "recommendation_allowed": false,
+                        "reason": "current procedure verification unavailable",
+                    }),
                     Priority::Warning,
                 ),
             };
@@ -950,8 +1121,8 @@ fn contains_program(value: &Json) -> bool {
         if nodes > 4096 {
             return true;
         }
-        if value["schema_ref"] == format!("{PROFILE}Skill")
-            || value["schema_ref"] == format!("{PROFILE}SkillRevision")
+        if value["schema_ref"] == profile!("Skill")
+            || value["schema_ref"] == profile!("SkillRevision")
         {
             return true;
         }
@@ -991,7 +1162,7 @@ fn discover_skills(value: &Json, into: &mut BTreeSet<String>) {
         if nodes > 4096 || into.len() > 8 {
             break;
         }
-        if value["schema_ref"] == format!("{PROFILE}Skill")
+        if value["schema_ref"] == profile!("Skill")
             && let Some(id) = value["id"].as_str()
         {
             into.insert(id.into());

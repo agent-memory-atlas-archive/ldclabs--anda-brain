@@ -42,7 +42,10 @@ anda_web3_client = { version = "0.16" }
 anda_object_store = "0.14"
 anda_db = { version = "0.14", features = ["full"] }
 anda_db_tfs = { version = "0.14", features = ["full"] }
-anda_cognitive_nexus = "0.14.0"
+# 0.14.1 regresses lineage matching of promoted draft vocabulary (a promoted
+# draft type no longer answers a query by its installed name); hold 0.14.0
+# until a fixed Nexus is published.
+anda_cognitive_nexus = "=0.14.0"
 # The embedded reference supplement is generated from this exact release.
 anda_kip = "=0.14.0"
 base64 = "0.23"

@@ -67,14 +67,10 @@ impl Space {
             "operation": request.operation,
             "input": request.input,
         }))?;
-        let key_id = anda_cognitive_nexus::content_digest(&json!([
-            namespace,
-            self.id(),
-            request.operation,
-            key
-        ]))?[7..47]
-            .to_string();
-        let receipt_ref = format!("rcpt-{key_id}");
+        let receipt_ref = format!(
+            "rcpt-{}",
+            intake::key_id(namespace, self.id(), request.operation, key)?
+        );
         let journal = &self.memory_interface.journal;
         let record_path = intake::receipt_path(&receipt_ref)?;
         let _gate = self.memory_interface.gate.lock().await;
@@ -197,7 +193,8 @@ impl Space {
     ) -> Result<intake::IntakeRecord, KipError> {
         let journal = &self.memory_interface.journal;
         let path = intake::receipt_path(receipt_ref)?;
-        loop {
+        let mut last = None;
+        for _ in 0..JOURNAL_UPDATE_ATTEMPTS {
             let stored = journal
                 .read::<intake::IntakeRecord>(&path)
                 .await
@@ -255,14 +252,15 @@ impl Space {
                     });
                 }
             }
-            if journal
+            match journal
                 .put(&path, &record, PutMode::Update(stored.version))
                 .await
-                .is_ok()
             {
-                return Ok(record);
+                Ok(()) => return Ok(record),
+                Err(error) => last = Some(error),
             }
         }
+        Err(journal_update_failed(last))
     }
 
     /// Runs the plan and returns its status, a summary and the sequence the
@@ -842,7 +840,7 @@ impl Space {
     /// Excludes sources from Formation, so an erased source is never
     /// re-ingested (the forget tombstone).
     pub(crate) async fn suppress_sources(&self, keys: &BTreeSet<String>) -> Result<(), KipError> {
-        let _guard = self.product_control.gate.lock().await;
+        let _guard = self.product_control.gate.write().await;
         let mut control = self.product_control.snapshot();
         let before = control.suppressed.len();
         control.suppressed.extend(keys.iter().cloned());

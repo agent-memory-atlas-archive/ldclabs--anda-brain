@@ -80,7 +80,9 @@ Space 的 learning 变更也会先登记；已启用 registration 的 review 时
 
 当前时刻的原生 BELIEF 结果可异步提示依赖失效时刻；原始 JSON、历史/假设查询和
 模型自填时间不能冒充该来源。这只更新图外目录，不修改认知图/原生控制状态，也不
-延长只读 KIP 工具等待。关闭时排空已接收的提示；周期 reconciliation 修复调度缓存。
+延长只读 KIP 工具等待。关闭时排空已接收的提示；周期 reconciliation 修复调度缓存
+（`AttentionPolicy::reconcile_ms`，默认 15 分钟）。到期的 Watch 与 dirty generation
+自行安排检查，reconciliation 只是兜底；它打开的冷 Space 会被空闲驱逐重新关闭。
 
 ## 动作回调与授权
 

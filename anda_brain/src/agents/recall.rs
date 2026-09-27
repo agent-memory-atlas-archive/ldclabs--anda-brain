@@ -15,8 +15,8 @@ use anda_engine::{
     unix_ms,
 };
 use parking_lot::RwLock;
+use serde::Deserialize;
 use serde_json::json;
-use std::sync::atomic::AtomicU64;
 use std::{
     collections::VecDeque,
     sync::{Arc, LazyLock},
@@ -189,7 +189,7 @@ impl Tool<BaseCtx> for TimedMemoryReadonly {
             Err(err) => return Ok(error_output(Response::from(err))),
         };
         let _guard = if let Some(control) = &self.product_control {
-            let guard = control.gate.lock().await;
+            let guard = control.gate.read().await;
             control.check(&ctx)?;
             if control.epoch() > 0 {
                 control.current_request(&request)?;
@@ -295,11 +295,6 @@ impl RecallAgent {
         }
     }
 
-    /// Retained for caller compatibility. Primers are now read fresh because
-    /// trust, identity and authorization can change without a schema publish.
-    pub fn with_schema_generation(self, _generation: Arc<AtomicU64>) -> Self {
-        self
-    }
     pub(crate) fn with_receipts(
         mut self,
         receipts: Arc<crate::recall_receipt::RecallReceipts>,
@@ -487,7 +482,7 @@ impl RecallAgent {
             .messages
             .first()
             .ok_or("recall conversation has no input message")?;
-        let message: Message = serde_json::from_value(first.clone())?;
+        let message = Message::deserialize(first)?;
         let prompt = message
             .content
             .iter()
@@ -626,7 +621,8 @@ impl RecallAgent {
             .into());
         }
 
-        let parsed_input = serde_json::from_str::<RecallInput>(&prompt).ok();
+        // The structured input, when the prompt is one; parsed once above.
+        let parsed_input = budget_input;
         let mut conversation = Conversation {
             user: *caller,
             messages: vec![serde_json::json!(Message {

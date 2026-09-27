@@ -25,8 +25,8 @@ use std::{
 pub struct MemoryUsage {
     pub _id: u64,
 
-    /// Graph entity id: `"C:<id>"` for concepts, `"P:<id>:<predicate>"`
-    /// for propositions.
+    /// Graph element id: `C-*` for concepts, `P-*` for propositions (KIP 2.0;
+    /// rows still keyed by the 1.x `C:`/`P:` forms are retired on upgrade).
     pub entity: String,
 
     /// Completed production recalls that surfaced this entity.

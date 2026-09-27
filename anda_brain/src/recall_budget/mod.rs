@@ -267,6 +267,37 @@ pub(crate) fn with_failure_reason(
     })
 }
 
+/// The longest prefix, between `required` and `len` items, that `fit` accepts,
+/// with what it built; `None` when even the required prefix does not fit.
+///
+/// A shorter prefix never needs more room, so this bisects. Each probe
+/// serializes and counts a whole packet or request, which made dropping one
+/// item and recounting quadratic in the items.
+pub(crate) fn longest_fitting<T, E>(
+    required: usize,
+    len: usize,
+    mut fit: impl FnMut(usize) -> Result<Option<T>, E>,
+) -> Result<Option<(usize, T)>, E> {
+    if let Some(all) = fit(len)? {
+        return Ok(Some((len, all)));
+    }
+    let Some(mut best) = fit(required)? else {
+        return Ok(None);
+    };
+    let (mut fits, mut overflows) = (required, len);
+    while overflows - fits > 1 {
+        let middle = fits + (overflows - fits) / 2;
+        match fit(middle)? {
+            Some(built) => {
+                fits = middle;
+                best = built;
+            }
+            None => overflows = middle,
+        }
+    }
+    Ok(Some((fits, best)))
+}
+
 fn validate_items(items: &[MemoryItem]) -> Result<(), BoxError> {
     if items.len() > MAX_ITEMS {
         return Err("Recall memory item count exceeds 256".into());

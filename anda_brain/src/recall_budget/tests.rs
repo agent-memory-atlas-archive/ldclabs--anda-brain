@@ -549,3 +549,32 @@ fn failure_reason_is_optional_and_counted_inside_the_packet() {
         }
     }
 }
+
+fn longest(required: usize, len: usize, room: usize) -> Option<usize> {
+    let mut probes = 0;
+    let found = longest_fitting::<_, ()>(required, len, |kept| {
+        probes += 1;
+        Ok((kept <= room).then_some(kept))
+    })
+    .unwrap()
+    .map(|(kept, built)| {
+        assert_eq!(kept, built);
+        kept
+    });
+    // One probe when everything fits, else a logarithmic number.
+    assert!(probes <= 2 + usize::BITS as usize - len.leading_zeros() as usize);
+    found
+}
+
+#[test]
+fn keeps_the_longest_prefix_that_fits() {
+    assert_eq!(longest(2, 10, 100), Some(10));
+    assert_eq!(longest(2, 10, 10), Some(10));
+    assert_eq!(longest(2, 10, 9), Some(9));
+    assert_eq!(longest(2, 10, 5), Some(5));
+    assert_eq!(longest(2, 10, 2), Some(2));
+    assert_eq!(longest(2, 10, 1), None);
+    assert_eq!(longest(0, 128, 77), Some(77));
+    assert_eq!(longest(3, 3, 2), None);
+    assert_eq!(longest(3, 3, 3), Some(3));
+}

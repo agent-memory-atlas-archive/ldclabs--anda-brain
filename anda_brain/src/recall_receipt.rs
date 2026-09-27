@@ -188,7 +188,7 @@ impl RecallReceipts {
     ) -> Result<RecallReceiptRef, BoxError> {
         let messages: Vec<Message> = messages
             .iter()
-            .filter_map(|m| serde_json::from_value(m.clone()).ok())
+            .filter_map(|m| Message::deserialize(m).ok())
             .collect();
         let trace = crate::assess::RecallTrace::from_messages(&messages);
         let mut receipt = RecallReceipt {

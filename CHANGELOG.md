@@ -30,6 +30,28 @@ All notable changes to the Anda Brain project.
   omitted rather than checked. The legacy note-store fallback, which was reached
   only on such errors, is gone. Clearing processing Notes for a managed change
   now fails that change if the note tool refuses the reset.
+- `anda_cognitive_nexus` is pinned to `=0.14.0`. 0.14.1 regresses lineage
+  matching of promoted draft vocabulary: a draft type promoted onto an installed
+  one no longer answers a query by the installed name.
+- The product-change fence is a read/write lock. Agent KIP reads and writes,
+  notes and runtime tools share it, so concurrent Recalls on one Space no longer
+  queue behind each other's reads; managed changes, forget and source suppression
+  still hold it exclusively.
+- Attention reconciles each registered Space every 15 minutes by default
+  (`AttentionPolicy::reconcile_ms`, was 60 seconds). Due Watches and dirty
+  generations schedule their own checks; the frequent reconcile reopened cold
+  Spaces that idle eviction had just closed. A pass also writes the directory
+  cursor once instead of once per Space, and reads the directory root once.
+- Memory Interface recall reads its five host channels concurrently, reads each
+  element and belief once per briefing, and finds the largest briefing that fits
+  the output budget by bisection instead of recounting after every dropped item.
+  Budgeted Recall evicts optional planning items the same way.
+- HTTP 400 messages are the error's plain text rather than its debug rendering,
+  which quoted messages and showed body-parse failures as
+  `RpcError { message: … }`. The Memory Interface helper endpoints put the KIP
+  `ErrorObject` in `RpcError.data` and its message in `RpcError.message`.
+- Removed `RecallAgent::with_schema_generation` (a no-op) and
+  `memory_interface::caller_namespace` (use `Caller::namespace`).
 
 ### Fixes
 
@@ -45,6 +67,16 @@ All notable changes to the Anda Brain project.
 - The memory self-test no longer sends `max_output_tokens`: some OpenAI-style
   backends reject the parameter, which failed every self-test there. The output
   share is still reserved from the budget, as budgeted Recall already does.
+- A Formation conversation that fails every attempt no longer blocks the queue
+  forever. After three failed rounds (an attempt and its retry each) spanning at
+  least 30 minutes, it is cancelled with `formation_failed:` and its last failure,
+  its Memory Interface receipt reports it failed, and later conversations are
+  processed. Shorter outages are still retried.
+- Conditional updates of Memory Interface journal records (receipt settlement,
+  forget settlement, staged-source erasure) give up after eight attempts and
+  report the last storage error, instead of retrying a failing write forever.
+- A forget now clears usage-ledger rows for exactly the elements PURGE reports
+  erased, instead of enumerating a Concept's Propositions beforehand.
 
 ## [0.13.0] — 2026-09-25
 

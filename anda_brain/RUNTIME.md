@@ -108,7 +108,10 @@ Present-time, directly returned native BELIEF bases can add a small asynchronous
 directory hint. Raw cognitive JSON, historical/what-if queries and model-provided
 timestamps do not enter that path. It performs no cognitive or native-control
 writes and adds no wait to the read-only KIP/model tool's timeout. Owned hint writes
-drain on close; registered Spaces are periodically reconciled if a hint is missed.
+drain on close; registered Spaces are periodically reconciled if a hint is missed
+(`AttentionPolicy::reconcile_ms`, 15 minutes by default). Due Watches and dirty
+generations schedule their own checks, so reconciliation is only the safety net; a
+cold Space it opens is closed again by the idle eviction.
 
 ## Action callbacks and authority
 
