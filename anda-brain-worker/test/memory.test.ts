@@ -225,6 +225,36 @@ describe('Memory Interface', () => {
 })
 
 describe('Memory Interface regressions', () => {
+  it('keeps a scope whose handle a maintenance plan archived', async () => {
+    const rule = (name: string) => `MUTATE {
+      CREATE CONCEPT ?rule {
+        TYPE "Insight" NAME "${name}"
+        SET ATTRIBUTES {summary: "${name}", insight_class: "constraint"}
+        SET FACET "MemoryScope" {task_ref: :scope_task, context_refs: :contexts}
+      }
+    }`
+    const ai = new FakeAi([]), runtime = testEnv(ai), space = uniqueSpace('mi-scope-handle')
+    const scope = { task_ref: 'release' }
+    const observe = async (key: string, name: string) => {
+      ai.push(plan([rule(name)]))
+      const source = await stage(runtime, space, key, name, '2026-09-20T00:00:00.000Z')
+      const observed = await memory(runtime, space, { operation: 'observe', idempotency_key: `observe:${key}`, scope, input: { source_ref: source } })
+      expect(observed.progress.disposition).toBe('formed')
+    }
+    const constraints = async () => {
+      ai.push({ commands: [] }, { answer: 'Plan it.', found: true, uncertainty: 0.2 })
+      const recalled = await memory(runtime, space, { operation: 'recall', scope, input: { query: 'When can I deploy?', mode: 'action' } })
+      return recalled.result.items.filter((item: any) => item.role === 'constraint').length
+    }
+    await observe('r1', 'Never deploy on Fridays')
+    // The maintenance gate admits a bounded Event selection; the handle is an Event.
+    const archived = await call(runtime, space, 'execute_kip', { command: 'TRANSITION ?e TO "archived" WHERE { ?e {type: "Event"} } LIMIT 20' })
+    expect(archived.result[0].status).toBe('succeeded')
+    expect(await constraints()).toBe(1)
+    await observe('r2', 'Never deploy after 5pm')
+    expect(await constraints()).toBe(2)
+  })
+
   it('does not erase another source after retrying rejected feedback with the same key', async () => {
     const runtime = testEnv(new FakeAi([])), space = uniqueSpace('mi-feedback-retry')
     const original = await stage(runtime, space, 'old', 'Original feedback', '2026-01-01T00:00:00.000Z')

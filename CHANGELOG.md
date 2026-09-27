@@ -80,6 +80,13 @@ All notable changes to the Anda Brain project.
   report the last storage error, instead of retrying a failing write forever.
 - A forget now clears usage-ledger rows for exactly the elements PURGE reports
   erased, instead of enumerating a Concept's Propositions beforehand.
+- A Memory Interface scope keeps its memory after Maintenance archives, tombstones
+  or merges the scope's handle. To Maintenance the handle is an ordinary Event, which
+  the reference policy archives when stale (as the retention sweep does when its
+  expiry lapses). Resolution read only active Concepts, so recall treated the scope
+  as unbound and every memory in it dropped out, including new observations, which
+  kept writing to the retired handle. The handle is now found by its key in any
+  lifecycle state short of purged.
 
 ### Cloudflare Worker
 
@@ -90,7 +97,8 @@ All notable changes to the Anda Brain project.
   reads consume the caller's budget and an expired pass cannot start a model call.
 - Maintenance no longer shows the Memory Interface's scope-handle Events to the
   model. An archived handle took every memory in its scope out of recall, and the
-  maintenance policy archives stale Events.
+  maintenance policy archives stale Events. A handle that a plan's Event selection
+  archives anyway still resolves by its key, as in Rust.
 - `GET /v1/{space}/info` counts active elements only; purged stubs and archived
   records are no longer counted, so a forget lowers the counts.
 - A Formation `DEFINE` past the 512-symbol cap, or a draft review that cannot be

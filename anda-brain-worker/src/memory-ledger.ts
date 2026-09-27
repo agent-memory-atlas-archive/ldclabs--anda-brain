@@ -217,7 +217,11 @@ export class MemoryLedger {
       return handle
     }
     const key = `memory_scope:${handle}`
-    const found = this.query('FIND(?c.id) WHERE { ?c {type: "Event", key: :key} } LIMIT 1', { key })[0]
+    // The handle is whichever Concept carries its key, in any lifecycle state
+    // short of purged: a maintenance plan may still archive or merge it, and
+    // memory stays scoped by the id it was written under, so resolving only an
+    // active handle would take the whole scope out of recall for good.
+    const found = this.query('FIND(?c.id) WHERE { ?c {type: "Event", key: :key, state: ?state} FILTER(?state != "purged") } LIMIT 1', { key })[0]
     if (typeof found === 'string') return found
     if (!create) return `unbound:${handle}`
     const outcome = this.session.execute(`UPSERT CONCEPT ?scope {

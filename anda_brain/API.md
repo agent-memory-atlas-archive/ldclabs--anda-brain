@@ -162,7 +162,9 @@ anything is stored: bytes a forget excluded are refused and bind no key.
 **Scope.** `task_ref` and `context_refs` are exact handles: an active Concept id of
 this Space, or an opaque host string that the host maps to a scope Concept (an
 `Event` with `event_class: "memory_scope"`, keyed `memory_scope:<handle>`), created
-on the first mutation that names it. The canonical context set is the task's
+on the first mutation that names it. The key finds the handle in any lifecycle state
+short of purged, so a handle that Maintenance archived, tombstoned or merged still
+names its scope. The canonical context set is the task's
 Concept plus every context's. Formation writes every claim from a scoped source
 with `context: :contexts` (the gate refuses one that does not), puts a MemoryScope
 Facet on the Evidence and on the Events, Insights, Experiences and Commitments it

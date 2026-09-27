@@ -1412,6 +1412,136 @@ async fn scoped_feedback_and_raw_evidence_do_not_escape_the_task() {
     f.space.close().await.unwrap();
 }
 
+/// A scoped constraint, as a scripted Formation pass writes it.
+const SCOPED_RULE: &str = r#"MUTATE {
+    CREATE CONCEPT ?rule {
+        TYPE "Insight" NAME "No Friday deploys"
+        SET ATTRIBUTES {summary: "Never deploy on Fridays", insight_class: "constraint"}
+        SET FACET "MemoryScope" {task_ref: :scope_task, context_refs: :contexts}
+    }
+}"#;
+
+/// Observes one scoped rule in `scope` and waits until it is formed.
+async fn observe_scoped_rule(f: &Fixture, key: &str, scope: &Json) {
+    f.script.write(SCOPED_RULE);
+    f.script.done();
+    let source = stage(
+        &f.space,
+        key,
+        "Never deploy on Fridays",
+        "2026-09-20T00:00:00.000Z",
+    )
+    .await;
+    let observed = f
+        .space
+        .memory_request(
+            NS,
+            false,
+            request(
+                "observe",
+                Some(&format!("observe:{key}")),
+                Some(scope.clone()),
+                json!({"source_ref": source}),
+            ),
+        )
+        .await;
+    let receipt = observed.receipt.expect("a receipt").receipt_ref;
+    assert_eq!(
+        wait_available(&f.space, &receipt).await.disposition,
+        Some(wire::Disposition::Formed)
+    );
+}
+
+/// The scoped action recall a later task makes.
+async fn recall_in_scope(f: &Fixture, scope: &Json) -> Briefing {
+    f.script.push(Step::Final("Plan the deployment.".into()));
+    briefing(
+        &f.space
+            .memory_request(
+                NS,
+                false,
+                request(
+                    "recall",
+                    None,
+                    Some(scope.clone()),
+                    json!({"query": "When can I deploy?", "mode": "action"}),
+                ),
+            )
+            .await,
+    )
+}
+
+fn constraints(brief: &Briefing) -> usize {
+    brief
+        .items
+        .iter()
+        .filter(|item| item.role == wire::ItemRole::Constraint)
+        .count()
+}
+
+async fn handle_state(f: &Fixture, handle: &str) -> Json {
+    let response = f
+        .space
+        .execute_kip_readonly(crate::kip::request_with(
+            "FIND(?e._system.state) WHERE { ?e {type: \"Event\", key: :key, state: ?state} } LIMIT 1",
+            crate::kip::param("key", format!("memory_scope:{handle}")),
+        ))
+        .await
+        .unwrap();
+    crate::kip::ok_result(&response)
+        .and_then(|rows| rows.as_array()?.first().cloned())
+        .map(crate::agents::first_row)
+        .unwrap_or(Json::Null)
+}
+
+#[tokio::test]
+async fn a_scope_handle_retired_by_maintenance_keeps_its_scope() {
+    // To Maintenance the handle is an Event like any other: the reference
+    // policy archives stale Events (and its retention sweep archives lapsed
+    // ones), tombstones what is withdrawn and merges duplicates. Each goes
+    // through the maintenance gate, which cannot tell a handle from the text.
+    for (name, command) in [
+        (
+            "archived",
+            r#"TRANSITION ?e TO "archived" WHERE { ?e {type: "Event"} } LIMIT 20"#,
+        ),
+        (
+            "tombstoned",
+            r#"TRANSITION ?e TO "tombstoned" WHERE { ?e {type: "Event", key: "memory_scope:release"} } LIMIT 1"#,
+        ),
+        (
+            "merged",
+            r#"MERGE CONCEPT ?a INTO ?b WHERE { ?a {type: "Event", key: "memory_scope:release"} ?b {type: "Event", name: "release week"} }"#,
+        ),
+    ] {
+        let f = fixture(&format!("mi_scope_handle_{name}")).await;
+        let scope = json!({"task_ref": "release"});
+        observe_scoped_rule(&f, "r1", &scope).await;
+        let nexus = f.space.memory.nexus();
+        let other = anda_kip::execute_request(
+            nexus.as_ref(),
+            &crate::kip::request(
+                r#"CREATE CONCEPT ?e {TYPE "Event" NAME "release week" SET ATTRIBUTES {event_class: "conversation", summary: "Release week"}}"#,
+            ),
+        )
+        .await;
+        assert!(crate::kip::succeeded(&other), "{other:?}");
+        let retired =
+            crate::kip::execute_maintenance_request(nexus.as_ref(), &crate::kip::request(command))
+                .await;
+        assert!(crate::kip::succeeded(&retired), "{name}: {retired:?}");
+        assert_eq!(handle_state(&f, "release").await, json!(name));
+
+        // The scope still resolves to the id its memory was written under,
+        // so the rule is recalled rather than lost with the handle.
+        assert_eq!(constraints(&recall_in_scope(&f, &scope).await), 1, "{name}");
+        // A new observation joins the same scope, and recall sees both.
+        observe_scoped_rule(&f, "r2", &scope).await;
+        assert_eq!(constraints(&recall_in_scope(&f, &scope).await), 2, "{name}");
+        f.space.close().await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn source_forget_erases_owned_constraints_but_keeps_shared_concepts() {
     let f = fixture("mi_source_concept").await;

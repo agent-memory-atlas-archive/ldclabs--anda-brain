@@ -143,7 +143,8 @@ export interface MemoryRequest {
 
 **作用域。** `task_ref` 与 `context_refs` 是精确句柄：本 Space 的 active Concept id，或由宿主
 映射到作用域 Concept 的不透明字符串（`event_class: "memory_scope"` 的 `Event`，键为
-`memory_scope:<handle>`，在第一个命名它的变更中创建）。规范上下文集 = 任务 Concept 加每个
+`memory_scope:<handle>`，在第一个命名它的变更中创建）。按键查找句柄时不限生命周期状态（已擦除
+除外），所以被 Maintenance 归档、tombstone 或合并的句柄仍指向原作用域。规范上下文集 = 任务 Concept 加每个
 上下文的 Concept。来自带作用域来源的每条断言，Formation 都写 `context: :contexts`（闸门拒绝
 不写的），Evidence 以及它创建的 Event、Insight、Experience、Commitment 都挂 MemoryScope
 Facet；recall 只接纳上下文集包含于请求上下文集的记录（KIP Spec §25.3）。任务名或话题字符串

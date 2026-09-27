@@ -333,11 +333,18 @@ impl Space {
             };
         }
         let key = scope_key(handle);
+        // The handle is whichever Concept carries its key, in any lifecycle
+        // state short of purged. Maintenance sees it as an ordinary Event and
+        // may archive, tombstone or merge it (its retention sweep archives a
+        // lapsed one), but memory stays scoped by the id it was written under
+        // — and the upsert below keeps writing to that id — so resolving only
+        // an active handle would take the whole scope out of recall for good.
         let found = crate::kip::ok_result(
             &anda_kip::execute_request(
                 nexus.as_ref(),
                 &crate::kip::request_with(
-                    "FIND(?c.id) WHERE { ?c {type: \"Event\", key: :key} } LIMIT 1",
+                    "FIND(?c.id) WHERE { ?c {type: \"Event\", key: :key, state: ?state} \
+                     FILTER(?state != \"purged\") } LIMIT 1",
                     crate::kip::param("key", key.as_str()),
                 ),
             )

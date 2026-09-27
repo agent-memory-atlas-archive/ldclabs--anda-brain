@@ -98,6 +98,8 @@ pnpm --filter @ldclabs/anda-brain-worker check
 - 省略 `observed_at` 的暂存重试复用首次观察时间；feedback 保留请求作用域。
   误记失效后，依赖它的模型摘要会被替换。来源遗忘包含有新建轨迹的记忆概念；
   轨迹缺失或处理未完成则报告 partial，不删除共享人物/选项概念。
+- 作用域句柄（`memory_scope:<handle>` 键的 Event）按键解析，不限生命周期状态（已擦除除外）：
+  维护计划选中 Event 时即使归档或合并了句柄，作用域内的记忆仍可召回，新的观察也继续写入该作用域。
 - forget 的存储表面只有本 Durable Object：图元素、Evidence 载荷与暂存来源字节；没有会话记录
   需要清理。
 
