@@ -52,15 +52,29 @@ var rootCmd = &cobra.Command{
 			return fmt.Errorf("--shard must be non-negative")
 		}
 		token = secretFlag(cmd, "token", "ANDA_TOKEN")
-		switch cmd.Name() {
-		case "keygen", "cwt", "status", "create-space", "update-tier", "completion", "bash", "zsh", "fish", "powershell":
-			return nil
-		}
-		if strings.TrimSpace(spaceID) == "" {
+		if requiresSpace(cmd) && strings.TrimSpace(spaceID) == "" {
 			return fmt.Errorf("--space-id (or ANDA_SPACE_ID) is required")
 		}
 		return nil
 	},
+}
+
+// spaceFree marks a command, and every command under it, as not addressing a
+// Space, so the root does not require --space-id for it.
+var spaceFree = map[string]string{"space": "none"}
+
+func requiresSpace(cmd *cobra.Command) bool {
+	for c := cmd; c != nil; c = c.Parent() {
+		if c.Annotations["space"] == "none" {
+			return false
+		}
+		switch c.Name() {
+		// Cobra's built-in help and shell completion commands.
+		case "help", "completion", cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd:
+			return false
+		}
+	}
+	return true
 }
 
 func Execute() error {
@@ -90,30 +104,6 @@ func envOrDefault(key, defaultVal string) string {
 		return v
 	}
 	return defaultVal
-}
-
-// resolveSecretInput resolves a secret flag value: a literal value is
-// returned as-is, while an "@path/to/file" input is replaced by the trimmed
-// contents of that file. This keeps secrets out of shell history and process
-// listings (same pattern as the cwt command's --key flag).
-func resolveSecretInput(input string) (string, error) {
-	input = strings.TrimSpace(input)
-	if !strings.HasPrefix(input, "@") {
-		return input, nil
-	}
-	path := strings.TrimSpace(strings.TrimPrefix(input, "@"))
-	if path == "" {
-		return "", fmt.Errorf("empty file path after '@'")
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("read secret file %q: %w", path, err)
-	}
-	value := strings.TrimSpace(string(data))
-	if value == "" {
-		return "", fmt.Errorf("secret file %q is empty", path)
-	}
-	return value, nil
 }
 
 func envOrDefaultInt(key string, defaultVal int) int {

@@ -132,6 +132,37 @@ All notable changes to the Anda Brain project.
 - Retained recall bases are still kept indefinitely, as in Rust; an ErasurePlan's
   `external_exports` scans them all.
 
+### CLI
+
+- HTTP errors are read from the server's `{"error":{"message","data"}}` envelope.
+  The client looked for a top-level `message`, so against a real server it only
+  showed the raw body and a wiki commit conflict never exposed `current_version`
+  through `HTTPError.RPC`. A non-JSON error body (a proxy page) is cut to 1 KiB.
+- A Memory Interface session releases a receipt that a recall reports `failed`.
+  Brain lists a failed receipt as pending; the session kept waiting on it, so one
+  failed Formation left every later recall `pending` with `action_eligible: false`
+  until the session file was edited by hand. The recall that reports the failure
+  explains it. A `failed` intent always exits nonzero, and its printed error keeps
+  `category`, `hint`, `retry` and `details`.
+- RPC commands print the result as the server sent it. `info` and `status` had
+  dropped the `memory_interface` descriptor; members the CLI does not model yet
+  now appear as well.
+- `help <command>` and shell completion no longer require `--space-id`.
+- `management revoke-token` exits nonzero when no token matched.
+- Batch Formation sends each file's path relative to `--batch-dir` as its source,
+  the checklist's key, instead of the absolute local path.
+- `execute-kip-readonly` accepts one bare KIP command, as the server does, and
+  `memory sources stage` reads stdin like `formation`.
+- The README documents that the CLI loads `.env` from the working directory and
+  what a `.env` there can redirect.
+- Removed the deprecated `maintenance --memory-strength-decay-factor` flag, which
+  the server ignores. In the Go `api` package, removed the unused
+  `MessageContent.SizeBytes`/`Text`/`FirstText`, the `KipCommandItem` and
+  `KipCommandObject` aliases, the deprecated `MaintenanceParameters` decay and
+  backlog aliases, and `MemoryError` (`MemoryResponse.Error` is now `*KipError`).
+  `GetOrInitUser` returns the RPC error in the response like every other method.
+  Content parts always encode their own `type`.
+
 ## [0.13.0] — 2026-09-25
 
 **Breaking for draft data.** The service now tracks KIP `11a82ec` (following the

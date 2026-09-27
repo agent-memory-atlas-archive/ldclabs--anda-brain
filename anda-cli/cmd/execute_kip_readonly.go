@@ -2,8 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"io"
-	"os"
 	"strings"
 
 	"github.com/ldclabs/anda-brain/anda-cli/api"
@@ -15,13 +13,14 @@ var executeKIPReadonlyCmd = &cobra.Command{
 	Short: "Execute a read-only KIP request",
 	Long: `Execute a KIP request in read-only mode.
 
-Input JSON can be provided via --request, --file, or stdin.
-The HTTP request accepts either a single "command" string or an "operations"
-array. More than one operation requires "execution":{"mode":"independent"}.
+Input can be provided via --request, --file, or stdin: a JSON request (or
+--request @file), or one bare KIP command. The JSON request accepts either a
+single "command" string or an "operations" array. More than one operation
+requires "execution":{"mode":"independent"}.
 
 Example:
   anda-cli --space-id my_space --token $TOKEN execute-kip-readonly \
-		--request '{"command":"DESCRIBE PRIMER"}'
+		--request 'DESCRIBE PRIMER'
 
   anda-cli --space-id my_space --token $TOKEN execute-kip-readonly \
 		--request '{"operations":["DESCRIBE PRIMER","DESCRIBE SCHEMA ENVIRONMENT"],"execution":{"mode":"independent"}}'
@@ -31,21 +30,23 @@ Example:
   cat kip_request.json | anda-cli --space-id my_space --token $TOKEN execute-kip-readonly`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		requestJSON, _ := cmd.Flags().GetString("request")
-		requestFile, _ := cmd.Flags().GetString("file")
-
-		if requestJSON != "" && requestFile != "" {
-			return fmt.Errorf("--request and --file cannot be used together")
-		}
-
-		raw, err := readKIPRequestInput(requestJSON, requestFile)
+		raw, err := readInput(cmd, "request", "file")
 		if err != nil {
 			return err
 		}
-
-		input, err := readJSONObject[api.KipRequest](string(raw))
-		if err != nil {
-			return fmt.Errorf("invalid request JSON: %w", err)
+		raw = strings.TrimSpace(raw)
+		var input api.KipRequest
+		switch {
+		case raw == "":
+			return fmt.Errorf("empty KIP request")
+		case strings.HasPrefix(raw, "{") || strings.HasPrefix(raw, "@"):
+			input, err = readJSONObject[api.KipRequest](raw)
+			if err != nil {
+				return fmt.Errorf("invalid request JSON: %w", err)
+			}
+		default:
+			// The server reads a bare command as {"command": ...} too.
+			input.Command = raw
 		}
 		input.Command = strings.TrimSpace(input.Command)
 		if input.Command == "" && len(input.Operations) == 0 {
@@ -65,8 +66,7 @@ Example:
 			}
 		}
 
-		client := newClient()
-		resp, err := client.ExecuteKIPReadonly(cmd.Context(), &input)
+		resp, err := newClient().ExecuteKIPReadonly(cmd.Context(), &input)
 		if err != nil {
 			return err
 		}
@@ -77,40 +77,8 @@ Example:
 	},
 }
 
-func readKIPRequestInput(requestJSON, requestFile string) ([]byte, error) {
-	if requestJSON != "" {
-		return []byte(strings.TrimSpace(requestJSON)), nil
-	}
-
-	if requestFile != "" {
-		data, err := os.ReadFile(requestFile)
-		if err != nil {
-			return nil, fmt.Errorf("read file %q: %w", requestFile, err)
-		}
-		return []byte(strings.TrimSpace(string(data))), nil
-	}
-
-	stat, err := os.Stdin.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("inspect stdin: %w", err)
-	}
-	if (stat.Mode() & os.ModeCharDevice) == 0 {
-		data, err := io.ReadAll(os.Stdin)
-		if err != nil {
-			return nil, fmt.Errorf("read stdin: %w", err)
-		}
-		trimmed := strings.TrimSpace(string(data))
-		if trimmed == "" {
-			return nil, fmt.Errorf("empty stdin input")
-		}
-		return []byte(trimmed), nil
-	}
-
-	return nil, fmt.Errorf("--request or --file is required, or pipe JSON via stdin")
-}
-
 func init() {
-	executeKIPReadonlyCmd.Flags().String("request", "", "KIP request JSON string")
-	executeKIPReadonlyCmd.Flags().String("file", "", "Read KIP request JSON from file")
+	executeKIPReadonlyCmd.Flags().String("request", "", "KIP request JSON, @file, or one KIP command")
+	executeKIPReadonlyCmd.Flags().String("file", "", "Read the KIP request from a file")
 	rootCmd.AddCommand(executeKIPReadonlyCmd)
 }

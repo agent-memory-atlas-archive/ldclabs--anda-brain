@@ -28,14 +28,24 @@ Configuration can be provided via flags or environment variables:
 | `--timeout`  | `ANDA_TIMEOUT`  | HTTP request timeout in seconds                   | `120`                   |
 
 `--timeout` must be positive and `--shard` non-negative. Space commands require
-`--space-id` or `ANDA_SPACE_ID`. Secret environment values are resolved when the
-command runs and are never displayed as help defaults; explicit flags take precedence.
+`--space-id` or `ANDA_SPACE_ID`; `help`, shell completion, `keygen`, `cwt`, `status`
+and `admin` do not. Secret environment values are resolved when the command runs and
+are never displayed as help defaults; explicit flags take precedence.
+
+At startup the CLI also loads a `.env` file from the current directory. It never
+overrides a variable already set in the environment, but it can set any one that is
+missing, including `ANDA_BASE_URL`: a `.env` in an untrusted directory could point
+the CLI, and the `ANDA_TOKEN` from your shell, at another server. Set the variables
+you rely on explicitly, or run the CLI from a directory you trust.
 
 Commands exit nonzero for HTTP/RPC errors and reported execution failures, including
-Recall `failed_reason`, per-entity forget errors and WikiDigest `failed` documents.
-The JSON result remains on stdout when it contains a business failure; diagnostics
-go to stderr. A successful Recall with `found: false` still exits zero. JSON numbers
-in KIP parameters/results, tool content and metadata retain their integer precision.
+Recall `failed_reason`, per-entity forget errors, WikiDigest `failed` documents, a
+failed Memory Interface intent and a `revoke-token` that matched no token. The JSON
+result remains on stdout when it contains a business failure; diagnostics go to
+stderr. A successful Recall with `found: false` still exits zero. RPC results are
+printed as the server sent them, including members this CLI does not model yet, and
+JSON numbers in KIP parameters/results, tool content and metadata retain their
+integer precision. HTTP errors show the server's message and its structured `data`.
 
 **CWT command flags:**
 
@@ -160,7 +170,10 @@ anda-cli --space-id my_space --token $TOKEN memory forget C-7
 # Memory Interface (KIP 2.0, memory_basic): stage what you observed, then send
 # one intent at a time. --session keeps outstanding receipts and the attention
 # cursor and task/context scope; recall adds outstanding receipts to `after` automatically.
+# A receipt leaves the session once a recall reports it available, or failed: a
+# failed receipt never becomes available, and that recall's briefing explains it.
 # --dry-run is refused with --mode: the Memory Interface has no erasure preview.
+# Stage from --text, --file or stdin.
 anda-cli --space-id my_space --token $TOKEN memory sources stage \
   --file chat.json --observed-at 2026-09-02T08:00:00.000Z --key chat-42:msg-7
 anda-cli --space-id my_space --token $TOKEN memory observe --source src-… \
@@ -184,9 +197,10 @@ anda-cli --space-id my_space --token $TOKEN maintenance
 anda-cli --space-id my_space --token $TOKEN maintenance --trigger on_demand --scope full
 anda-cli --space-id my_space --token $TOKEN maintenance \
   --unconsolidated-max-backlog 50
-# --memory-strength-decay-factor is deprecated: decay is computed by the engine
 
-# Execute a single read-only KIP command
+# Execute a single read-only KIP command (a bare command or {"command": ...})
+anda-cli --space-id my_space --token $TOKEN execute-kip-readonly \
+  --request 'DESCRIBE PRIMER'
 anda-cli --space-id my_space --token $TOKEN execute-kip-readonly \
   --request '{"command":"DESCRIBE PRIMER"}'
 
@@ -205,7 +219,9 @@ Batch Formation visits regular files in deterministic directory order. The check
 binds its root and selector to the API endpoint, Space ID and shard. Use a separate
 `--batch-report` when changing that target. Historical checklists with attempted
 submissions but no recorded target are refused; retain them for reference and choose
-a new report instead of assuming their files reached the current Space.
+a new report instead of assuming their files reached the current Space. Unless
+`--context-source` is given, each file is submitted with its path relative to
+`--batch-dir` as its source, the same key the checklist uses.
 
 Unchanged submitted files are skipped; SHA-256 content changes become new submissions.
 Changing context alone requires `--batch-force`, which deliberately resubmits every
@@ -271,7 +287,8 @@ anda-cli --space-id my_space --token $CWT_TOKEN management add-token \
 anda-cli --space-id my_space --token $CWT_TOKEN management revoke-token ST_xxx
 
 # Revoke by unique token name (list-tokens only echoes a token prefix, so use
-# --name when the full value was not saved at mint time)
+# --name when the full value was not saved at mint time). Both forms exit nonzero
+# when no token matched.
 anda-cli --space-id my_space --token $CWT_TOKEN management revoke-token --name hr-viewer
 
 # Update space info

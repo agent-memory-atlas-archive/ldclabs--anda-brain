@@ -58,17 +58,8 @@ type MemoryProgress struct {
 	Error        json.RawMessage `json:"error,omitempty"`
 }
 
-// MemoryError is the KIP error a failed Memory Interface response carries.
-type MemoryError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-}
-
-func (e *MemoryError) Error() string {
-	return fmt.Sprintf("%s: %s", e.Code, e.Message)
-}
-
-// MemoryResponse is one Memory Interface response.
+// MemoryResponse is one Memory Interface response. A failed intent carries
+// the full KIP error object, with its category, hint and retry advice.
 type MemoryResponse struct {
 	KipMemory string          `json:"kip_memory"`
 	RequestID string          `json:"request_id,omitempty"`
@@ -77,8 +68,8 @@ type MemoryResponse struct {
 	Receipt   *MemoryReceipt  `json:"receipt,omitempty"`
 	Progress  *MemoryProgress `json:"progress,omitempty"`
 	Result    json.RawMessage `json:"result,omitempty"`
-	Error     *MemoryError    `json:"error,omitempty"`
-	Warnings  []string        `json:"warnings"`
+	Error     *KipError       `json:"error,omitempty"`
+	Warnings  []string        `json:"warnings,omitempty"`
 }
 
 // MemoryCoverage is the part of a Briefing a session reads.

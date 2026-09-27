@@ -8,8 +8,9 @@ import (
 )
 
 var adminCmd = &cobra.Command{
-	Use:   "admin",
-	Short: "Admin operations (requires platform admin auth)",
+	Use:         "admin",
+	Annotations: spaceFree,
+	Short:       "Admin operations (requires platform admin auth)",
 }
 
 var createSpaceCmd = &cobra.Command{

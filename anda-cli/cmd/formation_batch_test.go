@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -82,7 +83,7 @@ func TestBatchUnresolvedFailuresRemainVisible(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if requests.Add(1) == 1 {
 			w.WriteHeader(400)
-			_, _ = w.Write([]byte(`{"message":"test failure"}`))
+			_, _ = w.Write([]byte(`{"error":{"message":"test failure"}}`))
 			return
 		}
 		_, _ = w.Write([]byte(`{"result":{"content":"","conversation":7}}`))
@@ -107,6 +108,30 @@ func TestBatchUnresolvedFailuresRemainVisible(t *testing.T) {
 	}
 	if requests.Load() != 2 {
 		t.Fatal("failed entry was not retried")
+	}
+}
+
+func TestBatchSendsSourceRelativeToRoot(t *testing.T) {
+	root := t.TempDir()
+	mustMkdirAll(t, filepath.Join(root, "notes"))
+	mustWriteFile(t, filepath.Join(root, "notes", "one.md"), "memory")
+	sources := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var input api.FormationInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil || input.Context == nil {
+			t.Errorf("bad formation request: %v", err)
+		} else {
+			sources <- input.Context.Source
+		}
+		_, _ = io.WriteString(w, `{"result":{"content":"","conversation":1}}`)
+	}))
+	defer server.Close()
+	opts := fileFormationBatchOptions{RootDir: root, Extension: "md", Output: io.Discard}
+	if err := runFileFormationBatch(context.Background(), api.NewClient(server.URL, "s1", ""), opts); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-sources; got != filepath.Join("notes", "one.md") {
+		t.Fatalf("source %q leaks the local directory layout", got)
 	}
 }
 

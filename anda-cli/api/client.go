@@ -18,6 +18,10 @@ const (
 	DefaultTimeout = 120 * time.Second
 )
 
+// maxErrorBody bounds a non-JSON error body, such as a proxy's HTML page, in
+// an error message.
+const maxErrorBody = 1024
+
 // Client is the HTTP client for the Anda Brain API.
 type Client struct {
 	BaseURL string
@@ -84,14 +88,51 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any) ([]b
 	}
 
 	if resp.StatusCode >= 400 {
-		var rpcErr RpcError
-		if DecodeJSON(respBody, &rpcErr) == nil && rpcErr.Message != "" {
-			return nil, &HTTPError{StatusCode: resp.StatusCode, RPC: &rpcErr}
-		}
-		return nil, &HTTPError{StatusCode: resp.StatusCode, Body: string(respBody)}
+		return nil, newHTTPError(resp.StatusCode, respBody)
 	}
 
 	return respBody, nil
+}
+
+// newHTTPError reads the server's error envelope, {"error":{"message","data"}},
+// keeping its structured data (a wiki conflict's current_version, say).
+func newHTTPError(status int, body []byte) *HTTPError {
+	var envelope struct {
+		Error *RpcError `json:"error"`
+	}
+	if DecodeJSON(body, &envelope) == nil && envelope.Error != nil {
+		return &HTTPError{StatusCode: status, RPC: envelope.Error}
+	}
+	text := strings.TrimSpace(string(body))
+	if len(text) > maxErrorBody {
+		text = strings.ToValidUTF8(text[:maxErrorBody], "") + "…"
+	}
+	return &HTTPError{StatusCode: status, Body: text}
+}
+
+func callRPC[T any](ctx context.Context, c *Client, method, path string, input any) (*RpcResponse[T], error) {
+	data, err := c.doJSON(ctx, method, path, input)
+	if err != nil {
+		return nil, err
+	}
+	var response RpcResponse[T]
+	if err := DecodeJSON(data, &response); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return &response, nil
+}
+
+func withQuery(path string, values url.Values) string {
+	if len(values) == 0 {
+		return path
+	}
+	return path + "?" + values.Encode()
+}
+
+func setLimit(values url.Values, limit int) {
+	if limit > 0 {
+		values.Set("limit", strconv.Itoa(limit))
+	}
 }
 
 // GetInfo returns service information.
@@ -117,6 +158,14 @@ func (c *Client) Recall(ctx context.Context, input *RecallInput) (*RpcResponse[A
 	return callRPC[AgentOutput](ctx, c, http.MethodPost, c.spacePath("/recall"), input)
 }
 
+func (c *Client) RecallStructured(ctx context.Context, input *RecallInput) (*RpcResponse[RecallOutput], error) {
+	return callRPC[RecallOutput](ctx, c, http.MethodPost, c.spacePath("/recall_structured"), input)
+}
+
+func (c *Client) Probe(ctx context.Context, input *ProbeInput) (*RpcResponse[ProbeOutput], error) {
+	return callRPC[ProbeOutput](ctx, c, http.MethodPost, c.spacePath("/probe"), input)
+}
+
 // Maintenance triggers maintenance task.
 func (c *Client) Maintenance(ctx context.Context, input *MaintenanceInput) (*RpcResponse[AgentOutput], error) {
 	return callRPC[AgentOutput](ctx, c, http.MethodPost, c.spacePath("/maintenance"), input)
@@ -137,15 +186,7 @@ func (c *Client) ExecuteKIPReadonly(ctx context.Context, input *KipRequest) (*Ki
 
 // GetOrInitUser gets or initializes a caller concept.
 func (c *Client) GetOrInitUser(ctx context.Context, input *GetOrInitUserInput) (*RpcResponse[Concept], error) {
-	response, err := callRPC[Concept](ctx, c, http.MethodPost, c.spacePath("/get_or_init_user"), input)
-	if err != nil {
-		return nil, err
-	}
-	// Preserve this method's existing Go error contract for library callers.
-	if response.Error != nil {
-		return nil, fmt.Errorf("RPC error: %w", response.Error)
-	}
-	return response, nil
+	return callRPC[Concept](ctx, c, http.MethodPost, c.spacePath("/get_or_init_user"), input)
 }
 
 // GetSpaceInfo returns space information.
@@ -157,57 +198,66 @@ func (c *Client) GetFormationStatus(ctx context.Context) (*RpcResponse[Formation
 	return callRPC[FormationStatus](ctx, c, http.MethodGet, c.spacePath("/formation_status"), nil)
 }
 
+func (c *Client) GetMemoryStatus(ctx context.Context) (*RpcResponse[MemoryStatus], error) {
+	return callRPC[MemoryStatus](ctx, c, http.MethodGet, c.spacePath("/memory_status"), nil)
+}
+
+func (c *Client) PinMemory(ctx context.Context, input *MemoryPinInput) (*RpcResponse[MemoryPinOutput], error) {
+	return callRPC[MemoryPinOutput](ctx, c, http.MethodPost, c.spacePath("/memory/pin"), input)
+}
+
+func (c *Client) ForgetMemory(ctx context.Context, input *MemoryForgetInput) (*RpcResponse[MemoryForgetReport], error) {
+	return callRPC[MemoryForgetReport](ctx, c, http.MethodPost, c.spacePath("/memory/forget"), input)
+}
+
 // GetConversation returns a single conversation.
 func (c *Client) GetConversation(ctx context.Context, conversationID uint64, collection string) (*RpcResponse[Conversation], error) {
-	path := fmt.Sprintf("%s/conversations/%d", c.spacePath(""), conversationID)
-	params := url.Values{}
+	values := url.Values{}
 	if collection != "" {
-		params.Set("collection", collection)
+		values.Set("collection", collection)
 	}
-	if len(params) > 0 {
-		path += "?" + params.Encode()
-	}
-	return callRPC[Conversation](ctx, c, http.MethodGet, path, nil)
+	path := c.spacePath(fmt.Sprintf("/conversations/%d", conversationID))
+	return callRPC[Conversation](ctx, c, http.MethodGet, withQuery(path, values), nil)
 }
 
 // GetConversationDelta returns incremental conversation updates since the given offsets.
 func (c *Client) GetConversationDelta(ctx context.Context, conversationID uint64, messagesOffset, artifactsOffset int, collection string) (*RpcResponse[ConversationDelta], error) {
-	path := fmt.Sprintf("%s/conversations/%d/delta", c.spacePath(""), conversationID)
-	params := url.Values{}
+	values := url.Values{}
 	if messagesOffset > 0 {
-		params.Set("messages_offset", fmt.Sprintf("%d", messagesOffset))
+		values.Set("messages_offset", strconv.Itoa(messagesOffset))
 	}
 	if artifactsOffset > 0 {
-		params.Set("artifacts_offset", fmt.Sprintf("%d", artifactsOffset))
+		values.Set("artifacts_offset", strconv.Itoa(artifactsOffset))
 	}
 	if collection != "" {
-		params.Set("collection", collection)
+		values.Set("collection", collection)
 	}
-	if len(params) > 0 {
-		path += "?" + params.Encode()
-	}
-
-	return callRPC[ConversationDelta](ctx, c, http.MethodGet, path, nil)
+	path := c.spacePath(fmt.Sprintf("/conversations/%d/delta", conversationID))
+	return callRPC[ConversationDelta](ctx, c, http.MethodGet, withQuery(path, values), nil)
 }
 
 // ListConversations lists conversations with pagination.
 func (c *Client) ListConversations(ctx context.Context, cursor string, limit int, collection string) (*RpcResponse[[]Conversation], error) {
-	path := c.spacePath("/conversations")
-	params := url.Values{}
+	values := url.Values{}
 	if cursor != "" {
-		params.Set("cursor", cursor)
+		values.Set("cursor", cursor)
 	}
-	if limit > 0 {
-		params.Set("limit", fmt.Sprintf("%d", limit))
-	}
+	setLimit(values, limit)
 	if collection != "" {
-		params.Set("collection", collection)
+		values.Set("collection", collection)
 	}
-	if len(params) > 0 {
-		path += "?" + params.Encode()
-	}
+	return callRPC[[]Conversation](ctx, c, http.MethodGet, withQuery(c.spacePath("/conversations"), values), nil)
+}
 
-	return callRPC[[]Conversation](ctx, c, http.MethodGet, path, nil)
+// SchemaDrafts lists the Space's draft vocabulary (KIP §20.16).
+func (c *Client) SchemaDrafts(ctx context.Context) (*RpcResponse[SchemaDrafts], error) {
+	return callRPC[SchemaDrafts](ctx, c, http.MethodGet, c.spacePath("/schema/drafts"), nil)
+}
+
+// PromoteDraftSymbol promotes one draft symbol onto an installed symbol of the
+// same kind. It is a Schema migration and needs the Space's management token.
+func (c *Client) PromoteDraftSymbol(ctx context.Context, input *PromoteDraftInput) (*RpcResponse[PromoteDraftOutput], error) {
+	return callRPC[PromoteDraftOutput](ctx, c, http.MethodPost, c.spacePath("/schema/promote"), input)
 }
 
 // ListSpaceTokens lists space tokens (management).
@@ -253,6 +303,10 @@ func (c *Client) UpdateBYOK(ctx context.Context, input *ModelConfig) (*RpcRespon
 	return callRPC[bool](ctx, c, http.MethodPatch, c.spacePath("/management/space_byok"), input)
 }
 
+func (c *Client) ShadowEval(ctx context.Context, input *ShadowEvalInput) (*RpcResponse[ShadowReport], error) {
+	return callRPC[ShadowReport](ctx, c, http.MethodPost, c.spacePath("/management/shadow_eval"), input)
+}
+
 // CreateSpace creates a space (admin).
 func (c *Client) CreateSpace(ctx context.Context, input *CreateOrUpdateSpaceInput) (*RpcResponse[SpaceInfo], error) {
 	return callRPC[SpaceInfo](ctx, c, http.MethodPost, "/admin/create_space", input)
@@ -262,4 +316,114 @@ func (c *Client) CreateSpace(ctx context.Context, input *CreateOrUpdateSpaceInpu
 func (c *Client) UpdateSpaceTier(ctx context.Context, spaceID string, input *CreateOrUpdateSpaceInput) (*RpcResponse[SpaceTier], error) {
 	path := fmt.Sprintf("/admin/%s/update_space_tier", url.PathEscape(spaceID))
 	return callRPC[SpaceTier](ctx, c, http.MethodPost, path, input)
+}
+
+func (c *Client) WikiCommit(ctx context.Context, input *WikiCommitInput) (*RpcResponse[WikiCommitOutput], error) {
+	return callRPC[WikiCommitOutput](ctx, c, http.MethodPost, c.spacePath("/wiki/docs"), input)
+}
+
+func (c *Client) WikiListDocs(ctx context.Context, query WikiListDocsQuery) (*RpcResponse[[]WikiDocInfo], error) {
+	values := url.Values{}
+	if query.Namespace != "" {
+		values.Set("namespace", query.Namespace)
+	}
+	if query.Status != "" {
+		values.Set("status", query.Status)
+	}
+	if query.Tag != "" {
+		values.Set("tag", query.Tag)
+	}
+	if query.Cursor != "" {
+		values.Set("cursor", query.Cursor)
+	}
+	setLimit(values, query.Limit)
+	return callRPC[[]WikiDocInfo](ctx, c, http.MethodGet, withQuery(c.spacePath("/wiki/docs"), values), nil)
+}
+
+func (c *Client) WikiGetDoc(ctx context.Context, docID uint64) (*RpcResponse[WikiDocOutput], error) {
+	return callRPC[WikiDocOutput](ctx, c, http.MethodGet, c.spacePath(fmt.Sprintf("/wiki/docs/%d", docID)), nil)
+}
+
+func (c *Client) WikiRead(ctx context.Context, docID uint64, query WikiReadQuery) (*RpcResponse[WikiReadOutput], error) {
+	values := url.Values{}
+	if query.Version != nil {
+		values.Set("version", strconv.FormatUint(*query.Version, 10))
+	}
+	if query.Anchor != "" {
+		values.Set("anchor", query.Anchor)
+	}
+	if query.Start != nil {
+		values.Set("start", strconv.FormatUint(*query.Start, 10))
+	}
+	if query.End != nil {
+		values.Set("end", strconv.FormatUint(*query.End, 10))
+	}
+	path := c.spacePath(fmt.Sprintf("/wiki/docs/%d/content", docID))
+	return callRPC[WikiReadOutput](ctx, c, http.MethodGet, withQuery(path, values), nil)
+}
+
+func (c *Client) WikiVersions(ctx context.Context, docID uint64, cursor string, limit int) (*RpcResponse[[]WikiVersionInfo], error) {
+	values := url.Values{}
+	if cursor != "" {
+		values.Set("cursor", cursor)
+	}
+	setLimit(values, limit)
+	path := c.spacePath(fmt.Sprintf("/wiki/docs/%d/versions", docID))
+	return callRPC[[]WikiVersionInfo](ctx, c, http.MethodGet, withQuery(path, values), nil)
+}
+
+func (c *Client) wikiSetArchived(ctx context.Context, docID uint64, archive bool) (*RpcResponse[WikiDocInfo], error) {
+	action := "restore"
+	if archive {
+		action = "archive"
+	}
+	path := c.spacePath(fmt.Sprintf("/wiki/docs/%d/%s", docID, action))
+	return callRPC[WikiDocInfo](ctx, c, http.MethodPost, path, nil)
+}
+
+func (c *Client) WikiArchive(ctx context.Context, docID uint64) (*RpcResponse[WikiDocInfo], error) {
+	return c.wikiSetArchived(ctx, docID, true)
+}
+
+func (c *Client) WikiRestore(ctx context.Context, docID uint64) (*RpcResponse[WikiDocInfo], error) {
+	return c.wikiSetArchived(ctx, docID, false)
+}
+
+func (c *Client) WikiSearch(ctx context.Context, input *WikiSearchInput) (*RpcResponse[WikiSearchOutput], error) {
+	return callRPC[WikiSearchOutput](ctx, c, http.MethodPost, c.spacePath("/wiki/search"), input)
+}
+
+func (c *Client) WikiVerify(ctx context.Context, input *WikiVerifyInput) (*RpcResponse[WikiVerifyOutput], error) {
+	return callRPC[WikiVerifyOutput](ctx, c, http.MethodPost, c.spacePath("/wiki/verify"), input)
+}
+
+func (c *Client) WikiEvents(ctx context.Context, query WikiEventsQuery) (*RpcResponse[[]WikiEventInfo], error) {
+	values := url.Values{}
+	if query.Kind != "" {
+		values.Set("kind", query.Kind)
+	}
+	if query.DocID != nil {
+		values.Set("doc_id", strconv.FormatUint(*query.DocID, 10))
+	}
+	if query.Cursor != "" {
+		values.Set("cursor", query.Cursor)
+	}
+	setLimit(values, query.Limit)
+	return callRPC[[]WikiEventInfo](ctx, c, http.MethodGet, withQuery(c.spacePath("/wiki/events"), values), nil)
+}
+
+func (c *Client) WikiImport(ctx context.Context, input *WikiImportInput) (*RpcResponse[WikiImportOutput], error) {
+	return callRPC[WikiImportOutput](ctx, c, http.MethodPost, c.spacePath("/wiki/import"), input)
+}
+
+func (c *Client) WikiExport(ctx context.Context, namespace string) (*RpcResponse[WikiExportOutput], error) {
+	values := url.Values{}
+	if namespace != "" {
+		values.Set("namespace", namespace)
+	}
+	return callRPC[WikiExportOutput](ctx, c, http.MethodGet, withQuery(c.spacePath("/wiki/export"), values), nil)
+}
+
+func (c *Client) WikiDigest(ctx context.Context) (*RpcResponse[WikiDigestReport], error) {
+	return callRPC[WikiDigestReport](ctx, c, http.MethodPost, c.spacePath("/wiki/digest"), nil)
 }

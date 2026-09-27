@@ -17,41 +17,29 @@ Example:
   anda-cli maintenance --trigger on_demand --scope full`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		trigger, _ := cmd.Flags().GetString("trigger")
-		scope, _ := cmd.Flags().GetString("scope")
-
 		input := &api.MaintenanceInput{
 			Timestamp: time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
 		}
-		if trigger != "" {
-			input.Trigger = trigger
+		input.Trigger, _ = cmd.Flags().GetString("trigger")
+		input.Scope, _ = cmd.Flags().GetString("scope")
+
+		var parameters api.MaintenanceParameters
+		set := false
+		intParameter := func(name string, field **int) {
+			if cmd.Flags().Changed(name) {
+				value, _ := cmd.Flags().GetInt(name)
+				*field = &value
+				set = true
+			}
 		}
-		if scope != "" {
-			input.Scope = scope
-		}
-		parameters := &api.MaintenanceParameters{}
-		if cmd.Flags().Changed("stale-event-threshold-days") {
-			v, _ := cmd.Flags().GetInt("stale-event-threshold-days")
-			parameters.StaleEventThresholdDays = &v
-		}
-		if cmd.Flags().Changed("memory-strength-decay-factor") {
-			v, _ := cmd.Flags().GetFloat64("memory-strength-decay-factor")
-			parameters.MemoryStrengthDecayFactor = &v
-		}
-		if cmd.Flags().Changed("unconsolidated-max-backlog") {
-			v, _ := cmd.Flags().GetInt("unconsolidated-max-backlog")
-			parameters.UnconsolidatedMaxBacklog = &v
-		}
-		if cmd.Flags().Changed("orphan-max-count") {
-			v, _ := cmd.Flags().GetInt("orphan-max-count")
-			parameters.OrphanMaxCount = &v
-		}
-		if cmd.Flags().Changed("stale-event-threshold-days") || cmd.Flags().Changed("memory-strength-decay-factor") || cmd.Flags().Changed("unconsolidated-max-backlog") || cmd.Flags().Changed("orphan-max-count") {
-			input.Parameters = parameters
+		intParameter("stale-event-threshold-days", &parameters.StaleEventThresholdDays)
+		intParameter("unconsolidated-max-backlog", &parameters.UnconsolidatedMaxBacklog)
+		intParameter("orphan-max-count", &parameters.OrphanMaxCount)
+		if set {
+			input.Parameters = &parameters
 		}
 
-		client := newClient()
-		resp, err := client.Maintenance(cmd.Context(), input)
+		resp, err := newClient().Maintenance(cmd.Context(), input)
 		if err != nil {
 			return err
 		}
@@ -63,8 +51,6 @@ func init() {
 	maintenanceCmd.Flags().String("trigger", "", "Trigger type: scheduled, threshold, on_demand (default: on_demand)")
 	maintenanceCmd.Flags().String("scope", "", "Scope: full, quick, daydream (default: daydream)")
 	maintenanceCmd.Flags().Int("stale-event-threshold-days", 0, "Per-run stale event threshold (1-365)")
-	maintenanceCmd.Flags().Float64("memory-strength-decay-factor", 0, "Deprecated: decay is computed by the engine; the server ignores it")
-	_ = maintenanceCmd.Flags().MarkDeprecated("memory-strength-decay-factor", "decay is computed by the engine; the server ignores it")
 	maintenanceCmd.Flags().Int("unconsolidated-max-backlog", 0, "Per-run unconsolidated backlog limit (1-10000)")
 	maintenanceCmd.Flags().Int("orphan-max-count", 0, "Per-run orphan limit (1-10000)")
 	rootCmd.AddCommand(maintenanceCmd)

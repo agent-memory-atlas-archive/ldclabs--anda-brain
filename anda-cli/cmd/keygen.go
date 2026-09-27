@@ -10,8 +10,9 @@ import (
 )
 
 var keygenCmd = &cobra.Command{
-	Use:   "keygen",
-	Short: "Generate a new Ed25519 key pair",
+	Use:         "keygen",
+	Annotations: spaceFree,
+	Short:       "Generate a new Ed25519 key pair",
 	Long: `Generate a random Ed25519 key pair and output the private key
 and public key as base64url-encoded CBOR (COSE Key format).
 

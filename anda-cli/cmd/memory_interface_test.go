@@ -7,7 +7,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ldclabs/anda-brain/anda-cli/api"
@@ -16,13 +18,13 @@ import (
 // A fake Brain that answers the Memory Interface: mutations are acknowledged
 // with a receipt; a recall reports each after receipt available once
 // "formation" has run, and echoes the attention cursor it was given.
-func memoryServer(t *testing.T, requests *[]map[string]any) *httptest.Server {
+func memoryServer(t *testing.T, requests *requestLog) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var request map[string]any
 		_ = json.Unmarshal(body, &request)
-		*requests = append(*requests, request)
+		requests.add(request)
 		switch r.URL.Path {
 		case "/v1/s/memory/sources":
 			_, _ = w.Write([]byte(`{"result":{"source_ref":"src-1","source_digest":"sha256:x","captured_at":"2026-01-01T00:00:00.000Z"}}`))
@@ -41,7 +43,7 @@ func memoryServer(t *testing.T, requests *[]map[string]any) *httptest.Server {
 				return
 			}
 			if operation == "forget" && input["mode"] == "semantic" {
-				_, _ = w.Write([]byte(`{"kip_memory":"2.0","operation":"forget","status":"failed","error":{"code":"NotAuthorized","message":"owner only"},"warnings":[]}`))
+				_, _ = w.Write([]byte(`{"kip_memory":"2.0","operation":"forget","status":"failed","error":{"code":"NotAuthorized","category":"authorization","message":"owner only","hint":"use the owner's CWT"}}`))
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"kip_memory": "2.0", "operation": operation, "status": "pending",
@@ -52,6 +54,34 @@ func memoryServer(t *testing.T, requests *[]map[string]any) *httptest.Server {
 			http.NotFound(w, r)
 		}
 	}))
+}
+
+// requestLog records the fake server's requests; handlers run on server
+// goroutines while the test reads.
+type requestLog struct {
+	mu       sync.Mutex
+	requests []map[string]any
+}
+
+func (l *requestLog) add(request map[string]any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.requests = append(l.requests, request)
+}
+
+func (l *requestLog) count() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.requests)
+}
+
+func (l *requestLog) last() map[string]any {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.requests) == 0 {
+		return nil
+	}
+	return l.requests[len(l.requests)-1]
 }
 
 func asStrings(value any) []string {
@@ -66,7 +96,7 @@ func asStrings(value any) []string {
 }
 
 func TestMemoryInterfaceSessionKeepsReceiptsUntilARecallAccountsForThem(t *testing.T) {
-	var requests []map[string]any
+	var requests requestLog
 	server := memoryServer(t, &requests)
 	defer server.Close()
 	dir := t.TempDir()
@@ -90,7 +120,7 @@ func TestMemoryInterfaceSessionKeepsReceiptsUntilARecallAccountsForThem(t *testi
 		t.Fatalf("session after observe: %s", data)
 	}
 	// The key is derived from the logical input, so a rerun replays.
-	observe := requests[len(requests)-1]
+	observe := requests.last()
 	if key, _ := observe["idempotency_key"].(string); !strings.HasPrefix(key, "cli:observe:") {
 		t.Fatalf("observe key %v", observe["idempotency_key"])
 	}
@@ -98,7 +128,7 @@ func TestMemoryInterfaceSessionKeepsReceiptsUntilARecallAccountsForThem(t *testi
 	if _, stderr, err := runCLI(t, env, append(base, "memory", "recall", "What do I prefer?", "--mode", "attention", "--session", session)...); err != nil {
 		t.Fatalf("recall: %v %s", err, stderr)
 	}
-	recall := requests[len(requests)-1]
+	recall := requests.last()
 	input, _ := recall["input"].(map[string]any)
 	scope, _ := recall["scope"].(map[string]any)
 	if scope["task_ref"] != "t1" {
@@ -114,20 +144,41 @@ func TestMemoryInterfaceSessionKeepsReceiptsUntilARecallAccountsForThem(t *testi
 		t.Fatalf("session after recall: %s", data)
 	}
 
-	// A failed intent is printed and fails the command.
-	if _, _, err := runCLI(t, env, append(base, "memory", "forget", "A-1", "--mode", "semantic", "--session", session)...); err == nil {
-		t.Fatal("a failed forget must exit non-zero")
+	// A failed intent is printed with its whole error object and fails the command.
+	out, stderr, err = runCLI(t, env, append(base, "memory", "forget", "A-1", "--mode", "semantic", "--session", session)...)
+	if err == nil || !strings.Contains(stderr, "NotAuthorized: owner only") {
+		t.Fatalf("a failed forget must exit non-zero: %v %s", err, stderr)
+	}
+	if !strings.Contains(out, `"hint": "use the owner's CWT"`) || !strings.Contains(out, `"category": "authorization"`) {
+		t.Fatalf("failed forget lost its error detail: %s", out)
+	}
+}
+
+// Brain lists a failed receipt as pending and explains it; failed is
+// terminal, so the session must let it go or every later recall stays pending.
+func TestMemorySessionReleasesFailedReceipts(t *testing.T) {
+	session := &memorySession{SpaceID: "s", Outstanding: []string{"ok", "bad", "waiting"}}
+	session.acknowledgeRecall(&api.MemoryBriefing{
+		After: []api.MemoryProgress{
+			{ReceiptRef: "ok", Phase: "available"},
+			{ReceiptRef: "bad", Phase: "failed", Reason: "formation_failed: provider error"},
+			{ReceiptRef: "waiting", Phase: "recorded"},
+		},
+		Coverage: api.MemoryCoverage{PendingReceipts: []string{"bad", "waiting"}},
+	})
+	if !slices.Equal(session.Outstanding, []string{"waiting"}) {
+		t.Fatalf("outstanding after recall: %v", session.Outstanding)
 	}
 }
 
 func TestMemoryInterfaceForgetRejectsDryRunBeforeSending(t *testing.T) {
-	var requests []map[string]any
+	var requests requestLog
 	server := memoryServer(t, &requests)
 	defer server.Close()
 	_, _, err := runCLI(t, map[string]string{}, "--base-url", server.URL, "--space-id", "s",
 		"memory", "forget", "A-1", "--mode", "semantic", "--dry-run")
-	if err == nil || len(requests) != 0 {
-		t.Fatalf("dry-run submitted a mutation: err=%v requests=%v", err, requests)
+	if err == nil || requests.count() != 0 {
+		t.Fatalf("dry-run submitted a mutation: err=%v requests=%d", err, requests.count())
 	}
 }
 

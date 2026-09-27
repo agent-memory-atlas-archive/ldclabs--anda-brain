@@ -12,6 +12,15 @@ import (
 	"github.com/ldclabs/anda-brain/anda-cli/api"
 )
 
+// firstText returns the text of the first part when it is a text part.
+func firstText(content api.MessageContent) (string, bool) {
+	if len(content) == 0 {
+		return "", false
+	}
+	part, ok := content[0].(api.TextPart)
+	return part.Text, ok
+}
+
 func TestParseMessagesInput_JSONArray(t *testing.T) {
 	messages, err := parseMessagesInput(`[{"role":"user","content":"Hello"},{"role":"assistant","content":"Hi"}]`)
 	if err != nil {
@@ -20,7 +29,7 @@ func TestParseMessagesInput_JSONArray(t *testing.T) {
 	if len(messages) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(messages))
 	}
-	text, ok := messages[0].Content.FirstText()
+	text, ok := firstText(messages[0].Content)
 	if messages[0].Role != "user" || !ok || text != "Hello" {
 		t.Fatalf("unexpected first message: %+v", messages[0])
 	}
@@ -34,7 +43,7 @@ func TestParseMessagesInput_JSONObject(t *testing.T) {
 	if len(messages) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(messages))
 	}
-	text, ok := messages[0].Content.FirstText()
+	text, ok := firstText(messages[0].Content)
 	if messages[0].Role != "user" || !ok || text != "Only one" {
 		t.Fatalf("unexpected message: %+v", messages[0])
 	}
@@ -48,7 +57,7 @@ func TestParseMessagesInput_PlainTextFallback(t *testing.T) {
 	if len(messages) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(messages))
 	}
-	text, ok := messages[0].Content.FirstText()
+	text, ok := firstText(messages[0].Content)
 	if messages[0].Role != "user" || !ok || text != "plain text input" {
 		t.Fatalf("unexpected message: %+v", messages[0])
 	}
@@ -81,7 +90,7 @@ func TestParseMessagesInput_PlainTextLooksLikeJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseMessagesInput returned error: %v", err)
 	}
-	text, ok := messages[0].Content.FirstText()
+	text, ok := firstText(messages[0].Content)
 	if messages[0].Role != "user" || !ok || text != "[2026-06-11] meeting notes" {
 		t.Fatalf("unexpected message: %+v", messages[0])
 	}

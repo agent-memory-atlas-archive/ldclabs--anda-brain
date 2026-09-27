@@ -96,7 +96,14 @@ saved at mint time. Provide exactly one of the two.`,
 		if err != nil {
 			return err
 		}
-		return printRPC(cmd, resp)
+		if err := printRPC(cmd, resp); err != nil {
+			return err
+		}
+		// A false result means no token matched: nothing was revoked.
+		if resp.Result == nil || !*resp.Result {
+			return fmt.Errorf("no space token matched; nothing was revoked")
+		}
+		return nil
 	},
 }
 

@@ -5,9 +5,10 @@ import (
 )
 
 var statusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Get service information (name, version, sharding)",
-	Args:  cobra.NoArgs,
+	Use:         "status",
+	Annotations: spaceFree,
+	Short:       "Get service information (name, version, sharding)",
+	Args:        cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		client := newClient()
 		info, err := client.GetInfo(cmd.Context())

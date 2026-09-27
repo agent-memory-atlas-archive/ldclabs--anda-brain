@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -41,6 +42,27 @@ type RpcResponse[T any] struct {
 	Result     *T        `json:"result,omitempty"`
 	Error      *RpcError `json:"error,omitempty"`
 	NextCursor string    `json:"next_cursor,omitempty"`
+	// RawResult is the result exactly as the server sent it, including members
+	// T does not model yet.
+	RawResult json.RawMessage `json:"-"`
+}
+
+func (r *RpcResponse[T]) UnmarshalJSON(data []byte) error {
+	var envelope struct {
+		Result     json.RawMessage `json:"result"`
+		Error      *RpcError       `json:"error"`
+		NextCursor string          `json:"next_cursor"`
+	}
+	if err := DecodeJSON(data, &envelope); err != nil {
+		return err
+	}
+	*r = RpcResponse[T]{Error: envelope.Error, NextCursor: envelope.NextCursor}
+	if len(envelope.Result) == 0 || string(envelope.Result) == "null" {
+		return nil
+	}
+	r.RawResult = envelope.Result
+	r.Result = new(T)
+	return DecodeJSON(envelope.Result, r.Result)
 }
 
 type TokenScope string
@@ -92,6 +114,11 @@ type ContentPart interface {
 	contentPartType() ContentPartType
 }
 
+var errInvalidContentPart = errors.New("invalid ContentPart")
+
+// Each part encodes its wire type whatever its Type field holds, so a part
+// built without Type still names its kind.
+
 type TextPart struct {
 	Type ContentPartType `json:"type"`
 	Text string          `json:"text"`
@@ -99,12 +126,24 @@ type TextPart struct {
 
 func (TextPart) contentPartType() ContentPartType { return ContentPartText }
 
+func (p TextPart) MarshalJSON() ([]byte, error) {
+	type plain TextPart
+	p.Type = ContentPartText
+	return json.Marshal(plain(p))
+}
+
 type ReasoningPart struct {
 	Type ContentPartType `json:"type"`
 	Text string          `json:"text"`
 }
 
 func (ReasoningPart) contentPartType() ContentPartType { return ContentPartReasoning }
+
+func (p ReasoningPart) MarshalJSON() ([]byte, error) {
+	type plain ReasoningPart
+	p.Type = ContentPartReasoning
+	return json.Marshal(plain(p))
+}
 
 type FileDataPart struct {
 	Type     ContentPartType `json:"type"`
@@ -114,6 +153,12 @@ type FileDataPart struct {
 
 func (FileDataPart) contentPartType() ContentPartType { return ContentPartFileData }
 
+func (p FileDataPart) MarshalJSON() ([]byte, error) {
+	type plain FileDataPart
+	p.Type = ContentPartFileData
+	return json.Marshal(plain(p))
+}
+
 type InlineDataPart struct {
 	Type     ContentPartType `json:"type"`
 	MimeType string          `json:"mimeType"`
@@ -121,6 +166,12 @@ type InlineDataPart struct {
 }
 
 func (InlineDataPart) contentPartType() ContentPartType { return ContentPartInlineData }
+
+func (p InlineDataPart) MarshalJSON() ([]byte, error) {
+	type plain InlineDataPart
+	p.Type = ContentPartInlineData
+	return json.Marshal(plain(p))
+}
 
 type ToolCallPart struct {
 	Type   ContentPartType `json:"type"`
@@ -130,6 +181,12 @@ type ToolCallPart struct {
 }
 
 func (ToolCallPart) contentPartType() ContentPartType { return ContentPartToolCall }
+
+func (p ToolCallPart) MarshalJSON() ([]byte, error) {
+	type plain ToolCallPart
+	p.Type = ContentPartToolCall
+	return json.Marshal(plain(p))
+}
 
 type ToolOutputPart struct {
 	Type     ContentPartType `json:"type"`
@@ -142,6 +199,12 @@ type ToolOutputPart struct {
 
 func (ToolOutputPart) contentPartType() ContentPartType { return ContentPartToolOutput }
 
+func (p ToolOutputPart) MarshalJSON() ([]byte, error) {
+	type plain ToolOutputPart
+	p.Type = ContentPartToolOutput
+	return json.Marshal(plain(p))
+}
+
 type ActionPart struct {
 	Type       ContentPartType `json:"type"`
 	Name       string          `json:"name"`
@@ -151,6 +214,12 @@ type ActionPart struct {
 }
 
 func (ActionPart) contentPartType() ContentPartType { return ContentPartAction }
+
+func (p ActionPart) MarshalJSON() ([]byte, error) {
+	type plain ActionPart
+	p.Type = ContentPartAction
+	return json.Marshal(plain(p))
+}
 
 type AnyPart struct {
 	Raw json.RawMessage
@@ -175,230 +244,56 @@ func MessageContentFromText(text string) MessageContent {
 	return MessageContent{NewTextContentPart(text)}
 }
 
+// parseContentPart decodes a known part, which must carry its required
+// members, and keeps anything else verbatim as an AnyPart.
 func parseContentPart(raw json.RawMessage) (ContentPart, error) {
 	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 {
-		return AnyPart{Raw: append(json.RawMessage(nil), trimmed...)}, nil
-	}
-
-	if trimmed[0] == '"' {
+	if len(trimmed) > 0 && trimmed[0] == '"' {
 		var text string
 		if err := json.Unmarshal(trimmed, &text); err != nil {
 			return nil, err
 		}
-		return TextPart{Type: ContentPartText, Text: text}, nil
-	}
-
-	if trimmed[0] != '{' {
-		return AnyPart{Raw: append(json.RawMessage(nil), trimmed...)}, nil
+		return NewTextContentPart(text), nil
 	}
 
 	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(trimmed, &fields); err != nil {
-		return AnyPart{Raw: append(json.RawMessage(nil), trimmed...)}, nil
-	}
-
-	metaRaw, ok := fields["type"]
-	if !ok {
-		return AnyPart{Raw: append(json.RawMessage(nil), trimmed...)}, nil
-	}
-
 	var partType ContentPartType
-	if err := json.Unmarshal(metaRaw, &partType); err != nil {
+	if len(trimmed) == 0 || trimmed[0] != '{' ||
+		json.Unmarshal(trimmed, &fields) != nil || json.Unmarshal(fields["type"], &partType) != nil {
 		return AnyPart{Raw: append(json.RawMessage(nil), trimmed...)}, nil
-	}
-
-	hasField := func(name string) bool {
-		_, ok := fields[name]
-		return ok
 	}
 
 	switch partType {
 	case ContentPartText:
-		if !hasField("text") {
-			return nil, fmt.Errorf("invalid ContentPart")
-		}
-		var part TextPart
-		if err := DecodeJSON(trimmed, &part); err != nil {
-			return nil, fmt.Errorf("invalid ContentPart")
-		}
-		part.Type = ContentPartText
-		return part, nil
+		return decodeContentPart[TextPart](trimmed, fields, "text")
 	case ContentPartReasoning:
-		if !hasField("text") {
-			return nil, fmt.Errorf("invalid ContentPart")
-		}
-		var part ReasoningPart
-		if err := DecodeJSON(trimmed, &part); err != nil {
-			return nil, fmt.Errorf("invalid ContentPart")
-		}
-		part.Type = ContentPartReasoning
-		return part, nil
+		return decodeContentPart[ReasoningPart](trimmed, fields, "text")
 	case ContentPartFileData:
-		if !hasField("fileUri") {
-			return nil, fmt.Errorf("invalid ContentPart")
-		}
-		var part FileDataPart
-		if err := DecodeJSON(trimmed, &part); err != nil {
-			return nil, fmt.Errorf("invalid ContentPart")
-		}
-		part.Type = ContentPartFileData
-		return part, nil
+		return decodeContentPart[FileDataPart](trimmed, fields, "fileUri")
 	case ContentPartInlineData:
-		if !hasField("mimeType") || !hasField("data") {
-			return nil, fmt.Errorf("invalid ContentPart")
-		}
-		var part InlineDataPart
-		if err := DecodeJSON(trimmed, &part); err != nil {
-			return nil, fmt.Errorf("invalid ContentPart")
-		}
-		part.Type = ContentPartInlineData
-		return part, nil
+		return decodeContentPart[InlineDataPart](trimmed, fields, "mimeType", "data")
 	case ContentPartToolCall:
-		if !hasField("name") || !hasField("args") {
-			return nil, fmt.Errorf("invalid ContentPart")
-		}
-		var part ToolCallPart
-		if err := DecodeJSON(trimmed, &part); err != nil {
-			return nil, fmt.Errorf("invalid ContentPart")
-		}
-		part.Type = ContentPartToolCall
-		return part, nil
+		return decodeContentPart[ToolCallPart](trimmed, fields, "name", "args")
 	case ContentPartToolOutput:
-		if !hasField("name") || !hasField("output") {
-			return nil, fmt.Errorf("invalid ContentPart")
-		}
-		var part ToolOutputPart
-		if err := DecodeJSON(trimmed, &part); err != nil {
-			return nil, fmt.Errorf("invalid ContentPart")
-		}
-		part.Type = ContentPartToolOutput
-		return part, nil
+		return decodeContentPart[ToolOutputPart](trimmed, fields, "name", "output")
 	case ContentPartAction:
-		if !hasField("name") || !hasField("payload") {
-			return nil, fmt.Errorf("invalid ContentPart")
-		}
-		var part ActionPart
-		if err := DecodeJSON(trimmed, &part); err != nil {
-			return nil, fmt.Errorf("invalid ContentPart")
-		}
-		part.Type = ContentPartAction
-		return part, nil
+		return decodeContentPart[ActionPart](trimmed, fields, "name", "payload")
 	default:
 		return AnyPart{Raw: append(json.RawMessage(nil), trimmed...)}, nil
 	}
 }
 
-func marshalContentPart(part ContentPart) ([]byte, error) {
-	switch p := part.(type) {
-	case TextPart:
-		if p.Type == "" {
-			p.Type = ContentPartText
+func decodeContentPart[P ContentPart](raw []byte, fields map[string]json.RawMessage, required ...string) (ContentPart, error) {
+	for _, name := range required {
+		if _, ok := fields[name]; !ok {
+			return nil, errInvalidContentPart
 		}
-		return json.Marshal(p)
-	case *TextPart:
-		if p == nil {
-			return json.Marshal(nil)
-		}
-		v := *p
-		if v.Type == "" {
-			v.Type = ContentPartText
-		}
-		return json.Marshal(v)
-	case ReasoningPart:
-		if p.Type == "" {
-			p.Type = ContentPartReasoning
-		}
-		return json.Marshal(p)
-	case *ReasoningPart:
-		if p == nil {
-			return json.Marshal(nil)
-		}
-		v := *p
-		if v.Type == "" {
-			v.Type = ContentPartReasoning
-		}
-		return json.Marshal(v)
-	case FileDataPart:
-		if p.Type == "" {
-			p.Type = ContentPartFileData
-		}
-		return json.Marshal(p)
-	case *FileDataPart:
-		if p == nil {
-			return json.Marshal(nil)
-		}
-		v := *p
-		if v.Type == "" {
-			v.Type = ContentPartFileData
-		}
-		return json.Marshal(v)
-	case InlineDataPart:
-		if p.Type == "" {
-			p.Type = ContentPartInlineData
-		}
-		return json.Marshal(p)
-	case *InlineDataPart:
-		if p == nil {
-			return json.Marshal(nil)
-		}
-		v := *p
-		if v.Type == "" {
-			v.Type = ContentPartInlineData
-		}
-		return json.Marshal(v)
-	case ToolCallPart:
-		if p.Type == "" {
-			p.Type = ContentPartToolCall
-		}
-		return json.Marshal(p)
-	case *ToolCallPart:
-		if p == nil {
-			return json.Marshal(nil)
-		}
-		v := *p
-		if v.Type == "" {
-			v.Type = ContentPartToolCall
-		}
-		return json.Marshal(v)
-	case ToolOutputPart:
-		if p.Type == "" {
-			p.Type = ContentPartToolOutput
-		}
-		return json.Marshal(p)
-	case *ToolOutputPart:
-		if p == nil {
-			return json.Marshal(nil)
-		}
-		v := *p
-		if v.Type == "" {
-			v.Type = ContentPartToolOutput
-		}
-		return json.Marshal(v)
-	case ActionPart:
-		if p.Type == "" {
-			p.Type = ContentPartAction
-		}
-		return json.Marshal(p)
-	case *ActionPart:
-		if p == nil {
-			return json.Marshal(nil)
-		}
-		v := *p
-		if v.Type == "" {
-			v.Type = ContentPartAction
-		}
-		return json.Marshal(v)
-	case AnyPart:
-		return json.Marshal(p)
-	case *AnyPart:
-		if p == nil {
-			return json.Marshal(nil)
-		}
-		return json.Marshal(*p)
-	default:
-		return nil, fmt.Errorf("unsupported ContentPart type")
 	}
+	var part P
+	if err := DecodeJSON(raw, &part); err != nil {
+		return nil, errInvalidContentPart
+	}
+	return part, nil
 }
 
 func (c *MessageContent) UnmarshalJSON(data []byte) error {
@@ -441,91 +336,7 @@ func (c MessageContent) MarshalJSON() ([]byte, error) {
 	if c == nil {
 		return []byte("[]"), nil
 	}
-	rawItems := make([]json.RawMessage, 0, len(c))
-	for _, part := range c {
-		encoded, err := marshalContentPart(part)
-		if err != nil {
-			return nil, err
-		}
-		rawItems = append(rawItems, json.RawMessage(encoded))
-	}
-	return json.Marshal(rawItems)
-}
-
-func (c MessageContent) SizeBytes() int {
-	total := 0
-	allText := len(c) > 0
-
-	for _, part := range c {
-		switch p := part.(type) {
-		case TextPart:
-			total += len(p.Text)
-			continue
-		case *TextPart:
-			if p != nil {
-				total += len(p.Text)
-				continue
-			}
-		case ReasoningPart:
-			total += len(p.Text)
-			continue
-		case *ReasoningPart:
-			if p != nil {
-				total += len(p.Text)
-				continue
-			}
-		}
-
-		allText = false
-		break
-	}
-
-	if allText {
-		return total
-	}
-
-	b, err := json.Marshal(c)
-	if err != nil {
-		return 0
-	}
-	return len(b)
-}
-
-func (c MessageContent) Text() (string, bool) {
-	texts := c.textParts()
-	if len(texts) == 0 {
-		return "", false
-	}
-	return strings.Join(texts, "\n"), true
-}
-
-func (c MessageContent) FirstText() (string, bool) {
-	for _, part := range c {
-		switch p := part.(type) {
-		case TextPart:
-			return p.Text, true
-		case *TextPart:
-			if p != nil {
-				return p.Text, true
-			}
-		}
-	}
-	return "", false
-}
-
-func (c MessageContent) textParts() []string {
-	texts := make([]string, 0, len(c))
-	for _, part := range c {
-		switch p := part.(type) {
-		case TextPart:
-			texts = append(texts, p.Text)
-		case *TextPart:
-			if p != nil {
-				texts = append(texts, p.Text)
-			}
-		}
-	}
-	return texts
+	return json.Marshal([]ContentPart(c))
 }
 
 type FormationInput struct {
@@ -543,14 +354,9 @@ type RecallInput struct {
 }
 
 type MaintenanceParameters struct {
-	StaleEventThresholdDays *int `json:"stale_event_threshold_days,omitempty"`
-	// Deprecated: decay is computed by the engine; the server ignores this value.
-	MemoryStrengthDecayFactor *float64 `json:"memory_strength_decay_factor,omitempty"`
-	UnconsolidatedMaxBacklog  *int     `json:"unconsolidated_max_backlog,omitempty"`
-	OrphanMaxCount            *int     `json:"orphan_max_count,omitempty"`
-	// Deprecated aliases remain accepted by the server for older callers.
-	ConfidenceDecayFactor *float64 `json:"confidence_decay_factor,omitempty"`
-	UnsortedMaxBacklog    *int     `json:"unsorted_max_backlog,omitempty"`
+	StaleEventThresholdDays  *int `json:"stale_event_threshold_days,omitempty"`
+	UnconsolidatedMaxBacklog *int `json:"unconsolidated_max_backlog,omitempty"`
+	OrphanMaxCount           *int `json:"orphan_max_count,omitempty"`
 }
 
 type MaintenanceInput struct {
@@ -717,12 +523,14 @@ type SpaceInfo struct {
 	FormationProcessedID   int64         `json:"formation_processed_id"`
 	MaintenanceProcessedID int64         `json:"maintenance_processed_id"`
 	MaintenanceAt          MaintenanceAt `json:"maintenance_at"`
-	WikiDocs               *int          `json:"wiki_docs,omitempty"`
-	WikiChunks             *int          `json:"wiki_chunks,omitempty"`
-	WikiVersions           *int          `json:"wiki_versions,omitempty"`
-	WikiQueries            *uint64       `json:"wiki_queries,omitempty"`
-	WikiDigested           *uint64       `json:"wiki_digested,omitempty"`
-	WikiStaleDocs          *uint64       `json:"wiki_stale_docs,omitempty"`
+	// MemoryInterface is the Memory Interface descriptor this Space serves.
+	MemoryInterface json.RawMessage `json:"memory_interface,omitempty"`
+	WikiDocs        *int            `json:"wiki_docs,omitempty"`
+	WikiChunks      *int            `json:"wiki_chunks,omitempty"`
+	WikiVersions    *int            `json:"wiki_versions,omitempty"`
+	WikiQueries     *uint64         `json:"wiki_queries,omitempty"`
+	WikiDigested    *uint64         `json:"wiki_digested,omitempty"`
+	WikiStaleDocs   *uint64         `json:"wiki_stale_docs,omitempty"`
 }
 
 type FormationStatus struct {
@@ -810,10 +618,13 @@ type ConversationDelta struct {
 }
 
 type ServiceInfo struct {
-	Name        string `json:"name"`
-	Version     string `json:"version"`
-	Sharding    int    `json:"sharding"`
-	Description string `json:"description"`
+	Name     string `json:"name"`
+	Version  string `json:"version"`
+	Sharding int    `json:"sharding"`
+	// MemoryInterface is the Memory Interface descriptor template every Space
+	// served here speaks.
+	MemoryInterface json.RawMessage `json:"memory_interface,omitempty"`
+	Description     string          `json:"description"`
 }
 
 type KipOperationObject struct {
@@ -831,11 +642,6 @@ type KipOperation struct {
 	String *string
 	Object *KipOperationObject
 }
-
-// Deprecated: the HTTP API calls these operations. These aliases keep older
-// Go source compiling while request bodies use KipRequest.Operations.
-type KipCommandItem = KipOperation
-type KipCommandObject = KipOperationObject
 
 func (item *KipOperation) UnmarshalJSON(data []byte) error {
 	trimmed := bytes.TrimSpace(data)

@@ -61,7 +61,7 @@ func TestContentPartUnknownTypeGoesAny(t *testing.T) {
 		t.Fatalf("expected raw payload in Any")
 	}
 
-	out, err := marshalContentPart(anyPart)
+	out, err := json.Marshal(anyPart)
 	if err != nil {
 		t.Fatalf("marshal any part: %v", err)
 	}
@@ -88,21 +88,22 @@ func TestMessageContentMarshalFromText(t *testing.T) {
 	}
 }
 
-func TestMessageContentTextAndFirstText(t *testing.T) {
+func TestMessageContentPartsAlwaysEncodeTheirType(t *testing.T) {
+	callID := "c1"
 	content := MessageContent{
-		TextPart{Type: ContentPartText, Text: "hello"},
-		ReasoningPart{Type: ContentPartReasoning, Text: "thinking"},
-		TextPart{Type: ContentPartText, Text: "world"},
+		TextPart{Text: "hello"},
+		&ReasoningPart{Text: "thinking"},
+		ToolCallPart{Type: ContentPartText, Name: "sum", Args: map[string]int{"x": 1}, CallID: &callID},
+		(*TextPart)(nil),
 	}
-
-	text, ok := content.Text()
-	if !ok || text != "hello\nworld" {
-		t.Fatalf("unexpected text aggregation: ok=%v text=%q", ok, text)
+	data, err := json.Marshal(content)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	first, ok := content.FirstText()
-	if !ok || first != "hello" {
-		t.Fatalf("unexpected first text: ok=%v first=%q", ok, first)
+	want := `[{"type":"Text","text":"hello"},{"type":"Reasoning","text":"thinking"},` +
+		`{"type":"ToolCall","name":"sum","args":{"x":1},"callId":"c1"},null]`
+	if string(data) != want {
+		t.Fatalf("got %s, want %s", data, want)
 	}
 }
 

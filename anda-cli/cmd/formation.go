@@ -3,8 +3,6 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"io"
-	"os"
 	"strings"
 	"time"
 
@@ -17,7 +15,7 @@ var formationCmd = &cobra.Command{
 	Short: "Submit a memory formation task",
 	Long: `Submit conversation messages for memory encoding.
 
-Messages are provided via --messages or stdin.
+Messages are provided via --messages, --file or stdin.
 Input can be a JSON message array/object, or plain text.
 Plain text is treated as one message: role="user", content=<text>.
 
@@ -36,24 +34,24 @@ Example:
 		batchRetryFailed, _ := cmd.Flags().GetBool("batch-retry-failed")
 		batchDryRun, _ := cmd.Flags().GetBool("batch-dry-run")
 		batchForce, _ := cmd.Flags().GetBool("batch-force")
-		contextUser, _ := cmd.Flags().GetString("context-counterparty")
+		contextCounterparty, _ := cmd.Flags().GetString("context-counterparty")
 		contextAgent, _ := cmd.Flags().GetString("context-agent")
 		contextSource, _ := cmd.Flags().GetString("context-source")
 		contextTopic, _ := cmd.Flags().GetString("context-topic")
-		timestamp, err := sourceTimestamp(cmd.Flags().Lookup("timestamp").Value.String())
+		rawTimestamp, _ := cmd.Flags().GetString("timestamp")
+		timestamp, err := sourceTimestamp(rawTimestamp)
 		if err != nil {
 			return err
 		}
 
-		ctx := buildInputContext(contextUser, contextAgent, contextSource, contextTopic)
+		ctx := buildInputContext(contextCounterparty, contextAgent, contextSource, contextTopic)
 
 		if batchDir != "" {
 			if messagesJSON != "" || messagesFile != "" {
 				return fmt.Errorf("--batch-dir cannot be used with --messages or --file")
 			}
 
-			client := newClient()
-			err := runFileFormationBatch(cmd.Context(), client, fileFormationBatchOptions{
+			return runFileFormationBatch(cmd.Context(), newClient(), fileFormationBatchOptions{
 				RootDir:      batchDir,
 				FileName:     batchFileName,
 				Extension:    batchExt,
@@ -65,10 +63,6 @@ Example:
 				InputContext: ctx,
 				Timestamp:    timestamp,
 			})
-			if err != nil {
-				return err
-			}
-			return nil
 		}
 
 		for _, name := range []string{"batch-file-name", "batch-ext", "batch-report", "batch-retry-failed", "batch-dry-run", "batch-force"} {
@@ -77,63 +71,28 @@ Example:
 			}
 		}
 
-		var messages []api.Message
-
-		if messagesJSON != "" && messagesFile != "" {
-			return fmt.Errorf("--messages and --file cannot be used together")
+		raw, err := readInput(cmd, "messages", "file")
+		if err != nil {
+			return err
 		}
-
-		if messagesJSON != "" {
-			var err error
-			messages, err = parseMessagesInput(messagesJSON)
-			if err != nil {
-				return fmt.Errorf("parse messages input: %w", err)
-			}
-		} else if messagesFile != "" {
-			data, err := os.ReadFile(messagesFile)
-			if err != nil {
-				return fmt.Errorf("read file %q: %w", messagesFile, err)
-			}
-			messages, err = parseMessagesInput(string(data))
-			if err != nil {
-				return fmt.Errorf("parse file input: %w", err)
-			}
-
+		messages, err := parseMessagesInput(raw)
+		if err != nil {
+			return fmt.Errorf("parse messages: %w", err)
+		}
+		if messagesFile != "" {
 			if ctx == nil {
 				ctx = &api.InputContext{Source: messagesFile}
 			} else if ctx.Source == "" {
 				ctx.Source = messagesFile
 			}
-		} else {
-			stat, err := os.Stdin.Stat()
-			if err != nil {
-				return fmt.Errorf("inspect stdin: %w", err)
-			}
-			if (stat.Mode() & os.ModeCharDevice) == 0 {
-				data, err := io.ReadAll(os.Stdin)
-				if err != nil {
-					return fmt.Errorf("read stdin: %w", err)
-				}
-				messages, err = parseMessagesInput(string(data))
-				if err != nil {
-					return fmt.Errorf("parse stdin messages: %w", err)
-				}
-			} else {
-				return fmt.Errorf("--messages or --file is required, or pipe input via stdin")
-			}
 		}
 
 		input := &api.FormationInput{
 			Messages:  messages,
+			Context:   ctx,
 			Timestamp: timestamp,
 		}
-
-		if ctx != nil {
-			input.Context = ctx
-		}
-
-		client := newClient()
-		resp, err := client.Formation(cmd.Context(), input)
+		resp, err := newClient().Formation(cmd.Context(), input)
 		if err != nil {
 			return err
 		}

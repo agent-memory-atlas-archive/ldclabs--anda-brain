@@ -16,8 +16,9 @@ import (
 
 // memorySession is the CLI's session file (MI §5.1, the MemorySession
 // helper): the receipts a later recall must wait on and the last attention
-// cursor the caller consumed. A receipt leaves only when a successful recall
-// accounted for it; a maximum sequence never replaces one.
+// cursor the caller consumed. A receipt leaves only when a recall accounted
+// for it, as available or as terminally failed; a maximum sequence never
+// replaces one.
 type memorySession struct {
 	SpaceID         string           `json:"space_id"`
 	Scope           *api.MemoryScope `json:"scope,omitempty"`
@@ -81,16 +82,23 @@ func (s *memorySession) recordReceipt(receipt *api.MemoryReceipt) error {
 	return nil
 }
 
-// acknowledgeRecall clears the receipts a successful recall accounted for:
-// available, and not still pending.
+// acknowledgeRecall clears the receipts a recall accounted for: available and
+// not still pending, or failed. A failed receipt is terminal and never becomes
+// available, so keeping it would leave every later recall pending; the recall
+// that reported it already carries its failure in the printed briefing.
 func (s *memorySession) acknowledgeRecall(briefing *api.MemoryBriefing) {
 	if s == nil || briefing == nil {
 		return
 	}
 	accounted := map[string]bool{}
 	for _, progress := range briefing.After {
-		if progress.Phase == "available" && !slices.Contains(briefing.Coverage.PendingReceipts, progress.ReceiptRef) {
+		switch progress.Phase {
+		case "failed":
 			accounted[progress.ReceiptRef] = true
+		case "available":
+			if !slices.Contains(briefing.Coverage.PendingReceipts, progress.ReceiptRef) {
+				accounted[progress.ReceiptRef] = true
+			}
 		}
 	}
 	s.Outstanding = slices.DeleteFunc(s.Outstanding, func(receipt string) bool { return accounted[receipt] })
@@ -192,6 +200,9 @@ func sendMemory(cmd *cobra.Command, operation string, input map[string]any, keye
 	if response.Error != nil {
 		return response.Error
 	}
+	if response.Status == "failed" {
+		return fmt.Errorf("memory %s failed", operation)
+	}
 	return nil
 }
 
@@ -199,25 +210,12 @@ var memorySourcesCmd = &cobra.Command{Use: "sources", Short: "Stage captured sou
 
 var memorySourcesStageCmd = &cobra.Command{
 	Use:   "stage",
-	Short: "Stage observed messages and print their source_ref",
+	Short: "Stage observed messages (--text, --file or stdin) and print their source_ref",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		file, _ := cmd.Flags().GetString("file")
-		text, _ := cmd.Flags().GetString("text")
-		var raw string
-		switch {
-		case file != "" && text != "":
-			return fmt.Errorf("use --file or --text, not both")
-		case file != "":
-			data, err := os.ReadFile(file)
-			if err != nil {
-				return fmt.Errorf("read %q: %w", file, err)
-			}
-			raw = string(data)
-		case text != "":
-			raw = text
-		default:
-			return fmt.Errorf("--file or --text is required")
+		raw, err := readInput(cmd, "text", "file")
+		if err != nil {
+			return err
 		}
 		messages, err := parseMessagesInput(raw)
 		if err != nil {

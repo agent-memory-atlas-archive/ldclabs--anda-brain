@@ -217,6 +217,13 @@ func TestCLIFormationAndKIPPreservePayloads(t *testing.T) {
 			t.Fatalf("rounded parameter: %s", body)
 		}
 	}
+	// A bare command is sent as a command request, as the server reads it.
+	if _, stderr, err := runCLI(t, nil, append(prefix, "execute-kip-readonly", "--request", "DESCRIBE PRIMER")...); err != nil {
+		t.Fatalf("bare KIP command: %v %s", err, stderr)
+	}
+	if body := <-bodies; body != `{"command":"DESCRIBE PRIMER"}` {
+		t.Fatalf("bare KIP command sent as %s", body)
+	}
 	_, stderr, err := runCLI(t, nil, append(prefix, "formation", "--messages", `[{"role":"tool","content":[{"type":"ToolOutput","name":"lookup","output":{"id":9007199254740993},"isError":true}]}]`)...)
 	if err != nil {
 		t.Fatalf("formation: %v %s", err, stderr)
@@ -252,6 +259,64 @@ func TestCLIRejectsInvalidArguments(t *testing.T) {
 		if err == nil || !strings.Contains(stderr, tc.message) {
 			t.Fatalf("%v: %v %s", tc.args, err, stderr)
 		}
+	}
+}
+
+func TestCLIHelpAndCompletionNeedNoSpace(t *testing.T) {
+	for _, args := range [][]string{{"help", "recall"}, {"__complete", "wiki", ""}, {"completion", "zsh"}, {"keygen"}} {
+		out, stderr, err := runCLI(t, nil, args...)
+		if err != nil || strings.Contains(stderr, "--space-id") || out == "" {
+			t.Fatalf("%v: %v %s", args, err, stderr)
+		}
+	}
+	if out, _, _ := runCLI(t, nil, "__complete", "wiki", ""); !strings.Contains(out, "commit") {
+		t.Fatalf("completion lost subcommands: %s", out)
+	}
+	if _, stderr, err := runCLI(t, nil, "info"); err == nil || !strings.Contains(stderr, "--space-id") {
+		t.Fatalf("a Space command ran without a Space: %v %s", err, stderr)
+	}
+}
+
+func TestCLIOutputKeepsUnmodeledServerFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/info" {
+			_, _ = io.WriteString(w, `{"name":"brain","version":"0.13.0","sharding":0,"memory_interface":{"kip_memory":"2.0"}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"result":{"id":"s1","memory_interface":{"kip_memory":"2.0"},"future_field":9007199254740993}}`)
+	}))
+	defer server.Close()
+	prefix := []string{"--base-url", server.URL, "--space-id", "s1"}
+	out, stderr, err := runCLI(t, nil, append(prefix, "status")...)
+	if err != nil || !strings.Contains(out, `"memory_interface"`) {
+		t.Fatalf("status: %v out=%s stderr=%s", err, out, stderr)
+	}
+	out, stderr, err = runCLI(t, nil, append(prefix, "info")...)
+	if err != nil || !strings.Contains(out, `"memory_interface"`) || !strings.Contains(out, `"future_field": 9007199254740993`) {
+		t.Fatalf("info: %v out=%s stderr=%s", err, out, stderr)
+	}
+}
+
+func TestCLIRevokeTokenWithoutMatchFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"result":false}`)
+	}))
+	defer server.Close()
+	out, stderr, err := runCLI(t, nil, "--base-url", server.URL, "--space-id", "s1", "management", "revoke-token", "--name", "missing")
+	if err == nil || !strings.Contains(stderr, "nothing was revoked") || !strings.Contains(out, "false") {
+		t.Fatalf("unmatched revoke reported success: %v out=%s stderr=%s", err, out, stderr)
+	}
+}
+
+func TestCLIServerErrorEnvelopeIsReadable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = io.WriteString(w, `{"error":{"message":"commit conflict","data":{"current_version":12}}}`)
+	}))
+	defer server.Close()
+	_, stderr, err := runCLI(t, nil, "--base-url", server.URL, "--space-id", "s1", "wiki", "commit", "--input", `{"title":"T","content":"# T"}`)
+	if err == nil || !strings.Contains(stderr, `HTTP 409: commit conflict (data: {"current_version":12})`) {
+		t.Fatalf("error envelope not read: %v %s", err, stderr)
 	}
 }
 

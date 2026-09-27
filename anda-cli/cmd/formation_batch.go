@@ -136,7 +136,7 @@ func runFileFormationBatch(ctx context.Context, client *api.Client, opts fileFor
 		var output *api.AgentOutput
 		submitErr := readErr
 		if submitErr == nil {
-			output, submitErr = submitFormationFile(ctx, client, file, content, opts.InputContext, opts.Timestamp)
+			output, submitErr = submitFormationFile(ctx, client, rel, content, opts.InputContext, opts.Timestamp)
 		}
 		if submitErr != nil {
 			entry.Status = batchStatusFailed
@@ -173,7 +173,10 @@ func runFileFormationBatch(ctx context.Context, client *api.Client, opts fileFor
 	return nil
 }
 
-func submitFormationFile(ctx context.Context, client *api.Client, file string, content []byte, inputContext *api.InputContext, timestamp string) (*api.AgentOutput, error) {
+// submitFormationFile submits one file. Unless the caller set a source, it is
+// the file's path relative to the batch root, the key the checklist uses, so
+// no local directory layout enters memory.
+func submitFormationFile(ctx context.Context, client *api.Client, rel string, content []byte, inputContext *api.InputContext, timestamp string) (*api.AgentOutput, error) {
 	messages, err := parseMessagesInput(string(content))
 	if err != nil {
 		return nil, fmt.Errorf("parse messages: %w", err)
@@ -183,7 +186,7 @@ func submitFormationFile(ctx context.Context, client *api.Client, file string, c
 		source = *inputContext
 	}
 	if source.Source == "" {
-		source.Source = file
+		source.Source = rel
 	}
 	response, err := client.Formation(ctx, &api.FormationInput{
 		Messages: messages, Context: &source, Timestamp: timestamp,
