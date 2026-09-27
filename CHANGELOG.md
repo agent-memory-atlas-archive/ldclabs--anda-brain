@@ -55,6 +55,9 @@ All notable changes to the Anda Brain project.
 
 ### Fixes
 
+- Formation `DEFINE` requests and `declare_memory_symbols` share a vocabulary
+  lock around their quota check and writes, so concurrent tool calls cannot
+  exceed the Space's 512-symbol cap. Ordinary memory reads stay concurrent.
 - Memory Interface requests stay well within a 2 MiB worker stack. The intent
   dispatch, the recall pass and its channels, attention, basis and retention,
   and read-only KIP execution are polled behind type-erased boxes, so an

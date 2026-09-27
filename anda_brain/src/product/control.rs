@@ -79,6 +79,9 @@ pub(crate) struct Control {
     /// change, a forget and source suppression hold it exclusively, so none
     /// of them interleaves with work that checked the epoch before it.
     pub gate: tokio::sync::RwLock<()>,
+    /// Serializes vocabulary quota checks and definitions across both model
+    /// tools. The product fence is shared, so it cannot enforce this quota.
+    pub vocabulary_gate: Arc<tokio::sync::Mutex<()>>,
     pub journal: crate::journal::Journal,
     state: parking_lot::RwLock<ControlState>,
     pub tasks: crate::runtime::DurableTasks,
@@ -99,6 +102,7 @@ impl Control {
         }
         Ok(Arc::new(Self {
             gate: tokio::sync::RwLock::new(()),
+            vocabulary_gate: Arc::new(tokio::sync::Mutex::new(())),
             journal,
             state: parking_lot::RwLock::new(state),
             tasks: Default::default(),

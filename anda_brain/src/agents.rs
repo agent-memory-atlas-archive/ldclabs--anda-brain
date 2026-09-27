@@ -94,6 +94,7 @@ pub(crate) struct Observation(pub Option<Arc<anda_kip::IngestContext>>);
 #[derive(Clone)]
 pub struct GuardedMemory {
     product_control: Option<Arc<crate::product::control::Control>>,
+    vocabulary_gate: Arc<tokio::sync::Mutex<()>>,
     memory: Arc<MemoryManagement>,
     clock: Arc<crate::runtime::BusinessClock>,
 }
@@ -103,12 +104,14 @@ impl GuardedMemory {
         mut self,
         control: Arc<crate::product::control::Control>,
     ) -> Self {
+        self.vocabulary_gate = control.vocabulary_gate.clone();
         self.product_control = Some(control);
         self
     }
     pub fn new(memory: Arc<MemoryManagement>) -> Self {
         Self {
             product_control: None,
+            vocabulary_gate: Arc::new(tokio::sync::Mutex::new(())),
             memory,
             clock: Arc::new(crate::runtime::BusinessClock::default()),
         }
@@ -226,6 +229,13 @@ impl Tool<BaseCtx> for GuardedMemory {
         // runs a request of DEFINEs independently so one that already exists
         // does not stop the rest, and queues a review for each new symbol.
         let defines = crate::vocabulary::model_defines(&request);
+        // Keep the quota check and write together, including against the
+        // deprecated declaration tool; ordinary memory work stays concurrent.
+        let _vocabulary_guard = if defines.is_empty() {
+            None
+        } else {
+            Some(self.vocabulary_gate.lock().await)
+        };
         if !defines.is_empty() {
             if let Err(error) = crate::vocabulary::check_define_budget(nexus, defines.len()).await {
                 return Ok(error_output(Response::from(

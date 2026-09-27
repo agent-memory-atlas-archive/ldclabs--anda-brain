@@ -644,7 +644,8 @@ fn patch_of(version: &str) -> Option<u32> {
 pub struct DeclareSymbolsTool {
     memory: Arc<MemoryManagement>,
     product_control: Option<Arc<crate::product::control::Control>>,
-    /// Serializes drafting, so two concurrent calls cannot both pass the cap.
+    /// Shared with model DEFINE requests when attached to a Space, so both
+    /// paths check and consume the same vocabulary quota under one lock.
     lock: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -665,6 +666,7 @@ impl DeclareSymbolsTool {
         mut self,
         control: Arc<crate::product::control::Control>,
     ) -> Self {
+        self.lock = control.vocabulary_gate.clone();
         self.product_control = Some(control);
         self
     }

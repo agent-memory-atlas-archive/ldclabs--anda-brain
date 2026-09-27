@@ -34,6 +34,7 @@ use tokio_util::sync::CancellationToken;
 
 mod forget;
 mod product;
+mod vocabulary;
 
 #[derive(Debug)]
 struct FinalCompleter;
