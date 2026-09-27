@@ -1,7 +1,7 @@
 import { env, runInDurableObject, evictDurableObject } from 'cloudflare:test'
 import { expect, it, vi } from 'vitest'
 import { systemAuth, SYSTEM_PRINCIPAL, type CognitiveNexus } from '@ldclabs/kip-do'
-import { maintainMemory, formMemory } from '../src/operations.js'
+import { maintainMemory, formMemory, recallMemory } from '../src/operations.js'
 import type { BrainRpc, Env } from '../src/types.js'
 import type { AndaBrain } from '../src/brain.js'
 import { AiResponseError, ModelDeadline, addUsage, createRecallPlan, createRecallAnswer } from '../src/ai.js'
@@ -415,6 +415,37 @@ it('treats a blank model timeout as the default and caps it at a caller budget',
     expect(unset.expiresAt - Date.now()).toBeGreaterThan(100_000)
     expect(capped.expiresAt - Date.now()).toBeLessThanOrEqual(50)
   } finally { unset.close(); capped.close() }
+})
+
+it.each([
+  { openingMs: 0, planningMs: 0, modelCalls: 2 },
+  { openingMs: 600, planningMs: 600, modelCalls: 1 },
+  { openingMs: 1100, planningMs: 0, modelCalls: 0 },
+])('counts $openingMs ms opening and $planningMs ms planning against one recall deadline', async ({ openingMs, planningMs, modelCalls }) => {
+  let now = Date.now()
+  const clock = vi.spyOn(Date, 'now').mockImplementation(() => now)
+  const checkProcessing = vi.fn(async () => {})
+  const brain = {
+    async openProcessing() {
+      now += openingMs
+      return { epoch: 0, primer: { status: 'succeeded', result: {} }, reads: [{ status: 'succeeded', result: { hits: [] } }] }
+    },
+    checkProcessing,
+  } as unknown as BrainRpc
+  const run = vi.fn<Env['AI']['run']>(async (_model, input) => {
+    if (input.max_tokens === 900) {
+      now += planningMs
+      return { response: { commands: [] } }
+    }
+    return { response: { answer: 'No recorded memory.', found: false, uncertainty: 1 } }
+  })
+  try {
+    const recall = recallMemory(runtime(run), brain, { query: 'anything?' }, 1000)
+    if (modelCalls === 2) await expect(recall).resolves.toMatchObject({ answer: 'No recorded memory.' })
+    else await expect(recall).rejects.toThrow('model request deadline exceeded')
+    expect(run).toHaveBeenCalledTimes(modelCalls)
+    expect(checkProcessing).toHaveBeenCalledExactlyOnceWith(0)
+  } finally { clock.mockRestore() }
 })
 
 it('fences in-flight passes and scrubs previews when execute_kip purges', async () => {

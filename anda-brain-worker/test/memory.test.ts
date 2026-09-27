@@ -225,6 +225,36 @@ describe('Memory Interface', () => {
 })
 
 describe('Memory Interface regressions', () => {
+  it('does not erase another source after retrying rejected feedback with the same key', async () => {
+    const runtime = testEnv(new FakeAi([])), space = uniqueSpace('mi-feedback-retry')
+    const original = await stage(runtime, space, 'old', 'Original feedback', '2026-01-01T00:00:00.000Z')
+    const replacement = await stage(runtime, space, 'new', 'Corrected feedback', '2026-01-02T00:00:00.000Z')
+    const refused = await memory(runtime, space, { operation: 'feedback', idempotency_key: 'retry',
+      input: { source_ref: original, decision_ref: 'X-999' } })
+    expect(refused.error.code).toBe('NotFoundOrNotVisible')
+    const accepted = await memory(runtime, space, { operation: 'feedback', idempotency_key: 'retry',
+      input: { source_ref: replacement } })
+    expect(accepted.status).toBe('succeeded')
+    const id = accepted.result.memory_refs[0]
+    const readPayload = async () => {
+      const read = await call(runtime, space, 'execute_kip_readonly', {
+        command: 'FIND(?e.payload) WHERE { ?e EVIDENCE {id: :id} } LIMIT 1', parameters: { id },
+      })
+      expect(read.result[0].status).toBe('succeeded')
+      return read.result[0].result
+    }
+    const before = await readPayload()
+    expect(JSON.stringify(before)).toContain('Corrected feedback')
+    const forgotten = await memory(runtime, space, { operation: 'forget', idempotency_key: 'forget-old',
+      input: { target_ref: original, mode: 'payload_only' } })
+    expect(forgotten.result.status).toBe('completed')
+    expect(await readPayload()).toEqual(before)
+    const ownForget = await memory(runtime, space, { operation: 'forget', idempotency_key: 'forget-new',
+      input: { target_ref: replacement, mode: 'payload_only' } })
+    expect(ownForget.result.status).toBe('completed')
+    expect(JSON.stringify(await readPayload())).not.toContain('Corrected feedback')
+  })
+
   it('cancels the recall pass when its deadline budget runs out', async () => {
     let signal: AbortSignal | undefined
     const ai: AiBinding = {

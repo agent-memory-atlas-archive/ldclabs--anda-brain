@@ -83,6 +83,11 @@ All notable changes to the Anda Brain project.
 
 ### Cloudflare Worker
 
+- A staged-source forget verifies each indexed receipt still belongs to that
+  source. Retrying rejected feedback with the same key and a different source
+  no longer lets the old source's forget erase the new source's Evidence.
+- Recall starts its deadline before opening the Durable Object pass, so initial
+  reads consume the caller's budget and an expired pass cannot start a model call.
 - Maintenance no longer shows the Memory Interface's scope-handle Events to the
   model. An archived handle took every memory in its scope out of recall, and the
   maintenance policy archives stale Events.

@@ -625,7 +625,12 @@ export class MemoryLedger {
       // Staged before receipts were listed on their source: scan them all.
       return [...this.kv.list<IntakeRecord>({ prefix: RECEIPT })].map(([, intake]) => intake).filter(intake => intake.source_ref === sourceRef)
     }
-    return listed.flatMap(ref => this.kv.get<IntakeRecord>(RECEIPT + ref) ?? [])
+    return listed.flatMap(ref => {
+      const intake = this.kv.get<IntakeRecord>(RECEIPT + ref)
+      // Rejected feedback can delete its receipt; a retry may reuse that key
+      // for another source. The index is only a hint, not proof of ownership.
+      return intake?.source_ref === sourceRef ? [intake] : []
+    })
   }
 
   private eraseStaged(sourceRef: string): boolean {

@@ -42,6 +42,7 @@ import type {
   FormationInput,
   MaintenanceInput,
   MaintenanceStart,
+  ProcessingStart,
   MutationPlan,
   RecallInput,
   Usage,
@@ -251,12 +252,16 @@ export async function recallMemory(
   input: RecallInput,
   deadlineMs?: number,
 ): Promise<unknown> {
-  const lookup = conceptLookupCommand(input.query, 8)
-  const opened = await brain.openProcessing([lookup], { primer: true })
-  const epoch = opened.epoch
+  // Opening the pass spends the caller's budget too; never restart its
+  // remaining time after the initial Durable Object read returns.
   const deadline = new ModelDeadline(env.AI_TIMEOUT_MS, deadlineMs)
+  let opened: ProcessingStart | undefined
   let usage = { ...EMPTY_USAGE }
   try {
+    const lookup = conceptLookupCommand(input.query, 8)
+    opened = await brain.openProcessing([lookup], { primer: true })
+    const epoch = opened.epoch
+    deadline.check()
     const model = env.AI_MODEL || DEFAULT_AI_MODEL
     const primer = resultOrThrow(opened.primer!, 'recall primer failed')
     const [grounding] = opened.reads
@@ -315,7 +320,10 @@ export async function recallMemory(
       },
     }
   } catch (error) { throw withUsage(error, usage) }
-  finally { deadline.close(); await brain.checkProcessing(epoch) }
+  finally {
+    deadline.close()
+    if (opened) await brain.checkProcessing(opened.epoch)
+  }
 }
 
 /**
