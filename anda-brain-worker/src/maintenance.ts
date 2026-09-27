@@ -69,10 +69,12 @@ export class MaintenanceWork {
   }
 
   /** SQL only selects candidate ids; native KQL still governs and renders each.
-   * Rotation means last offered, never proof of processing or change coverage. */
+   * Rotation means last offered, never proof of processing or change coverage.
+   * The Memory Interface's scope handles are host bookkeeping, not events: an
+   * archived handle would take every memory in its scope out of recall. */
   snapshot(space: string): KipOperation[] {
     const groups = [
-      ['events', "lineage = 'kip://profiles/cognitive-memory/Event'"],
+      ['events', "lineage = 'kip://profiles/cognitive-memory/Event' AND COALESCE(json_extract(attributes, '$.event_class'), '') <> 'memory_scope'"],
       ['tasks', "lineage = 'kip://profiles/cognitive-memory/SleepTask' AND json_extract(attributes, '$.status') IN ('pending', 'running', 'blocked')"],
       ['memories', "lineage NOT IN ('kip://profiles/cognitive-memory/Event', 'kip://profiles/cognitive-memory/SleepTask', 'kip://profiles/cognitive-memory/Watch')"],
       ['watches', "lineage = 'kip://profiles/cognitive-memory/Watch' AND json_extract(attributes, '$.status') = 'disarmed'"],

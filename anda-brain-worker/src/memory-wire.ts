@@ -4,6 +4,7 @@
  * schema states, and the response shapes this Worker returns. Mirrors
  * `anda_kip::memory::binding` in the Rust Brain.
  */
+import { isJsonMap } from '@ldclabs/kip-do'
 
 export const KIP_MEMORY = '2.0'
 export const MAX_AFTER = 128
@@ -121,8 +122,6 @@ const INPUT_KEYS: Record<Operation, Set<string>> = {
 }
 
 const invalid = (message: string): never => { throw new MemoryError('InvalidRequestEnvelope', message) }
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value)
 const isRef = (value: unknown): value is string =>
   typeof value === 'string' && value.length > 0 && value.length <= 1024
 
@@ -132,7 +131,7 @@ const isRef = (value: unknown): value is string =>
  * shape. A binding request never reaches a KQL/KML parser.
  */
 export function parseMemoryRequest(value: unknown): MemoryRequest {
-  if (!isRecord(value)) return invalid('a Memory Interface request is an object')
+  if (!isJsonMap(value)) return invalid('a Memory Interface request is an object')
   for (const key of Object.keys(value)) if (!REQUEST_KEYS.has(key)) invalid(`unknown request member ${key}`)
   if (value.kip_memory !== KIP_MEMORY) invalid(`kip_memory must be "${KIP_MEMORY}"`)
   const operation = value.operation as Operation
@@ -142,20 +141,20 @@ export function parseMemoryRequest(value: unknown): MemoryRequest {
   if (!MUTATIONS.has(operation) && value.idempotency_key !== undefined) invalid('recall is read-only and takes no idempotency_key')
   if (value.requires !== undefined && (!Array.isArray(value.requires) || value.requires.some(b => typeof b !== 'string'))) invalid('requires lists level names')
   if (value.scope !== undefined) {
-    if (!isRecord(value.scope)) invalid('scope is an object')
+    if (!isJsonMap(value.scope)) invalid('scope is an object')
     const scope = value.scope as Record<string, unknown>
     for (const key of Object.keys(scope)) if (key !== 'task_ref' && key !== 'context_refs') invalid(`unknown scope member ${key}`)
     if (scope.task_ref !== undefined && !isRef(scope.task_ref)) invalid('task_ref is a reference')
     if (scope.context_refs !== undefined && (!Array.isArray(scope.context_refs) || !scope.context_refs.every(isRef))) invalid('context_refs are references')
   }
   if (value.budget !== undefined) {
-    if (!isRecord(value.budget)) invalid('budget is an object')
+    if (!isJsonMap(value.budget)) invalid('budget is an object')
     const budget = value.budget as Record<string, unknown>
     for (const key of ['max_output_tokens', 'deadline_ms']) {
       if (budget[key] !== undefined && (!Number.isSafeInteger(budget[key]) || (budget[key] as number) < 1)) invalid(`${key} is a positive integer`)
     }
   }
-  if (!isRecord(value.input)) invalid('input is an object')
+  if (!isJsonMap(value.input)) invalid('input is an object')
   const input = value.input as Record<string, unknown>
   for (const key of Object.keys(input)) if (!INPUT_KEYS[operation].has(key)) invalid(`unknown ${operation} input member ${key}`)
   switch (operation) {
@@ -184,7 +183,7 @@ export function parseMemoryRequest(value: unknown): MemoryRequest {
       if (input.query === undefined && input.target_ref === undefined && mode !== 'attention' && mode !== 'resume') invalid('recall needs a query, a target_ref or mode attention')
       if (input.query !== undefined && (typeof input.query !== 'string' || !input.query.trim())) invalid('query is non-empty text')
       if (input.time !== undefined) {
-        if (!isRecord(input.time)) invalid('time is an object')
+        if (!isJsonMap(input.time)) invalid('time is an object')
         const time = input.time as Record<string, unknown>
         if (time.as_of_seq !== undefined && (!Number.isSafeInteger(time.as_of_seq) || (time.as_of_seq as number) < 0)) invalid('as_of_seq is a sequence')
         if (time.valid_at !== undefined && (typeof time.valid_at !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(time.valid_at))) invalid('valid_at is a KIP timestamp')
@@ -248,7 +247,7 @@ export function mutationResponse(
   let status: Status = progress.phase === 'available' ? 'succeeded'
     : progress.phase === 'failed' ? 'failed' : progress.phase === 'processed' ? 'partial' : 'pending'
   if (status === 'succeeded' && warnings.some(w => w.startsWith('partial:'))) status = 'partial'
-  if (status === 'pending' && isRecord(result) && result.status === 'partial') status = 'partial'
+  if (status === 'pending' && isJsonMap(result) && result.status === 'partial') status = 'partial'
   return {
     kip_memory: KIP_MEMORY,
     ...(request.request_id === undefined ? {} : { request_id: request.request_id }),

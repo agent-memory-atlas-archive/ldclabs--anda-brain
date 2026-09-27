@@ -225,6 +225,55 @@ describe('Memory Interface', () => {
 })
 
 describe('Memory Interface regressions', () => {
+  it('cancels the recall pass when its deadline budget runs out', async () => {
+    let signal: AbortSignal | undefined
+    const ai: AiBinding = {
+      async run(_model, input, options) {
+        // The plan answers at once; the answer outlives the budget.
+        if (input.max_tokens === 900) return { response: { commands: [] } }
+        signal = options?.signal
+        return new Promise(() => {})
+      },
+    }
+    const response = await memory(testEnv(ai), uniqueSpace('mi-deadline'), { operation: 'recall', budget: { deadline_ms: 300 }, input: { query: 'anything?' } })
+    expect(response.status).toBe('partial')
+    expect(response.result.uncertainties.join(' ')).toContain('the recall pass did not complete')
+    expect(signal?.aborted).toBe(true)
+  })
+
+  it('stages only RFC 3339 instants that name their offset', async () => {
+    const runtime = testEnv(new FakeAi([])), space = uniqueSpace('mi-instant')
+    for (const observed_at of ['2026-09-27T10:00:00', 'Thu, 01 Jan 2026 00:00:00 GMT']) {
+      const staged = await call(runtime, space, 'memory/sources', { messages: [{ role: 'user', content: 'x' }], observed_at, idempotency_key: observed_at })
+      expect(staged.status).toBe(400)
+    }
+    const offset = await call(runtime, space, 'memory/sources', { messages: [{ role: 'user', content: 'x' }], observed_at: '2026-09-27T12:00:00+02:00', idempotency_key: 'offset' })
+    expect(offset.status).toBe(200)
+    expect((await call(runtime, space, `memory/sources/${offset.result.source_ref as string}`)).result.observed_at).toBe('2026-09-27T10:00:00.000Z')
+  })
+
+  it('keeps the most optional items that fit the output budget', async () => {
+    const ai = new FakeAi([]), runtime = testEnv(ai), space = uniqueSpace('mi-budget')
+    for (let i = 0; i < 6; i++) {
+      const created = await call(runtime, space, 'execute_kip', {
+        command: 'CREATE CONCEPT ?e {TYPE "Experience" NAME :name SET ATTRIBUTES {goal: "ship the release", summary: :summary, outcome_status: "success"}}',
+        parameters: { name: `deploy run ${i}`, summary: `The deploy run ${i} went fine` },
+      })
+      expect(created.result[0].status).toBe('succeeded')
+    }
+    const ask = async (max: number) => {
+      ai.push({ commands: [] }, { answer: 'Deploys went fine.', found: true, uncertainty: 0.2 })
+      return memory(runtime, space, { operation: 'recall', budget: { max_output_tokens: max }, input: { query: 'deploy' } })
+    }
+    const full = await ask(65_536)
+    expect(full.result.items.filter((item: any) => item.role === 'experience').length).toBeGreaterThan(1)
+    expect(full.result.coverage.channels.experiences).toBe('complete')
+    const size = new TextEncoder().encode(JSON.stringify(full.result)).byteLength
+    const trimmed = await ask(size - 1)
+    expect(trimmed.result.items).toHaveLength(full.result.items.length - 1)
+    expect(trimmed.result.coverage.channels.experiences).toBe('incomplete')
+  })
+
   it('replays staging with an implicit observation time', async () => {
     const runtime = testEnv(new FakeAi([])), space = uniqueSpace('mi-implicit-time')
     const input = { messages: [{ role: 'user', content: 'same source' }], idempotency_key: 'retry' }

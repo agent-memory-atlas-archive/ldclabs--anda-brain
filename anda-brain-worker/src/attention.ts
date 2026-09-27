@@ -9,7 +9,7 @@
  * the host keeps the cursor, and consuming an item changes nothing in memory.
  * An item grants nothing. Mirrors `anda_brain/src/space/attention_recall.rs`.
  */
-import type { Json, JsonMap, KipResult } from '@ldclabs/kip-do'
+import { isJsonMap, type Json, type JsonMap, type KipResult } from '@ldclabs/kip-do'
 
 const CURSOR_PREFIX = 'attention:'
 const CURSOR_START = 'attention:start'
@@ -65,9 +65,12 @@ export function recallAttention(read: ReadKip, input: AttentionRecallInput): Att
   // A cursor inside a commit reads that commit again and skips what was
   // delivered; a whole-commit cursor starts at the next one.
   const from = after === undefined ? 0 : after.ref === undefined ? after.seq + 1 : after.seq
+  // The classes are matcher literals, which the engine narrows on its class
+  // index; a FILTER on them would load every Activity in the Space first.
   const rows = rowsOf(read(`FIND(?a.id, ?a._system.space_seq, ?a.activity_class) WHERE {
-  ?a ACTIVITY {}
-  FILTER((?a.activity_class == "watch_fire" || ?a.activity_class == "commitment_review") && ?a._system.space_seq >= :from)
+  ?a ACTIVITY {activity_class: "watch_fire"}
+  UNION { ?a ACTIVITY {activity_class: "commitment_review"} }
+  FILTER(?a._system.space_seq >= :from)
 } ORDER BY ?a._system.space_seq ASC LIMIT :limit`, { from, limit: ACTIVITY_WINDOW }))
   let raised = rows.flatMap((row) => Array.isArray(row) && typeof row[0] === 'string' &&
     typeof row[1] === 'number' && typeof row[2] === 'string' ? [{ id: row[0], seq: row[1], kind: row[2] }] : [])
@@ -121,7 +124,7 @@ function raisedItems(read: ReadKip, activity: string, seq: number, kind: string)
   for (const input of inputs) {
     if (!Array.isArray(input) || typeof input[0] !== 'string' || typeof input[1] !== 'string') continue
     const [id, schemaRef] = [input[0], input[1]]
-    const attributes = isMap(input[2]) ? input[2] : {}
+    const attributes = isJsonMap(input[2]) ? input[2] : {}
     if (kind === 'watch_fire' && schemaRef === `${PROFILE}Watch`) {
       items.push({ ref: id, kind: 'watch_fired', summary: summary(attributes, 'Watch fired'),
         raised_seq: seq, target_refs: watchedTargets(read, id) })
@@ -147,10 +150,6 @@ function watchedTargets(read: ReadKip, watch: string): string[] {
 function rowsOf(result: KipResult): Json[] {
   if (result.status === 'failed') throw new Error(result.error?.message ?? 'attention read failed')
   return Array.isArray(result.result) ? result.result : []
-}
-
-function isMap(value: unknown): value is JsonMap {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function summary(attributes: JsonMap, fallback: string): string {

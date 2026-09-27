@@ -6,7 +6,7 @@ import {
   type AuthContext, type CognitiveNexus, type Element, type EvidenceRow,
   type Json, type JsonMap, type Session, type WhereClause, type ObjectMatcher, type IngestContext,
 } from '@ldclabs/kip-do'
-import type { KipOperation } from './kip.js'
+import { parseGate, type KipOperation } from './kip.js'
 
 export interface SourceIdentity { key: string; parents?: string[] }
 export interface RecordSource {
@@ -56,7 +56,7 @@ interface StoredChange {
   input_digest: string; kind: ChangeInput['kind']; auth: AuthContext
   receipt: ChangeReceipt; requests: KipOperation[]; completed: string[]
 }
-interface ControlState { version: 1; epoch: number; suppressed: string[]; pending: string | null }
+interface ControlState { version: 1; epoch: number; pending: string | null }
 export interface RecordWatch {
   operation_id: string; watch_id: string; target_id: string; state: string; digest: string
 }
@@ -67,8 +67,11 @@ const SOURCE = PREFIX + 'source:'
 const EVIDENCE = PREFIX + 'evidence:'
 const WATCH = PREFIX + 'watch:'
 const SCRUB = PREFIX + 'pending_scrub'
+/** One key per suppressed source, so admission reads what it checks and nothing else. */
+const SUPPRESSED = PREFIX + 'suppressed:'
 interface PendingScrub { ids: string[]; except?: string }
-const digest = (value: unknown): string => contentDigest(JSON.parse(JSON.stringify(value)) as Json)
+/** The content digest of a value's JSON form. */
+export const jsonDigest = (value: unknown): string => contentDigest(JSON.parse(JSON.stringify(value ?? null)) as Json)
 const fail = (reason: string): never => { throw new Error(reason) }
 
 export function sourceKeys(source: SourceIdentity): string[] {
@@ -95,7 +98,7 @@ export function assertCurrentOperations(operations: readonly KipOperation[]): vo
     }
   }
   for (const op of operations) {
-    const command = parseKip(op.command)
+    const command = parseGate(op.command)
     if ('Kql' in command) {
       if (command.Kql.as_of || command.Kql.cursor) fail('historical_memory_disabled')
       activeClauses(command.Kql.where_clauses)
@@ -120,9 +123,15 @@ export class MemoryProduct {
   private get kv() { return this.storage.kv }
   private governedResultLimit: number | null | undefined
   state(): ControlState {
-    const state = this.kv.get<ControlState>(CONTROL) ?? { version: 1, epoch: 0, suppressed: [], pending: null }
-    if (state.version !== 1) fail('unsupported_product_state')
+    const state = this.kv.get<ControlState & { suppressed?: string[] }>(CONTROL) ?? { version: 1, epoch: 0, pending: null }
+    // Suppressed sources are stored one key each. A record still carrying the
+    // earlier inline list is refused rather than read as suppressing nothing.
+    if (state.version !== 1 || state.suppressed?.length) fail('unsupported_product_state')
     return state
+  }
+  /** Whether any of these source keys was excluded by an earlier forget. */
+  isSuppressed(keys: readonly string[]): boolean {
+    return keys.some(key => this.kv.get(SUPPRESSED + key) !== undefined)
   }
   check(epoch: number): void {
     const state = this.state()
@@ -134,12 +143,12 @@ export class MemoryProduct {
     this.check(state.epoch)
     if (source) {
       const keys = sourceKeys(source)
-      if (keys.some(key => state.suppressed.includes(key))) fail('source_suppressed')
+      if (this.isSuppressed(keys)) fail('source_suppressed')
       if (origin) {
         if (!/^formation:sha256:[a-f0-9]{64}$/.test(origin)) fail('invalid_source')
         const key = SOURCE + origin
         const old = this.kv.get<SourceIdentity>(key)
-        if (old && digest(old) !== digest(source)) fail('source_identity_conflict')
+        if (old && jsonDigest(old) !== jsonDigest(source)) fail('source_identity_conflict')
         this.kv.put(key, source)
       }
     }
@@ -150,20 +159,15 @@ export class MemoryProduct {
     for (const evidence of ingest?.evidence ?? []) {
       const key = evidence.client_key
       if (!key || !/^formation:sha256:[a-f0-9]{64}:[1-9]\d*$/.test(key)) continue
-      const binding = {payload_digest:digest(evidence.payload), observed_at:evidence.observed_at ?? null}
+      const binding = {payload_digest:jsonDigest(evidence.payload), observed_at:evidence.observed_at ?? null}
       const old = this.kv.get(EVIDENCE + key)
-      if (old && digest(old) !== digest(binding)) fail('source_identity_conflict')
+      if (old && jsonDigest(old) !== jsonDigest(binding)) fail('source_identity_conflict')
       this.kv.put(EVIDENCE + key, binding)
     }
   }
   /** Excludes sources from Formation for good: the forget tombstone. */
   suppress(keys: readonly string[]): void {
-    const state = this.state()
-    const merged = [...new Set([...state.suppressed, ...keys])]
-    if (merged.length === state.suppressed.length) return
-    if (merged.length > 100_000) fail('source_capacity_exhausted')
-    state.suppressed = merged
-    this.kv.put(CONTROL, state)
+    for (const key of new Set(keys)) this.kv.put(SUPPRESSED + key, 1)
   }
   invalidate(): void {
     const state = this.state()
@@ -204,7 +208,7 @@ export class MemoryProduct {
     const operation = /^memory-product:([a-f0-9]{64}):input$/.exec(row.client_key)?.[1] ?? null
     return {
       evidence_id: `E-${row.id}`,
-      payload_digest: row.state !== 'purged' && row.payload_mode === 'inline' ? digest(row.payload_inline) : null,
+      payload_digest: row.state !== 'purged' && row.payload_mode === 'inline' ? jsonDigest(row.payload_inline) : null,
       origin: formation?.[1] ?? null,
       message_index: formation ? Number(formation[2]) - 1 : null,
       product_operation: operation, observed_at: row.observed_at || null,
@@ -291,7 +295,7 @@ export class MemoryProduct {
     if (source.product_operation) {
       const change = this.kv.get<StoredChange>(CHANGE + source.product_operation)
       if (change?.receipt.state === 'confirmed' && change.receipt.source_evidence === source.evidence_id &&
-          digest(change.requests[0]?.parameters?.statement ?? null) === source.payload_digest) return [`product-change:${source.product_operation}`]
+          jsonDigest(change.requests[0]?.parameters?.statement ?? null) === source.payload_digest) return [`product-change:${source.product_operation}`]
     }
     return fail('unsupported_scope')
   }
@@ -333,13 +337,13 @@ export class MemoryProduct {
   private key(auth: AuthContext, id: string): string {
     this.session(auth)
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) return fail('invalid_request')
-    return digest({ caller: auth.principal_id, operation_id: id }).slice(7)
+    return jsonDigest({ caller: auth.principal_id, operation_id: id }).slice(7)
   }
   prepare(auth: AuthContext, input: ChangeInput): ChangeReceipt {
     if (!input || Object.keys(input).some(key => !['operation_id', 'record_id', 'expected_revision', 'kind', 'new_value'].includes(key)) ||
         !['correct', 'world_change', 'misrecorded', 'suppress', 'delete'].includes(input.kind) || !Number.isSafeInteger(input.expected_revision) || input.expected_revision < 1) fail('invalid_request')
     if (input.kind === 'misrecorded') fail('unsupported_capability')
-    const key = this.key(auth, input.operation_id), inputDigest = digest(input)
+    const key = this.key(auth, input.operation_id), inputDigest = jsonDigest(input)
     const old = this.kv.get<StoredChange>(CHANGE + key)
     if (old) {
       this.expire(old, key)
@@ -358,7 +362,7 @@ export class MemoryProduct {
       this.session(auth).mutate(command.Kml, request.parameters, { dryRun: true })
     }
     const receipt: ChangeReceipt = { schema_version: 1, operation_id: input.operation_id, operation_key: key,
-      caller: auth.principal_id, state: 'prepared', preview_digest: digest(preview), expires_at: Date.now() + 600_000,
+      caller: auth.principal_id, state: 'prepared', preview_digest: jsonDigest(preview), expires_at: Date.now() + 600_000,
       preview, replacement_record: null, source_evidence: null, error: null }
     this.kv.put(CHANGE + key, { input_digest: inputDigest, kind: input.kind, auth, receipt, requests, completed: [] } satisfies StoredChange)
     return receipt
@@ -398,11 +402,10 @@ export class MemoryProduct {
       const input: ChangeInput = { operation_id: id, kind: stored.kind, record_id: stored.receipt.preview.record.id,
         expected_revision: stored.receipt.preview.record.revision,
         ...(revises(stored.kind) ? { new_value: stored.receipt.preview.new_value! } : {}) }
-      if (digest(this.preview(auth, input)) !== stored.receipt.preview_digest) fail('revision_conflict')
+      if (jsonDigest(this.preview(auth, input)) !== stored.receipt.preview_digest) fail('revision_conflict')
       control.epoch += 1
       if (!Number.isSafeInteger(control.epoch)) fail('epoch_exhausted')
-      control.suppressed = [...new Set([...control.suppressed, ...stored.receipt.preview.excluded_sources])]
-      if (control.suppressed.length > 100_000) fail('source_capacity_exhausted')
+      this.suppress(stored.receipt.preview.excluded_sources)
       control.pending = key
       // Persist the fence before the first native write; reload can resume even
       // if interrupted before the receipt moves from prepared to committing.
@@ -562,10 +565,10 @@ export class MemoryProduct {
   correctionSource(auth: AuthContext, source: RecordSource): string | null {
     if (!source.product_operation || !/^[a-f0-9]{64}$/.test(source.product_operation)) return null
     const current = this.source(auth, source.evidence_id)
-    if (digest(current) !== digest(source)) return null
+    if (jsonDigest(current) !== jsonDigest(source)) return null
     const stored = this.kv.get<StoredChange>(CHANGE + source.product_operation)
     if (!stored || stored.receipt.caller !== auth.principal_id || stored.receipt.state !== 'confirmed' || stored.receipt.source_evidence !== source.evidence_id) return null
-    return digest(stored.requests[0]?.parameters?.statement ?? null) === source.payload_digest ? stored.receipt.preview.new_value : null
+    return jsonDigest(stored.requests[0]?.parameters?.statement ?? null) === source.payload_digest ? stored.receipt.preview.new_value : null
   }
   private watchSession(auth: AuthContext): Session {
     if (!this.recipient || auth.principal_id !== this.recipient) return fail('recipient_binding_required')
@@ -583,7 +586,7 @@ export class MemoryProduct {
     const session = this.watchSession(auth), key = this.key(auth, id)
     this.record(auth, target)
     if (!summary || new TextEncoder().encode(summary).length > 4096) fail('invalid_request')
-    const hash = digest({ target, summary }), old = this.kv.get<RecordWatch>(WATCH + key)
+    const hash = jsonDigest({ target, summary }), old = this.kv.get<RecordWatch>(WATCH + key)
     if (old) {
       if (old.digest !== hash) fail('idempotency_conflict')
       if (old.state !== 'preparing') return this.watch(auth, id)

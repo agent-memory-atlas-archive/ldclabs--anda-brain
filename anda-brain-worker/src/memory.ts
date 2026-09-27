@@ -15,6 +15,7 @@ import {
   checkRequires,
   errorOf,
   failed,
+  fitsBudget,
   mutationResponse,
   parseMemoryRequest,
   type Briefing,
@@ -24,7 +25,7 @@ import {
 } from './memory-wire.js'
 import type { IntakeRecord, MemoryIntent, PassTrace } from './memory-ledger.js'
 import type { BrainRpc, Env } from './types.js'
-import type { KipResult } from '@ldclabs/kip-do'
+import type { JsonMap, KipResult } from '@ldclabs/kip-do'
 
 /**
  * This Worker has one API key, so every caller is one namespace: handles are
@@ -70,7 +71,8 @@ async function intake(env: Env, brain: BrainRpc, spaceId: string, request: Memor
   const receipt = admission.record.receipt.receipt_ref
   const input = request.input as Record<string, unknown>
   if (request.operation === 'feedback') {
-    const about = { decision_ref: input.decision_ref ?? null, attempt_ref: input.attempt_ref ?? null }
+    // Both are references `parseMemoryRequest` already checked.
+    const about = { decision_ref: input.decision_ref ?? null, attempt_ref: input.attempt_ref ?? null } as JsonMap
     return respond(request, await brain.memoryCaptureEvidence(receipt, admission.messages, admission.observed_at, 'feedback', about))
   }
   if (request.operation === 'revise' && input.change_kind === 'misrecorded' && input.target_ref === undefined) {
@@ -146,10 +148,10 @@ async function recall(env: Env, brain: BrainRpc, _spaceId: string, request: Memo
     try {
       const remaining = deadline - Date.now()
       if (remaining <= 0) throw new MemoryError('ExecutionTimeout', 'deadline')
-      const output = await Promise.race([
-        recallMemory(env, brain, { query: recallPrompt(input.query, mode, request, input) }),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new MemoryError('ExecutionTimeout', 'the recall pass reached the deadline')), remaining)),
-      ]) as { answer?: string; memories?: { entity: string }[] }
+      // The budget caps the pass's own model deadline, so a pass past it is
+      // cancelled rather than left running (and billed) behind the answer.
+      const output = await recallMemory(env, brain,
+        { query: recallPrompt(input.query, mode, request, input) }, remaining) as { answer?: string; memories?: { entity: string }[] }
       cited = (output.memories ?? []).map(memory => memory.entity).filter(Boolean)
       summary = output.answer
       evidenceComplete = true
@@ -167,7 +169,7 @@ async function recall(env: Env, brain: BrainRpc, _spaceId: string, request: Memo
 }
 
 function briefingResponse(request: MemoryRequest, briefing: Briefing, maxTokens: number, warnings: string[]): MemoryResponse {
-  if (new TextEncoder().encode(JSON.stringify(briefing)).byteLength > maxTokens) {
+  if (!fitsBudget(briefing, maxTokens)) {
     throw new MemoryError('ResultLimitExceeded', `the result does not fit ${maxTokens} tokens`)
   }
   const status = briefing.coverage.complete ? 'succeeded' : briefing.coverage.pending_receipts.length ? 'pending' : 'partial'

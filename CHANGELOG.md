@@ -81,6 +81,44 @@ All notable changes to the Anda Brain project.
 - A forget now clears usage-ledger rows for exactly the elements PURGE reports
   erased, instead of enumerating a Concept's Propositions beforehand.
 
+### Cloudflare Worker
+
+- Maintenance no longer shows the Memory Interface's scope-handle Events to the
+  model. An archived handle took every memory in its scope out of recall, and the
+  maintenance policy archives stale Events.
+- `GET /v1/{space}/info` counts active elements only; purged stubs and archived
+  records are no longer counted, so a forget lowers the counts.
+- A Formation `DEFINE` past the 512-symbol cap, or a draft review that cannot be
+  queued, answers 422 with the KIP error instead of 500.
+- Memory Interface recall passes `budget.deadline_ms` to the model deadline, so an
+  expired pass is cancelled instead of running (and billing) after the response;
+  the stray timer is gone.
+- Staged-source `observed_at` follows the Formation `timestamp` rule (RFC 3339 with
+  an offset, at most millisecond precision); other `Date.parse` forms answer 400.
+- An `execute_kip` batch containing `PURGE` or `PURGE PAYLOAD` fences in-flight
+  agent passes and scrubs product previews, as `memory/forget` does.
+- A blank `AI_TIMEOUT_MS` means the default rather than failing every request.
+- Correction discovery and attention recall select superseded Assertions and
+  raising Activities through indexed matcher columns instead of loading every
+  Assertion and Activity (which also stopped at the engine's 50,000-element load
+  ceiling). The predicate census is one SQL group-by over active Propositions.
+- Formation, Recall, probe and Maintenance open with one Durable Object call each
+  (admission, primer and first reads together) and Maintenance closes with one;
+  a typical pass makes two or three RPC round trips instead of four to seven.
+- Memory Interface briefings read each element once per call, resolve the scope
+  once and find the largest budget-fitting item set by bisection. A staged-source
+  forget reads that source's receipts from an index instead of every receipt;
+  sources staged earlier keep the full scan.
+- Suppressed sources are stored one key each instead of in the product control
+  record, which every call parsed and which could outgrow a single value. A control
+  record that still carries a non-empty inline list is refused
+  (`unsupported_product_state`) rather than read as suppressing nothing.
+- Initialization and recovery run once per Durable Object call rather than once per
+  batched operation, and the gates share one parse per command.
+- `BrainRpc` is derived from `AndaBrain`; duplicated helpers were merged.
+- Retained recall bases are still kept indefinitely, as in Rust; an ErasurePlan's
+  `external_exports` scans them all.
+
 ## [0.13.0] — 2026-09-25
 
 **Breaking for draft data.** The service now tracks KIP `11a82ec` (following the

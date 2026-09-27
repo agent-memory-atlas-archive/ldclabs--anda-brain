@@ -1,4 +1,4 @@
-import type { JsonMap } from '@ldclabs/kip-do'
+import { isJsonMap, type JsonMap } from '@ldclabs/kip-do'
 import type { KipExecution, KipOperation } from './kip.js'
 import type {
   FormationInput,
@@ -260,7 +260,7 @@ function parseMessage(value: unknown): Message {
       content.every(
         (part) =>
           typeof part === 'string' ||
-          (isObject(part) && (part.text === undefined || typeof part.text === 'string')),
+          (isJsonMap(part) && (part.text === undefined || typeof part.text === 'string')),
       )
     )
   ) {
@@ -352,7 +352,11 @@ function optionalTimestamp(value: unknown): string | undefined {
   return canonical
 }
 
-function canonicalTimestamp(value: string): string | undefined {
+/**
+ * An RFC 3339 instant in any offset with at most millisecond precision, in
+ * the canonical millisecond UTC spelling; `undefined` when it is not one.
+ */
+export function canonicalTimestamp(value: string): string | undefined {
   const timestamp = value.trim()
   const match = /^(\d{4})-(\d{2})-(\d{2})[Tt ](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(?:[Zz]|[+-]\d{2}:\d{2})$/.exec(timestamp)
   if (!match) return undefined
@@ -400,10 +404,6 @@ function jsonObject(value: unknown, message: string): JsonMap {
 }
 
 function object(value: unknown, message: string): Record<string, unknown> {
-  if (!isObject(value)) throw new ValidationError(message)
+  if (!isJsonMap(value)) throw new ValidationError(message)
   return value
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

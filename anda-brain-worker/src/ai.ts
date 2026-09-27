@@ -1,4 +1,4 @@
-import { tryParseElementId } from '@ldclabs/kip-do'
+import { isJsonMap, tryParseElementId } from '@ldclabs/kip-do'
 import { digestParameters, runtimeOperations } from './cognitive.js'
 import { MAX_REFERENCE_PAGES, MAX_REFERENCE_ROUNDS, readReference, REFERENCE_INSTRUCTIONS } from './kip-reference.js'
 import type {
@@ -30,14 +30,19 @@ export class AiResponseError extends Error {
   }
 }
 
-/** One deadline for planning, reference lookups, answering and Formation review. */
+/**
+ * One deadline for planning, reference lookups, answering and Formation review.
+ * `capMs` shortens it to a caller's own budget; it never lengthens it.
+ */
 export class ModelDeadline {
   readonly expiresAt: number
   readonly signal: AbortSignal
   private timer: ReturnType<typeof setTimeout>
-  constructor(config?: string) {
-    const timeout = config === undefined ? 120_000 : Number(config)
-    if (!Number.isInteger(timeout) || timeout < 1 || timeout > 300_000) throw new Error('AI_TIMEOUT_MS must be in [1, 300000]')
+  constructor(config?: string, capMs?: number) {
+    // An unset or blank variable is the default, not a zero deadline.
+    const configured = config === undefined || config.trim() === '' ? 120_000 : Number(config)
+    if (!Number.isInteger(configured) || configured < 1 || configured > 300_000) throw new Error('AI_TIMEOUT_MS must be in [1, 300000]')
+    const timeout = capMs === undefined ? configured : Math.max(1, Math.min(configured, Math.floor(capMs)))
     this.expiresAt = Date.now() + timeout
     const controller = new AbortController()
     this.signal = controller.signal
@@ -224,7 +229,7 @@ function assertReferenceOnly(value: JsonObject, schema: JsonObject): void {
     if (key === 'references') continue
     const empty = ['commands', 'types', 'predicates', 'runtime', 'reviewed_corrections'].includes(key)
       ? Array.isArray(entry) && entry.length === 0
-      : key === 'digests' ? isObject(entry) && Object.keys(entry).length === 0
+      : key === 'digests' ? isJsonMap(entry) && Object.keys(entry).length === 0
         : key === 'found' ? entry === false
           : key === 'uncertainty' ? entry === 1
             : ['summary', 'answer'].includes(key) && entry === ''
@@ -251,12 +256,12 @@ async function runStructuredOnce(
     temperature: 0.1,
   }, deadline)
 
-  if (!isObject(raw)) throw new AiResponseError('Workers AI returned a non-object response', { input_tokens: null, output_tokens: null })
+  if (!isJsonMap(raw)) throw new AiResponseError('Workers AI returned a non-object response', { input_tokens: null, output_tokens: null })
   const envelope = raw
   const usage = readUsage(envelope.usage)
   const response = envelope.response
 
-  if (isObject(response)) return { value: response, usage }
+  if (isJsonMap(response)) return { value: response, usage }
   if (typeof response !== 'string') {
     throw new AiResponseError('Workers AI response did not contain structured output', usage)
   }
@@ -349,7 +354,7 @@ function readCorrections(value: unknown): string[] {
 }
 
 function readUsage(value: unknown): Usage {
-  if (!isObject(value)) return { input_tokens: null, output_tokens: null }
+  if (!isJsonMap(value)) return { input_tokens: null, output_tokens: null }
   return { input_tokens: readTokenCount(value.input_tokens ?? value.prompt_tokens),
     output_tokens: readTokenCount(value.output_tokens ?? value.completion_tokens) }
 }
@@ -384,12 +389,8 @@ function stripCodeFence(value: string): string {
 }
 
 function asObject(value: unknown, message: string): JsonObject {
-  if (!isObject(value)) throw new AiResponseError(message)
+  if (!isJsonMap(value)) throw new AiResponseError(message)
   return value
-}
-
-function isObject(value: unknown): value is JsonObject {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 export function addUsage(left: Usage, right: Usage): Usage {

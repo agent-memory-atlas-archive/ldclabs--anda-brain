@@ -67,7 +67,9 @@ Activity。`correct` 的新 Assertion supersede 旧主张并保留其世界时�
 闭包按带版本的逐项操作处理，留下身份 stub，并非跨操作原子批。这样不会让引擎 cascade
 悄悄删除预览以外的目标。管理修改后，模型历史/非活跃选择器、所有 continuation cursor
 以及 SEARCH 之外的 META 均被禁用。管理级 `execute_kip_readonly` 仍可审计历史，不应作为
-模型读通道；管理级原始写入也不属于该受控产品通道。
+模型读通道；管理级原始写入也不属于该受控产品通道。含 `PURGE` 或 `PURGE PAYLOAD` 的
+`execute_kip` 批次与 `memory/forget` 同样受封锁约束：执行前开启新的处理代次（托管变更
+未完成时返回 409），执行后从预览副本清除被擦除的元素。
 
 ## 接收者拥有的记录 Watch
 
@@ -102,9 +104,10 @@ Maintenance 每个 Space 同时只允许一次运行，使用持久身份和过�
 拒绝旧调用者的写入和更正确认。未确认的更正页跨失败、驱逐保留；模型计划可用
 `reviewed_corrections` 确认本页已审阅的根，仅在计划执行无失败后应用，不证明依赖覆盖
 完整，也不覆盖原生有效性。直接使用 `settleMemory` 的受信宿主可调用
-`acknowledgeCorrections(ids, epoch)` 确认已审阅项。快照轮转有界候选 ID，排除终态任务，
-提供原生内容、版本和 live primer；谓词计数合并为一次原生分组查询，词汇读取仅加载
-活跃包正文。
+`acknowledgeCorrections(ids, epoch)` 确认已审阅项。快照轮转有界候选 ID，排除终态任务
+和 Memory Interface 的作用域句柄 Event，提供原生内容、版本和 live primer；谓词计数
+是对活跃 Proposition 的一次索引 SQL 分组，而非原生全量扫描；更正发现与注意力召回按
+索引列选取已 superseded 的 Assertion 和提起注意力的 Activity。词汇读取仅加载活跃包正文。
 
 Worker HTTP 409 在 `error.data.code` 提供精确冲突码。Formation / Maintenance 返回
 `operation_results`（status、可用的 receipt、可选 op_id），无实际变更使用宿主文案。

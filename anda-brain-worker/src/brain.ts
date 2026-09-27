@@ -18,12 +18,13 @@ import {
   assertFormationOperations,
   assertMaintenanceOperations,
   assertReadonlyOperations,
+  erasesMemory,
   isDefine,
   type IngestContext,
   type KipExecution,
   type KipOperation,
 } from './kip.js'
-import { assess, settle } from './settle.js'
+import { assess, predicateLineage, settle } from './settle.js'
 import { recallAttention, type AttentionRecall, type AttentionRecallInput } from './attention.js'
 import { MemoryLedger, type Admission, type IntakeRecord, type PassTrace, type StageSourceInput } from './memory-ledger.js'
 import { descriptor, type AttentionItem, type Briefing, type MemoryRequest, type Progress, type Scope } from './memory-wire.js'
@@ -34,6 +35,8 @@ import type {
   DraftSymbol,
   Env,
   MaintenanceAssessment,
+  MaintenanceStart,
+  ProcessingStart,
   PromoteDraftInput,
   PromoteDraftOutput,
   RevisedRoot,
@@ -83,6 +86,30 @@ export class AndaBrain extends KipDatabase<Env> {
     return this.maintenance.begin(epoch, expiresAt)
   }
   endMaintenance(id: string): void { this.maintenance.release(id) }
+
+  /**
+   * Everything a maintenance pass reads before its model call, in one round
+   * trip: admission, the deterministic settlement, the snapshot, the
+   * assessment and the primer. A failure after admission releases the run it
+   * took, so a refused open never leaves the Space busy.
+   */
+  openMaintenance(expiresAt: number, nowMs: number): MaintenanceStart {
+    const epoch = this.beginProcessing()
+    const run = this.beginMaintenance(epoch, expiresAt)
+    try {
+      const settlement = this.settleMemory(nowMs, run, epoch)
+      return { epoch, run, settlement, snapshot: this.maintenanceSnapshot(epoch, run),
+        assessment: this.maintenanceAssessment(), primer: this.describePrimer() }
+    } catch (error) {
+      this.endMaintenance(run)
+      throw error
+    }
+  }
+  /** Releases a maintenance run, then fences its output against a managed change. */
+  closeMaintenance(run: string, epoch: number): void {
+    this.endMaintenance(run)
+    this.checkProcessing(epoch)
+  }
   maintenanceSnapshot(epoch: number, run: string): KipResult[] {
     this.checkProcessing(epoch)
     this.maintenance.check(run, epoch)
@@ -153,6 +180,19 @@ export class AndaBrain extends KipDatabase<Env> {
   beginProcessing(source?: SourceIdentity, origin?: string): number {
     this.ensureInitialized()
     return this.product.begin(source, origin)
+  }
+  /**
+   * The start of one agent pass in a single round trip: admission (with the
+   * source a Formation pass is formed from), the primer when the pass prompts
+   * a model, and its first reads under the admitted epoch.
+   */
+  openProcessing(reads: readonly KipOperation[] = [], options: { primer?: boolean; source?: SourceIdentity; origin?: string } = {}): ProcessingStart {
+    const epoch = this.beginProcessing(options.source, options.origin)
+    return {
+      epoch,
+      ...(options.primer ? { primer: this.describePrimer() } : {}),
+      reads: reads.length ? this.executeAgentRead(reads, epoch) : [],
+    }
   }
   checkProcessing(epoch: number): void {
     this.ensureInitialized()
@@ -284,6 +324,25 @@ export class AndaBrain extends KipDatabase<Env> {
   }
 
   /**
+   * The administrative `execute_kip`. A batch that erases runs the way
+   * `memory/forget` does: in-flight agent passes are fenced before it, and
+   * host preview copies of whatever it purged are scrubbed after.
+   */
+  executeAdminKipBatch(operations: readonly KipOperation[], execution?: KipExecution): KipResult[] {
+    this.ensureInitialized()
+    if (operations.some((operation) => erasesMemory(operation.command))) this.product.invalidate()
+    const results = super.executeKipBatch(operations, undefined, undefined, execution)
+    const erased = new Set<string>()
+    for (const result of results) {
+      for (const change of result.extensions?.['kip-do/outcome']?.changes ?? []) {
+        if (change.op === 'purge' && typeof change.id === 'string') erased.add(change.id)
+      }
+    }
+    if (erased.size) this.product.scrubChanges(erased)
+    return results
+  }
+
+  /**
    * KQL and META only, decided by what each command parses to — twice.
    *
    * {@link assertReadonlyOperations} is the gate that answers: it refuses the
@@ -330,14 +389,17 @@ export class AndaBrain extends KipDatabase<Env> {
     // exist before the commands that use it, so the plan's DEFINEs run first,
     // one by one. One that already resolves (`SchemaSymbolConflict`) has no
     // effect rather than stopping the plan; each new symbol queues a review.
-    const defines = operations.filter((operation) => isDefine(operation.command))
-    const writes = operations.filter((operation) => !isDefine(operation.command))
+    // A refusal is a failed result the caller reads, never a thrown host error.
+    const defines: KipOperation[] = []
+    const writes: KipOperation[] = []
+    for (const operation of operations) (isDefine(operation.command) ? defines : writes).push(operation)
     const results: KipResult[] = []
     if (defines.length > 0) {
       const vocabulary = MemoryVocabulary.load(this.nexus)
       if (vocabulary.size + defines.length > MAX_SYMBOLS) {
-        throw new Error(`this Space's vocabulary holds ${vocabulary.size} of its ${MAX_SYMBOLS} symbols; ` +
-          'reuse an existing symbol instead of defining another')
+        return [{ status: 'failed', error: new KipError('ResourceExhausted',
+          `this Space's vocabulary holds ${vocabulary.size} of its ${MAX_SYMBOLS} symbols; ` +
+          'reuse an existing symbol instead of defining another').toJSON() }]
       }
       for (const define of defines) {
         const result = super.executeKip(define.command, define.parameters ?? {})
@@ -349,7 +411,14 @@ export class AndaBrain extends KipDatabase<Env> {
         if (result.status === 'failed') return results
         const ref = definedRef(result)
         const drafted = defineOf(define.command)
-        if (ref && drafted) queueSchemaReview(this.host, drafted.kind, ref, drafted.description)
+        if (ref && drafted) {
+          try {
+            queueSchemaReview(this.host, drafted.kind, ref, drafted.description)
+          } catch (error) {
+            results.push({ status: 'failed', error: KipError.from(error).toJSON() })
+            return results
+          }
+        }
       }
     }
     if (writes.length === 0) return results
@@ -437,11 +506,20 @@ export class AndaBrain extends KipDatabase<Env> {
   maintenanceAssessment(): MaintenanceAssessment {
     this.ensureInitialized()
     const kv = this.ctx.storage.kv
+    // One indexed group-by; the maintenance session reads the whole Space, so
+    // these are the counts a native `COUNT` would reach without loading every
+    // Proposition. An empty lineage is a row stored before lineages existed.
+    const predicateCounts = this.ctx.storage.sql.exec<{ lineage: string; ref: string; count: number }>(
+      `SELECT predicate_lineage AS lineage, predicate_ref AS ref, COUNT(*) AS count FROM propositions
+       WHERE space = ? AND state = 'active' GROUP BY predicate_lineage, predicate_ref`,
+      this.nexus.space,
+    ).toArray().map((row) => ({ lineage: row.lineage || predicateLineage(row.ref), count: row.count }))
     const assessment = assess(
       (operation) => this.run(operation),
       this.nexus.store.currentSeq(this.nexus.space),
       {
         revisedRoots: kv.get<RevisedRoot[]>(REVISED_ROOTS_KEY) ?? [],
+        predicateCounts,
       },
     )
     return { ...assessment, ...this.exposureBatch() }
@@ -558,9 +636,11 @@ export class AndaBrain extends KipDatabase<Env> {
 
   stats(): BrainStats {
     this.ensureInitialized()
+    // Active elements only: an erased element leaves a `purged` stub, and an
+    // archived one is retired memory, so neither is counted as held.
     const count = (table: string): number =>
       this.ctx.storage.sql
-        .exec<{ count: number }>(`SELECT COUNT(*) AS count FROM ${table}`)
+        .exec<{ count: number }>(`SELECT COUNT(*) AS count FROM ${table} WHERE space = ? AND state = 'active'`, this.nexus.space)
         .one().count
 
     return {
@@ -584,8 +664,16 @@ export class AndaBrain extends KipDatabase<Env> {
    * observe a half-initialized brain and nothing for a promise to guard.
    */
   private hostDeclared = false
+  private bootstrapped = false
+  /** Set while one synchronous call runs after it has initialized. */
+  private initializedThisCall = false
 
   private ensureInitialized(): void {
+    // Every method here runs synchronously to completion, so one check per
+    // call is enough and the flag clears in the microtask after it returns.
+    // The engine's batch loop re-enters `executeKip` for every operation,
+    // which would otherwise repeat the recovery reads each time.
+    if (this.initializedThisCall) return
     // The binding this Worker serves, declared to the engine so `DESCRIBE
     // CAPABILITIES`/`PRIMER` and every `requires` block report it truthfully
     // (Spec §67.4, MI §2). Process state: declared again after eviction.
@@ -593,10 +681,16 @@ export class AndaBrain extends KipDatabase<Env> {
       this.nexus.setHostCapabilities({ memory_interface: descriptor(this.ctx.id.name) as never })
       this.hostDeclared = true
     }
-    if (this.ctx.storage.kv.get<string>(APP_BOOTSTRAP_KEY) === APP_BOOTSTRAP_VERSION) {
-      this.product.recover()
-      return
+    if (!this.bootstrapped) {
+      if (this.ctx.storage.kv.get<string>(APP_BOOTSTRAP_KEY) !== APP_BOOTSTRAP_VERSION) this.bootstrap()
+      this.bootstrapped = true
     }
+    this.product.recover()
+    this.initializedThisCall = true
+    queueMicrotask(() => { this.initializedThisCall = false })
+  }
+
+  private bootstrap(): void {
     const result = super.executeKip(ACTOR_BOOTSTRAP, { key: SELF_ACTOR_KEY })
     if (result.status === 'failed') {
       throw new Error(`failed to initialize the brain's actor: ${result.error?.message}`)

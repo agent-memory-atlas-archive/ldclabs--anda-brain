@@ -1,8 +1,6 @@
-import type { SourceIdentity } from './product.js'
-import type { RuntimeOperation } from './cognitive.js'
 import type { KipResult } from '@ldclabs/kip-do'
-import type { IngestContext, KipExecution, KipOperation } from './kip.js'
-import type { AttentionRecall, AttentionRecallInput } from './attention.js'
+import type { AndaBrain } from './brain.js'
+import type { RuntimeOperation } from './cognitive.js'
 
 export type JsonObject = Record<string, unknown>
 
@@ -12,7 +10,7 @@ export interface AiBinding {
 }
 
 export interface Env {
-  BRAIN: DurableObjectNamespace<import('./brain.js').AndaBrain>
+  BRAIN: DurableObjectNamespace<AndaBrain>
   AI: AiBinding
   AI_MODEL?: string
   /** Shared wall-clock budget across all model stages, default 120000; max 300000. */
@@ -23,63 +21,32 @@ export interface Env {
 }
 
 /**
- * The Durable Object as the Worker sees it.
- *
- * Every method is synchronous inside the object and a promise across the RPC
- * boundary, which is why these signatures do not match the class's.
+ * The Durable Object as the Worker sees it: each public method of the class,
+ * a promise across the RPC boundary. Derived rather than restated, so the two
+ * cannot drift apart.
  */
-export interface BrainRpc {
-  forgetMemory(input: import('./forget.js').ForgetInput): Promise<import('./forget.js').ForgetReport>
-  beginProcessing(source?: SourceIdentity, origin?: string): Promise<number>
-  checkProcessing(epoch: number): Promise<void>
-  executeAgentRead(operations: readonly KipOperation[], epoch: number): Promise<KipResult[]>
-  declareSymbols(
-    types: readonly string[],
-    predicates: readonly string[],
-    epoch?: number,
-  ): Promise<DeclaredVocabulary>
-  describePrimer(): Promise<KipResult>
-  executeFormationPlan(
-    operations: readonly KipOperation[],
-    ingest?: IngestContext,
-    epoch?: number,
-  ): Promise<KipResult[]>
-  executeKip(command: string, params?: Record<string, unknown>): Promise<KipResult>
-  executeKipBatch(
-    operations: readonly KipOperation[],
-    context?: undefined,
-    read?: undefined,
-    execution?: KipExecution,
-  ): Promise<KipResult[]>
-  executeKipReadonlyBatch(
-    operations: readonly KipOperation[],
-    execution?: KipExecution,
-  ): Promise<KipResult[]>
-  executeMaintenancePlan(operations: readonly KipOperation[], runtime?: readonly RuntimeOperation[], epoch?: number, run?: string, reviewed?: string[]): Promise<KipResult[]>
-  beginMaintenance(epoch: number, expiresAt: number): Promise<string>
-  endMaintenance(id: string): Promise<void>
-  maintenanceSnapshot(epoch: number, run: string): Promise<KipResult[]>
-  acknowledgeCorrections(ids: string[], epoch: number): Promise<void>
-  maintenanceAssessment(): Promise<MaintenanceAssessment>
-  settleMemory(nowMs: number, run?: string, epoch?: number): Promise<SettlementReport>
-  stats(): Promise<BrainStats>
-  vocabulary(): Promise<DeclaredVocabulary>
-  schemaDrafts(): Promise<SchemaDrafts>
-  promoteDraftSymbol(input: PromoteDraftInput): Promise<PromoteDraftOutput>
-  recallAttention(input: AttentionRecallInput): Promise<AttentionRecall>
-  memoryStage(namespace: string, space: string, input: import('./memory-ledger.js').StageSourceInput): Promise<import('./memory-ledger.js').StagedSourceRef>
-  memorySource(namespace: string, sourceRef: string): Promise<import('./memory-ledger.js').StagedSource>
-  memoryAdmit(namespace: string, space: string, request: import('./memory-wire.js').MemoryRequest): Promise<import('./memory-ledger.js').Admission>
-  memoryCaptureEvidence(receiptRef: string, messages: Message[], observedAt: string, purpose: 'feedback' | 'revise-report', about?: Record<string, unknown>): Promise<import('./memory-ledger.js').IntakeRecord>
-  memoryFinishFormation(receiptRef: string, trace: import('./memory-ledger.js').PassTrace): Promise<import('./memory-ledger.js').IntakeRecord>
-  memoryFailFormation(receiptRef: string, error: { code: string; message: string }): Promise<import('./memory-ledger.js').IntakeRecord>
-  memoryForget(namespace: string, space: string, request: import('./memory-wire.js').MemoryRequest, owner: boolean): Promise<import('./memory-ledger.js').IntakeRecord>
-  memoryBarrier(namespace: string, after: string[]): Promise<import('./memory-wire.js').Progress[]>
-  memoryScopedAttention(scope: import('./memory-wire.js').Scope | undefined, items: AttentionRecall['items']): Promise<import('./memory-wire.js').AttentionItem[]>
-  memoryDeliver(namespace: string, scope: import('./memory-wire.js').Scope | undefined, cited: string[], options: Parameters<import('./memory-ledger.js').MemoryLedger['deliver']>[3]): Promise<{ briefing: import('./memory-wire.js').Briefing; warnings: string[] }>
-  memoryExpand(namespace: string, target: string, evidence: boolean): Promise<import('./memory-wire.js').Briefing>
-  memoryReceipt(namespace: string, receiptRef: string): Promise<Record<string, unknown>>
-  memoryPlan(namespace: string, planRef: string): Promise<Record<string, unknown>>
+export type BrainRpc = {
+  [K in keyof AndaBrain as AndaBrain[K] extends (...args: never[]) => unknown ? K : never]:
+    AndaBrain[K] extends (...args: infer A) => infer R ? (...args: A) => Promise<Awaited<R>> : never
+}
+
+/** What opening one agent pass returns (see `AndaBrain.openProcessing`). */
+export interface ProcessingStart {
+  epoch: number
+  /** Present when the pass asked for it: it prompts a model. */
+  primer?: KipResult
+  /** The pass's first reads, run under `epoch`. */
+  reads: KipResult[]
+}
+
+/** Everything a maintenance pass reads before its model call. */
+export interface MaintenanceStart {
+  epoch: number
+  run: string
+  settlement: SettlementReport
+  snapshot: KipResult[]
+  assessment: MaintenanceAssessment
+  primer: KipResult
 }
 
 /** This Space's draft vocabulary (Spec §20.16), as its owner reviews it. */

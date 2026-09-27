@@ -1,6 +1,7 @@
 import { assertCurrentOperations, type SourceIdentity } from './product.js'
 import { contentDigest, type JsonMap, type KipResult } from '@ldclabs/kip-do'
 import { observationTimestamp } from './validation.js'
+import { processingErrorCode } from './processing.js'
 import {
   DEFAULT_AI_MODEL,
   AiResponseError,
@@ -40,6 +41,7 @@ import type {
   Env,
   FormationInput,
   MaintenanceInput,
+  MaintenanceStart,
   MutationPlan,
   RecallInput,
   Usage,
@@ -81,50 +83,59 @@ export async function formMemoryWithResults(
 ): Promise<{ output: unknown; results: KipResult[] }> {
   const timestamp = observationTimestamp(input.timestamp, Date.now())
   const origin = await conversationOrigin(input, timestamp)
-  const epoch = await brain.beginProcessing(sourceIdentity ?? { key: origin,
-    parents: input.context?.source ? [`source:${contentDigest(input.context.source)}`] : [] }, origin)
+  const counterpartyKey = input.context?.counterparty
+  const opened = await brain.openProcessing(counterpartyKey ? [counterpartyLookup(counterpartyKey)] : [], {
+    primer: true,
+    source: sourceIdentity ?? { key: origin,
+      parents: input.context?.source ? [`source:${contentDigest(input.context.source)}`] : [] },
+    origin,
+  })
+  const epoch = opened.epoch
   const deadline = new ModelDeadline(env.AI_TIMEOUT_MS)
   let usage = { ...EMPTY_USAGE }
   try {
-    const counterparty = await counterpartyElement(brain, input.context?.counterparty, epoch)
-    const primer = resultOrThrow(await brain.describePrimer(), 'formation primer failed')
+    const counterparty = await counterpartyElement(brain, counterpartyKey, opened.reads[0], epoch)
+    const primer = resultOrThrow(opened.primer!, 'formation primer failed')
     const model = env.AI_MODEL || DEFAULT_AI_MODEL
+    /** Gates, drafts and runs one Formation plan with the observation it cites. */
+    const runPlan = async (plan: MutationPlan, label: string) => {
+      deadline.check()
+      if (plan.reviewed_corrections?.length) throw new OperationError(`${label} cannot acknowledge maintenance corrections`, 422)
+      if (plan.runtime?.length) throw new OperationError(`${label} cannot manage Watch arming or task leases`, 422)
+      const prepared = await preparePlan(
+        brain,
+        plan,
+        intent
+          ? (operations) => { assertFormationOperations(operations); assertIntentOperations(intent, operations, plan.parameters ?? {}) }
+          : assertFormationOperations,
+        label.toLowerCase(),
+        epoch,
+        undefined,
+        intent ? intentBindings(intent) : undefined,
+      )
+      // The observation rides the envelope, so the model's commands cite `:msg1`
+      // instead of retyping what was said (§71.1).
+      const ingest = observationIngest(prepared.operations, input.messages, {
+        at: timestamp,
+        origin,
+        sourceActor: counterparty.id,
+        ...(intent ? { scope: intent.scope } : {}),
+      })
+      deadline.check()
+      const results = prepared.operations.length
+        ? await brain.executeFormationPlan(prepared.operations, ingest, epoch)
+        : []
+      return { ...prepared, results }
+    }
+
     const plan = await createMutationPlan(
       env.AI,
       model,
       formationMessages(primer, input, timestamp, intent ? intentDirective(intent) : undefined),
       deadline,
     )
-
     usage = plan.usage
-    deadline.check()
-    if (plan.value.reviewed_corrections?.length) throw new OperationError('Formation cannot acknowledge maintenance corrections', 422)
-    if (plan.value.runtime?.length) throw new OperationError('Formation cannot manage Watch arming or task leases', 422)
-
-    const { operations, vocabulary } = await preparePlan(
-      brain,
-      plan.value,
-      intent
-        ? (operations) => { assertFormationOperations(operations); assertIntentOperations(intent, operations, plan.value.parameters ?? {}) }
-        : assertFormationOperations,
-      'formation',
-      epoch,
-      undefined,
-      intent ? intentBindings(intent) : undefined,
-    )
-
-    // The observation rides the envelope, so the model's commands cite `:msg1`
-    // instead of retyping what was said (§71.1).
-    const ingest = observationIngest(operations, input.messages, {
-      at: timestamp,
-      origin,
-      sourceActor: counterparty.id,
-      ...(intent ? { scope: intent.scope } : {}),
-    })
-    deadline.check()
-    const results = operations.length
-      ? await brain.executeFormationPlan(operations, ingest, epoch)
-      : []
+    const { operations, vocabulary, results } = await runPlan(plan.value, 'Formation')
     throwOnKipError(results, 'formation KIP failed')
     let review: { performed: boolean; commands: number; summary: string } | undefined
     let repairResults: KipResult[] = []
@@ -135,20 +146,11 @@ export async function formMemoryWithResults(
         const repair = await createMutationPlan(env.AI, model,
           formationReviewMessages(primer, input, timestamp, results), deadline)
         usage = addUsage(usage, repair.usage)
-        deadline.check()
-        if (repair.value.reviewed_corrections?.length) throw new OperationError('Formation review cannot acknowledge maintenance corrections', 422)
         if (repair.value.commands.length > 1) throw new OperationError('Formation review accepts at most one repair MUTATE', 422)
-        if (repair.value.runtime?.length) throw new OperationError('Formation review cannot manage runtime actions', 422)
-        const prepared = await preparePlan(brain, repair.value,
-          intent
-            ? (operations) => { assertFormationOperations(operations); assertIntentOperations(intent, operations, repair.value.parameters ?? {}) }
-            : assertFormationOperations,
-          'formation review', epoch, undefined, intent ? intentBindings(intent) : undefined)
-        const repairIngest = observationIngest(prepared.operations, input.messages, {at: timestamp, origin, sourceActor: counterparty.id, ...(intent ? { scope: intent.scope } : {})})
-        deadline.check()
-        repairResults = prepared.operations.length ? await brain.executeFormationPlan(prepared.operations, repairIngest, epoch) : []
+        const repaired = await runPlan(repair.value, 'Formation review')
+        repairResults = repaired.results
         throwOnKipError(repairResults, 'formation review KIP failed')
-        review = { performed:true, commands:prepared.operations.length, summary:repair.value.summary }
+        review = { performed: true, commands: repaired.operations.length, summary: repair.value.summary }
       } catch (error) {
         if (error instanceof AiResponseError) usage = addUsage(usage, error.usage)
         throw new OperationError('formation review failed after initial writes; inspect receipts before retrying', 422,
@@ -197,22 +199,27 @@ async function conversationOrigin(
   return `formation:sha256:${hex}`
 }
 
+/** The read that finds the semantic counterparty by its immutable key. */
+function counterpartyLookup(key: string): KipOperation {
+  return {
+    command: 'FIND(?person.id) WHERE { ?person CONCEPT {type: "Person", key: :key} } LIMIT 1',
+    parameters: { key },
+  }
+}
+
 /**
  * Resolve/create the semantic counterparty before planning. First ingestion
  * and a retry must name the same Evidence source, even when the first model
- * plan would otherwise be responsible for creating the Person.
+ * plan would otherwise be responsible for creating the Person. `known` is the
+ * lookup the pass was opened with.
  */
 async function counterpartyElement(
   brain: BrainRpc,
   counterparty: string | undefined,
+  known: KipResult | undefined,
   epoch: number,
 ): Promise<{ id?: string; created: number }> {
   if (!counterparty) return { created: 0 }
-  const lookup = {
-    command: 'FIND(?person.id) WHERE { ?person CONCEPT {type: "Person", key: :key} } LIMIT 1',
-    parameters: { key: counterparty },
-  }
-  const [known] = await brain.executeAgentRead([lookup], epoch)
   if (known?.status === 'failed') throw new OperationError('counterparty lookup failed', 422, known.error)
   const knownId = Array.isArray(known?.result) ? known.result[0] : undefined
   if (typeof knownId === 'string') return { id: knownId, created: 0 }
@@ -224,7 +231,7 @@ async function counterpartyElement(
   // display name; an UPSERT here could overwrite a rename made meanwhile.
   const collision = created.some((result) => result.error?.code === 'IdentityConflict')
   if (!collision) throwOnKipError(created, 'counterparty initialization failed')
-  const [found] = await brain.executeAgentRead([lookup], epoch)
+  const [found] = await brain.executeAgentRead([counterpartyLookup(counterparty)], epoch)
   if (found?.status !== 'succeeded') throw new OperationError('counterparty lookup failed', 422, found?.error)
   const row = Array.isArray(found.result) ? found.result[0] : undefined
   const count = countWrites(created).concepts
@@ -234,19 +241,25 @@ async function counterpartyElement(
   throw new OperationError('counterparty lookup returned no element', 422)
 }
 
+/**
+ * Recall. `deadlineMs` caps the shared model deadline at a caller's own
+ * budget, so a pass that runs out of it is cancelled rather than left running.
+ */
 export async function recallMemory(
   env: Env,
   brain: BrainRpc,
   input: RecallInput,
+  deadlineMs?: number,
 ): Promise<unknown> {
-  const epoch = await brain.beginProcessing()
-  const deadline = new ModelDeadline(env.AI_TIMEOUT_MS)
+  const lookup = conceptLookupCommand(input.query, 8)
+  const opened = await brain.openProcessing([lookup], { primer: true })
+  const epoch = opened.epoch
+  const deadline = new ModelDeadline(env.AI_TIMEOUT_MS, deadlineMs)
   let usage = { ...EMPTY_USAGE }
   try {
     const model = env.AI_MODEL || DEFAULT_AI_MODEL
-    const primer = resultOrThrow(await brain.describePrimer(), 'recall primer failed')
-    const lookup = conceptLookupCommand(input.query, 8)
-    const [grounding] = await brain.executeAgentRead([lookup], epoch)
+    const primer = resultOrThrow(opened.primer!, 'recall primer failed')
+    const [grounding] = opened.reads
     if (grounding === undefined || grounding.status !== 'succeeded') {
       throw new OperationError('recall KIP failed', 422, grounding?.error)
     }
@@ -316,8 +329,7 @@ export async function probeMemory(
   brain: BrainRpc,
   input: RecallInput,
 ): Promise<unknown> {
-  const epoch = await brain.beginProcessing()
-  const [probe] = await brain.executeAgentRead([conceptLookupCommand(input.query, 8)], epoch)
+  const { epoch, reads: [probe] } = await brain.openProcessing([conceptLookupCommand(input.query, 8)])
   await brain.checkProcessing(epoch)
   if (probe === undefined || probe.status === 'failed') {
     throw new OperationError('probe KIP failed', 422, probe?.error)
@@ -329,19 +341,15 @@ export async function probeMemory(
 export async function maintainMemory(
   env: Env, brain: BrainRpc, input: MaintenanceInput,
 ): Promise<unknown> {
-  const epoch = await brain.beginProcessing()
   const deadline = new ModelDeadline(env.AI_TIMEOUT_MS)
-  let run: string | undefined
+  let opened: MaintenanceStart | undefined
   let usage = { ...EMPTY_USAGE }
   try {
-    run = await brain.beginMaintenance(epoch, deadline.expiresAt)
     const timestamp = observationTimestamp(input.timestamp, Date.now())
-    const settlement = await brain.settleMemory(Date.parse(timestamp), run, epoch)
-    const [snapshot, assessment, primerResult] = await Promise.all([
-      brain.maintenanceSnapshot(epoch, run), brain.maintenanceAssessment(), brain.describePrimer(),
-    ])
+    opened = await brain.openMaintenance(deadline.expiresAt, Date.parse(timestamp))
+    const { epoch, run, settlement, snapshot, assessment } = opened
     throwOnKipError(snapshot, 'maintenance snapshot failed')
-    const primer = resultOrThrow(primerResult, 'maintenance primer failed')
+    const primer = resultOrThrow(opened.primer, 'maintenance primer failed')
     const plan = await createMutationPlan(env.AI, env.AI_MODEL || DEFAULT_AI_MODEL,
       maintenanceMessages(input, { snapshot, assessment, settlement }, timestamp, primer), deadline)
     usage = plan.usage
@@ -364,8 +372,7 @@ export async function maintainMemory(
   } catch (error) { throw withUsage(error, usage) }
   finally {
     deadline.close()
-    if (run) await brain.endMaintenance(run)
-    await brain.checkProcessing(epoch)
+    if (opened) await brain.closeMaintenance(opened.run, opened.epoch)
   }
 }
 
@@ -413,9 +420,11 @@ async function preparePlan(
     const current = await brain.vocabulary()
     return { operations, vocabulary: { ...current, rejected: [...plan.types, ...plan.predicates] } }
   }
-  return {
-    operations,
-    vocabulary: await brain.declareSymbols(plan.types, plan.predicates, epoch),
+  try {
+    return { operations, vocabulary: await brain.declareSymbols(plan.types, plan.predicates, epoch) }
+  } catch (error) {
+    if (processingErrorCode(error)) throw error
+    throw new OperationError(error instanceof Error ? error.message : `invalid ${mode} vocabulary`, 422)
   }
 }
 

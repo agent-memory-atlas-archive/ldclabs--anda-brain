@@ -190,12 +190,9 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       }
       case 'execute_kip': {
         const batch = parseKipInput(body)
-        // `context` and `read` are the object's own concerns on this path, so
-        // they go unset; `execution` is the caller's and rides the fourth slot
-        // the engine's own batch signature puts it in.
-        return ok(
-          await brain.executeKipBatch(batch.operations, undefined, undefined, batch.execution),
-        )
+        // A batch that purges fences in-flight agent passes and scrubs host
+        // preview copies, as `memory/forget` does.
+        return ok(await brain.executeAdminKipBatch(batch.operations, batch.execution))
       }
       default:
         throw new ApiError('not found', 404)

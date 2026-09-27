@@ -13,6 +13,7 @@
  */
 
 import {
+  isJsonMap,
   parseKip,
   tryParseElementId,
   type Command,
@@ -68,6 +69,33 @@ const EVIDENCE_CLASS: Record<string, string> = {
   system: 'message',
 }
 
+/** The Evidence class a message's role makes it. */
+export function evidenceClassOf(role: string): string {
+  return EVIDENCE_CLASS[role] ?? 'message'
+}
+
+/** Commands this long are parsed afresh every time rather than cached. */
+const PARSE_CACHE_CHARS = 16 * 1024
+const PARSE_CACHE_ENTRIES = 32
+const PARSED = new Map<string, Command>()
+
+/**
+ * `parseKip` for the gates, which read the same command several times on each
+ * side of the RPC boundary: batch, intent, current-memory and formation gates
+ * and `DEFINE` detection. They only read the AST, so one small cache serves
+ * them all. The engine and every `mutate` still parse their own copy.
+ */
+export function parseGate(command: string): Command {
+  const cached = PARSED.get(command)
+  if (cached !== undefined) return cached
+  const parsed = parseKip(command)
+  if (command.length <= PARSE_CACHE_CHARS) {
+    if (PARSED.size >= PARSE_CACHE_ENTRIES) PARSED.delete(PARSED.keys().next().value!)
+    PARSED.set(command, parsed)
+  }
+  return parsed
+}
+
 /** The `ingest` block of a request envelope. */
 export type { IngestContext }
 
@@ -111,12 +139,19 @@ export function capturedEvidence(
   messages: readonly Message[],
   batchAt: string,
 ): { key: string; evidence_class: string; observed_at: string }[] {
-  const start = Math.max(0, messages.length - MAX_INGESTED_MESSAGES)
-  return messages.slice(start).map((message, index) => ({
+  // Numbered from the start of the kept window, so `:msg1` is the oldest
+  // message the model can cite and the numbering matches the order it reads
+  // them in.
+  return messages.slice(capturedStart(messages)).map((message, index) => ({
     key: `msg${index + 1}`,
-    evidence_class: EVIDENCE_CLASS[message.role] ?? 'message',
+    evidence_class: evidenceClassOf(message.role),
     observed_at: messageObservedAt(message, batchAt),
   }))
+}
+
+/** The index of the oldest message the captured window keeps. */
+function capturedStart(messages: readonly Message[]): number {
+  return Math.max(0, messages.length - MAX_INGESTED_MESSAGES)
 }
 
 export function observationIngest(
@@ -124,22 +159,16 @@ export function observationIngest(
   messages: readonly Message[],
   observed: { at: string; origin: string; sourceActor?: string; scope?: { task: string | null; contexts: string[] } },
 ): IngestContext | undefined {
-  const start = Math.max(0, messages.length - MAX_INGESTED_MESSAGES)
-  const recent = messages.slice(start)
+  const start = capturedStart(messages)
   // A pass that stored nothing has nothing to mint Evidence for, and an
   // Evidence record for a claim nobody made is indistinguishable later from an
   // observation somebody chose not to act on.
-  if (operations.length === 0 || recent.length === 0) return undefined
-  // Numbered from the start of the kept window, so `:msg1` is the oldest
-  // message the model can cite and the numbering matches the order it reads
-  // them in.
-  const evidence = recent.map((message, index) => ({
-    key: `msg${index + 1}`,
-    evidence_class: EVIDENCE_CLASS[message.role] ?? 'message',
-    payload: message as unknown as Json,
-    observed_at: messageObservedAt(message, observed.at),
+  if (operations.length === 0 || messages.length === 0) return undefined
+  const evidence = capturedEvidence(messages, observed.at).map((captured, index) => ({
+    ...captured,
+    payload: messages[start + index] as unknown as Json,
     client_key: `${observed.origin}:${start + index + 1}`,
-    ...(observed.sourceActor === undefined || message.role !== 'user'
+    ...(observed.sourceActor === undefined || messages[start + index]!.role !== 'user'
       ? {}
       : { source_actor: { id: observed.sourceActor } }),
     // A scoped observation's Evidence carries its scope, so the raw source
@@ -255,7 +284,7 @@ function assertOperationBatch(operations: readonly KipOperation[]): void {
 export function assertReadonlyOperations(operations: readonly KipOperation[]): void {
   assertOperationBatch(operations)
   for (const operation of operations) {
-    if ('Kml' in parseKip(operation.command)) {
+    if ('Kml' in parseGate(operation.command)) {
       throw new Error('read-only KIP accepts only KQL and META commands')
     }
   }
@@ -274,7 +303,7 @@ function assertBoundedReadonlyOperations(
 ): void {
   assertOperationBatch(operations)
   for (const operation of operations) {
-    assertBoundedRead(parseKip(operation.command), operation.parameters, maxResults)
+    assertBoundedRead(parseGate(operation.command), operation.parameters, maxResults)
   }
 }
 
@@ -283,7 +312,7 @@ export function assertFormationOperations(operations: readonly KipOperation[]): 
   // At most MAX_KIP_OPERATIONS commands, which also bounds a plan's DEFINEs.
   assertOperationBatch(operations)
   for (const operation of operations) {
-    const command = parseKip(operation.command)
+    const command = parseGate(operation.command)
     if (!('Kml' in command)) {
       throw new Error('formation accepts only KIP KML commands')
     }
@@ -340,7 +369,7 @@ export function assertFormationOperations(operations: readonly KipOperation[]): 
 export function assertMaintenanceOperations(operations: readonly KipOperation[]): void {
   assertOperationBatch(operations)
   for (const operation of operations) {
-    const command = parseKip(operation.command)
+    const command = parseGate(operation.command)
     if (!('Kml' in command)) {
       throw new Error('maintenance plans must contain KML commands')
     }
@@ -545,14 +574,14 @@ export function countWrites(results: readonly KipResult[]): {
  * relevance, and a number sitting beside a memory is read as confidence (§2.10).
  */
 function citationsFromLookup(result: Json | undefined): MemoryCitation[] {
-  const hits = isObject(result) ? result.hits : undefined
+  const hits = isJsonMap(result) ? result.hits : undefined
   if (!Array.isArray(hits)) return []
   const citations: MemoryCitation[] = []
   for (const hit of hits) {
-    if (!isObject(hit)) continue
+    if (!isJsonMap(hit)) continue
     const id = hit.id
     if (typeof id !== 'string' || tryParseElementId(id) === null) continue
-    const element = isObject(hit.element) ? hit.element : {}
+    const element = isJsonMap(hit.element) ? hit.element : {}
     const citation: MemoryCitation = { entity: id }
     if (typeof element.name === 'string' && element.name !== '') {
       citation.name = element.name
@@ -609,12 +638,8 @@ function visit(value: unknown, citations: Map<string, MemoryCitation>): void {
   }
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
 /** `kip://profiles/cognitive-memory@2.0.0/Person` → `Person`. */
-function localName(symbolRef: string): string {
+export function localName(symbolRef: string): string {
   return symbolRef.slice(symbolRef.lastIndexOf('/') + 1)
 }
 
@@ -889,17 +914,17 @@ function assertDatedCitation(clause: MutationClause): void {
     edge.field?.Name === 'evidence' && typeof edge.value?.Param === 'string' && CAPTURED.test(edge.value.Param))
   if (!citesCapture) return
   const fields = new Map(body.set_fields ?? [])
-  const literal = (value: unknown): unknown => (isObject(value) && 'Value' in value ? value.Value : undefined)
+  const literal = (value: unknown): unknown => (isJsonMap(value) && 'Value' in value ? value.Value : undefined)
   const mode = literal(fields.get('mode'))
-  if (isObject(mode) && mode.String === 'inferred') return
+  if (isJsonMap(mode) && mode.String === 'inferred') return
   const at = fields.get('asserted_at')
   const dated = at !== undefined && literal(at) !== 'Null'
   const valid = fields.get('valid_time')
   let starts = false
-  if (isObject(valid)) {
+  if (isJsonMap(valid)) {
     if ('Value' in valid) {
-      const object = isObject(valid.Value) ? valid.Value.Object : undefined
-      starts = isObject(object) && object.from !== undefined && object.from !== 'Null'
+      const object = isJsonMap(valid.Value) ? valid.Value.Object : undefined
+      starts = isJsonMap(object) && object.from !== undefined && object.from !== 'Null'
     } else if ('Object' in valid && Array.isArray(valid.Object)) {
       starts = (valid.Object as [string, unknown][]).some(([key, value]) => key === 'from' && literal(value) !== 'Null')
     } else {
@@ -928,15 +953,26 @@ function assertLiteralDefine(define: DefineCommand): void {
       'UpperCamelCase letters and digits, predicates are snake_case, at most 64 characters, ' +
       'and never a Core element kind')
   }
-  if (Object.values(define.definition as Record<string, unknown>).some((value) => !isObject(value) || !('Value' in value))) {
+  if (Object.values(define.definition as Record<string, unknown>).some((value) => !isJsonMap(value) || !('Value' in value))) {
     throw new Error('write the DEFINE body as literals; a bound body cannot be reviewed before it runs')
+  }
+}
+
+/** Whether a command purges an element or a payload. A command that does not
+ * parse erases nothing; the engine reports it. */
+export function erasesMemory(command: string): boolean {
+  try {
+    const parsed = parseGate(command)
+    return 'Kml' in parsed && parsed.Kml.clauses.some((clause) => 'Purge' in clause || 'PurgePayload' in clause)
+  } catch {
+    return false
   }
 }
 
 /** Whether a command is a standalone `DEFINE` (Spec §20.16). */
 export function isDefine(command: string): boolean {
   try {
-    const parsed = parseKip(command)
+    const parsed = parseGate(command)
     return 'Kml' in parsed && parsed.Kml.clauses.length === 1 && 'Define' in parsed.Kml.clauses[0]!
   } catch {
     return false
@@ -978,13 +1014,13 @@ export function assertIntentOperations(intent: IntentShape, operations: readonly
     throw new Error('`:contexts`, `:scope_task` and `:orig` are bound by the host; cite them without binding them')
   }
   for (const operation of operations) {
-    const command = parseKip(operation.command)
+    const command = parseGate(operation.command)
     if (!('Kml' in command)) continue
     for (const clause of command.Kml.clauses) {
       if ('CreateAssertion' in clause && intent.scope.contexts.length > 0) {
         const fields = new Map((clause.CreateAssertion as unknown as { set_fields?: [string, unknown][] | null }).set_fields ?? [])
         const context = fields.get('context_refs')
-        if (!(isObject(context) && context.Param === 'contexts')) {
+        if (!(isJsonMap(context) && context.Param === 'contexts')) {
           throw new Error('this observation is scoped: write every ASSERT with `context: :contexts` so the claim ' +
             'stays in its task and contexts (MI §3, Profile §20.3)')
         }

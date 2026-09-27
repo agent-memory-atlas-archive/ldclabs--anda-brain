@@ -1188,6 +1188,9 @@ function failingReadBrain(): BrainRpc {
   }
   return {
     beginProcessing: async () => 0,
+    openProcessing: async (reads: unknown[] = []) => ({
+      epoch: 0, primer: { status: 'succeeded', result: {} }, reads: reads.map(() => failure),
+    }),
     checkProcessing: async () => {},
     executeAgentRead: async () => [failure],
     declareSymbols: unsupported,

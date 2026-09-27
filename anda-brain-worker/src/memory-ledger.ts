@@ -11,7 +11,6 @@
  * pending forever and never re-run.
  */
 import {
-  contentDigest,
   isJsonMap,
   parseElementId,
   tryParseElementId,
@@ -20,12 +19,15 @@ import {
   type JsonMap,
   type Session,
 } from '@ldclabs/kip-do'
-import type { MemoryProduct, SourceIdentity } from './product.js'
+import { evidenceClassOf, localName } from './kip.js'
+import { jsonDigest, type MemoryProduct, type SourceIdentity } from './product.js'
 import type { Message } from './types.js'
+import { canonicalTimestamp as canonical } from './validation.js'
 import {
   MAX_AFTER,
   MemoryError,
   coverage as coverageOf,
+  fitsBudget,
   type AttentionItem,
   type Briefing,
   type ChangeKind,
@@ -45,6 +47,8 @@ const PREFIX = 'anda-brain:memory:v1:'
 const SOURCE = PREFIX + 'source:'
 const RECEIPT = PREFIX + 'receipt:'
 const RECALL = PREFIX + 'recall:'
+/** The receipts admitted from one staged source, so a forget reads only those. */
+const SOURCE_RECEIPTS = PREFIX + 'source-receipts:'
 const PLAN = PREFIX + 'plan:'
 /** A pass that has not reported back after this long was interrupted. */
 const ABANDONED_MS = 10 * 60_000
@@ -84,21 +88,17 @@ export type Admission =
 /** What a Formation pass committed, from its results. */
 export interface PassTrace { formed: string[]; evidence: string[]; assertions: string[]; created: string[]; max_seq: number | null }
 
-const digest = (value: unknown): string => contentDigest(JSON.parse(JSON.stringify(value ?? null)) as Json)
-const hexId = (value: unknown): string => digest(value).slice(7, 47)
+const hexId = (value: unknown): string => jsonDigest(value).slice(7, 47)
 const notFound = (what: string): never => { throw new MemoryError('NotFoundOrNotVisible', `${what} not found`) }
 
+/** The same instant rule as the Brain API's `timestamp` (see `validation.ts`). */
 function canonicalTimestamp(value: string): string {
-  const parsed = Date.parse(value.trim())
-  if (!Number.isFinite(parsed) || !/T/.test(value)) throw new MemoryError('InvalidRequestEnvelope', `timestamp ${JSON.stringify(value)} is not an RFC 3339 instant`)
-  if (/\.\d{4,}/.test(value)) throw new MemoryError('InvalidRequestEnvelope', `timestamp ${JSON.stringify(value)} is finer than milliseconds`)
-  return new Date(parsed).toISOString()
+  const instant = canonical(value)
+  if (instant === undefined) {
+    throw new MemoryError('InvalidRequestEnvelope', `timestamp ${JSON.stringify(value)} is not an RFC 3339 instant with at most millisecond precision`)
+  }
+  return instant
 }
-
-const evidenceClass = (role: string): string =>
-  role === 'user' ? 'user_statement' : role === 'assistant' ? 'agent_statement' : role === 'tool' ? 'tool_result' : 'message'
-
-const local = (reference: string): string => reference.split('/').at(-1) ?? reference
 
 export class MemoryLedger {
   constructor(
@@ -109,6 +109,9 @@ export class MemoryLedger {
   ) {}
 
   private get kv() { return this.storage.kv }
+  /** Element views read in this call. A ledger lives for one Durable Object
+   * call, and its recall reads commit nothing between them. */
+  private readonly rows = new Map<string, JsonMap | null>()
 
   seq(): number {
     return this.nexus.spaceRow().seq
@@ -145,10 +148,9 @@ export class MemoryLedger {
     const existing = this.kv.get<StagedSource>(SOURCE + source_ref)
     const captured_at = new Date().toISOString()
     const observed_at = input.observed_at === undefined ? existing?.observed_at ?? captured_at : canonicalTimestamp(input.observed_at)
-    const source_digest = digest({ kind, messages: input.messages, observed_at })
+    const source_digest = jsonDigest({ kind, messages: input.messages, observed_at })
     // Admission precedes capture: excluded bytes are refused before storage.
-    const excluded = this.product.state().suppressed
-    if ([`memory-source:${source_ref}`, `memory-source-digest:${source_digest}`].some(key => excluded.includes(key))) {
+    if (this.product.isSuppressed([`memory-source:${source_ref}`, `memory-source-digest:${source_digest}`])) {
       throw new MemoryError('NotFoundOrNotVisible', 'this source is excluded from memory by an earlier forget')
     }
     if (existing) {
@@ -163,6 +165,7 @@ export class MemoryLedger {
       ...(input.order ? { order: input.order } : {}), erased: false,
     }
     this.kv.put(SOURCE + source_ref, staged)
+    this.kv.put(SOURCE_RECEIPTS + source_ref, [])
     return { source_ref, source_digest, captured_at }
   }
 
@@ -186,23 +189,19 @@ export class MemoryLedger {
     const message: Message = isJsonMap(payload) && typeof payload.role === 'string'
       ? (payload as unknown as Message)
       : { role: 'user', content: JSON.stringify(payload) }
-    return { ref: sourceRef, digest: row.row.content_digest || digest(payload), messages: [message], observed_at: row.row.observed_at || row.row.created_at, evidence: sourceRef }
+    return { ref: sourceRef, digest: row.row.content_digest || jsonDigest(payload), messages: [message], observed_at: row.row.observed_at || row.row.created_at, evidence: sourceRef }
   }
 
   // ── Scope ────────────────────────────────────────────────────────────────
 
   resolveScope(scope: Scope | undefined, create: boolean): ResolvedScope {
-    const contexts = [...new Set(scope?.context_refs ?? [])].sort()
-    const requested: Scope = {
-      ...(scope?.task_ref === undefined ? {} : { task_ref: scope.task_ref }),
-      ...(contexts.length ? { context_refs: contexts } : {}),
-    }
+    const requested = this.resolveScopeShape(scope)
     const resolved: ResolvedScope = { requested, task: null, contexts: [] }
     if (requested.task_ref !== undefined) {
       resolved.task = this.scopeConcept(requested.task_ref, create)
       resolved.contexts.push(resolved.task)
     }
-    for (const context of contexts) resolved.contexts.push(this.scopeConcept(context, create))
+    for (const context of requested.context_refs ?? []) resolved.contexts.push(this.scopeConcept(context, create))
     resolved.contexts = [...new Set(resolved.contexts)].sort()
     return resolved
   }
@@ -272,7 +271,7 @@ export class MemoryLedger {
     if (operation !== 'forget') {
       try { source = this.resolveSource(namespace, input.source_ref as string) } catch (error) { sourceError = error }
     }
-    const meaning = (sourceDigest: string | undefined) => digest({
+    const meaning = (sourceDigest: string | undefined) => jsonDigest({
       operation, scope: requested, input, source: operation === 'forget' ? null : { ref: input.source_ref, digest: sourceDigest ?? null },
     })
     if (existing) {
@@ -320,6 +319,11 @@ export class MemoryLedger {
       record.intent = intent
     }
     this.kv.put(RECEIPT + receiptRef, record)
+    if (source?.ref.startsWith('src-')) {
+      const receipts = this.kv.get<string[]>(SOURCE_RECEIPTS + source.ref)
+      // A source staged before receipts were listed keeps its full-scan fallback.
+      if (receipts && !receipts.includes(receiptRef)) this.kv.put(SOURCE_RECEIPTS + source.ref, [...receipts, receiptRef])
+    }
     return {
       record,
       messages: source?.messages ?? [],
@@ -341,11 +345,8 @@ export class MemoryLedger {
   finishFormation(receiptRef: string, trace: PassTrace): IntakeRecord {
     const record = this.kv.get<IntakeRecord>(RECEIPT + receiptRef) ?? notFound('receipt')
     record.created = [...new Set([...(record.created ?? []), ...trace.created])]
+    if (trace.evidence.length) record.evidence = [...new Set([...(record.evidence ?? []), ...trace.evidence])]
     this.kv.put(RECEIPT + receiptRef, record)
-    if (trace.evidence.length) {
-      record.evidence = [...new Set([...(record.evidence ?? []), ...trace.evidence])]
-      this.kv.put(RECEIPT + receiptRef, record)
-    }
     const warnings: string[] = []
     let refs = trace.formed.slice(0, MAX_ITEMS)
     let disposition: Disposition = trace.formed.length ? 'formed' : trace.evidence.length ? 'evidence_only' : 'skipped'
@@ -370,7 +371,7 @@ export class MemoryLedger {
           : `bytes=0-${Math.max(0, (typeof payload === 'string' ? payload : JSON.stringify(payload)).length - 1)}`
         const result = this.session.repairRecording({
           source_ref: intent.original_evidence,
-          source_digest: evidence.content_digest || digest(payload),
+          source_digest: evidence.content_digest || jsonDigest(payload),
           source_locator: locator,
           invalidated_refs: [intent.target_ref],
           replacement_refs: replacements,
@@ -429,7 +430,7 @@ export class MemoryLedger {
           ? 'SET FACET "MemoryScope" {task_ref: :scope_task, context_refs: :contexts}' : ''
         const outcome = this.session.execute(`MUTATE {
           CREATE EVIDENCE ?e { CLIENT KEY :key SET FIELDS { evidence_class: :class, payload: :payload, observed_at: :at } ${scoped} }
-        }`, { key: `memory-${purpose}:${receiptRef}:${index + 1}`, class: originalClass ?? evidenceClass(message.role), payload, at,
+        }`, { key: `memory-${purpose}:${receiptRef}:${index + 1}`, class: originalClass ?? evidenceClassOf(message.role), payload, at,
           scope_task: record.scope.task, contexts: record.scope.contexts })
         if (outcome.handles.e) evidence.push(outcome.handles.e)
         if (typeof outcome.space_seq === 'number') max = Math.max(max, outcome.space_seq)
@@ -461,7 +462,7 @@ export class MemoryLedger {
     const input = request.input as { target_ref: string; mode: 'payload_only' | 'semantic' }
     if (input.mode === 'semantic' && !owner) throw new MemoryError('NotAuthorized', "a semantic forget is the owner's decision")
     const receiptRef = `rcpt-${hexId([namespace, space, 'forget', request.idempotency_key])}`
-    const meaning = digest({ operation: 'forget', input })
+    const meaning = jsonDigest({ operation: 'forget', input })
     const existing = this.kv.get<IntakeRecord>(RECEIPT + receiptRef)
     if (existing) {
       if (existing.namespace !== namespace || existing.intent_digest !== meaning) throw new MemoryError('IdempotencyConflict', 'this idempotency key was used for a different request')
@@ -484,14 +485,13 @@ export class MemoryLedger {
         staged = this.stagedSource(namespace, input.target_ref)
         suppressed.add(`memory-source:${staged.source_ref}`)
         suppressed.add(`memory-source-digest:${staged.source_digest}`)
-        for (const [, intake] of this.kv.list<IntakeRecord>({ prefix: RECEIPT })) {
-          if (intake.source_ref !== staged.source_ref) continue
+        for (const intake of this.sourceIntakes(staged.source_ref)) {
           if (!intake.terminal) { status = 'partial'; summary = 'source processing has not finished' }
           for (const reference of (isJsonMap(intake.result) && Array.isArray(intake.result.memory_refs) ? intake.result.memory_refs : [])) {
             if (typeof reference === 'string' && reference.startsWith('E-')) evidenceTargets.push(reference)
             if (input.mode === 'semantic' && typeof reference === 'string' && reference.startsWith('C-')) {
               const element = this.nexus.store.load(parseElementId(reference))
-              if (element?.kind === 'Concept' && ['Event', 'Insight', 'Experience', 'Commitment'].includes(local(element.row.schema_ref))) {
+              if (element?.kind === 'Concept' && ['Event', 'Insight', 'Experience', 'Commitment'].includes(localName(element.row.schema_ref))) {
                 if (intake.created?.includes(reference)) ownedConcepts.add(reference)
                 else { status = 'partial'; summary = 'some source outputs have no verified ownership trace' }
               }
@@ -618,6 +618,16 @@ export class MemoryLedger {
     return view as JsonMap
   }
 
+  /** The intake records admitted from one staged source. */
+  private sourceIntakes(sourceRef: string): IntakeRecord[] {
+    const listed = this.kv.get<string[]>(SOURCE_RECEIPTS + sourceRef)
+    if (listed === undefined) {
+      // Staged before receipts were listed on their source: scan them all.
+      return [...this.kv.list<IntakeRecord>({ prefix: RECEIPT })].map(([, intake]) => intake).filter(intake => intake.source_ref === sourceRef)
+    }
+    return listed.flatMap(ref => this.kv.get<IntakeRecord>(RECEIPT + ref) ?? [])
+  }
+
   private eraseStaged(sourceRef: string): boolean {
     const staged = this.kv.get<StagedSource>(SOURCE + sourceRef)
     if (!staged || staged.erased) return false
@@ -645,18 +655,15 @@ export class MemoryLedger {
   }
 
   /**
-   * Builds a briefing from what the Recall pass cited plus the host's own
-   * channel reads (MI §6; see the Rust `recall.rs`). Returns the briefing
-   * without its budget applied; `memory.ts` trims optional items to fit.
+   * What a recall pass rests on (MI §6; see the Rust `recall.rs`): the items
+   * the pass cited plus the host's own channel reads, before any budget.
    */
-  briefing(
-    _namespace: string, scopeInput: Scope | undefined, cited: string[], options: {
-      mode: string; valid_at?: string; as_of_seq?: number; query?: string; after: Progress[]
+  private collect(
+    scope: ResolvedScope, cited: string[], options: {
+      mode: string; valid_at?: string; as_of_seq?: number; query?: string
       uncertainties: string[]; evidence_complete: boolean; summary?: string
     },
-  ): { briefing: Briefing; candidates: Candidate[]; dropped: boolean } {
-    const scope = this.resolveScope(scopeInput, false)
-    const snapshot = options.as_of_seq ?? this.seq()
+  ): Collected {
     const candidates: Candidate[] = []
     let dropped = false
     for (const id of cited) {
@@ -685,6 +692,7 @@ export class MemoryLedger {
     plans.evidence = { exact: false, complete: options.evidence_complete, truncation: options.evidence_complete ? null : 'unsupported' }
     const unverified: string[] = []
     for (const candidate of [...candidates]) {
+      // Already read by the item or its channel; the row memo answers it.
       const row = this.row(candidate.pins[0]![0], options.as_of_seq)
       const validity = isJsonMap(row) && isJsonMap(row._system) ? row._system.dependency_validity : undefined
       const status = isJsonMap(validity) ? validity.status : validity
@@ -709,31 +717,29 @@ export class MemoryLedger {
     candidates.splice(MAX_ITEMS)
     const summary = options.summary && !dropped ? options.summary
       : candidates.length ? candidates.slice(0, 12).map(c => `- ${c.item.text}`).join('\n') : 'No recorded memory bears on this in scope.'
-    const briefing = this.assemble(scope, snapshot, plans, candidates, options.after, unverified, uncertainties, summary)
-    return { briefing, candidates, dropped }
+    return { candidates, plans, dropped, unverified, uncertainties, summary }
   }
 
-  /** The briefing for a candidate set, with fresh item refs. */
-  assemble(scope: ResolvedScope, snapshot: number, plans: Record<string, Plan>, candidates: Candidate[], after: Progress[],
-    unverified: string[], uncertainties: string[], summary: string): Briefing {
+  /** The briefing for a candidate set under one basis. */
+  private assemble(scope: ResolvedScope, snapshot: number, basis: string, plans: Record<string, Plan>, candidates: Candidate[],
+    after: Progress[], collected: Pick<Collected, 'unverified' | 'uncertainties' | 'summary'>): Briefing {
     const channels = Object.fromEntries(CHANNELS.map(name => [name, plans[name]?.complete === false ? 'incomplete' : 'complete'])) as unknown as Channels
     const pending = after.filter(p => p.phase !== 'available' || (p.available_seq ?? Infinity) > snapshot).map(p => p.receipt_ref)
-    const coverage = coverageOf(scope.requested, channels, pending, [...new Set(unverified)])
-    const basis = `basis-${hexId([crypto.randomUUID()])}`
+    const coverage = coverageOf(scope.requested, channels, pending, [...new Set(collected.unverified)])
     const items = candidates.map((candidate, index): MemoryItem => ({
       ...candidate.item, ref: `${basis}:${index}`,
       action_eligible: coverage.action_eligible && candidate.item.epistemic_status === 'accepted' && (candidate.item.role === 'fact' || candidate.item.role === 'constraint'),
     }))
-    const briefing: Briefing = { summary: summary.slice(0, 4096) || 'No recorded memory bears on this in scope.', items,
-      uncertainties: [...new Set(uncertainties)].slice(0, 128), basis_ref: basis, coverage, after }
-    ;(briefing as Briefing & { __plans?: Record<string, Plan>; __snapshot?: number; __scope?: ResolvedScope }).__plans = plans
-    return briefing
+    return { summary: collected.summary.slice(0, 4096) || 'No recorded memory bears on this in scope.', items,
+      uncertainties: [...new Set(collected.uncertainties)].slice(0, 128), basis_ref: basis, coverage, after }
   }
 
   /**
    * The whole recall answer: builds the briefing, trims optional items to the
    * output budget (required constraints and warnings never go; what does not
    * fit makes its channel incomplete), retains the basis and logs exposure.
+   * The largest set of optional items that fits is found by bisection, so a
+   * long candidate list is serialized a logarithmic number of times.
    */
   deliver(
     namespace: string, scopeInput: Scope | undefined, cited: string[], options: {
@@ -744,43 +750,57 @@ export class MemoryLedger {
   ): Briefing {
     const scope = this.resolveScope(scopeInput, false)
     const snapshot = options.as_of_seq ?? this.seq()
-    const built = options.mode === 'attention'
-      ? { briefing: this.assemble(scope, snapshot, Object.fromEntries(CHANNELS.map(name => [name, { exact: true, complete: true, truncation: null }])),
-          [], options.after, [], options.uncertainties, `${options.attention?.length ?? 0} attention item(s) raised since the cursor. An item is a prompt to think, never permission to act.`),
-        candidates: [] as Candidate[], dropped: false }
-      : this.briefing(namespace, scopeInput, cited, options)
-    if (built.dropped) options.warnings.push('the recall pass read unavailable, invalidated or out-of-scope memory; its summary was replaced with verified items')
-    const plans = (built.briefing as Briefing & { __plans?: Record<string, Plan> }).__plans ?? {}
-    const candidates = built.candidates
-    for (;;) {
-      const briefing = this.assemble(scope, snapshot, plans, candidates, options.after,
-        built.briefing.coverage.unverified_preconditions, built.briefing.uncertainties, built.briefing.summary)
-      if (options.mode === 'attention') {
+    const attention = options.mode === 'attention'
+    const collected: Collected = attention
+      ? { candidates: [], plans: Object.fromEntries(CHANNELS.map(name => [name, { exact: true, complete: true, truncation: null }])),
+          dropped: false, unverified: [], uncertainties: options.uncertainties,
+          summary: `${options.attention?.length ?? 0} attention item(s) raised since the cursor. An item is a prompt to think, never permission to act.` }
+      : this.collect(scope, cited, options)
+    if (collected.dropped) options.warnings.push('the recall pass read unavailable, invalidated or out-of-scope memory; its summary was replaced with verified items')
+    const basis = `basis-${hexId([crypto.randomUUID()])}`
+    const optional = collected.candidates.filter(candidate => !candidate.required).length
+    // Keeps every required item and the first `keep` optional ones; each
+    // optional item left out marks its channel incomplete.
+    const build = (keep: number) => {
+      const plans = { ...collected.plans }
+      let kept = 0
+      const candidates = collected.candidates.filter(candidate => {
+        if (candidate.required || kept++ < keep) return true
+        const role = candidate.item.role
+        const channel = role === 'experience' ? 'experiences' : role === 'procedure' ? 'skills' : 'evidence'
+        plans[channel] = { ...(plans[channel] ?? { exact: false }), complete: false, truncation: 'budget' }
+        return false
+      })
+      const briefing = this.assemble(scope, snapshot, basis, plans, candidates, options.after, collected)
+      if (attention) {
         for (const name of CHANNELS) (briefing.coverage.channels as unknown as Record<string, ChannelState>)[name] = 'not_applicable'
       }
       if (options.attention) {
         briefing.attention = options.attention
         if (options.attention_cursor) briefing.attention_cursor = options.attention_cursor
       }
-      delete (briefing as Briefing & { __plans?: unknown }).__plans
-      if (new TextEncoder().encode(JSON.stringify(briefing)).byteLength <= options.max_tokens) {
-        this.retain(namespace, scopeInput, briefing, candidates, plans, snapshot)
-        return briefing
-      }
-      let index = -1
-      for (let i = candidates.length - 1; i >= 0; i -= 1) if (!candidates[i]!.required) { index = i; break }
-      if (index < 0) {
+      return { briefing, candidates, plans, fits: fitsBudget(briefing, options.max_tokens) }
+    }
+    let best = build(optional)
+    if (!best.fits) {
+      best = build(0)
+      if (!best.fits) {
         throw new MemoryError('ResultLimitExceeded', `the required constraints, warnings and coverage need more than ${options.max_tokens} tokens`)
       }
-      const [removed] = candidates.splice(index, 1)
-      const channel = removed!.item.role === 'experience' ? 'experiences' : removed!.item.role === 'procedure' ? 'skills' : 'evidence'
-      plans[channel] = { ...(plans[channel] ?? { exact: false }), complete: false, truncation: 'budget' }
+      let low = 0
+      let high = optional
+      while (high - low > 1) {
+        const middle = (low + high) >> 1
+        const attempt = build(middle)
+        if (attempt.fits) { low = middle; best = attempt } else high = middle
+      }
     }
+    this.retain(namespace, scope, best.briefing, best.candidates, best.plans, snapshot)
+    return best.briefing
   }
 
   /** Retains a delivered briefing's basis and records `retrieved` exposure. */
-  retain(namespace: string, scopeInput: Scope | undefined, briefing: Briefing, candidates: Candidate[], plans: Record<string, Plan>, snapshot: number): void {
-    const scope = this.resolveScope(scopeInput, false)
+  private retain(namespace: string, scope: ResolvedScope, briefing: Briefing, candidates: Candidate[], plans: Record<string, Plan>, snapshot: number): void {
     const basisRow = this.basis(candidates, scope, snapshot)
     const authorizationView = isJsonMap(basisRow) && typeof basisRow.authorization_view === 'string' ? basisRow.authorization_view : 'kip:system'
     const channelStates: JsonMap = {}, planValues: JsonMap = {}
@@ -789,7 +809,7 @@ export class MemoryLedger {
       const state = (briefing.coverage.channels as unknown as Record<string, ChannelState>)[name]
       channelStates[name] = { completed: state !== 'incomplete', truncated: plan.truncation !== null }
       planValues[name] = {
-        selector: { artifact_ref: `anda-brain:recall-plan/${name}`, content_digest: digest({ channel: name, exact: plan.exact }) },
+        selector: { artifact_ref: `anda-brain:recall-plan/${name}`, content_digest: jsonDigest({ channel: name, exact: plan.exact }) },
         scope: { task_ref: scope.task, context_refs: scope.contexts },
         method: plan.exact ? 'exact' : 'approximate', snapshot_seq: snapshot, index_seq: snapshot, covered_through_seq: snapshot,
         authorization_view: authorizationView, complete: plan.complete, truncation_reason: plan.truncation,
@@ -858,16 +878,27 @@ export class MemoryLedger {
   // ── helpers ──────────────────────────────────────────────────────────────
 
   private row(id: string, asOf?: number): JsonMap | null {
+    const key = `${id}@${asOf ?? ''}`
+    const cached = this.rows.get(key)
+    if (cached !== undefined) return cached
     const parsed = tryParseElementId(id)
     if (!parsed) return null
     const pattern = parsed.kind === 'Concept' ? '?e CONCEPT {id: :id}'
       : parsed.kind === 'Proposition' ? '?e PROPOSITION (id: :id)'
         : parsed.kind === 'Assertion' ? '?e ASSERTION {id: :id}'
           : parsed.kind === 'Evidence' ? '?e EVIDENCE {id: :id}' : '?e ACTIVITY {id: :id}'
+    let row: JsonMap | null = null
     try {
       const rows = this.query(`FIND(?e) WHERE { ${pattern} }${asOf === undefined ? '' : ` AS OF SEQ ${asOf}`} LIMIT 1`, { id })
-      return isJsonMap(rows[0]) ? rows[0] : null
-    } catch { return null }
+      row = isJsonMap(rows[0]) ? rows[0] : null
+    } catch { row = null }
+    this.rows.set(key, row)
+    return row
+  }
+
+  /** Remembers a whole element a channel read, so a later `row` does not reread it. */
+  private remember(row: Json, asOf?: number): void {
+    if (isJsonMap(row) && typeof row.id === 'string') this.rows.set(`${row.id}@${asOf ?? ''}`, row)
   }
 
   /** An endpoint as a reader sees it: a Concept's name, else the literal. */
@@ -923,7 +954,7 @@ export class MemoryLedger {
       if (!proposition) return null
       const belief = this.belief(proposition, scope, validAt, asOf)
       const prop = this.row(proposition, asOf)
-      const text = prop ? `${this.label(prop.subject)} · ${local(String(prop.predicate_ref ?? '?'))} · ${this.label(prop.object)}` : proposition
+      const text = prop ? `${this.label(prop.subject)} · ${localName(String(prop.predicate_ref ?? '?'))} · ${this.label(prop.object)}` : proposition
       const evidence = (Array.isArray(row.evidence) ? row.evidence : Array.isArray(row.evidence_refs) ? row.evidence_refs : [])
         .flatMap(ref => typeof ref === 'string' ? [ref] : isJsonMap(ref) && typeof ref.id === 'string' ? [ref.id] : []).slice(0, 32)
       return { item: { ref: '', text: text.slice(0, 4096), role: 'fact', epistemic_status: statusOf(belief?.status), evidence_refs: evidence, action_eligible: false },
@@ -939,7 +970,7 @@ export class MemoryLedger {
         .flatMap(ref => typeof ref === 'string' ? [ref] : isJsonMap(ref) && typeof ref.id === 'string' ? [ref.id] : [])))
       if (!inScope) return 'out_of_scope'
       const belief = this.belief(id, scope, validAt, asOf)
-      return { item: { ref: '', text: `${this.label(row.subject)} · ${local(String(row.predicate_ref ?? '?'))} · ${this.label(row.object)}`.slice(0, 4096),
+      return { item: { ref: '', text: `${this.label(row.subject)} · ${localName(String(row.predicate_ref ?? '?'))} · ${this.label(row.object)}`.slice(0, 4096),
         role: 'fact', epistemic_status: statusOf(belief?.status), evidence_refs: [], action_eligible: false }, pins: [[id, version]], required: false }
     }
     if (parsed.kind === 'Concept') {
@@ -963,6 +994,7 @@ export class MemoryLedger {
     }
     const truncated = rows.length > CHANNEL_LIMIT
     const items = rows.slice(0, CHANNEL_LIMIT).flatMap(row => {
+      this.remember(row, asOf)
       if (!isJsonMap(row)) return []
       const [task, contexts] = conceptScope(row)
       if (!admits(scope, task, contexts)) return []
@@ -986,6 +1018,7 @@ export class MemoryLedger {
     }
     const truncated = !query.trim() && rows.length > SEARCH_LIMIT
     const items = rows.slice(0, SEARCH_LIMIT).flatMap(row => {
+      this.remember(row, asOf)
       if (!isJsonMap(row)) return []
       const [task, contexts] = conceptScope(row)
       if (!admits(scope, task, contexts)) return []
@@ -998,6 +1031,11 @@ export class MemoryLedger {
 
 export interface Candidate { item: MemoryItem; pins: [string, number][]; required: boolean }
 export interface Plan { exact: boolean; complete: boolean; truncation: string | null }
+/** What a recall pass rests on before the output budget is applied. */
+interface Collected {
+  candidates: Candidate[]; plans: Record<string, Plan>; dropped: boolean
+  unverified: string[]; uncertainties: string[]; summary: string
+}
 interface RetainedRecall {
   namespace: string; snapshot_seq: number; scope: ResolvedScope; basis: Json; coverage: JsonMap
   items: [string, [string, number][]][]; created_at: number
@@ -1015,7 +1053,7 @@ function roleRank(role: Role): number {
 
 function conceptScope(row: JsonMap | null): [string | null, string[]] {
   const facets = row && isJsonMap(row.facets) ? row.facets : null
-  const scope = facets ? Object.entries(facets).find(([name]) => local(name) === 'MemoryScope')?.[1] : undefined
+  const scope = facets ? Object.entries(facets).find(([name]) => localName(name) === 'MemoryScope')?.[1] : undefined
   if (!isJsonMap(scope)) return [null, []]
   const task = typeof scope.task_ref === 'string' ? scope.task_ref : null
   const contexts = Array.isArray(scope.context_refs) ? scope.context_refs.filter((c): c is string => typeof c === 'string') : []
@@ -1030,7 +1068,7 @@ function admits(scope: ResolvedScope, task: string | null, contexts: string[]): 
 function conceptItem(row: JsonMap, required: boolean): Candidate | null {
   const id = typeof row.id === 'string' ? row.id : null
   if (!id) return null
-  const type = local(typeof row.schema_ref === 'string' ? row.schema_ref : typeof row.type === 'string' ? row.type : '')
+  const type = localName(typeof row.schema_ref === 'string' ? row.schema_ref : typeof row.type === 'string' ? row.type : '')
   const attributes = isJsonMap(row.attributes) ? row.attributes : {}
   const name = typeof row.name === 'string' ? row.name : ''
   const summary = typeof attributes.summary === 'string' ? attributes.summary : typeof attributes.goal === 'string' ? attributes.goal : name

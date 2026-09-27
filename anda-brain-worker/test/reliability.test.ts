@@ -137,7 +137,7 @@ it('provides Event content, versions and the live primer to maintenance',async()
   expect(payload.snapshot.snapshot[0].result[0]._system.version).toBeGreaterThan(0)
 })
 
-it('groups predicate counts in one query and bounds snapshot candidates before KQL', async () => {
+it('counts predicates without loading Propositions and bounds snapshot candidates before KQL', async () => {
   const brain = makeBrain()
   await brain.declareSymbols(['WritingStyle'],Array.from({length:16},(_,i)=>`relation_${i}`))
   await runInDurableObject(brain as never,(instance)=>{
@@ -153,8 +153,9 @@ it('groups predicate counts in one query and bounds snapshot candidates before K
     }) as typeof nexus.store.all
     try {
       const assessment = (instance as unknown as AndaBrain).maintenanceAssessment()
+      // Counted by one SQL group-by, not a KQL scan loading every Proposition.
       const predicateReads = calls.filter(c=>c.table==='propositions').length
-      expect(predicateReads).toBe(1)
+      expect(predicateReads).toBe(0)
       expect(Object.keys(assessment.predicates)).toHaveLength(19)
       calls.length=0
       const host = instance as unknown as AndaBrain
@@ -324,4 +325,113 @@ it('aggregates erasure cleanup and scrubs every preview page, including expired 
       expect(JSON.stringify(entry)).not.toContain('private draft')
     }
   })
+})
+
+it('counts predicate use per lineage in the maintenance census', async () => {
+  const brain = makeBrain()
+  await brain.declareSymbols(['WritingStyle'], [])
+  for (const name of ['terse', 'formal']) {
+    expect((await brain.executeKip(`MUTATE {
+      UPSERT CONCEPT ?person {MATCH {type:"Person",key:"${SYSTEM_PRINCIPAL}"}}
+      CREATE CONCEPT ?value {TYPE "WritingStyle" NAME :name}
+      ENSURE PROPOSITION ?p (?person, "prefers", ?value)
+    }`, {name})).status).toBe('succeeded')
+  }
+  const assessment = await brain.maintenanceAssessment()
+  expect(assessment.predicates.prefers).toBe(2)
+  expect(assessment.predicates.caused_by).toBe(0)
+})
+
+it('keeps the host\'s scope handles out of the maintenance snapshot', async () => {
+  const brain = makeBrain()
+  expect((await brain.executeKip(`UPSERT CONCEPT ?scope {
+    MATCH {type: "Event", key: "memory_scope:release"}
+    SET FIELDS {name: "release"}
+    SET ATTRIBUTES {event_class: "memory_scope", summary: "Memory scope handle release, named by the host"}
+  }`)).status).toBe('succeeded')
+  expect((await brain.executeKip('CREATE CONCEPT ?e {TYPE "Event" NAME "shipped" SET ATTRIBUTES {event_class: "conversation", summary: "Shipped the release"}}')).status).toBe('succeeded')
+  const run = await brain.beginMaintenance(0, Date.now()+60_000)
+  const [events] = await brain.maintenanceSnapshot(0, run)
+  await brain.endMaintenance(run)
+  expect((events!.result as any[]).map(row => row.name)).toEqual(['shipped'])
+})
+
+it('counts only active elements in the Space statistics', async () => {
+  const brain = makeBrain()
+  const before = await brain.stats()
+  const created = await brain.executeKip('CREATE CONCEPT ?c {TYPE "Person" NAME "Erased Person"}')
+  const id = created.extensions!['kip-do/outcome']!.handles.c!
+  expect((await brain.stats()).concepts).toBe(before.concepts + 1)
+  expect((await brain.forgetMemory({entities:[id]})).deleted_concepts).toBe(1)
+  expect((await brain.stats()).concepts).toBe(before.concepts)
+})
+
+it('reads superseded claims and raising Activities through their indexes', async () => {
+  const brain = makeBrain()
+  for (let i = 0; i < 30; i++) {
+    expect((await brain.executeKip(`MUTATE {
+      UPSERT CONCEPT ?person {MATCH {type:"Person",key:"${SYSTEM_PRINCIPAL}"}}
+      CREATE CONCEPT ?value {TYPE "Person" NAME :name}
+      ASSERT ?claim (?person, "same_as", ?value) {by: ?person, mode: "stated"}
+      CREATE ACTIVITY ?work {SET FIELDS {activity_class: "formation", status: "completed"}}
+    }`, {name: `value ${i}`})).status).toBe('succeeded')
+  }
+  await runInDurableObject(brain as never, (instance) => {
+    const nexus = (instance as unknown as {nexus:CognitiveNexus}).nexus
+    const all = nexus.store.all.bind(nexus.store)
+    const rows: Record<string, number> = {}
+    nexus.store.all = ((...args: Parameters<typeof all>) => {
+      const result = all(...args)
+      rows[args[0]] = (rows[args[0]] ?? 0) + result.length
+      return result
+    }) as typeof nexus.store.all
+    try {
+      const host = instance as unknown as AndaBrain
+      expect(host.settleMemory(Date.now()).corrections.revised_roots).toEqual([])
+      expect(host.recallAttention({}).items).toEqual([])
+      // Neither the 30 active claims nor the 30 formation Activities are loaded.
+      expect(rows.assertions ?? 0).toBe(0)
+      expect(rows.activities ?? 0).toBe(0)
+    } finally { nexus.store.all = all }
+  })
+})
+
+it('refuses a DEFINE past the vocabulary cap as a plan error, not a host failure', async () => {
+  const space = crypto.randomUUID()
+  const brain = env.BRAIN.getByName(space) as unknown as Brain
+  const filled = await brain.declareSymbols([], Array.from({length:512}, (_, i) => `relation_${i}`))
+  expect(filled.draft_predicates).toHaveLength(512)
+  const response = await handleRequest(new Request(`https://test/v1/${space}/formation`, {
+    method: 'POST', body: JSON.stringify({messages:[{role:'user',content:'Alice mentors Bob'}]}),
+  }), runtime(async () => ({response:{...empty, commands:['DEFINE PREDICATE "mentors" {description: "The subject mentors the object."}']}})))
+  expect(response.status).toBe(422)
+  expect(await response.json()).toMatchObject({error:{data:{error:{code:'ResourceExhausted'}}}})
+})
+
+it('treats a blank model timeout as the default and caps it at a caller budget', () => {
+  const unset = new ModelDeadline('')
+  const capped = new ModelDeadline('120000', 50)
+  try {
+    expect(unset.expiresAt - Date.now()).toBeGreaterThan(100_000)
+    expect(capped.expiresAt - Date.now()).toBeLessThanOrEqual(50)
+  } finally { unset.close(); capped.close() }
+})
+
+it('fences in-flight passes and scrubs previews when execute_kip purges', async () => {
+  const space = crypto.randomUUID()
+  const brain = env.BRAIN.getByName(space) as unknown as Brain
+  const created = await brain.executeKip('CREATE CONCEPT ?c {TYPE "Person" NAME "Admin Erased"}')
+  const id = created.extensions!['kip-do/outcome']!.handles.c!
+  const epoch = await brain.beginProcessing()
+  const response = await handleRequest(new Request(`https://test/v1/${space}/execute_kip`, {
+    method: 'POST', body: JSON.stringify({command: 'PURGE :id REFERENCE POLICY "authorized_cascade" CONFIRM "PURGE"', parameters: {id}}),
+  }), runtime(async () => { throw new Error('unexpected AI call') }))
+  expect(response.status).toBe(200)
+  expect((await brain.productStatus()).epoch).toBe(epoch + 1)
+  await expect((async () => await brain.checkProcessing(epoch))()).rejects.toThrow('memory_changed_rebuild_context')
+  // A write that erases nothing leaves in-flight passes alone.
+  await handleRequest(new Request(`https://test/v1/${space}/execute_kip`, {
+    method: 'POST', body: JSON.stringify({command: 'CREATE CONCEPT ?c {TYPE "Person" NAME "Kept"}'}),
+  }), runtime(async () => { throw new Error('unexpected AI call') }))
+  expect((await brain.productStatus()).epoch).toBe(epoch + 1)
 })

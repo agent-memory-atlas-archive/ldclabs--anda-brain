@@ -85,13 +85,16 @@ pnpm --filter @ldclabs/anda-brain-worker check
 
 - 这个 Worker 只有一个 API key，所以所有调用方同属一个句柄命名空间；该 key 同时是所有者凭据，
   可以执行 `semantic` forget。
-- `POST /v1/{space}/memory/sources` 暂存来源（最多 16 条消息、256 KiB）；
+- `POST /v1/{space}/memory/sources` 暂存来源（最多 16 条消息、256 KiB）；`observed_at` 与
+  Formation 的 `timestamp` 同一规则：带时区偏移、至多毫秒精度的 RFC 3339，否则返回 400。
   `GET /v1/{space}/memory/{receipts|sources|plans}/{ref}` 读取回执进度、暂存来源与擦除计划。
 - observe / revise 在请求内完成 Formation，回执返回时已是 `available` 或 `failed`；一直没有回报
   结果的回执十分钟后读为 `failed`（`OutcomeUnknown`），不会重跑。带作用域的计划若有 ASSERT 没写
   `context: :contexts`，整份计划被拒，回执失败。
 - recall 的 `max_output_tokens` 按 UTF-8 字节数保守限制（每个 o200k token 至少一个字节，所以
-  不会少算，可能比 Rust 服务更早裁掉可选条目）。展开默认预算为 65,536。
+  不会少算，可能比 Rust 服务更早裁掉可选条目），装得下的最多可选条目用二分查找确定。
+  展开默认预算为 65,536。`budget.deadline_ms` 同时是本次 Recall 模型调用的截止时间：超时即取消
+  模型调用，briefing 以 `the recall pass did not complete` 不确定性返回，而不是让调用在后台继续。
 - 省略 `observed_at` 的暂存重试复用首次观察时间；feedback 保留请求作用域。
   误记失效后，依赖它的模型摘要会被替换。来源遗忘包含有新建轨迹的记忆概念；
   轨迹缺失或处理未完成则报告 partial，不删除共享人物/选项概念。
@@ -380,7 +383,7 @@ Activity 的 `space_seq`），并返回新的 `attention_cursor`。一次提交�
 | Method | Path | 说明 |
 | --- | --- | --- |
 | `GET` | `/healthz` | 健康检查，不需要鉴权 |
-| `GET` | `/v1/{space}/info` | 元素计数、Schema 环境版本和初始化时间 |
+| `GET` | `/v1/{space}/info` | 活跃元素计数（不含已归档与已擦除的存根）、Schema 环境版本和初始化时间 |
 | `GET` | `/v1/{space}/vocabulary` | 本空间的草稿符号与旧宿主包符号 |
 | `GET` | `/v1/{space}/schema/drafts` | 草稿定义及晋升去向 |
 | `POST` | `/v1/{space}/schema/promote` | 所有者把草稿晋升到已安装符号 |
@@ -393,6 +396,10 @@ Activity 的 `space_seq`），并返回新的 `attention_cursor`。一次提交�
 直接 KIP 的请求体与 Rust 服务一致：`{"command": "..."}` 或 `{"operations": [...]}`，二选一。`parameters` 会绑定进命令的 `:placeholder`（结构化绑定，不是字符串插值），单个 operation 自己的 `parameters` 覆盖共享的同名键。每个 operation 可以带自己的 `op_id`，会原样回显在对应结果上——这是批次答案与请求配对的唯一可靠方式。
 
 `execution` 可选：`{"mode": "independent"}`（默认，各自独立提交）或 `{"mode": "sequence", "on_error": "stop"}`（一条失败后，其余答 `skipped` 而不执行）。`"atomic"` 被明确拒绝——本引擎没有跨 operation 的事务，把它当 sequence 跑就等于谎报了原子性。
+
+含 `PURGE` 或 `PURGE PAYLOAD` 的 `execute_kip` 批次与 `memory/forget` 一样：执行前开启新的处理代次，
+进行中的 Formation / Recall / Maintenance 以 409 结束并需重建上下文；执行后从产品预览副本清除被擦除的
+元素。托管变更尚未完成时这样的批次返回 409（`memory_change_pending`）。
 
 ```bash
 curl http://localhost:8787/v1/alice/execute_kip_readonly \
@@ -424,7 +431,7 @@ curl http://localhost:8787/v1/alice/execute_kip_readonly \
   仅确认本次快照中实际审阅的根；失败、延后或省略确认时，下轮仍提供这些根。
   确认有界审阅不证明依赖闭包完整，也不覆盖原生 dependency validity。
 - 快照先在 SQLite 选每组最多 20 个候选 ID，再通过原生授权读取完整元素视图与版本，
-  并提供 live primer。任务排除终态；候选轮转位置表示已提供，不表示已处理。
+  并提供 live primer。任务排除终态，Memory Interface 的作用域句柄 Event 是宿主记账，不进入快照；候选轮转位置表示已提供，不表示已处理。
   KIP 查询的 `LIMIT` 仍是结果条数上限，不是通用扫描工作量上限。
 - Formation / Maintenance 返回 `operation_results`，每项包含 `status` 和可用的原生
   `receipt`（以及请求指定时的 `op_id`）。没有实际计划变更时，宿主返回无变更文案，
@@ -436,7 +443,9 @@ curl http://localhost:8787/v1/alice/execute_kip_readonly \
   模型超时返回 HTTP 504（`model_timeout`）；其他模型调用/输出错误返回 HTTP 502。
   错误数据保留已知用量。初次写入后复核失败仍返回带回执的 422，不能重放整份计划。
 - 管理修改后的模型 Session 在原生读取时排除非活跃元素，覆盖结构引用、按 ID 读取
-  Proposition、嵌套查询与聚合；管理审计接口仍可读取历史。HTTP 409 的
+  Proposition、嵌套查询与聚合；管理审计接口仍可读取历史。模型读取的能力因此以 Space 的
+  第一次托管变更（产品变更、forget 或管理级擦除）为界：此前 Recall 规划可用普通只读 KQL / META，
+  此后只接受当前 KQL 与 SEARCH，历史读取、continuation cursor 和其他 META 被拒绝。HTTP 409 的
   `error.data.code` 给出精确处理原因，模型供应商错误文本不会被子串匹配成状态冲突。
 - 批量擦除合并预览清理，分批读取历史预览并清除过期草稿内容；清理失败保留恢复记录，
   后续对象访问/驱逐恢复会继续清理，完成前自动处理保持关闭。

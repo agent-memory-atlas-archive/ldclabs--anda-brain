@@ -91,7 +91,10 @@ not an atomic batch. This avoids an engine cascade silently erasing targets outs
 the reviewed list. Historical/inactive model selectors, all model continuation
 cursors and META other than SEARCH are disabled after a managed change. Technical
 owner `execute_kip_readonly` remains an audit API; do not expose it as the model's
-read channel. The same warning applies to administrative raw writes.
+read channel. The same warning applies to administrative raw writes. An
+`execute_kip` batch that contains `PURGE` or `PURGE PAYLOAD` is fenced like
+`memory/forget`: it starts a new processing epoch before it runs (409 while a
+managed change is pending) and scrubs purged elements from preview copies after.
 
 ## Recipient-owned record watches
 
@@ -140,9 +143,12 @@ plan field `reviewed_corrections` acknowledges only roots supplied in the pendin
 page after successful plan execution; it does not establish complete dependent
 coverage or override native validity. Trusted hosts using `settleMemory` directly
 can acknowledge their reviewed roots with `acknowledgeCorrections(ids, epoch)`.
-Snapshots rotate bounded candidate ids, exclude terminal tasks and include native
-content/versions plus a live primer. Predicate counts use one grouped native query;
-vocabulary inspection loads active package artifacts rather than every version.
+Snapshots rotate bounded candidate ids, exclude terminal tasks and the Memory
+Interface's scope-handle Events, and include native content/versions plus a live
+primer. Predicate counts come from one indexed SQL group-by over active
+Propositions rather than a native scan; correction discovery and attention recall
+select superseded Assertions and raising Activities through their indexed columns.
+Vocabulary inspection loads active package artifacts rather than every version.
 
 Worker HTTP processing returns exact conflict codes in `error.data.code` (409).
 Formation and Maintenance expose `operation_results` with status, available receipt

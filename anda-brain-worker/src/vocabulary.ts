@@ -32,12 +32,12 @@ import {
   COGNITIVE_MEMORY,
   CORE_PACKAGE,
   CORE_PACKAGE_REF,
-  parseKip,
   type CognitiveNexus,
   type JsonMap,
   type KipResult,
   type SchemaPackage,
 } from '@ldclabs/kip-do'
+import { parseGate } from './kip.js'
 import type { DeclaredVocabulary } from './types.js'
 
 /**
@@ -204,7 +204,7 @@ export function definedRef(result: KipResult): string | undefined {
 
 /** The kind and description a `DEFINE` command drafts, for its review. */
 export function defineOf(command: string): { kind: SymbolKind; description: string } | undefined {
-  const parsed = parseKip(command)
+  const parsed = parseGate(command)
   if (!('Kml' in parsed) || parsed.Kml.clauses.length !== 1) return undefined
   const clause = parsed.Kml.clauses[0]!
   if (!('Define' in clause)) return undefined

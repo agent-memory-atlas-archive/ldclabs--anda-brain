@@ -43,18 +43,26 @@ export function settle(run: RunKip, nowMs: number, position: SettlePosition = {}
   }
 }
 
+/** Active Propositions stored under one predicate lineage, counted by the host. */
+export interface PredicateCount { lineage: string; count: number }
+
 export function assess(
   run: RunKip,
   spaceSeq: number,
-  extras: { revisedRoots?: RevisedRoot[] } = {},
+  extras: { revisedRoots?: RevisedRoot[]; predicateCounts?: readonly PredicateCount[] } = {},
 ): MaintenanceAssessment {
   return {
     space_seq: spaceSeq,
     armed_watches: watchesInStatus(run, 'armed'),
     fired_watches: watchesInStatus(run, 'fired'),
-    predicates: predicateCensus(run),
+    predicates: extras.predicateCounts === undefined ? {} : predicateCensus(run, extras.predicateCounts),
     revised_roots: extras.revisedRoots ?? [],
   }
+}
+
+/** `kip://profiles/cognitive-memory@2.0.0/prefers` → `kip://profiles/cognitive-memory/prefers`. */
+export function predicateLineage(ref: string): string {
+  return ref.replace(/@[^/]+(?=\/[^/]+$)/, '')
 }
 
 
@@ -125,7 +133,7 @@ function sweepWatches(run: RunKip, advance?: AdvanceWatch): WatchSettlement {
       continue
     }
     // An arbitrary text member must never be ignored by a structured matcher.
-    if (!isObject(row.condition) || 'text' in row.condition ||
+    if (!isJsonMap(row.condition) || 'text' in row.condition ||
         !['element', 'slot', 'type'].some((key) => key in (row.condition as Record<string, unknown>))) {
       report.deferred += 1
       continue
@@ -141,7 +149,7 @@ function sweepWatches(run: RunKip, advance?: AdvanceWatch): WatchSettlement {
     runnable = readWatchRows(selected.result)
   }
   for (const row of runnable) {
-    if (row.generation === undefined || !isObject(row.condition) || 'text' in row.condition) continue
+    if (row.generation === undefined || !isJsonMap(row.condition) || 'text' in row.condition) continue
     if (!advance) {
       report.deferred += 1
       report.error = 'Watch runtime is unavailable'
@@ -187,11 +195,11 @@ function readWatchRows(result: unknown): WatchRow[] {
   return result.flatMap((row): WatchRow[] => {
     if (!Array.isArray(row)) return []
     const [id, name, attributes, version, state, schemaRef] = row
-    if (typeof id !== 'string' || typeof version !== 'number' || !isObject(attributes)) return []
+    if (typeof id !== 'string' || typeof version !== 'number' || !isJsonMap(attributes)) return []
     const text = (key: string): string => typeof attributes[key] === 'string'
       ? attributes[key] : attributes[key] === undefined ? '' : JSON.stringify(attributes[key])
     return [{ id, version, condition: attributes.condition,
-      generation: isObject(state) && typeof state.arm_generation === 'number' ? state.arm_generation : undefined,
+      generation: isJsonMap(state) && typeof state.arm_generation === 'number' ? state.arm_generation : undefined,
       watch: { id, ...(typeof schemaRef === 'string' ? {schema_ref:schemaRef} : {}), version,
         name: typeof name === 'string' ? name : '', watch_class: text('watch_class'),
         condition: text('condition'), summary: text('summary'), due_at: text('due_at') },
@@ -202,7 +210,7 @@ function readWatchRows(result: unknown): WatchRow[] {
 /** An element id, whether the row spelled it bare or as a reference. */
 function elementId(value: unknown): string | undefined {
   if (typeof value === 'string') return value
-  if (isObject(value) && typeof value.id === 'string') return value.id
+  if (isJsonMap(value) && typeof value.id === 'string') return value.id
   return undefined
 }
 
@@ -301,8 +309,9 @@ function supersededCommand(after: CorrectionCursor): KipOperation {
   return {
     command:
       'FIND(?a.id, ?a._system.space_seq, ?a.asserted_by, ?a.proposition, ?a.lifecycle.superseded_by) WHERE { ' +
-      '?a ASSERTION {} ' +
-      'FILTER(?a.lifecycle.status == "superseded") ' +
+      // In the matcher, not a FILTER: the engine narrows a matcher literal in
+      // SQL, while a FILTER loads every active Assertion first.
+      '?a ASSERTION {status: "superseded"} ' +
       boundary +
       ` } ORDER BY ?a._system.space_seq, ?a.id LIMIT ${CORRECTION_SCAN_LIMIT}`,
     parameters: { after: after.seq, after_id: after.after_id },
@@ -321,8 +330,8 @@ function readDependents(result: unknown): Dependent[] {
   if (!Array.isArray(result)) return []
   const dependents: Dependent[] = []
   for (const row of result) {
-    if (!isObject(row) || typeof row.id !== 'string') continue
-    const via = isObject(row.via) && typeof row.via.activity === 'string' ? row.via.activity : undefined
+    if (!isJsonMap(row) || typeof row.id !== 'string') continue
+    const via = isJsonMap(row.via) && typeof row.via.activity === 'string' ? row.via.activity : undefined
     dependents.push({
       id: row.id,
       kind: typeof row.kind === 'string' ? row.kind : '',
@@ -350,38 +359,29 @@ function watchesInStatus(run: RunKip, status: string): ArmedWatch[] {
 /**
  * Per-predicate link counts — the vocabulary sprawl indicator.
  *
- * A count that failed is omitted rather than reported as zero: naming the
- * busiest predicate as unused would point the merge guidance at exactly the
- * wrong target.
+ * The counts come from the host: one indexed SQL group-by over the Space the
+ * maintenance session reads whole, where a KQL `COUNT` loads every Proposition
+ * and stops answering past the engine's load ceiling. A listing that failed is
+ * omitted rather than reported as zero: naming the busiest predicate as unused
+ * would point the merge guidance at exactly the wrong target. Exact-version
+ * groups merge by lineage; only unambiguous local names are exposed, including
+ * zero-use symbols.
  */
-function predicateCensus(run: RunKip): Record<string, number> {
+function predicateCensus(run: RunKip, counted: readonly PredicateCount[]): Record<string, number> {
   const listed = run({ command: 'LIST PREDICATES LIMIT 1000' })
-  const counted = run({ command: 'FIND(?predicate, COUNT(?link)) WHERE { ?link (?s, ?predicate, ?o) } LIMIT 1000' })
-  if (listed.status !== 'succeeded' || counted.status !== 'succeeded' || counted.next_cursor ||
-      !Array.isArray(listed.result) || !Array.isArray(counted.result)) return {}
-  // Native counts retain visibility. Merge exact-version groups by lineage,
-  // then expose only unambiguous active local names, including zero-use symbols.
-  const lineage = (ref: string) => ref.replace(/@[^/]+(?=\/[^/]+$)/, '')
+  if (listed.status !== 'succeeded' || !Array.isArray(listed.result)) return {}
   const counts = new Map<string, number>()
-  for (const row of counted.result) {
-    if (!Array.isArray(row) || typeof row[0] !== 'string' || typeof row[1] !== 'number') return {}
-    const key = lineage(row[0])
-    counts.set(key, (counts.get(key) ?? 0) + row[1])
-  }
+  for (const { lineage, count } of counted) counts.set(lineage, (counts.get(lineage) ?? 0) + count)
   const entries = listed.result.filter(isJsonMap)
+  const names = new Map<string, number>()
+  for (const { local_name: name } of entries) {
+    if (typeof name === 'string') names.set(name, (names.get(name) ?? 0) + 1)
+  }
   const census: Record<string, number> = {}
-  for (const entry of entries) {
-    const name = entry.local_name, ref = entry.ref
-    if (typeof name === 'string' && typeof ref === 'string' &&
-        entries.filter(candidate => candidate.local_name === name).length === 1) {
-      census[name] = counts.get(lineage(ref)) ?? 0
+  for (const { local_name: name, ref } of entries) {
+    if (typeof name === 'string' && typeof ref === 'string' && names.get(name) === 1) {
+      census[name] = counts.get(predicateLineage(ref)) ?? 0
     }
   }
   return census
-}
-
-// --- helpers ----------------------------------------------------------------
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

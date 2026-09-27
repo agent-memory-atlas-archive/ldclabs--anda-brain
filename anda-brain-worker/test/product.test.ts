@@ -17,6 +17,11 @@ function stub() { return env.BRAIN.getByName(crypto.randomUUID()) as unknown as 
 function runtime(responses: unknown[]): Env {
   return { BRAIN:env.BRAIN, AI:{ async run() { const response = responses.shift(); if (response === undefined) throw new Error('unexpected AI call'); return {response} } } } as Env
 }
+/** The product fence as `commit` persists it before its first native write. */
+function holdFence(storage: DurableObjectStorage, preview: {operation_key: string; preview: {excluded_sources: string[]}}) {
+  for (const key of preview.preview.excluded_sources) storage.kv.put('anda-brain:product:v1:suppressed:' + key, 1)
+  storage.kv.put('anda-brain:product:v1:control', {version:1, epoch:1, pending:preview.operation_key})
+}
 async function seed() {
   const brain = stub()
   const input: FormationInput = {messages:[{role:'user',content:'my old preference'}],context:{source:'chat-42'},timestamp:'2026-09-20T00:00:00Z'}
@@ -130,7 +135,7 @@ describe('recoverable memory product', () => {
       const nexus = (instance as unknown as {nexus:CognitiveNexus}).nexus
       const key = 'anda-brain:product:v1:change:' + preview.operation_key
       const stored = state.storage.kv.get<any>(key)!
-      state.storage.kv.put('anda-brain:product:v1:control',{version:1,epoch:1,suppressed:preview.preview.excluded_sources,pending:preview.operation_key})
+      holdFence(state.storage, preview)
       const command = parseKip(stored.requests[0].command)
       if (!('Kml' in command)) throw new Error('fixture')
       nexus.session(auth).mutate(command.Kml,stored.requests[0].parameters,{idempotencyKey:`memory-product:${preview.operation_key}:correction`})
@@ -149,7 +154,7 @@ describe('recoverable memory product', () => {
     const preview = await brain.productPrepare(auth,{operation_id:'pending',record_id:record.id,expected_revision:record.revision,kind:'delete'})
     await runInDurableObject(brain as never, (instance,state) => {
       const nexus = (instance as unknown as {nexus:CognitiveNexus}).nexus
-      state.storage.kv.put('anda-brain:product:v1:control',{version:1,epoch:1,suppressed:preview.preview.excluded_sources,pending:preview.operation_key})
+      holdFence(state.storage, preview)
       // A late native hold must be honored even during recovery.
       nexus.execute('SET RETENTION :id {legal_hold:true}',{id:record.id})
     })
