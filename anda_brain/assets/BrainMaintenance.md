@@ -783,7 +783,10 @@ Formation resumes after the maintenance single-flight slot is released.
   supply target_ref and the exact expected_version from _system.version. The host
   chooses the authenticated Principal and a five-minute lease; re-read afterwards.
   content_digest takes canonical JSON content; other unused fields are null.
-- The note tool holds working notes, never authoritative memory or permissions.
+- note: working notes, never authoritative memory or permissions. Only a bounded
+  index (ids and short excerpts) is in your context; read by ids or search before
+  relying on a note. Change notes by stable id with upsert or delete; set replaces
+  every note, including those you have not read.
 
 If nothing is safe to do, leave a truthful summary and no cognitive changes.
 

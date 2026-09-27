@@ -10,7 +10,8 @@ use anda_core::{
 };
 use anda_db::{query::Fv, schema::DocumentId};
 use anda_engine::{
-    context::{BaseCtx, CompletionRunner},
+    context::{AgentCtx, BaseCtx, CompletionRunner},
+    extension::note::NoteContextConfig,
     memory::{Conversation, ConversationStatus, KipArgs, MemoryManagement},
     unix_ms,
 };
@@ -298,6 +299,26 @@ pub(super) const PERSIST_EVERY_N_TURNS: usize = 5;
 /// in-flight KIP write turn is never cancelled halfway.
 pub(super) const RUNNER_MAX_MODEL_TURNS: usize = 200;
 pub(super) const RUNNER_MAX_WALL_CLOCK_MS: u64 = 30 * 60 * 1000;
+
+/// Rendered byte budget of the saved-note index (the engine's maximum).
+const NOTE_INDEX_MAX_BYTES: usize = 8192;
+
+/// Opts a formation/maintenance pass into the engine's bounded note index.
+///
+/// The note store holds up to ~160K characters, so its full text no longer
+/// rides in every system prompt. The runner injects an index of ids and short
+/// excerpts on its first turn, and again for the replacement runner after a
+/// compaction handoff, so the index reflects notes written earlier in the
+/// pass; the model reads or searches the `note` tool for full content. The
+/// index is request context only and never enters the persisted conversation.
+/// It is loaded only when the request offers the note tool, and a store or
+/// decode failure fails the turn instead of reading as "no notes".
+pub(super) fn install_note_index(ctx: &AgentCtx) {
+    ctx.base.set_state(NoteContextConfig {
+        max_bytes: NOTE_INDEX_MAX_BYTES,
+        ids: None,
+    });
+}
 
 /// Control flow returned by [`RunnerHost::after_turn`].
 pub(super) enum RunnerFlow {

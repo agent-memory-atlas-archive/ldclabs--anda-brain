@@ -13,6 +13,24 @@ All notable changes to the Anda Brain project.
   naming another audience is still refused. It is off by default: a shared service
   keeps refusing unscoped tokens.
 
+### Changed
+
+- Formation and Maintenance no longer copy the whole note store (up to about
+  160K characters) into every system prompt. On `anda_engine` 0.16.2, which Brain
+  now requires with `anda_core` 0.16.2, the runner supplies a bounded index of
+  note ids and short excerpts (at most 8 KiB). Each runner loads it afresh,
+  including the replacement after a compaction handoff, and it never enters the
+  persisted conversation. The model pages full notes through the `note` tool's
+  `read`, `list` and `search`, and the deployment prompts direct changes to
+  `upsert`/`delete` by id, because `set` also replaces notes the model has not
+  read. A note store that cannot be read now fails the pass, which is retried,
+  instead of passing as empty.
+- Recall reports its host-injected notes as unavailable when their store cannot
+  be read or the lookup times out; budgeted Recall marks the `notes` channel
+  omitted rather than checked. The legacy note-store fallback, which was reached
+  only on such errors, is gone. Clearing processing Notes for a managed change
+  now fails that change if the note tool refuses the reset.
+
 ### Fixes
 
 - Memory Interface requests stay well within a 2 MiB worker stack. The intent

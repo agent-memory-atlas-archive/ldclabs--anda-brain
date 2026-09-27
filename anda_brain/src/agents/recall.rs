@@ -6,7 +6,7 @@ use anda_core::{
 use anda_db::collection::Collection;
 use anda_engine::{
     context::{AgentCtx, BaseCtx},
-    extension::note::{load_notes, load_notes_from_legacy},
+    extension::note::try_load_notes,
     local_date_hour,
     memory::{
         Conversation, ConversationRef, ConversationStatus, Conversations, KipArgs,
@@ -444,12 +444,17 @@ impl RecallAgent {
         }
     }
 
-    async fn load_recall_notes(ctx: &AgentCtx) -> Json {
-        let notes = match load_notes(ctx).await {
-            Some(n) => n,
-            None => load_notes_from_legacy(ctx).await.unwrap_or_default(),
+    /// Host-injected Recall notes. Recall holds no note tool, so it cannot
+    /// page them and receives them whole. A store or decode failure, or a
+    /// timeout, is an error and never reads as an empty store.
+    async fn load_recall_notes(ctx: &AgentCtx) -> Result<Json, BoxError> {
+        let notes = match timeout(RECALL_CONTEXT_TIMEOUT, try_load_notes(ctx)).await {
+            Ok(notes) => notes,
+            Err(_) => Err("recall notes lookup timed out".into()),
         };
-        serde_json::to_value(notes.items).unwrap_or_default()
+        notes
+            .and_then(|notes| Ok(serde_json::to_value(notes.items)?))
+            .inspect_err(|err| log::warn!(target: "brain", "recall notes not available: {err:?}"))
     }
 
     async fn persist_conversation(&self, conversation: &Conversation) {
@@ -653,6 +658,9 @@ impl RecallAgent {
             self.get_counterparty_with_timeout(counterparty),
             self.describe_primer_fresh(),
             Self::load_recall_notes(&ctx),
+        );
+        let notes = notes.unwrap_or_else(
+            |_| json!({"notes": "unavailable", "meaning": "not evidence of absence"}),
         );
 
         // add bounded history conversations to provide context without bloating

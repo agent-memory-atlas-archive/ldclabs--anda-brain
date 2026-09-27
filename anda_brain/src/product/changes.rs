@@ -738,16 +738,25 @@ impl Space {
             let ctx = self
                 .engine
                 .ctx_with(SELF_USER_ID, agent, "", RequestMeta::default())?;
-            NoteTool::new()
+            let output = NoteTool::new()
                 .call(
                     ctx.child_base(NoteTool::NAME)?,
                     NoteArgs {
                         op: Some("set".into()),
                         items: Some(vec![]),
+                        ..Default::default()
                     },
                     vec![],
                 )
                 .await?;
+            // A refused reset reports through the output, not the call.
+            if !output.output.success {
+                return Err(output
+                    .output
+                    .error
+                    .unwrap_or_else(|| "note reset failed".into())
+                    .into());
+            }
         }
         self.miss_cache.clear().await?;
         Ok(())

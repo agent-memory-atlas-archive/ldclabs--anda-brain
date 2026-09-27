@@ -1,7 +1,7 @@
 use super::*;
 use anda_core::Tool;
 use anda_core::{BoxPinFut, CompletionRequest, Message};
-use anda_engine::extension::note::{NoteArgs, NoteItemInput, NoteTool, load_notes};
+use anda_engine::extension::note::{NoteArgs, NoteItemInput, NoteTool, try_load_notes};
 use anda_engine::{
     memory::ConversationRef,
     model::{CompletionFeaturesDyn, Models},
@@ -351,6 +351,7 @@ async fn write_note(run: &Experiment, text: &str) {
                     id: "fixture".into(),
                     content: Some(text.into()),
                 }]),
+                ..Default::default()
             },
             vec![],
         )
@@ -367,7 +368,8 @@ async fn notes(run: &Experiment) -> String {
         .space
         .ctx_for_test(SELF_USER_ID, RecallAgent::NAME)
         .unwrap();
-    serde_json::to_string(&load_notes(&ctx).await).unwrap()
+    // A store error must fail the test, not read as notes lacking a marker.
+    serde_json::to_string(&try_load_notes(&ctx).await.unwrap()).unwrap()
 }
 
 #[tokio::test]

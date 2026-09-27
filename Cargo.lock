@@ -145,9 +145,9 @@ dependencies = [
 
 [[package]]
 name = "anda_cognitive_nexus"
-version = "0.14.0"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2561651057fe8d2d881bb53b865cae1e9546f881143f4b0913e8a60361dc5903"
+checksum = "a3329862a586007cca3caace19309df50e7a8a4d4747f6a12f57a53095674096"
 dependencies = [
  "anda_db",
  "anda_db_schema",
@@ -173,9 +173,9 @@ dependencies = [
 
 [[package]]
 name = "anda_core"
-version = "0.16.1"
+version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ec1733d15f56995a6c68f8abce7bfaf836a00f1d7ea0ee66dd59531da0fea2e"
+checksum = "922237c496cfcce3bbf77af3dac35ac960504419170cd4ab54b5dcb74dab0f98"
 dependencies = [
  "anda_db_schema",
  "bytes",
@@ -200,9 +200,9 @@ dependencies = [
 
 [[package]]
 name = "anda_db"
-version = "0.14.0"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29e74d870f137fcab9dcfdf6652c29bcef08961d0a38b526141bc2efe3cf8498"
+checksum = "1620c42ed7047b5f28080d35e9502015feadf2a79ccabc39d69d76ca70aa4fba"
 dependencies = [
  "anda_db_btree",
  "anda_db_hnsw",
@@ -228,9 +228,9 @@ dependencies = [
 
 [[package]]
 name = "anda_db_btree"
-version = "0.14.0"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d093176ed16636990f7ccc01abea3a0880a6af48a754d0b12aa72ea59bbb473"
+checksum = "fe796249bf0993b397f5213215743cabc838ea856fee6df874826905efb4006d"
 dependencies = [
  "cbor2",
  "dashmap",
@@ -293,9 +293,9 @@ dependencies = [
 
 [[package]]
 name = "anda_db_tfs"
-version = "0.14.0"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "982dcfda219e4a787238a7fbdb2d61b62260060f3d9105eddc22026feb87f32c"
+checksum = "922a46ccda8e97c0b9942b0d0d7b3e6a4fdd9a3e1b3123f27fbe9758ee9a5214"
 dependencies = [
  "cbor2",
  "dashmap",
@@ -310,9 +310,9 @@ dependencies = [
 
 [[package]]
 name = "anda_engine"
-version = "0.16.1"
+version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4ce2b2d5d2a60844bb762d117c1ee92503d45c185fff0622fbffc1d72c4b7c0"
+checksum = "a0bc84f5876b65a2dee6e2f8a3989129837eddc98c356c563d3cec67c9b72a03"
 dependencies = [
  "anda_cloud_cdk",
  "anda_cognitive_nexus",
@@ -350,7 +350,10 @@ dependencies = [
  "serde-saphyr",
  "serde_bytes",
  "serde_json",
+ "sha2 0.10.9",
+ "sse-stream",
  "structured-logger",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-util",
  "unicode-segmentation",
@@ -837,9 +840,9 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "candid"
-version = "0.10.36"
+version = "0.10.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "688dc9917e4fd15d7656d46f9dbf45ca0151ca13158875894b40e22c27681d86"
+checksum = "a4dda5edb2bfa2d7703219ba0fd6ec712343fcd03867b76b87405feaa9aae7a0"
 dependencies = [
  "anyhow",
  "binrw",
@@ -860,9 +863,9 @@ dependencies = [
 
 [[package]]
 name = "candid_derive"
-version = "0.10.36"
+version = "0.10.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b33ea2fcb595b01cc1188d51c8fcf0455220779f6fd5f9b88e280d8c602baa1"
+checksum = "45e094bb111b7a9b70174aaa66f80f1a6751a2e66d2a99eef797c8ab6d0933d3"
 dependencies = [
  "lazy_static",
  "proc-macro2",
@@ -893,9 +896,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.4.7"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54413ede23c2daf518f35156dfde027feb2374004d63bd497f983c8db9c0e313"
+checksum = "f360145194ee8e21db5ee7f3fcd4fe52210864c75c985dae33218202c8bbe040"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -1802,9 +1805,9 @@ checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
 
 [[package]]
 name = "find-msvc-tools"
-version = "0.1.13"
+version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef25905e51abafe4dcea6c15fec58c57b601cdbd0ee53d22ea1d3016c587d39b"
+checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
 name = "flate2"
@@ -4697,9 +4700,9 @@ dependencies = [
 
 [[package]]
 name = "siphasher"
-version = "1.0.3"
+version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
+checksum = "33f4fe9184a62d842c9ef383018f3306d8ba224fd9d836f56d7288308847c256"
 
 [[package]]
 name = "sketches-ddsketch"
@@ -6159,18 +6162,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.58"
+version = "0.8.59"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c17e8fafad82b542ff3717217ecdc736231b59e387768c9630123b4ce4d2db44"
+checksum = "6df92bf3d9227be3d53173901ddbffac2babc27ae50f397776ffd6dc33f800cb"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.58"
+version = "0.8.59"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "595f56e044df4f46a0c9a626f65c3d99eb8488f7e8a8baa12dd76326d9710bf2"
+checksum = "ac4f328cf2f05d084e496c3e9c3f33ed0a183656a16e1fcec4d464d8373aec82"
 dependencies = [
  "proc-macro2",
  "quote",

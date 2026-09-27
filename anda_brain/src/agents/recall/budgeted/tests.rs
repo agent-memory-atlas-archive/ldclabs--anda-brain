@@ -691,6 +691,51 @@ async fn legacy_calls_remain_legacy_until_space_policy_enforces_non_expandable_c
 }
 
 #[tokio::test]
+async fn unreadable_notes_are_reported_unavailable_not_empty() {
+    use anda_core::{Path, PutMode, StoreFeatures};
+
+    let (_app, space, requests) = setup("recall_unreadable_notes", Behavior::LegacyOrSelect).await;
+    let budget = limits(8192, 131_072);
+    let output = space
+        .query(SELF_USER_ID, input(Some(budget.clone())))
+        .await
+        .unwrap();
+    let packet = check_output(&output, 8192).unwrap();
+    assert!(packet.coverage.queried.contains(&Channel::Notes));
+    assert!(!packet.coverage.omitted.contains(&Channel::Notes));
+
+    // The note store exists but no longer decodes.
+    let ctx = space.ctx_for_test(SELF_USER_ID, RecallAgent::NAME).unwrap();
+    let notes = ctx.child_base("note").unwrap();
+    notes
+        .store_put(
+            &Path::from(notes.agent.as_str()),
+            PutMode::Overwrite,
+            vec![0xff].into(),
+        )
+        .await
+        .unwrap();
+    let output = space
+        .query(SELF_USER_ID, input(Some(budget)))
+        .await
+        .unwrap();
+    let packet = check_output(&output, 8192).unwrap();
+    assert!(
+        packet.coverage.omitted.contains(&Channel::Notes),
+        "{:?}",
+        packet.coverage
+    );
+
+    requests.lock().clear();
+    let legacy = space.query(SELF_USER_ID, input(None)).await.unwrap();
+    assert_eq!(legacy.content, "legacy answer");
+    let instructions = requests.lock()[0].instructions.clone();
+    assert!(instructions.contains(r#""notes":"unavailable""#));
+    assert!(!instructions.contains("# Your Notes:\n[]"));
+    space.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn structured_and_markdown_surfaces_share_one_budgeted_semantic_packet() {
     let (_app, space, requests) = setup("p5_structured_packet", Behavior::Select).await;
     let budget = limits(65_536, 131_072);

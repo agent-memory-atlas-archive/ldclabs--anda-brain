@@ -703,7 +703,10 @@ UPSERT CONCEPT ?alice { MATCH {type: "Person", key: :counterparty} SET FIELDS {n
   a parameter this request does not bind is refused, because the gate cannot
   check what it cannot read.
 - `declare_memory_symbols { types, predicates }` — deprecated shortcut, see A.3.
-- The note tool, for working state that is not memory.
+- `note` — working state that is not memory. Your context carries only a
+  bounded index of saved notes (ids and short excerpts): `read` by `ids` or
+  `search` before relying on one. Change notes by stable id with `upsert` or
+  `delete`; `set` replaces every note, including those you have not read.
 
 ## A.3 New vocabulary is a draft
 

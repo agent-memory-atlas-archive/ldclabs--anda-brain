@@ -193,7 +193,7 @@ impl RecallAgent {
         let (profile, primer, notes) = tokio::join!(
             self.get_counterparty_with_timeout(counterparty),
             self.describe_primer_fresh(),
-            timeout(RECALL_CONTEXT_TIMEOUT, Self::load_recall_notes(&ctx))
+            Self::load_recall_notes(&ctx)
         );
         if primer.is_null() {
             material.critical_missing = true;

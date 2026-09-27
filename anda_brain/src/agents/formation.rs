@@ -8,7 +8,7 @@ use anda_db::{
 };
 use anda_engine::{
     context::{AgentCtx, CompletionRunner},
-    extension::note::{NoteTool, load_notes, load_notes_from_legacy},
+    extension::note::NoteTool,
     local_date_hour,
     memory::{Conversation, ConversationRef, ConversationStatus, MemoryManagement},
     unix_ms,
@@ -587,7 +587,7 @@ impl FormationAgent {
         let now_ms = unix_ms();
         // The context sources are independent; fetch them concurrently (same
         // pattern as recall's context assembly).
-        let (counterparty_info, primer, notes) = tokio::join!(
+        let (counterparty_info, primer) = tokio::join!(
             async {
                 match counterparty {
                     Some(counterparty) => {
@@ -597,12 +597,6 @@ impl FormationAgent {
                 }
             },
             async { self.memory.describe_primer().await.unwrap_or_default() },
-            async {
-                match load_notes(ctx).await {
-                    Some(n) => n,
-                    None => load_notes_from_legacy(ctx).await.unwrap_or_default(),
-                }
-            },
         );
 
         // The observation this pass was called on, for the runtime to mint as
@@ -667,13 +661,13 @@ impl FormationAgent {
         };
         let review_prompt = (estimate_tokens(&prompt) >= REVIEW_MIN_INPUT_TOKENS)
             .then(|| review_prompt(conversation._id, input.messages.len()));
+        super::install_note_index(ctx);
         let mut runner = ctx.clone().completion_iter(
             CompletionRequest {
                 instructions: format!(
-                    "{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Your Notes:\n{}\n\n# Counterparty Profile:\n{}\n\n# Captured Evidence:\n{}\n\n# Memory Interface Intent:\n{}\n\n# Current Datetime: {}",
+                    "{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Counterparty Profile:\n{}\n\n# Captured Evidence:\n{}\n\n# Memory Interface Intent:\n{}\n\n# Current Datetime: {}",
                     super::prompts::system_prompt(super::prompts::PromptTarget::Formation, &self.prompt),
                     primer,
-                    serde_json::to_string(&notes.items).unwrap_or_default(),
                     serde_json::to_string(&counterparty_info).unwrap_or_default(),
                     captured,
                     intent
@@ -864,8 +858,8 @@ mod tests {
         types::{FormationInput, InputContext, MaintenanceInput, MaintenanceScope},
     };
     use anda_core::{
-        Agent, AgentOutput, BoxError, BoxPinFut, CompletionRequest, ContentPart, Message, ToolCall,
-        Usage,
+        Agent, AgentContext, AgentOutput, BoxError, BoxPinFut, CompletionRequest, ContentPart,
+        Message, ToolCall, ToolInput, Usage,
     };
     use anda_engine::{
         context::{AgentCtx, COMPACTION_PROMPT},
@@ -1337,6 +1331,20 @@ mod tests {
 
     fn test_app_state(name: &str) -> AppState {
         app_state_core(name, Arc::new(Models::default()), vec![], "test", 0)
+    }
+
+    /// Saves one note through the registered, product-gated note tool.
+    async fn save_note(ctx: &AgentCtx, id: &str, content: &str) {
+        let (output, _) = ctx
+            .tool_call(ToolInput {
+                name: "note".into(),
+                args: json!({"op": "upsert", "items": [{"id": id, "content": content}]}),
+                resources: vec![],
+                meta: None,
+            })
+            .await
+            .unwrap();
+        assert_ne!(output.is_error, Some(true), "{:?}", output.output);
     }
 
     fn test_app_state_with_completer<C>(name: &str, completer: C) -> AppState
@@ -2458,6 +2466,7 @@ mod tests {
         let ctx = space
             .ctx_for_test(SELF_USER_ID, FormationAgent::NAME)
             .unwrap();
+        save_note(&ctx, "draft", "COMPACTION_NOTE").await;
         // ~44k chars ≈ 11k estimated tokens, above the 10k-token review threshold
         let large_text = "x".repeat(44_000);
         let mut conversation = stored_conversation(
@@ -2486,10 +2495,66 @@ mod tests {
             !requests[1].contains(super::REVIEW_INSTRUCTIONS),
             "queued review must survive rather than be folded into the handoff"
         );
+        // The replacement runner loads its own note index, not a stale copy.
+        assert!(requests[0].contains("COMPACTION_NOTE"));
+        assert!(requests[2].contains("COMPACTION_NOTE"));
 
         let messages = serde_json::to_string(&conversation.messages).unwrap();
         assert!(messages.contains("draft before compaction"));
         assert!(messages.contains("handoff summary"));
         assert!(messages.contains("reviewed after compaction"));
+        assert!(!messages.contains("Saved note index"));
+    }
+
+    #[tokio::test]
+    async fn process_one_offers_a_bounded_note_index_instead_of_full_notes() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let app = test_app_state_with_completer(
+            "formation_note_index",
+            ReviewCompleter {
+                requests: requests.clone(),
+                fail_on_call: None,
+            },
+        );
+        let space = create_loaded_space(&app, "formation_note_index").await;
+        let ctx = space
+            .ctx_for_test(SELF_USER_ID, FormationAgent::NAME)
+            .unwrap();
+        let note = format!("NOTE_HEAD {} NOTE_TAIL", "x".repeat(400));
+        save_note(&ctx, "pending", &note).await;
+        let mut conversation = stored_conversation(
+            &space,
+            vec![json!(Message {
+                role: "user".into(),
+                content: vec!["I always prefer dark mode.".to_string().into()],
+                ..Default::default()
+            })],
+        )
+        .await;
+
+        space.formation.process_one(&ctx, &mut conversation).await;
+
+        assert_eq!(conversation.status, ConversationStatus::Completed);
+        let first = requests.lock().unwrap()[0].clone();
+        assert!(!first.instructions.contains("NOTE_HEAD"));
+        let index = first
+            .chat_history
+            .iter()
+            .filter_map(Message::text)
+            .find(|text| text.contains("[Saved note index]"))
+            .expect("the runner injects the note index");
+        assert!(index.contains(r#""id":"pending""#) && index.contains("NOTE_HEAD"));
+        assert!(
+            !index.contains("NOTE_TAIL"),
+            "an index carries excerpts only"
+        );
+        let stored = space
+            .memory
+            .get_conversation(conversation._id)
+            .await
+            .unwrap();
+        let stored = serde_json::to_string(&stored.messages).unwrap();
+        assert!(!stored.contains("Saved note index"));
+        space.close().await.unwrap();
     }
 }

@@ -5,7 +5,7 @@ use anda_core::{
 use anda_db::{collection::Collection, schema::DocumentId};
 use anda_engine::{
     context::{AgentCtx, CompletionRunner},
-    extension::note::{NoteTool, load_notes, load_notes_from_legacy},
+    extension::note::NoteTool,
     local_date_hour,
     memory::{Conversation, ConversationRef, ConversationStatus, Conversations, MemoryManagement},
     unix_ms,
@@ -412,17 +412,7 @@ impl MaintenanceAgent {
         };
 
         let now_ms = unix_ms();
-        // The context sources are independent; fetch them concurrently (same
-        // pattern as recall's context assembly).
-        let (primer, notes) = tokio::join!(
-            async { self.memory.describe_primer().await.unwrap_or_default() },
-            async {
-                match load_notes(ctx).await {
-                    Some(n) => n,
-                    None => load_notes_from_legacy(ctx).await.unwrap_or_default(),
-                }
-            },
-        );
+        let primer = self.memory.describe_primer().await.unwrap_or_default();
         let chat_history: Vec<Document> = if self
             .product_control
             .as_ref()
@@ -448,13 +438,16 @@ impl MaintenanceAgent {
                 ..Default::default()
             }]
         };
+        super::install_note_index(ctx);
         let mut runner = ctx.clone().completion_iter(
             CompletionRequest {
                 instructions: format!(
-                    "{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Your Notes:\n{}\n\n# Current Datetime: {}",
-                    super::prompts::system_prompt(super::prompts::PromptTarget::Maintenance, &self.prompt),
+                    "{}\n\n---\n\n# `DESCRIBE PRIMER` Result:\n{}\n\n---\n\n# Current Datetime: {}",
+                    super::prompts::system_prompt(
+                        super::prompts::PromptTarget::Maintenance,
+                        &self.prompt
+                    ),
                     primer,
-                    serde_json::to_string(&notes.items).unwrap_or_default(),
                     local_date_hour(self.clock.now_ms()).unwrap_or_default()
                 ),
                 prompt,
@@ -520,7 +513,8 @@ mod tests {
         types::{MaintenanceInput, MaintenanceScope},
     };
     use anda_core::{
-        Agent, AgentOutput, BoxError, BoxPinFut, CompletionRequest, Message, ToolCall, Usage,
+        Agent, AgentContext, AgentOutput, BoxError, BoxPinFut, CompletionRequest, Message,
+        ToolCall, ToolInput, Usage,
     };
     use anda_engine::{
         context::AgentCtx,
@@ -551,6 +545,28 @@ mod tests {
                         content: vec![format!("maintained: {}", req.prompt).into()],
                         ..Default::default()
                     }],
+                    ..Default::default()
+                })
+            })
+        }
+    }
+
+    /// Records each request and finishes on the first turn.
+    #[derive(Debug)]
+    struct CapturingCompleter {
+        requests: Arc<parking_lot::Mutex<Vec<CompletionRequest>>>,
+    }
+
+    impl CompletionFeaturesDyn for CapturingCompleter {
+        fn model_name(&self) -> String {
+            "maintenance-capturing-test-model".to_string()
+        }
+
+        fn completion(&self, req: CompletionRequest) -> BoxPinFut<Result<AgentOutput, BoxError>> {
+            self.requests.lock().push(req);
+            Box::pin(async {
+                Ok(AgentOutput {
+                    content: "maintained".to_string(),
                     ..Default::default()
                 })
             })
@@ -848,6 +864,64 @@ mod tests {
         assert!(err.to_string().contains("invalid MaintenanceInput"));
         assert!(!maintenance.is_processing());
         assert_eq!(maintenance.conversations_collection.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn process_one_offers_a_bounded_note_index_instead_of_full_notes() {
+        let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let app = test_app_state_with_completer(
+            "maintenance_note_index",
+            CapturingCompleter {
+                requests: requests.clone(),
+            },
+        );
+        let space = create_loaded_space(&app, "maintenance_note_index").await;
+        let maintenance = space.maintenance_for_test();
+        let ctx = space
+            .ctx_for_test(SELF_USER_ID, MaintenanceAgent::NAME)
+            .unwrap();
+        let note = format!("NOTE_HEAD {} NOTE_TAIL", "x".repeat(400));
+        let (written, _) = ctx
+            .tool_call(ToolInput {
+                name: "note".into(),
+                args: json!({"op": "upsert", "items": [{"id": "cycle", "content": note}]}),
+                resources: vec![],
+                meta: None,
+            })
+            .await
+            .unwrap();
+        assert_ne!(written.is_error, Some(true), "{:?}", written.output);
+        let mut conversation = stored_conversation(
+            &maintenance,
+            vec![json!(Message {
+                role: "user".to_string(),
+                content: vec![maintenance_prompt(MaintenanceScope::Quick).into()],
+                ..Default::default()
+            })],
+        )
+        .await;
+
+        maintenance.process_one(&ctx, &mut conversation).await;
+
+        assert_eq!(conversation.status, ConversationStatus::Completed);
+        let first = requests.lock()[0].clone();
+        assert!(!first.instructions.contains("NOTE_HEAD"));
+        let index = first
+            .chat_history
+            .iter()
+            .filter_map(Message::text)
+            .find(|text| text.contains("[Saved note index]"))
+            .expect("the runner injects the note index");
+        assert!(index.contains(r#""id":"cycle""#) && index.contains("NOTE_HEAD"));
+        assert!(
+            !index.contains("NOTE_TAIL"),
+            "an index carries excerpts only"
+        );
+        assert!(
+            !serde_json::to_string(&conversation.messages)
+                .unwrap()
+                .contains("Saved note index")
+        );
     }
 
     #[tokio::test]
