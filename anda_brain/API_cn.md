@@ -90,7 +90,7 @@ KIP `597db44` / `cognitive-memory@2.0.0` 对齐说明：鉴权与 JSON/CBOR/Mark
   "kip_memory": "2.0",
   "bundles": ["memory_basic"],
   "default_budget": {"max_output_tokens": 4096, "deadline_ms": 30000},
-  "tokenizer": "o200k_base@tiktoken-rs-0.12.0",
+  "tokenizer": "o200k_base@tiktoken-rs-0.12",
   "minimum_response_tokens": 256,
   "default_space": {"id": "my_space"}
 }
@@ -319,7 +319,9 @@ export interface RecallInput {
 }
 
 export interface RecallBudget {
-  tokenizer?: 'o200k_base@tiktoken-rs-0.12.0';
+  // 指 tiktoken-rs 0.12 版本线的 o200k 编码。旧写法
+  // 'o200k_base@tiktoken-rs-0.12.0' 是同一编码，仍被接受。
+  tokenizer?: 'o200k_base@tiktoken-rs-0.12';
   max_tokens?: number; // 1–65536；显式启用后的默认值为 4096
   context_tokens?: number; // 1–131072；默认 49152；整次规划输入规范序列化的累计上限
 }

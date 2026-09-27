@@ -103,7 +103,7 @@ binding in `DESCRIBE CAPABILITIES` and `DESCRIBE PRIMER`:
   "kip_memory": "2.0",
   "bundles": ["memory_basic"],
   "default_budget": {"max_output_tokens": 4096, "deadline_ms": 30000},
-  "tokenizer": "o200k_base@tiktoken-rs-0.12.0",
+  "tokenizer": "o200k_base@tiktoken-rs-0.12",
   "minimum_response_tokens": 256,
   "default_space": {"id": "my_space"}
 }
@@ -378,7 +378,9 @@ export interface RecallInput {
 }
 
 export interface RecallBudget {
-  tokenizer?: 'o200k_base@tiktoken-rs-0.12.0';
+  // Names the o200k encoding of the tiktoken-rs 0.12 line. The earlier
+  // 'o200k_base@tiktoken-rs-0.12.0' is the same encoding and is accepted.
+  tokenizer?: 'o200k_base@tiktoken-rs-0.12';
   max_tokens?: number; // 1–65536; default 4096 after explicit opt-in
   context_tokens?: number; // 1–131072; default 49152; cumulative normalized planner inputs
 }

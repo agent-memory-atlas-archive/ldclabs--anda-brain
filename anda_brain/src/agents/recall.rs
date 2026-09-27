@@ -57,7 +57,7 @@ pub static FUNCTION_DEFINITION: LazyLock<FunctionDefinition> = LazyLock::new(|| 
                 "type": ["object", "null"],
                 "description": "Optional hard-budget memory packet mode. The host returns selected authorized items and coverage, not a free-form answer. A Space policy may enforce tighter limits. Null preserves the policy/default behavior.",
                 "properties": {
-                    "tokenizer": {"type":"string","enum":["o200k_base@tiktoken-rs-0.12.0"]},
+                    "tokenizer": {"type":"string","enum":[crate::recall_budget::TOKENIZER]},
                     "max_tokens": {"type":"integer","minimum":1,"maximum":65536},
                     "context_tokens": {"type":"integer","minimum":1,"maximum":131072}
                 },

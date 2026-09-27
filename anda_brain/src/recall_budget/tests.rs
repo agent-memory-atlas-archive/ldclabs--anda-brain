@@ -105,6 +105,56 @@ fn checked(packet: &SerializedPacket, limit: u32) -> Option<MemoryPacket> {
 }
 
 #[test]
+fn the_legacy_tokenizer_identity_reads_as_the_current_one() {
+    assert_eq!(TOKENIZER, "o200k_base@tiktoken-rs-0.12");
+    // A policy stored through 0.13.1 spells the patch release.
+    let stored: RecallBudget = serde_json::from_value(json!({
+        "tokenizer": LEGACY_TOKENIZER,
+        "max_tokens": 1000,
+        "context_tokens": 30_000,
+    }))
+    .unwrap();
+    assert_eq!(stored.tokenizer, TOKENIZER);
+    stored.validate().unwrap();
+    // Built in code with the old spelling, a request still validates, and
+    // whatever each side spelled, the resolved budget names the current one.
+    let request = RecallBudget {
+        tokenizer: LEGACY_TOKENIZER.into(),
+        max_tokens: 4000,
+        ..Default::default()
+    };
+    request.validate().unwrap();
+    let resolved = RecallBudget::resolve(Some(&stored), Some(&request))
+        .unwrap()
+        .unwrap();
+    assert_eq!(resolved.tokenizer, TOKENIZER);
+    assert_eq!(
+        (resolved.max_tokens, resolved.context_tokens),
+        (1000, 30_000)
+    );
+    let alone = RecallBudget::resolve(None, Some(&request))
+        .unwrap()
+        .unwrap();
+    assert_eq!(alone.tokenizer, TOKENIZER);
+    let packet = pack(&request, &[], &[], Coverage::default()).unwrap();
+    let delivered: MemoryPacket = serde_json::from_str(&packet.content).unwrap();
+    assert_eq!(delivered.tokenizer, TOKENIZER);
+    // Other spellings are other encodings, as far as the host can tell.
+    for name in [
+        "o200k_base@tiktoken-rs-0.12.1",
+        "o200k_base@tiktoken-rs-0.13",
+        "o200k_base",
+    ] {
+        let other = RecallBudget {
+            tokenizer: name.into(),
+            ..Default::default()
+        };
+        assert!(other.validate().is_err(), "{name}");
+        assert_eq!(canonical_tokenizer(name), None);
+    }
+}
+
+#[test]
 fn opt_in_resolution_preserves_operator_caps_and_rejects_unknown_encoding() {
     assert_eq!(RecallBudget::resolve(None, None).unwrap(), None);
     let default: RecallBudget = serde_json::from_str("{}").unwrap();

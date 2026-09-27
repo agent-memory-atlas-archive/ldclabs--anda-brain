@@ -53,7 +53,7 @@ cannot supply authentication, change a pin, re-arm a Watch, or dispatch an actio
 | Model attempts per page | 2 | 4 |
 
 These are operational caps, not empirical quality thresholds. Input is counted over
-the exact serialized JSON request using `o200k_base@tiktoken-rs-0.12.0`; output is
+the exact serialized JSON request using `o200k_base@tiktoken-rs-0.12`; output is
 counted over the returned content. This contract does not claim provider billing or
 hidden provider-template token accounting. HTTP response bytes are capped at 512 KiB,
 model JSON content at 256 KiB. Pages are never truncated to fit: excess candidates or

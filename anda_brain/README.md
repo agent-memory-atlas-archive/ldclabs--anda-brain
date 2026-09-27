@@ -148,7 +148,7 @@ Receives conversation messages and encodes them into structured memory within th
 The optional `RecallInput.budget` (or an enforced `memory_policy.recall_budget`)
 selects a host-packed JSON memory response instead of free-form synthesis.
 The whole packet and cumulative normalized planning input use the pinned
-`o200k_base@tiktoken-rs-0.12.0` counter. Required commitments/warnings precede
+`o200k_base@tiktoken-rs-0.12` counter. Required commitments/warnings precede
 optional items, failed coverage is explicit, and diagnostic histories/artifacts
 cannot bypass the packet limit. Existing requests without a budget policy keep
 the normal flow below. Question-specific search supplies candidates before
@@ -441,9 +441,10 @@ counts these calls and their planning input against its existing limits; referen
 pages never become memory packet items or attest retrieval coverage. The legacy
 `memory_runtime` syntax operation remains available to writing agents.
 
-The reference supplement is pinned to `anda_kip =0.14.0`; public crate constants
-are reused instead of copied. To refresh the supplementary files, set
-`ANDA_KIP_SOURCE` to the matching published crate directory and run
+The reference supplement is generated from `anda_kip` 0.14.0, the release
+`Cargo.lock` resolves; public crate constants are reused instead of copied. To refresh
+the supplementary files, set `ANDA_KIP_SOURCE` to the matching published crate
+directory (the script refuses one that differs from `Cargo.lock`) and run
 `node scripts/sync-kip-reference.mjs` (or `--check` to verify without writing).
 The generated manifest records source hashes, and tests check both the supplement
 and exported crate documents against it. Do not hand-edit these reference assets.

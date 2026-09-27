@@ -1,12 +1,35 @@
 //! The encoding is a protocol choice, not inferred from a provider/model name.
 
 use anda_core::BoxError;
+use serde::{Deserialize, Deserializer};
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     sync::OnceLock,
 };
 
-pub const TOKENIZER: &str = "o200k_base@tiktoken-rs-0.12.0";
+/// The encoding Recall counts with: `o200k_base` as the tiktoken-rs 0.12 line
+/// implements it. `Cargo.toml` admits patch releases of that line only; a
+/// release that changes the encoding needs a new identity.
+pub const TOKENIZER: &str = "o200k_base@tiktoken-rs-0.12";
+
+/// The identity Brain advertised through 0.13.1, naming the patch release.
+/// It is the same encoding, so stored policies and clients that still send it
+/// are accepted and read as [`TOKENIZER`].
+pub const LEGACY_TOKENIZER: &str = "o200k_base@tiktoken-rs-0.12.0";
+
+/// The current identity of a supported tokenizer name, `None` otherwise.
+pub fn canonical_tokenizer(name: &str) -> Option<&'static str> {
+    matches!(name, TOKENIZER | LEGACY_TOKENIZER).then_some(TOKENIZER)
+}
+
+/// Reads a tokenizer name, rewriting a supported one to [`TOKENIZER`]; any
+/// other name is kept for validation to refuse.
+pub(super) fn deserialize_tokenizer<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    let name = String::deserialize(deserializer)?;
+    Ok(canonical_tokenizer(&name).map_or(name, str::to_string))
+}
 
 static ENCODING: OnceLock<Result<tiktoken_rs::CoreBPE, String>> = OnceLock::new();
 

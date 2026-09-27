@@ -2,6 +2,74 @@
 
 All notable changes to the Anda Brain project.
 
+## [0.13.2] — 2026-09-27
+
+On the same KIP `11a82ec` / `cognitive-memory@2.0.0` stack: Cognitive Nexus 0.14.2, and
+a Recall tokenizer identity that names the tiktoken-rs 0.12 line. The CLI reports
+0.13.2 and the Worker package is 0.1.2.
+
+Upgrade notes:
+
+- The first load of an existing Space under Nexus 0.14.2 upgrades its Nexus
+  collection schemas and builds the `query_keys` and `lookup_key` indexes over the
+  rows already stored. Let that load finish; do not cancel it.
+- Do not load an upgraded Space with Brain 0.13.1 or earlier (Nexus 0.14.0). That
+  version keeps the newer schema without maintaining the derived indexes, so rows it
+  writes are missing from reverse `STRUCTURAL` and historical reads afterwards.
+- Brain calls `anda_core` / `anda_engine` 0.16.2 APIs (the bounded note index) under
+  a `0.16` requirement: a lockfile that still holds an older 0.16 release must update
+  them.
+
+### Changed
+
+- The Recall tokenizer identity is `o200k_base@tiktoken-rs-0.12` (was
+  `o200k_base@tiktoken-rs-0.12.0`): it names the o200k encoding of the tiktoken-rs
+  0.12 line, which Brain now takes at 0.12.1 and admits patch releases of. Recall
+  budgets, packets, receipts, the Memory Interface descriptor and the
+  `recall_memory` tool schema report the new name. The old one is the same encoding
+  and is still accepted from requests, Memory Interface budgets and stored
+  `MemoryPolicy.recall_budget` values, and is read as the new name. The Worker
+  advertises and accepts the same pair.
+- The semantic Watch evaluator pin digests the tokenizer identity, so a host with a
+  semantic Watch binding gets a new pin. As for any evaluator change, semantic
+  Watches stop advancing ("semantic evaluator changed") until the operator reviews
+  it, calls `reconfigure_evaluator` and re-arms the affected Watches.
+
+### Dependencies
+
+- `anda_cognitive_nexus` 0.14.2 (from 0.14.0), with the 0.14.1 query work. 0.14.2
+  fixes `connect`, which adopted the handle it had opened, without setup, to detect a
+  KIP 1.x layout. Under 0.14.0 every Brain Space, which is reopened after it is
+  created, therefore ran its Concept collection without the Nexus index hooks and with
+  the default tokenizer. Under 0.14.1 the same defect also kept new Concepts out of
+  `query_keys`, so a `FILTER` on their name found nothing (a promoted draft type
+  queried by its installed name returned nothing), and a Space that 0.14.0 wrote
+  failed to load ("collection is open with schema version 0, but version 1 was
+  requested"). Brain never used 0.14.1.
+- `tiktoken-rs` 0.12.1, within 0.12.x (see Changed). Its o200k tables and encoder
+  are unchanged from 0.12.0; the release drops `lazy_static` and a duplicate
+  `fancy-regex`.
+- `mimalloc` 0.1.52. Since 0.1.49 mimalloc v3 is the crate default (the `v3` feature
+  is gone and `v2` opts back), so Brain requires 0.1.52 rather than any 0.1 release,
+  which would let a lockfile resolve one that defaults to v2.
+- `anda_kip` stays at 0.14.0 under a `0.14` requirement; the embedded reference
+  supplement is generated from it. `scripts/sync-kip-reference.mjs` now checks its
+  source against the `anda_kip` in `Cargo.lock` instead of an exact `Cargo.toml` pin.
+
+### Fixes
+
+- `handler::tests::runtime_handlers_cover_parse_auth_and_readonly_paths` waits for
+  the scheduled maintenance that loading a Space starts once it has formed memory,
+  instead of racing it with a manual maintenance request.
+
+### Known limits
+
+- Nexus 0.14.2 does not rebuild index entries written under 0.14.0. A Concept written
+  after its Space was reopened keeps default-tokenizer BM25 terms, so `SEARCH` does
+  not find a word inside its Chinese name, until an update rewrites the indexed
+  columns; its empty optional keys also stay indexed. The upgrade builds `query_keys`
+  for every existing row.
+
 ## [0.13.1] — 2026-09-27
 
 `anda_brain` 0.13.1 on the same KIP `11a82ec` / `cognitive-memory@2.0.0` stack, now

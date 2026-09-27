@@ -32,12 +32,17 @@ write KIP directly.
 
 The service tracks KIP `11a82ec` and `kip://profiles/cognitive-memory@2.0.0`
 (content digest `sha256:734aa0fd…`; the draft rewrote 2.0.0 in place, so only the
-digest names a revision). It pins `anda_kip = "=0.14.0"` and
-`anda_cognitive_nexus = "=0.14.0"` (0.14.1 regresses promoted-draft lineage
-matching) with `anda_engine` 0.16 from crates.io; the Worker
-uses `@ldclabs/kip-do` 0.14 from npm. The commented `[patch.crates-io]` block in
-`Cargo.toml` is for developing against sibling `anda-db` / `anda` checkouts: enable
-the shared DB/KIP stack together and verify one type identity with Cargo metadata.
+digest names a revision). It depends on the 0.14 DB/KIP stack and `anda_engine` 0.16
+from crates.io; the lockfile resolves `anda_kip` 0.14.0, `anda_cognitive_nexus`
+0.14.2 and `anda_core`/`anda_engine` 0.16.2, and Brain needs those: the reference
+supplement is generated from `anda_kip` 0.14.0 (`scripts/sync-kip-reference.mjs`
+checks the source against `Cargo.lock`), Nexus 0.14.1 cannot open a 0.14.0 store,
+and the bounded note index is 0.16.2 API. `tiktoken-rs` is held to 0.12.x: the Recall
+tokenizer identity `o200k_base@tiktoken-rs-0.12` names that line, and `…-0.12.0`
+stays accepted. The Worker uses `@ldclabs/kip-do` 0.14 from npm. The commented
+`[patch.crates-io]` block in `Cargo.toml` is for developing against sibling
+`anda-db` / `anda` checkouts: enable the shared DB/KIP stack together and verify one
+type identity with Cargo metadata.
 KIP v2 has not been deployed. Use fresh v2 Spaces for current acceptance;
 do not add pre-release old-data migration work (including 2.1.0-draft Spaces)
 unless explicitly requested. The one requested exception is the standalone
@@ -332,7 +337,7 @@ or endpoints:
 - Keep English and Chinese runtime guides in separate files, with language links
   and matching formulas, limits, API names and examples. Chinese entry points link
   to `_cn.md`; never remove necessary detail while separating translations.
-- Keep the release version at 0.13.1 until explicitly asked to change it. Record completed
+- Keep the release version at 0.13.2 until explicitly asked to change it. Record completed
   behavior and known limits in `CHANGELOG.md`; do not list planned work as shipped.
 
 ## Prompt and Asset Changes

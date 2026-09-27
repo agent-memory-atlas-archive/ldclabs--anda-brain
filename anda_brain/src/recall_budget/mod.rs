@@ -6,7 +6,7 @@
 
 mod tokenizer;
 
-pub use tokenizer::{TOKENIZER, count};
+pub use tokenizer::{LEGACY_TOKENIZER, TOKENIZER, canonical_tokenizer, count};
 
 use anda_core::{BoxError, Json};
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,9 @@ pub const PACKET_FORMAT: &str = "anda-brain-recall/1";
 #[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct RecallBudget {
+    /// A supported name is read as [`TOKENIZER`], including the legacy
+    /// [`LEGACY_TOKENIZER`] that stored policies may still carry.
+    #[serde(deserialize_with = "tokenizer::deserialize_tokenizer")]
     pub tokenizer: String,
     pub max_tokens: u32,
     pub context_tokens: u32,
@@ -42,7 +45,7 @@ impl Default for RecallBudget {
 
 impl RecallBudget {
     pub fn validate(&self) -> Result<(), BoxError> {
-        if self.tokenizer != TOKENIZER {
+        if canonical_tokenizer(&self.tokenizer).is_none() {
             return Err("unsupported Recall tokenizer".into());
         }
         if !(1..=65_536).contains(&self.max_tokens) {
@@ -65,20 +68,21 @@ impl RecallBudget {
         if let Some(request) = request {
             request.validate()?;
         }
-        match (policy, request) {
-            (None, None) => Ok(None),
-            (Some(one), None) | (None, Some(one)) => Ok(Some(one.clone())),
-            (Some(policy), Some(request)) => {
-                if policy.tokenizer != request.tokenizer {
-                    return Err("Recall policy and request tokenizers differ".into());
-                }
-                Ok(Some(Self {
-                    tokenizer: policy.tokenizer.clone(),
-                    max_tokens: policy.max_tokens.min(request.max_tokens),
-                    context_tokens: policy.context_tokens.min(request.context_tokens),
-                }))
-            }
-        }
+        let (max_tokens, context_tokens) = match (policy, request) {
+            (None, None) => return Ok(None),
+            (Some(one), None) | (None, Some(one)) => (one.max_tokens, one.context_tokens),
+            (Some(policy), Some(request)) => (
+                policy.max_tokens.min(request.max_tokens),
+                policy.context_tokens.min(request.context_tokens),
+            ),
+        };
+        // Both validated, so both name the one supported encoding; the result
+        // names it as current, whichever spelling either side stored.
+        Ok(Some(Self {
+            tokenizer: TOKENIZER.into(),
+            max_tokens,
+            context_tokens,
+        }))
     }
 }
 

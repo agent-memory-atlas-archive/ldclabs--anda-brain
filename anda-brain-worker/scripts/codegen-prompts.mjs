@@ -82,9 +82,10 @@ ${bodies.join('\n')}`
 
 const target = join(root, 'src', 'assets.generated.ts')
 const bundle = JSON.parse(readFileSync(join(root, 'assets/kip-reference.json'), 'utf8'))
-// Protocol references track anda_kip, not the independently versioned TS engine.
-const protocol = readFileSync(join(root, '../Cargo.toml'), 'utf8').match(/anda_kip = "=([^"]+)"/)?.[1]
-if (bundle.version !== protocol) throw new Error('Reference bundle must match the exact anda_kip pin')
+// Protocol references track the anda_kip the Rust service resolves, not the
+// independently versioned TS engine.
+const protocol = readFileSync(join(root, '../Cargo.lock'), 'utf8').match(/\nname = "anda_kip"\nversion = "([^"]+)"/)?.[1]
+if (bundle.version !== protocol) throw new Error(`Reference bundle ${bundle.version} must match the anda_kip ${protocol} in Cargo.lock`)
 if (readFileSync(join(root, 'assets/BrainFormationReview.md'), 'utf8') !== readFileSync(join(root, '../anda_brain/assets/BrainFormationReview.md'), 'utf8')) throw new Error('Formation review policy must match Rust')
 const imports = []
 const documents = bundle.documents.map(({ id, source, sha256, content, constant, asset }) => {

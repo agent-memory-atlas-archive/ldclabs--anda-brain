@@ -76,6 +76,6 @@ func init() {
 	recallCmd.Flags().Bool("budget", false, "Return a bounded JSON memory packet using server defaults")
 	recallCmd.Flags().Uint32("budget-max-tokens", 0, "Optional packet token limit (1-65536)")
 	recallCmd.Flags().Uint32("budget-context-tokens", 0, "Optional cumulative planning-input limit (1-131072)")
-	recallCmd.Flags().String("budget-tokenizer", "", "Pinned tokenizer (o200k_base@tiktoken-rs-0.12.0)")
+	recallCmd.Flags().String("budget-tokenizer", "", "Tokenizer identity; omit to use the server's (o200k_base@tiktoken-rs-0.12)")
 	rootCmd.AddCommand(recallCmd)
 }

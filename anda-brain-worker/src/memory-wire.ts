@@ -9,7 +9,9 @@ import { isJsonMap } from '@ldclabs/kip-do'
 export const KIP_MEMORY = '2.0'
 export const MAX_AFTER = 128
 /** Same pinned name the Rust Brain advertises; see {@link fitsBudget}. */
-export const TOKENIZER = 'o200k_base@tiktoken-rs-0.12.0'
+export const TOKENIZER = 'o200k_base@tiktoken-rs-0.12'
+/** The name advertised through Brain 0.13.1, for the same encoding. */
+export const LEGACY_TOKENIZER = 'o200k_base@tiktoken-rs-0.12.0'
 export const DEFAULT_OUTPUT_TOKENS = 4096
 export const DEFAULT_DEADLINE_MS = 30_000
 export const MAX_DEADLINE_MS = 120_000
@@ -206,7 +208,7 @@ export function checkRequires(request: MemoryRequest): void {
     }
   }
   const tokenizer = request.budget?.tokenizer
-  if (tokenizer !== undefined && tokenizer !== TOKENIZER) {
+  if (tokenizer !== undefined && tokenizer !== TOKENIZER && tokenizer !== LEGACY_TOKENIZER) {
     throw new MemoryError('UnsupportedCapability', `tokenizer ${JSON.stringify(tokenizer)} is not supported; this binding counts with ${TOKENIZER}`)
   }
   if ((request.budget?.deadline_ms ?? 0) > MAX_DEADLINE_MS) {

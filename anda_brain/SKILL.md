@@ -7,7 +7,7 @@ description: |
   asks to use Anda Brain. Observer ingestion, runtime installation and trust
   governance require separate trusted-host authority.
 metadata:
-  version: 0.13.1
+  version: 0.13.2
   url: https://github.com/ldclabs/anda-brain/blob/main/skills/anda-brain/SKILL.md
   keywords:
     - long-term memory
@@ -23,7 +23,7 @@ metadata:
 
 # 🧠 Anda Brain
 
-This skill targets the Rust **Anda Brain 0.13.1** service with KIP 2.0 (`11a82ec`),
+This skill targets the Rust **Anda Brain 0.13.2** service with KIP 2.0 (`11a82ec`),
 `cognitive-memory@2.0.0`, Nexus 0.14 and KIP 0.14. The Cloudflare Worker uses a
 separate engine and does not acquire these Rust runtime capabilities automatically.
 Check the deployed service and its configuration before choosing an optional path.
@@ -382,9 +382,9 @@ Content-Type: application/json
 Note: `result.content` is the primary contract. Additional fields may vary by model/runtime.
 
 **Optional budget mode (Rust service):** add `budget` with the fixed tokenizer
-`o200k_base@tiktoken-rs-0.12.0`, `max_tokens` (1–65536), and `context_tokens`
-(1–131072). An explicit empty object defaults to 4096 output / 49152 cumulative
-normalized planning-input tokens. `memory_policy.recall_budget` can enforce
+`o200k_base@tiktoken-rs-0.12` (the earlier `…-0.12.0` spelling is accepted),
+`max_tokens` (1–65536), and `context_tokens` (1–131072). An explicit empty object
+defaults to 4096 output / 49152 cumulative normalized planning-input tokens. `memory_policy.recall_budget` can enforce
 ceilings; omitting the request budget cannot disable that policy.
 
 In this mode `content` is one compact JSON memory packet, not a synthesized

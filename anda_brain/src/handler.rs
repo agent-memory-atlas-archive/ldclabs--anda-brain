@@ -1463,6 +1463,17 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    /// Waits for background formation and maintenance to finish.
+    async fn wait_until_idle(space: &crate::space::Space) {
+        for _ in 0..500 {
+            if !space.is_processing() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("the space is still processing after 5 s");
+    }
+
     async fn ok_json<T: IntoResponse>(result: Result<T, AppError>) -> Value {
         match result {
             Ok(value) => {
@@ -2339,13 +2350,7 @@ mod tests {
             Err(err) => panic!("unexpected formation error: {}", err.message),
         };
         assert_eq!(formation_ok.status(), StatusCode::OK);
-        for _ in 0..100 {
-            if !space.is_processing() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        assert!(!space.is_processing());
+        wait_until_idle(&space).await;
 
         let recall_ok = ok_json(
             post_recall(
@@ -2368,6 +2373,10 @@ mod tests {
         )
         .await;
         assert!(recall_ok["result"]["conversation"].is_number());
+        // Loading the Space for that recall kicks its first scheduled
+        // maintenance (it has formed memory and was never maintained), which
+        // runs in the background; a manual request meanwhile is refused.
+        wait_until_idle(&space).await;
 
         let maintenance_ok = ok_json(
             post_maintenance(

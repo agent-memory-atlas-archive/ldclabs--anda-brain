@@ -290,6 +290,15 @@ async fn the_binding_advertises_only_what_it_serves() {
     });
     let response = f.space.memory_request(NS, true, tokenizer).await;
     assert_eq!(error_code(&response), "UnsupportedCapability");
+    // The identity advertised through 0.13.1 names the same encoding.
+    let mut legacy = request("recall", None, None, json!({"mode": "attention"}));
+    legacy.budget = Some(wire::Budget {
+        max_output_tokens: Some(1000),
+        deadline_ms: Some(1000),
+        tokenizer: Some(crate::recall_budget::LEGACY_TOKENIZER.into()),
+    });
+    let response = f.space.memory_request(NS, true, legacy).await;
+    assert!(response.error.is_none(), "{}", error_code(&response));
     let mut other = request("recall", None, None, json!({"mode": "attention"}));
     other.space = Some(SpaceSelector {
         id: Some("another_space".into()),

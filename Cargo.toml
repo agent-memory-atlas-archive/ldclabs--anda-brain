@@ -35,19 +35,15 @@ axum = { version = "0.8", features = [
 ], default-features = true }
 # 0.16.1 is the first published Core/Engine pair using the DB/KIP 0.14 stack;
 # 0.16.2 adds the bounded note queries and the runner's note index.
-anda_core = { version = "0.16.2" }
-anda_engine = { version = "0.16.2" }
+anda_core = { version = "0.16" }
+anda_engine = { version = "0.16" }
 anda_engine_server = { version = "0.16" }
 anda_web3_client = { version = "0.16" }
 anda_object_store = "0.14"
 anda_db = { version = "0.14", features = ["full"] }
 anda_db_tfs = { version = "0.14", features = ["full"] }
-# 0.14.1 regresses lineage matching of promoted draft vocabulary (a promoted
-# draft type no longer answers a query by its installed name); hold 0.14.0
-# until a fixed Nexus is published.
-anda_cognitive_nexus = "=0.14.0"
-# The embedded reference supplement is generated from this exact release.
-anda_kip = "=0.14.0"
+anda_cognitive_nexus = "0.14"
+anda_kip = "0.14"
 base64 = "0.23"
 cbor2 = "1"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
@@ -74,10 +70,12 @@ log = { version = "0.4", features = ["kv_serde"] }
 clap = { version = "4.6", features = ["derive", "env"] }
 tower = { version = "0.5", features = ["limit", "load-shed", "util"] }
 tower-http = { version = "0.7", features = ["compression-gzip", "cors"] }
-# Keep the implementation aligned with recall_budget::TOKENIZER and its public contract.
-tiktoken-rs = "=0.12.0"
+# recall_budget::TOKENIZER names the o200k encoding of the tiktoken-rs 0.12 line:
+# patch releases only. A release that changes the encoding needs a new identity.
+tiktoken-rs = "0.12.1"
 markdown = "1"
-mimalloc = { version = "0.1", features = ["v3"] }
+# 0.1.49 made mimalloc v3 the default (the `v3` feature is gone; `v2` opts back).
+mimalloc = { version = "0.1.52" }
 rand = "0.10"
 rmcp = { version = "3", features = [
   "macros",

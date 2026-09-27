@@ -11,8 +11,13 @@ const source = process.env.ANDA_KIP_SOURCE
 if (!source) throw new Error('Set ANDA_KIP_SOURCE to the published anda_kip crate directory')
 const manifest = readFileSync(join(source, 'Cargo.toml'), 'utf8')
 const version = manifest.match(/\[package\][\s\S]*?\nversion\s*=\s*"([^"]+)"/)?.[1]
-const pinned = readFileSync(join(root, 'Cargo.toml'), 'utf8').match(/anda_kip = "=([^"]+)"/)?.[1]
-if (!version || version !== pinned) throw new Error('Source version must match the exact anda_kip workspace pin')
+// The release the build resolves, not the Cargo.toml requirement: the supplement
+// must come from the anda_kip the service is compiled against.
+const pinned = readFileSync(join(root, 'Cargo.lock'), 'utf8')
+  .match(/\nname = "anda_kip"\nversion = "([^"]+)"/)?.[1]
+if (!version || version !== pinned) {
+  throw new Error(`Source version ${version} must match the anda_kip ${pinned} in Cargo.lock`)
+}
 const files = [
   'SPECIFICATION.md', 'Invariants.md', 'brain/ExperienceLearningArchitecture.md',
   'grammar/KQL.ebnf', 'grammar/KML.ebnf', 'grammar/META.ebnf',

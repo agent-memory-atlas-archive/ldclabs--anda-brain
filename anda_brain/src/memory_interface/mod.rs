@@ -386,11 +386,12 @@ impl Space {
     }
 }
 
-/// A request budget this binding can honor: the advertised tokenizer, a
-/// positive output bound and a deadline within [`MAX_DEADLINE_MS`].
+/// A request budget this binding can honor: the advertised tokenizer (or its
+/// legacy spelling), a positive output bound and a deadline within
+/// [`MAX_DEADLINE_MS`].
 fn check_budget(budget: &wire::Budget) -> Result<(), KipError> {
     if let Some(tokenizer) = &budget.tokenizer
-        && tokenizer != crate::recall_budget::TOKENIZER
+        && crate::recall_budget::canonical_tokenizer(tokenizer).is_none()
     {
         return Err(KipError::unsupported_capability(format!(
             "tokenizer {tokenizer:?} is not supported; this binding counts with {}",
