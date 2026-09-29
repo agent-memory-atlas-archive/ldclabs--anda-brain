@@ -646,9 +646,9 @@ never execute mutations, refresh the snapshot or prove change coverage.
 Use KIP 2.0 with `kip://profiles/cognitive-memory@2.0.0` (the revision is named
 by its content digest; the reference alone does not identify it). The live Primer
 provides identities, Schema and engine capabilities. Installed types do not
-advertise this Brain's interfaces. This deployment exposes the existing Brain
-API and raw KIP; it does not advertise the optional five-intent Memory Interface,
-a memory capability bundle, or full CognitiveMemory conformance.
+advertise this Brain's interfaces. This Worker exposes its Brain API, raw KIP
+and the KIP Memory Interface at the `memory_basic` level only; it does not claim
+`memory_experience`, `memory_learning` or full CognitiveMemory conformance.
 
 There is no configured independent observer/trial/evaluation scheduler or external
 dispatch adapter. Procedures remain explicitly **unproven** candidates. Do not
@@ -689,9 +689,10 @@ self-report; task_family only discovers possible controls and never selects one.
   synthesized watch_fire Activity or a model-authored watermark.
 - Prose conditions and mixed structured/text conditions are deferred: this Brain
   has no semantic Watch evaluator. Completion of a model call proves no change
-  coverage. No legacy `due_seen_seq` or Space `delta_consumed_seq` releases a Watch.
-- The former family-success-rate Skill rule does not run. The report's
-  `skills.unsupported_reason` explains why no validated evaluation was performed.
+  coverage; only the protected Watch API advances a Watch.
+- No Skill lifecycle verdict runs in this cycle: shared `task_family` membership
+  is not a control. The report's `skills.unsupported_reason` explains why no
+  validated evaluation was performed.
 - Attention reaches the business agent only through a commit. A fired Watch is
   already raised by its `watch_fire` Activity. The settlement raises due
   Commitments before this cycle (its report's `commitments`): each `pending` or

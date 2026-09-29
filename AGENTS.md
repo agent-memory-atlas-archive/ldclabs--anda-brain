@@ -33,11 +33,11 @@ write KIP directly.
 The service tracks KIP `11a82ec` and `kip://profiles/cognitive-memory@2.0.0`
 (content digest `sha256:734aa0fd…`; the draft rewrote 2.0.0 in place, so only the
 digest names a revision). It depends on the 0.14 DB/KIP stack and `anda_engine` 0.16
-from crates.io; the lockfile resolves `anda_kip` 0.14.0, `anda_cognitive_nexus`
-0.14.2 and `anda_core`/`anda_engine` 0.16.2, and Brain needs those: the reference
-supplement is generated from `anda_kip` 0.14.0 (`scripts/sync-kip-reference.mjs`
-checks the source against `Cargo.lock`), Nexus 0.14.1 cannot open a 0.14.0 store,
-and the bounded note index is 0.16.2 API. `tiktoken-rs` is held to 0.12.x: the Recall
+from crates.io; `Cargo.lock` is the record of resolved versions. Brain needs at
+least `anda_cognitive_nexus` 0.14.2 (0.14.1 cannot open a 0.14.0 store) and
+`anda_core`/`anda_engine` 0.16.2 (the bounded note index API); the reference
+supplement is generated from the locked `anda_kip` (`scripts/sync-kip-reference.mjs`
+checks the source against `Cargo.lock`). `tiktoken-rs` is held to 0.12.x: the Recall
 tokenizer identity `o200k_base@tiktoken-rs-0.12` names that line, and `…-0.12.0`
 stays accepted. The Worker uses `@ldclabs/kip-do` 0.14 from npm. The commented
 `[patch.crates-io]` block in `Cargo.toml` is for developing against sibling
@@ -58,7 +58,7 @@ library. Keep normal restart, eviction and unresolved-write recovery fully teste
 - `anda_brain/src/handler.rs`: HTTP route handlers and API entry points.
 - `anda_brain/src/payload.rs`: JSON/CBOR/Markdown payload negotiation.
 - `anda_brain/src/types.rs`: API input/output and persisted config types.
-- `anda_brain/assets/`: agent prompts and tool definitions. The KIP syntax card
+- `anda_brain/assets/`: agent prompts. The KIP syntax card
   and the Cognitive Memory Profile are **not** copied here — `anda_kip` ships
   them with the protocol, and `agents::prompts::system_prompt()` includes the full
   syntax, role cards and Profile in every model call, including budgeted Recall.
@@ -75,10 +75,10 @@ library. Keep normal restart, eviction and unresolved-write recovery fully teste
   and keep the advertised levels truthful.
 - `anda_brain/src/assess/` and `assess.rs`: online diagnostic model routing,
   typed read observations, Recall trace/citations and metadata. Preserve these
-  and the usage/correction ledgers; they are not the retired offline evaluator.
-- Offline product regressions live in sibling MIB. `src/eval.rs`, its modules,
-  the `eval` CLI and global prompt/policy overrides were retired. Do not
-  recreate an equivalent comprehensive evaluator inside Brain. The independent
+  and the usage/correction ledgers; they are online diagnostics, not an offline
+  evaluator.
+- Offline product regressions live in sibling MIB. Do not add a comprehensive
+  evaluator, an `eval` CLI or process-global prompt/policy overrides to Brain. The independent
   wiki corpus under `anda_brain/evals/wiki/` remains in use.
 - `anda_brain/src/settlement/`: bounded decay, correction discovery and Watch
   scheduling. `watch.rs` reads ids, overall versions and WatchState generations;
@@ -337,7 +337,7 @@ or endpoints:
 - Keep English and Chinese runtime guides in separate files, with language links
   and matching formulas, limits, API names and examples. Chinese entry points link
   to `_cn.md`; never remove necessary detail while separating translations.
-- Keep the release version at 0.13.2 until explicitly asked to change it. Record completed
+- Change the release version only when explicitly asked. Record completed
   behavior and known limits in `CHANGELOG.md`; do not list planned work as shipped.
 
 ## Prompt and Asset Changes

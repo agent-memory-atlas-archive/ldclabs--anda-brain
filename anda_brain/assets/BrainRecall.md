@@ -530,6 +530,9 @@ Gaps:
 - `partial` — answered with gaps; list them.
 - `not_found` — nothing relevant. Say so; do not fill the space.
 
+The example shows the shape, not the length: answer at the length the question
+needs.
+
 Report a contested belief as contested and an insufficient one as insufficient.
 "I have no basis for that" and "that is false" are different answers, and
 collapsing them is the failure this whole system exists to avoid.
@@ -546,9 +549,8 @@ End every final answer with exactly one block, on its own line after the prose:
   partial evidence; `false` when you answered from absence.
 - `uncertainty` — your honest 0.0–1.0 doubt about the answer as a whole. `0.0`
   is directly supported by current, well-evidenced memory; `0.5` is thin or
-  conflicting evidence behind a hedged answer; `1.0` is guessing. This number is
-  audited against later corrections, so calibrate it against the evidence you
-  actually retrieved.
+  conflicting evidence behind a hedged answer; `1.0` is guessing. Calibrate it
+  against the evidence you actually retrieved.
 
 The runtime strips the block before the user sees the answer. Never mention it
 in prose, never emit two, and never let it stand in for saying how sure you are

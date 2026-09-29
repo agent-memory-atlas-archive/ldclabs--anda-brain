@@ -2,6 +2,65 @@
 
 All notable changes to the Anda Brain project.
 
+## [0.13.3] — 2026-09-29
+
+On the same KIP `11a82ec` / `cognitive-memory@2.0.0` stack. A prompt and
+tool-definition audit: instructions that contradicted the running system, and request
+shapes that current Claude models reject.
+
+### Changed
+
+- Formation, Recall, Maintenance and budgeted Recall no longer force their first tool
+  call (`tool_choice_required` is off). anda_engine sent it to Anthropic-protocol
+  backends as `tool_choice: {type: "any"}`, which Claude Opus 5.5, Sonnet 5.5 and
+  Fable 5.1 reject with 400. The prompts already name the tools to start with, and
+  budgeted Recall still parses a selection returned as text. Budgeted Recall's
+  normalized request digest changes with it.
+- Wiki Digest asks for its extraction through `output_schema` (structured output on
+  the Anthropic, OpenAI and Gemini adapters) instead of a "reply with ONLY JSON"
+  instruction. The tolerant parser and the single retry stay for backends that ignore
+  the schema.
+- The Maintenance deployment contract (Rust and Worker) states the Memory Interface at
+  `memory_basic` it actually serves; it said the opposite of the capability summary in
+  the same system prompt. It no longer names Watch fields that exist nowhere
+  (`due_seen_seq`, `delta_consumed_seq`) or a "former" Skill rule, and Formation and
+  Maintenance no longer point the model at `memory_runtime syntax`, which returns the
+  syntax already in its context.
+- Recall's self-report asks for calibration without describing how it is audited, and
+  says the answer example fixes the shape, not the length. The `recall_memory` query
+  description drops its example queries; the MCP `anda_brain_execute_kip_readonly`
+  description states its KQL/META-only gate, 15-second bound, belief semantics and
+  when to use recall instead.
+- `anda_brain/assets/RecallFunctionDefinition.json` is removed. No code loaded it and it
+  lacked the required `budget` field; `RecallAgent::definition()` is the definition.
+- SKILL.md no longer links the deleted OpenClaw plugin directory or sends readers to the
+  discontinued console, and says `memory_strength_decay_factor` is accepted but ignored.
+
+### Cloudflare Worker
+
+- The Formation contract's examples write the counterparty key and Evidence fields as
+  literals: the plan API never binds `:counterparty`, `:display_name`, `:evidence_key`,
+  `:payload` or `:observed_at`. Its list of bound values now includes the Memory
+  Interface's `:contexts`, `:scope_task` and `:orig`, and its example plan leaves the
+  deprecated `types` / `predicates` empty, as the schema descriptions now say.
+- The embedded-reference instructions say the full syntax is in context at every stage,
+  not only planning.
+
+### Dependencies
+
+- `anda_engine` 0.16.4 (from 0.16.2), under the existing `0.16` requirement.
+- `rmcp` / `rmcp-macros` 3.5.0 (from 3.4.1) and `tokio-rustls` 0.26.6 (from 0.26.5),
+  lockfile updates only.
+
+### Known limits
+
+- Whether DeepSeek's Anthropic-compatible endpoint (the default `MODEL_API_BASE`)
+  accepts `output_config.format` has not been verified; if it rejects the field, Wiki
+  Digest fails there until the schema is made optional per provider.
+- anda_engine's Anthropic adapter sets no `cache_control`, so the static system prefix
+  is not prompt-cached on Claude. `MODEL_MAX_OUTPUT` defaults to 384000 for
+  `deepseek-v4-pro`; a Claude model needs 128000 or less.
+
 ## [0.13.2] — 2026-09-27
 
 On the same KIP `11a82ec` / `cognitive-memory@2.0.0` stack: Cognitive Nexus 0.14.2, and

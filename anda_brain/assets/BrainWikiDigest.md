@@ -8,7 +8,7 @@ A document header (title, URI, namespace, tags), a list of indexed previous clai
 
 ## Output
 
-Reply with ONLY one JSON object — no prose, no markdown fences:
+Return one JSON object in this shape:
 
 ```json
 {

@@ -7,7 +7,7 @@ export const MAX_REFERENCE_PAGES = 8
 
 export const REFERENCE_INSTRUCTIONS = `# Embedded protocol references
 Markdown links and bare document paths are source citations, not files you can open.
-The role cards, Profile and deployment policy are in context; planning also has full syntax.
+The full syntax, role cards, Profile and deployment policy are in context for every stage.
 To consult another reference, return a non-empty references array in your JSON response,
 for example {"references":[{"document":"syntax","section":"kql","offset":0}]}.
 Include the other required response fields as empty placeholders: commands/types/predicates=[],

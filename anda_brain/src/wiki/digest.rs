@@ -634,6 +634,7 @@ impl WikiDigest {
                     CompletionRequest {
                         instructions: DIGEST_PROMPT.to_string(),
                         prompt: attempt_prompt.clone(),
+                        output_schema: Some(extraction_schema()),
                         ..Default::default()
                     },
                     Vec::new(),
@@ -1031,6 +1032,60 @@ async fn verify_recent_citations(
         }
     }
     Ok((checked, invalid))
+}
+
+/// Structured-output schema for [`Extraction`]. Providers that honor
+/// `output_schema` return exactly this shape; `parse_extraction` and the single
+/// retry remain the fallback for backends that ignore it.
+fn extraction_schema() -> Json {
+    let concept_ref = json!({
+        "type": "object",
+        "properties": {"type": {"type": "string"}, "name": {"type": "string"}},
+        "required": ["type", "name"],
+        "additionalProperties": false
+    });
+    json!({
+        "type": "object",
+        "properties": {
+            "concepts": {"type": "array", "items": {
+                "type": "object",
+                "properties": {
+                    "type": {"type": "string"},
+                    "name": {"type": "string"},
+                    "attributes": {
+                        "type": "object",
+                        "properties": {"description": {"type": "string"}},
+                        "additionalProperties": false
+                    }
+                },
+                "required": ["type", "name"],
+                "additionalProperties": false
+            }},
+            "facts": {"type": "array", "items": {
+                "type": "object",
+                "properties": {
+                    "subject": concept_ref,
+                    "predicate": {"type": "string"},
+                    "object": concept_ref,
+                    "confidence": {"type": "number"},
+                    "anchor": {"type": "string"}
+                },
+                "required": ["subject", "predicate", "object", "confidence", "anchor"],
+                "additionalProperties": false
+            }},
+            "reviews": {"type": "array", "items": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer"},
+                    "verdict": {"type": "string", "enum": ["supported", "absent", "unknown"]}
+                },
+                "required": ["index", "verdict"],
+                "additionalProperties": false
+            }}
+        },
+        "required": ["concepts", "facts", "reviews"],
+        "additionalProperties": false
+    })
 }
 
 /// Whether a KQL FIND result contains any row.

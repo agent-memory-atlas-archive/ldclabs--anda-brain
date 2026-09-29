@@ -139,7 +139,7 @@ impl MemoryRuntimeTool {
 static DEFINITION: LazyLock<FunctionDefinition> = LazyLock::new(|| {
     serde_json::from_value(json!({
     "name": MemoryRuntimeTool::NAME,
-    "description": "Read full KIP syntax or runtime configuration/status, compute a kip-jcs-safe-v1 SHA-256 content digest, or (Maintenance only) arm a Watch / acquire or renew a five-minute SleepTask lease. Create Watch as disarmed and SleepTask as pending first. Mutations require the exact target and its current _system.version. Re-read after every mutation; never infer the new version. Arming starts a new observation generation, so review gaps before re-arming. External work requires separately installed host callbacks and the fenced action gate. This tool cannot install or invoke an executor or grant authority.",
+    "description": "Read runtime configuration/status (the full KIP syntax is already in your system context), compute a kip-jcs-safe-v1 SHA-256 content digest, or (Maintenance only) arm a Watch / acquire or renew a five-minute SleepTask lease. Create Watch as disarmed and SleepTask as pending first. Mutations require the exact target and its current _system.version. Re-read after every mutation; never infer the new version. Arming starts a new observation generation, so review gaps before re-arming. External work requires separately installed host callbacks and the fenced action gate. This tool cannot install or invoke an executor or grant authority.",
     "parameters": {"type":"object", "additionalProperties":false,
         "properties": {
             "operation":{"type":"string","enum":["syntax","status","content_digest","arm_watch","lease_task"]},

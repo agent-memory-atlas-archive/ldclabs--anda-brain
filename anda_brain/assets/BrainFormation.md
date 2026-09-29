@@ -749,9 +749,9 @@ Type may add only open, optional `attributes`. `SchemaSymbolConflict` means the
 name already resolves: use it. The host queues the `review_schema` SleepTask
 for every new symbol (`review_schema:<kind>:<ref>`); do not create it yourself.
 
-`declare_memory_symbols {types, predicates}` remains for one release as a
-deprecated shortcut: it drafts bare names with a generic description. Prefer
-`DEFINE` with a description that says what the symbol means.
+`declare_memory_symbols {types, predicates}` is a deprecated shortcut: it drafts
+bare names with a generic description. Prefer `DEFINE` with a description that
+says what the symbol means.
 
 An option someone prefers is a Concept typed by its kind — `ColorScheme`,
 `Editor`, `ReplyLength` — because `prefers` partitions by that type (§23). Declare
@@ -918,6 +918,5 @@ lease/arm step. Procedures remain unproven Skill + immutable SkillRevision with
 both structural links in one MUTATE; never invent a behavior digest. Confidence,
 salience and utility are optional; repeated reports are not independent attempts.
 Use memory_runtime content_digest to hash all SkillRevision attributes except
-behavior_digest; operation syntax loads the full language reference. Formation
-cannot call its arm_watch or lease_task operations. The observation bindings and
+behavior_digest. Formation cannot call its arm_watch or lease_task operations. The observation bindings and
 ingest block belong to the host; do not override them in an execute_kip request.

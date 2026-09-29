@@ -66,7 +66,7 @@ pub static FUNCTION_DEFINITION: LazyLock<FunctionDefinition> = LazyLock::new(|| 
             },
             "query": {
                 "type": "string",
-                "description": "A natural language question about older or out-of-context memory. Be specific and include the subject, timeframe, and topic when known. Examples: 'What do we know about the current user's communication preferences?', 'What happened in our last discussion about Project Aurora?', 'Who are the members of the engineering team?'"
+                "description": "A natural language question about older or out-of-context memory. Be specific and include the subject, timeframe, and topic when known."
             },
             "context": {
                 "type": [
@@ -692,7 +692,7 @@ impl RecallAgent {
                 prompt,
                 chat_history,
                 tools: ctx.tool_definitions(Some(&self.tool_dependencies())),
-                tool_choice_required: true,
+                tool_choice_required: false,
                 effort: Some(ModelEffort::Medium),
                 ..Default::default()
             },

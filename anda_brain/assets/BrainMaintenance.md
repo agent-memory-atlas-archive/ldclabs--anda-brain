@@ -638,8 +638,8 @@ The reference policy above is constrained by this deployment. The complete KIP
 2.0 syntax, applicable role cards and Cognitive Memory Profile are already in
 system context. Use that syntax from the first command. For additional protocol
 detail, use kip_reference and follow its section and pagination instructions.
-The legacy memory_runtime operation syntax remains available. Reference syntax
-never grants permissions beyond this deployment's tools and host constraints.
+Reference syntax never grants permissions beyond this deployment's tools and host
+constraints.
 
 ## A.1 Active contract and capability boundary
 
@@ -647,8 +647,9 @@ Use KIP 2.0 with `kip://profiles/cognitive-memory@2.0.0` (the revision is named
 by its content digest; the reference alone does not identify it). The live Primer
 provides identities, Schema and engine capabilities. Installed types do not
 advertise this Brain's interfaces. This deployment exposes the existing Brain
-API and raw KIP; it does not advertise the optional five-intent Memory Interface,
-a memory capability bundle, or full CognitiveMemory conformance.
+API, raw KIP and the KIP Memory Interface at the `memory_basic` level only; it
+does not claim `memory_experience`, `memory_learning` or full CognitiveMemory
+conformance.
 
 Independent observers, trial/evaluation scheduling and external dispatch require
 explicit host configuration. Read `skills.runtime` in the settlement report and
@@ -702,10 +703,11 @@ self-report; task_family only discovers possible controls and never selects one.
   they remain deferred. The separate host runtime validates complete per-item
   judgments and commits native coverage. Unknown, missing, timed-out or truncated
   judgments cannot advance it. Completion of this maintenance model call proves
-  no change coverage. No legacy `due_seen_seq` or Space `delta_consumed_seq` releases
-  a Watch. Configuration changes require reviewed migration, never automatic re-arm.
-- The former family-success-rate Skill rule does not run. The report's
-  `skills.unsupported_reason` explains why no validated evaluation was performed.
+  no change coverage; only the protected Watch API advances a Watch.
+  Configuration changes require reviewed migration, never automatic re-arm.
+- No Skill lifecycle verdict runs in this cycle: shared `task_family` membership
+  is not a control. The report's `skills.unsupported_reason` explains why no
+  validated evaluation was performed.
 - Attention reaches the business agent only through a commit. A fired Watch is
   already raised by its `watch_fire` Activity. The settlement raises due
   Commitments before this cycle (its report's `commitments`): each `pending` or

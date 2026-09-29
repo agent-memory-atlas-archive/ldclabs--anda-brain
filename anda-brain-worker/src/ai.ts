@@ -65,16 +65,17 @@ const MUTATION_PLAN_SCHEMA: JsonObject = {
       maxItems: 16,
       items: { type: 'string' },
       description:
-        'UpperCamelCase Concept type names this plan needs and the Space does not ' +
-        'already resolve. The host publishes them before running any command.',
+        'Deprecated shortcut; prefer a DEFINE CONCEPT TYPE command with a description. ' +
+        'UpperCamelCase names the Space does not already resolve; the host drafts them ' +
+        'with a generic description before running any command. Usually [].',
     },
     predicates: {
       type: 'array',
       maxItems: 16,
       items: { type: 'string' },
       description:
-        'snake_case predicate names this plan needs and the Space does not already ' +
-        'resolve.',
+        'Deprecated shortcut; prefer a DEFINE PREDICATE command with a description. ' +
+        'snake_case names the Space does not already resolve. Usually [].',
     },
     commands: {
       type: 'array',

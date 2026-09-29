@@ -7,7 +7,7 @@ description: |
   asks to use Anda Brain. Observer ingestion, runtime installation and trust
   governance require separate trusted-host authority.
 metadata:
-  version: 0.13.2
+  version: 0.13.3
   url: https://github.com/ldclabs/anda-brain/blob/main/skills/anda-brain/SKILL.md
   keywords:
     - long-term memory
@@ -23,7 +23,7 @@ metadata:
 
 # 🧠 Anda Brain
 
-This skill targets the Rust **Anda Brain 0.13.2** service with KIP 2.0 (`11a82ec`),
+This skill targets the Rust **Anda Brain 0.13.3** service with KIP 2.0 (`11a82ec`),
 `cognitive-memory@2.0.0`, Nexus 0.14 and KIP 0.14. The Cloudflare Worker uses a
 separate engine and does not acquire these Rust runtime capabilities automatically.
 Check the deployed service and its configuration before choosing an optional path.
@@ -756,7 +756,7 @@ Read only the relevant reference when integrating a host:
 
 ## OpenClaw Integration
 
-The [`anda-brain`](https://github.com/ldclabs/anda-brain/tree/main/anda-brain-openclaw) plugin integrates Anda Brain into [OpenClaw](https://openclaw.ai/) agents, providing automatic memory encoding and a `recall_memory` tool — no manual API calls needed.
+The `anda-brain` OpenClaw plugin (installed from the OpenClaw plugin registry; its source is no longer in this repository) integrates Anda Brain into [OpenClaw](https://openclaw.ai/) agents, providing automatic memory encoding and a `recall_memory` tool — no manual API calls needed.
 
 ### Prerequisites: Deploy Anda Brain and Create a Space
 
@@ -773,7 +773,7 @@ Before installing the plugin, you need a running Anda Brain deployment plus a `s
 openclaw plugins install anda-brain
 ```
 
-2. Update anda-brain configuration in `openclaw.json` with the `spaceId` and `spaceToken` obtained from the console:
+2. Update anda-brain configuration in `openclaw.json` with the `spaceId` and `spaceToken` created above:
 ```json
 {
   "plugins": {
@@ -890,8 +890,9 @@ The service is configured via CLI arguments and environment variables:
 | MCP HTTP | `cargo run -p anda_brain --features mcp,wiki -- local` then connect `/mcp/{space_id}` | `MCP_HTTP_ALLOWED_HOSTS`, bearer token |
 | MCP stdio | `cargo run -p anda_brain --features mcp,wiki -- mcp --space-id my_space_001 local` | `MCP_AUTH_TOKEN`, `LOCAL_DB_PATH` |
 
-Maintenance parameters override the space policy for that run, including the
-actual deterministic decay. Inspect `GET /v1/{space_id}/memory_status`:
+Maintenance parameters override the space policy for that run.
+`memory_strength_decay_factor` is accepted but ignored: decay is computed at read
+time from the pinned strength policy. Inspect `GET /v1/{space_id}/memory_status`:
 `last_settlement.correction_scan_incomplete` means the bounded discovery scan
 will continue, and `correction_scan_through_seq` identifies fully read progress.
 A completed discovery page does not prove model processing or Watch coverage.

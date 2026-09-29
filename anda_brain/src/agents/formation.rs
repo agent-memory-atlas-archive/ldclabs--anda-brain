@@ -749,7 +749,7 @@ impl FormationAgent {
                 prompt,
                 chat_history,
                 tools: ctx.tool_definitions(Some(&self.tool_dependencies())),
-                tool_choice_required: true,
+                tool_choice_required: false,
                 ..Default::default()
             },
             vec![],

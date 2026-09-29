@@ -1437,7 +1437,13 @@ impl AndaBrainMcpServer {
         self.run_maintenance_for(&access, input).await
     }
 
-    /// Execute KIP read-only commands against the Cognitive Nexus for advanced graph inspection.
+    /// Run KIP 2.0 KQL and META commands against this Space's Cognitive Nexus for
+    /// audit and graph inspection. A request containing any KML mutation is
+    /// rejected, and each request is bounded by a 15-second timeout. Results are
+    /// raw KIP responses: a Proposition that exists is not one that is believed, so
+    /// use a `BELIEF` pattern for "is this true" questions and treat `insufficient`
+    /// as unknown, not false. For natural-language questions use
+    /// anda_brain_recall_memory instead; this tool does no interpretation.
     #[tool(
         name = "anda_brain_execute_kip_readonly",
         annotations(

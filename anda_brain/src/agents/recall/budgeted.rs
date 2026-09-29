@@ -436,7 +436,7 @@ impl RecallAgent {
         let template = CompletionRequest {
             instructions,
             tools,
-            tool_choice_required: true,
+            tool_choice_required: false,
             // The host bounds the delivered packet below. Keep provider
             // output defaults: some backends reject max_output_tokens entirely.
             effort: Some(ModelEffort::Medium),
