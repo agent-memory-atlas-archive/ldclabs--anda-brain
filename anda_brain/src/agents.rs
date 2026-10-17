@@ -5,12 +5,12 @@ pub mod prompts;
 mod recall;
 
 use anda_core::{
-    BoxError, ContentPart, Document, FunctionDefinition, Json, Message, Principal, Resource, Tool,
+    BoxError, Document, FunctionDefinition, Json, Message, Principal, Resource, Tool,
     ToolGroupInfo, ToolOutput, Usage,
 };
 use anda_db::{query::Fv, schema::DocumentId};
 use anda_engine::{
-    context::{AgentCtx, BaseCtx, CompletionRunner},
+    context::{AgentCtx, BaseCtx, COMPACTION_CONTINUE_PROMPT, CompletionRunner},
     extension::note::NoteContextConfig,
     memory::{Conversation, ConversationStatus, KipArgs, MemoryManagement},
     unix_ms,
@@ -286,7 +286,6 @@ pub trait BrainHook: Send + Sync {
 
 /// Principal ID: uuc56-gyb
 pub static SELF_USER_ID: Principal = Principal::from_slice(&[1]);
-const COMPACTION_CONTINUE_PROMPT: &str = "Continue the active memory-agent work from the compaction handoff. The handoff contains the conversation state immediately before compaction.";
 
 /// Persist in-flight (non-terminal) runner turns to the conversation store
 /// only every N turns.
@@ -625,7 +624,13 @@ pub(super) async fn compact_runner_if_needed(
         Ok((mut compacted, output)) => {
             compacted.accumulate(&output.usage);
             compacted.accumulate_tools_usage(&output.tools_usage);
-            compacted.follow_up(ContentPart::from(COMPACTION_CONTINUE_PROMPT.to_string()));
+            // handoff() already resumes a task it interrupted (a tool round
+            // folded into the summary), and queued input such as Formation's
+            // review moves the task on by itself. Only a runner left with
+            // nothing to send needs the prompt, or two would share one turn.
+            if compacted.is_idle() {
+                compacted.follow_up(COMPACTION_CONTINUE_PROMPT.to_string());
+            }
             *runner = compacted;
             Ok(true)
         }

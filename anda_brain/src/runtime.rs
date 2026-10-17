@@ -39,7 +39,7 @@ impl BusinessClock {
             .as_ref()
             .ok_or("clock is not an experiment clock")?;
         clock
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |old| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |old| {
                 (now_ms >= old).then_some(now_ms)
             })
             .map_err(|_| "business time cannot move backwards")?;

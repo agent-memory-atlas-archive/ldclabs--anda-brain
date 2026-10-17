@@ -882,7 +882,7 @@ mod tests {
             .ctx_for_test(SELF_USER_ID, MaintenanceAgent::NAME)
             .unwrap();
         let note = format!("NOTE_HEAD {} NOTE_TAIL", "x".repeat(400));
-        let (written, _) = ctx
+        let written = ctx
             .tool_call(ToolInput {
                 name: "note".into(),
                 args: json!({"op": "upsert", "items": [{"id": "cycle", "content": note}]}),

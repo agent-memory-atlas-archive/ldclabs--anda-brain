@@ -14,9 +14,9 @@ language over REST or MCP; they never write KIP.
 | [SEMANTIC_WATCH_RUNTIME.md](SEMANTIC_WATCH_RUNTIME.md), [LEARNING_RUNTIME.md](LEARNING_RUNTIME.md), [UTILITY_RUNTIME.md](UTILITY_RUNTIME.md), [TRUST_RUNTIME.md](TRUST_RUNTIME.md) | Optional runtimes (each with a `_cn.md` edition) |
 | [../CHANGELOG.md](../CHANGELOG.md) | Release notes and known limits |
 
-Version 0.13.4 tracks KIP `11a82ec` and `kip://profiles/cognitive-memory@2.0.0`
+Version 0.13.5 tracks KIP `11a82ec` and `kip://profiles/cognitive-memory@2.0.0`
 (content digest `sha256:734aa0fd…`), on the 0.14 AndaDB / KIP / Cognitive Nexus
-stack and `anda_engine` 0.16. `Cargo.lock` records the resolved versions.
+stack and `anda_engine` 0.17. `Cargo.lock` records the resolved versions.
 
 ## Contents
 

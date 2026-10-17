@@ -531,8 +531,7 @@ async fn long_real_evidence_notes_and_history_are_removed_atomically_before_the_
             meta: None,
         })
         .await
-        .unwrap()
-        .0;
+        .unwrap();
     assert_ne!(written.is_error, Some(true));
     space.recall.history.write().push_back(Document::from_text(
         "large-history",

@@ -44,7 +44,7 @@ async fn concurrent_formation_tools_share_the_last_vocabulary_slot() {
         let barrier = barrier.clone();
         tokio::spawn(async move {
             barrier.wait().await;
-            formation.tool_call(input).await.unwrap().0
+            formation.tool_call(input).await.unwrap()
         })
     });
     let mut outputs = futures::future::join_all(calls)

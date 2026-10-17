@@ -932,7 +932,7 @@ mod tests {
         Message, ToolCall, ToolInput, Usage,
     };
     use anda_engine::{
-        context::{AgentCtx, COMPACTION_PROMPT},
+        context::{AgentCtx, COMPACTION_CONTINUE_PROMPT, COMPACTION_PROMPT},
         memory::{Conversation, ConversationRef, ConversationStatus},
         model::{CompletionFeaturesDyn, Models},
         unix_ms,
@@ -1377,6 +1377,58 @@ mod tests {
         }
     }
 
+    /// Answers the first turn with a tool call whose usage forces compaction
+    /// in the middle of that tool round, then finishes after the handoff.
+    #[derive(Debug)]
+    struct ToolRoundCompactionCompleter {
+        requests: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl CompletionFeaturesDyn for ToolRoundCompactionCompleter {
+        fn model_name(&self) -> String {
+            "formation-tool-round-compaction-test-model".to_string()
+        }
+
+        fn completion(&self, req: CompletionRequest) -> BoxPinFut<Result<AgentOutput, BoxError>> {
+            let requests = self.requests.clone();
+            Box::pin(async move {
+                let text = request_text(&req);
+                requests.lock().unwrap().push(text.clone());
+                let usage = |input_tokens| Usage {
+                    input_tokens,
+                    output_tokens: 1,
+                    requests: 1,
+                    ..Default::default()
+                };
+                if text.contains(COMPACTION_PROMPT.trim()) {
+                    return Ok(AgentOutput {
+                        content: "handoff summary".to_string(),
+                        usage: usage(8),
+                        ..Default::default()
+                    });
+                }
+                if text.contains("handoff summary") {
+                    return Ok(AgentOutput {
+                        content: "resumed after compaction".to_string(),
+                        usage: usage(16),
+                        ..Default::default()
+                    });
+                }
+                Ok(AgentOutput {
+                    tool_calls: vec![ToolCall {
+                        name: "execute_kip".to_string(),
+                        args: json!({"command": "DESCRIBE PRIMER"}),
+                        result: None,
+                        call_id: Some("primer".to_string()),
+                        remote_id: None,
+                    }],
+                    usage: usage(900),
+                    ..Default::default()
+                })
+            })
+        }
+    }
+
     fn part_text(part: &ContentPart) -> Option<String> {
         match part {
             ContentPart::Text { text } | ContentPart::Reasoning { text } => Some(text.clone()),
@@ -1405,7 +1457,7 @@ mod tests {
 
     /// Saves one note through the registered, product-gated note tool.
     async fn save_note(ctx: &AgentCtx, id: &str, content: &str) {
-        let (output, _) = ctx
+        let output = ctx
             .tool_call(ToolInput {
                 name: "note".into(),
                 args: json!({"op": "upsert", "items": [{"id": id, "content": content}]}),
@@ -2687,6 +2739,10 @@ mod tests {
             !requests[1].contains(super::REVIEW_INSTRUCTIONS),
             "queued review must survive rather than be folded into the handoff"
         );
+        assert!(
+            !requests[2].contains(COMPACTION_CONTINUE_PROMPT),
+            "the queued review moves the task on without a continuation prompt"
+        );
         // The replacement runner loads its own note index, not a stale copy.
         assert!(requests[0].contains("COMPACTION_NOTE"));
         assert!(requests[2].contains("COMPACTION_NOTE"));
@@ -2696,6 +2752,47 @@ mod tests {
         assert!(messages.contains("handoff summary"));
         assert!(messages.contains("reviewed after compaction"));
         assert!(!messages.contains("Saved note index"));
+    }
+
+    #[tokio::test]
+    async fn tool_round_compaction_resumes_with_one_continuation_prompt() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let models = models_with_configured_completer(
+            ToolRoundCompactionCompleter {
+                requests: requests.clone(),
+            },
+            |model| model.context_window = 1000,
+        );
+        let app = app_state_core("formation_tool_round_compaction", models, vec![], "test", 0);
+        let space = create_loaded_space(&app, "formation_tool_round_compaction").await;
+        let ctx = space
+            .ctx_for_test(SELF_USER_ID, FormationAgent::NAME)
+            .unwrap();
+        let mut conversation = stored_conversation(
+            &space,
+            vec![json!(Message {
+                role: "user".to_string(),
+                content: vec![formation_prompt_with_text("Ada likes tea.", None).into()],
+                ..Default::default()
+            })],
+        )
+        .await;
+
+        space.formation.process_one(&ctx, &mut conversation).await;
+
+        assert_eq!(conversation.status, ConversationStatus::Completed);
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3, "{requests:#?}");
+        assert!(requests[1].contains(COMPACTION_PROMPT.trim()));
+        assert!(requests[2].contains("handoff summary"));
+        // The engine resumes the interrupted tool round itself; a second
+        // prompt from the host would share the same user turn.
+        assert_eq!(
+            requests[2].matches(COMPACTION_CONTINUE_PROMPT).count(),
+            1,
+            "{:#?}",
+            requests[2]
+        );
     }
 
     #[tokio::test]

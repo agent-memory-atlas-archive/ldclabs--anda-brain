@@ -850,8 +850,7 @@ impl RecallAgent {
             }),
         )
         .await
-        .map_err(|_| "bounded Recall tool timed out")??
-        .0;
+        .map_err(|_| "bounded Recall tool timed out")??;
         Ok((output.output, output.usage, output.is_error == Some(true)))
     }
 

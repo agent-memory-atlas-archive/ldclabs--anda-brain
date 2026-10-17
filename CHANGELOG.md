@@ -2,7 +2,30 @@
 
 All notable changes to the Anda Brain project.
 
-## [Unreleased]
+## [0.13.5] — 2026-10-17
+
+On the same KIP `11a82ec` / `cognitive-memory@2.0.0` stack, moved to `anda_core` /
+`anda_engine` 0.17.
+
+### Changed
+
+- A compaction handoff resumes the interrupted pass with one continuation prompt.
+  `anda_engine` 0.17's `handoff` queues its own `COMPACTION_CONTINUE_PROMPT` when it
+  folds an unfinished tool round into the summary. Formation, Recall and Maintenance
+  used to queue Brain's own prompt after every handoff, which on 0.17 would share one
+  user turn with the engine's; they now add the engine's prompt only when the
+  replacement runner has nothing else to send. Queued input moves the pass on by
+  itself, so Formation's review of a large input now follows the handoff alone.
+  Agent-initiated compaction (`SelfCompaction`) stays off for Brain's runners.
+
+### Dependencies
+
+- `anda_core` and `anda_engine` 0.17.0 (from 0.16.3 / 0.16.8), under a new `0.17`
+  requirement; `anda_engine_server` and `anda_web3_client` move to `0.17` as well.
+  0.17 removes remote engines, agents and tools, which Brain never registered:
+  `AgentContext::tool_call` returns the tool output alone, so only the bounded Recall
+  tool path and tests change. `serde-saphyr` 2 (from 1.3, used by the wiki's OKF
+  frontmatter) and `tokio` 1.53.3 resolve with it.
 
 ### Fixed
 
