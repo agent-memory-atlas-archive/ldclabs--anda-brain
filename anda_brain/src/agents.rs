@@ -12,7 +12,7 @@ use anda_db::{query::Fv, schema::DocumentId};
 use anda_engine::{
     context::{AgentCtx, BaseCtx, COMPACTION_CONTINUE_PROMPT, CompletionRunner},
     extension::note::NoteContextConfig,
-    memory::{Conversation, ConversationStatus, KipArgs, MemoryManagement},
+    memory::{Conversation, ConversationStatus, KipArgs, MemoryManagement, PrunedMessage},
     unix_ms,
 };
 use anda_kip::Response;
@@ -664,7 +664,7 @@ fn usage_is_empty(usage: &Usage) -> bool {
 /// rotate the ring, so every later pass failed the same way. The budget is in
 /// bytes because `estimate_tokens` counts four characters per token, several
 /// times too few for CJK text.
-pub(super) const HISTORY_DOCUMENT_MAX_BYTES: usize = 32 * 1024;
+pub(super) const HISTORY_DOCUMENT_MAX_BYTES: usize = 64 * 1024;
 
 const TRUNCATED_MARKER: &str = "…[truncated]";
 
@@ -678,7 +678,7 @@ const TRUNCATED_MARKER: &str = "…[truncated]";
 /// Messages are measured as rendered, so escaping and per-message overhead
 /// count against the budget too.
 pub(super) fn history_document(conversation: &Conversation) -> Document {
-    let mut messages: VecDeque<Message> = conversation
+    let mut messages: VecDeque<PrunedMessage> = conversation
         .messages
         .iter()
         .filter_map(|value| Message::deserialize(value).ok())
@@ -686,46 +686,50 @@ pub(super) fn history_document(conversation: &Conversation) -> Document {
             message.content.retain(
                 |part| matches!(part, ContentPart::Text { text } if !text.trim().is_empty()),
             );
-            (!message.content.is_empty()).then_some(message)
+            if message.content.is_empty() {
+                return None;
+            }
+            // Text alone is kept whole by pruning, without a pruning notice.
+            PrunedMessage::try_from(message)
         })
         .collect();
 
     let mut budget = HISTORY_DOCUMENT_MAX_BYTES;
     let mut kept = Vec::new();
     if let Some(mut input) = messages.pop_front() {
-        truncate_text(&mut input, budget / 2);
+        truncate_text(&mut input.content, budget / 2);
         budget = budget.saturating_sub(rendered_len(&input));
         kept.push(input);
     }
     let mut newest = Vec::new();
     while let Some(mut message) = messages.pop_back() {
-        if rendered_len(&message) > budget {
+        let mut len = rendered_len(&message);
+        if len > budget {
             if !newest.is_empty() {
                 messages.push_back(message);
                 break;
             }
             // The newest message is the pass's conclusion: keep its head.
-            truncate_text(&mut message, budget);
+            truncate_text(&mut message.content, budget);
+            len = rendered_len(&message);
         }
-        budget = budget.saturating_sub(rendered_len(&message));
+        budget = budget.saturating_sub(len);
         newest.push(message);
     }
     kept.extend(newest.into_iter().rev());
 
+    // The stored conversation's metadata, with the kept messages as content.
     let mut doc = Document::from(Conversation {
         _id: conversation._id,
         user: conversation.user,
         thread: conversation.thread,
-        messages: kept
-            .iter()
-            .filter_map(|message| serde_json::to_value(message).ok())
-            .collect(),
         status: conversation.status.clone(),
         created_at: conversation.created_at,
         updated_at: conversation.updated_at,
         label: conversation.label.clone(),
         ..Default::default()
     });
+    doc.content = serde_json::to_value(kept).unwrap_or_default();
     if !messages.is_empty() {
         doc.metadata
             .insert("omitted_messages".to_string(), messages.len().into());
@@ -733,15 +737,16 @@ pub(super) fn history_document(conversation: &Conversation) -> Document {
     doc
 }
 
-fn rendered_len(message: &Message) -> usize {
-    serde_json::to_vec(message).map_or(0, |bytes| bytes.len())
+/// What a message adds to the rendered document, its separating comma included.
+fn rendered_len(message: &PrunedMessage) -> usize {
+    serde_json::to_vec(message).map_or(0, |bytes| bytes.len() + 1)
 }
 
-/// Cuts a text-only message to `max_bytes` of text, marking the cut.
-fn truncate_text(message: &mut Message, max_bytes: usize) {
+/// Cuts text-only content to `max_bytes` of text, marking the cut.
+fn truncate_text(content: &mut Vec<ContentPart>, max_bytes: usize) {
     let mut remaining = max_bytes;
-    let mut keep = message.content.len();
-    for (index, part) in message.content.iter_mut().enumerate() {
+    let mut keep = content.len();
+    for (index, part) in content.iter_mut().enumerate() {
         let ContentPart::Text { text } = part else {
             continue;
         };
@@ -754,7 +759,7 @@ fn truncate_text(message: &mut Message, max_bytes: usize) {
         keep = index + 1;
         break;
     }
-    message.content.truncate(keep);
+    content.truncate(keep);
 }
 
 pub(super) fn push_completed_history(
@@ -882,6 +887,32 @@ mod tests {
         assert!(rendered.len() <= HISTORY_DOCUMENT_MAX_BYTES + 1024);
         assert!(rendered.contains("FINAL_HEAD") && rendered.contains("INPUT_HEAD"));
         assert!(!rendered.contains("CONCLUSION"));
+    }
+
+    #[test]
+    fn history_document_measures_messages_as_they_render() {
+        // Model adapters stamp every message, and the document renders the
+        // stamp as an RFC 3339 string: a pass of many short turns must still
+        // stay within the budget.
+        let mut conversation = long_pass(9, 0);
+        conversation.messages.truncate(1);
+        for turn in 0..1_000 {
+            conversation.messages.push(json!(Message {
+                role: "assistant".to_string(),
+                content: vec![format!("step {turn}").into()],
+                timestamp: Some(1_760_000_000_000 + turn),
+                ..Default::default()
+            }));
+        }
+        let doc = history_document(&conversation);
+        let rendered = doc.to_string();
+        assert!(
+            rendered.len() <= HISTORY_DOCUMENT_MAX_BYTES + 1024,
+            "{} bytes",
+            rendered.len()
+        );
+        assert!(rendered.contains("step 999") && rendered.contains(r#""timestamp":"20"#));
+        assert!(doc.metadata["omitted_messages"].as_u64().unwrap() > 0);
     }
 
     #[test]

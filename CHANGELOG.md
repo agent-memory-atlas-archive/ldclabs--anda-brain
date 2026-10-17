@@ -16,8 +16,14 @@ All notable changes to the Anda Brain project.
   messages`), before compaction can act. A failed pass does not rotate the ring, and
   a restart rebuilds it from the same two conversations, so every later window
   failed the same way until Formation gave up on it. Each history conversation is
-  now its visible text only, at most 32 KiB as rendered: the head of its opening
+  now its visible text only, at most 64 KiB as rendered: the head of its opening
   input and its newest messages, with `omitted_messages` counting the ones left out.
+
+### Dependencies
+
+- `anda_core` 0.17.1 and `anda_engine` 0.17.2 (from 0.17.0), under the existing `0.17`
+  requirement, and other lockfile-only patch updates (`async-compression`,
+  `compression-codecs`, `compression-core`).
 
 ## [0.13.5] — 2026-10-17
 
