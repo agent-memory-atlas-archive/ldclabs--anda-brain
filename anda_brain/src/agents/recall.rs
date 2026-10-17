@@ -376,7 +376,7 @@ impl RecallAgent {
             .take(RECALL_HISTORY_LIMIT)
             .collect();
         history.reverse();
-        *self.history.write() = history.into_iter().map(Document::from).collect();
+        *self.history.write() = history.iter().map(super::history_document).collect();
         Ok(())
     }
 

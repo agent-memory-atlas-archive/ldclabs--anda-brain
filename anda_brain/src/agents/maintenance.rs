@@ -168,7 +168,7 @@ impl MaintenanceAgent {
                             .unwrap_or(0)
             })
             .rev()
-            .map(Document::from)
+            .map(|conversation| super::history_document(&conversation))
             .collect();
         Ok(())
     }

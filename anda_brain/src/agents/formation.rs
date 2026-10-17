@@ -188,7 +188,7 @@ impl FormationAgent {
                     .as_deref()
                     .is_none_or(|label| label == "formation")
             {
-                newest.push(Document::from(conv));
+                newest.push(super::history_document(&conv));
             }
             id -= 1;
         }
@@ -2844,6 +2844,88 @@ mod tests {
             .unwrap();
         let stored = serde_json::to_string(&stored.messages).unwrap();
         assert!(!stored.contains("Saved note index"));
+        space.close().await.unwrap();
+    }
+
+    /// Earlier passes reach the next one as bounded history, also when a
+    /// restart rebuilds the ring from the store. Whole, two long passes made
+    /// every later pass's first request outgrow a 1M-token window.
+    #[tokio::test]
+    async fn history_formation_stays_bounded_after_long_passes() {
+        let max_doc = super::super::HISTORY_DOCUMENT_MAX_BYTES + 1024;
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let app = test_app_state_with_completer(
+            "formation_bounded_history",
+            ReviewCompleter {
+                requests: requests.clone(),
+                fail_on_call: None,
+            },
+        );
+        let space = create_loaded_space(&app, "formation_bounded_history").await;
+        let ctx = space
+            .ctx_for_test(SELF_USER_ID, FormationAgent::NAME)
+            .unwrap();
+        let mut messages = vec![json!(Message {
+            role: "user".into(),
+            content: vec![format!("PAST_INPUT {}", "记".repeat(100_000)).into()],
+            ..Default::default()
+        })];
+        for turn in 0..300 {
+            messages.push(json!({"role": "assistant", "content": [
+                {"type": "Reasoning", "text": "PAST_REASONING ".repeat(200)},
+                {"type": "Text", "text": format!("past step {turn}")},
+            ]}));
+        }
+        messages.push(json!(Message {
+            role: "assistant".into(),
+            content: vec!["PAST_CONCLUSION".to_string().into()],
+            ..Default::default()
+        }));
+        for _ in 0..2 {
+            let now = unix_ms();
+            space
+                .memory
+                .add_conversation(ConversationRef::from(&Conversation {
+                    user: SELF_USER_ID,
+                    status: ConversationStatus::Completed,
+                    messages: messages.clone(),
+                    label: Some("formation".to_string()),
+                    created_at: now,
+                    updated_at: now,
+                    ..Default::default()
+                }))
+                .await
+                .unwrap();
+        }
+        space.formation.init().await.unwrap();
+        assert_eq!(space.formation.history.read().len(), 2);
+
+        let mut conversation = stored_conversation(
+            &space,
+            vec![json!(Message {
+                role: "user".into(),
+                content: vec!["I always prefer dark mode.".to_string().into()],
+                ..Default::default()
+            })],
+        )
+        .await;
+        space.formation.process_one(&ctx, &mut conversation).await;
+        assert_eq!(conversation.status, ConversationStatus::Completed);
+
+        let first = requests.lock().unwrap()[0].clone();
+        let history = first
+            .chat_history
+            .iter()
+            .filter_map(Message::text)
+            .find(|text| text.starts_with("<history_formation>"))
+            .expect("the pass is given the earlier passes");
+        assert!(history.len() <= 2 * max_doc, "{} bytes", history.len());
+        assert_eq!(history.matches("PAST_CONCLUSION").count(), 2);
+        assert!(history.contains("PAST_INPUT") && !history.contains("PAST_REASONING"));
+        // The pass that just completed joins the ring bounded as well.
+        let ring = space.formation.history.read().clone();
+        assert_eq!(ring.len(), 2);
+        assert!(ring.iter().all(|doc| doc.to_string().len() <= max_doc));
         space.close().await.unwrap();
     }
 }

@@ -5,7 +5,7 @@ pub mod prompts;
 mod recall;
 
 use anda_core::{
-    BoxError, Document, FunctionDefinition, Json, Message, Principal, Resource, Tool,
+    BoxError, ContentPart, Document, FunctionDefinition, Json, Message, Principal, Resource, Tool,
     ToolGroupInfo, ToolOutput, Usage,
 };
 use anda_db::{query::Fv, schema::DocumentId};
@@ -17,6 +17,7 @@ use anda_engine::{
 };
 use anda_kip::Response;
 use parking_lot::RwLock;
+use serde::Deserialize;
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::Arc,
@@ -653,6 +654,109 @@ fn usage_is_empty(usage: &Usage) -> bool {
         && usage.requests == 0
 }
 
+/// Byte budget of one completed conversation served as `history_*` context.
+///
+/// The ring gives a pass continuity with the passes before it — what they were
+/// given and what they concluded — not a replay of them. A Formation or
+/// Maintenance pass can run for hundreds of turns and the pruned view keeps
+/// every reasoning block, so two whole passes once put a pass's first request
+/// over a 1M-token window, before compaction can act. A failed pass does not
+/// rotate the ring, so every later pass failed the same way. The budget is in
+/// bytes because `estimate_tokens` counts four characters per token, several
+/// times too few for CJK text.
+pub(super) const HISTORY_DOCUMENT_MAX_BYTES: usize = 32 * 1024;
+
+const TRUNCATED_MARKER: &str = "…[truncated]";
+
+/// A completed conversation as bounded `history_*` context.
+///
+/// Only visible text is kept: reasoning is the model's scratch work, and tool
+/// rounds were already pruned from history. The opening input takes at most
+/// half of [`HISTORY_DOCUMENT_MAX_BYTES`], the newest messages fill the rest
+/// (the newest one truncated when it alone does not fit), and the document's
+/// `omitted_messages` counts the messages between them that were left out.
+/// Messages are measured as rendered, so escaping and per-message overhead
+/// count against the budget too.
+pub(super) fn history_document(conversation: &Conversation) -> Document {
+    let mut messages: VecDeque<Message> = conversation
+        .messages
+        .iter()
+        .filter_map(|value| Message::deserialize(value).ok())
+        .filter_map(|mut message| {
+            message.content.retain(
+                |part| matches!(part, ContentPart::Text { text } if !text.trim().is_empty()),
+            );
+            (!message.content.is_empty()).then_some(message)
+        })
+        .collect();
+
+    let mut budget = HISTORY_DOCUMENT_MAX_BYTES;
+    let mut kept = Vec::new();
+    if let Some(mut input) = messages.pop_front() {
+        truncate_text(&mut input, budget / 2);
+        budget = budget.saturating_sub(rendered_len(&input));
+        kept.push(input);
+    }
+    let mut newest = Vec::new();
+    while let Some(mut message) = messages.pop_back() {
+        if rendered_len(&message) > budget {
+            if !newest.is_empty() {
+                messages.push_back(message);
+                break;
+            }
+            // The newest message is the pass's conclusion: keep its head.
+            truncate_text(&mut message, budget);
+        }
+        budget = budget.saturating_sub(rendered_len(&message));
+        newest.push(message);
+    }
+    kept.extend(newest.into_iter().rev());
+
+    let mut doc = Document::from(Conversation {
+        _id: conversation._id,
+        user: conversation.user,
+        thread: conversation.thread,
+        messages: kept
+            .iter()
+            .filter_map(|message| serde_json::to_value(message).ok())
+            .collect(),
+        status: conversation.status.clone(),
+        created_at: conversation.created_at,
+        updated_at: conversation.updated_at,
+        label: conversation.label.clone(),
+        ..Default::default()
+    });
+    if !messages.is_empty() {
+        doc.metadata
+            .insert("omitted_messages".to_string(), messages.len().into());
+    }
+    doc
+}
+
+fn rendered_len(message: &Message) -> usize {
+    serde_json::to_vec(message).map_or(0, |bytes| bytes.len())
+}
+
+/// Cuts a text-only message to `max_bytes` of text, marking the cut.
+fn truncate_text(message: &mut Message, max_bytes: usize) {
+    let mut remaining = max_bytes;
+    let mut keep = message.content.len();
+    for (index, part) in message.content.iter_mut().enumerate() {
+        let ContentPart::Text { text } = part else {
+            continue;
+        };
+        if text.len() <= remaining {
+            remaining -= text.len();
+            continue;
+        }
+        anda_engine::truncate_utf8_to_max_bytes(text, remaining);
+        text.push_str(TRUNCATED_MARKER);
+        keep = index + 1;
+        break;
+    }
+    message.content.truncate(keep);
+}
+
 pub(super) fn push_completed_history(
     history: &RwLock<VecDeque<Document>>,
     conversation: &Conversation,
@@ -662,7 +766,7 @@ pub(super) fn push_completed_history(
         return;
     }
 
-    let doc: Document = conversation.clone().into();
+    let doc = history_document(conversation);
     let mut history = history.write();
     history.push_back(doc);
     let len = history.len();
@@ -700,11 +804,97 @@ pub(super) fn append_runner_history(
 
 #[cfg(test)]
 mod tests {
-    use super::{append_runner_history, push_completed_history};
+    use super::{
+        HISTORY_DOCUMENT_MAX_BYTES, TRUNCATED_MARKER, append_runner_history, history_document,
+        push_completed_history,
+    };
     use anda_core::Message;
     use anda_engine::memory::{Conversation, ConversationStatus};
     use parking_lot::RwLock;
+    use serde_json::json;
     use std::collections::VecDeque;
+
+    /// What a long pass leaves in its conversation: a large input, then
+    /// hundreds of turns of reasoning, short text and pruned tool rounds.
+    fn long_pass(id: u64, turns: usize) -> Conversation {
+        let mut messages = vec![json!(Message {
+            role: "user".to_string(),
+            content: vec![format!("INPUT_HEAD {}", "记".repeat(50_000)).into()],
+            ..Default::default()
+        })];
+        for turn in 0..turns {
+            messages.push(json!({"role": "assistant", "content": [
+                {"type": "Reasoning", "text": "REASONING ".repeat(400)},
+                {"type": "Text", "text": format!("step {turn} {}", "y".repeat(500))},
+                {"type": "Text", "text": "  "},
+                {"type": "ToolCall", "name": "execute_kip", "args": {"command": "FIND"}, "callId": format!("c{turn}")},
+            ]}));
+            messages.push(json!({"role": "tool", "content": [
+                {"type": "ToolOutput", "name": "execute_kip", "output": {"rows": "z".repeat(2_000)}, "callId": format!("c{turn}")},
+            ]}));
+        }
+        messages.push(json!(Message {
+            role: "assistant".to_string(),
+            content: vec!["CONCLUSION".to_string().into()],
+            ..Default::default()
+        }));
+        Conversation {
+            _id: id,
+            status: ConversationStatus::Completed,
+            label: Some("formation".to_string()),
+            messages,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn history_document_keeps_the_input_and_conclusion_within_its_budget() {
+        let conversation = long_pass(7, 200);
+        assert!(serde_json::to_string(&conversation.messages).unwrap().len() > 1_000_000);
+
+        let doc = history_document(&conversation);
+        let rendered = doc.to_string();
+        assert!(
+            rendered.len() <= HISTORY_DOCUMENT_MAX_BYTES + 1024,
+            "{} bytes",
+            rendered.len()
+        );
+        assert!(rendered.contains("INPUT_HEAD") && rendered.contains(TRUNCATED_MARKER));
+        assert!(rendered.contains("CONCLUSION") && rendered.contains("step 199"));
+        assert!(!rendered.contains("REASONING") && !rendered.contains("zzzz"));
+        assert!(!rendered.contains(r#""text":"  ""#));
+        assert_eq!(doc.metadata["_id"], 7);
+        // The input, 200 step texts and the conclusion; tool rounds hold no text.
+        let kept = doc.content.as_array().unwrap().len() as u64;
+        assert_eq!(
+            kept + doc.metadata["omitted_messages"].as_u64().unwrap(),
+            202
+        );
+
+        // A newest message that alone exceeds the budget keeps its head.
+        let mut conversation = long_pass(8, 0);
+        conversation.messages.push(json!(Message {
+            role: "assistant".to_string(),
+            content: vec![format!("FINAL_HEAD {}", "w".repeat(100_000)).into()],
+            ..Default::default()
+        }));
+        let rendered = history_document(&conversation).to_string();
+        assert!(rendered.len() <= HISTORY_DOCUMENT_MAX_BYTES + 1024);
+        assert!(rendered.contains("FINAL_HEAD") && rendered.contains("INPUT_HEAD"));
+        assert!(!rendered.contains("CONCLUSION"));
+    }
+
+    #[test]
+    fn push_completed_history_keeps_a_bounded_document() {
+        let history = RwLock::new(VecDeque::new());
+        push_completed_history(&history, &long_pass(1, 300), 2);
+        push_completed_history(&history, &long_pass(2, 300), 2);
+        let history = history.read();
+        assert_eq!(history.len(), 2);
+        for doc in history.iter() {
+            assert!(doc.to_string().len() <= HISTORY_DOCUMENT_MAX_BYTES + 1024);
+        }
+    }
 
     #[test]
     fn push_completed_history_ignores_working_conversations_and_caps_length() {

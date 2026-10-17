@@ -2,6 +2,23 @@
 
 All notable changes to the Anda Brain project.
 
+## [Unreleased]
+
+## [0.13.6] — 2026-10-17
+
+### Fixed
+
+- Formation, Maintenance and Recall get their earlier passes as bounded history.
+  The `history_formation`, `history_maintenance` and `history_recall` context held
+  the last completed conversations whole: the full input and every turn's text and
+  reasoning. A long Formation pass on a reasoning model leaves megabytes of that, so
+  two of them put a pass's first request over a 1M-token window (`1073261 in the
+  messages`), before compaction can act. A failed pass does not rotate the ring, and
+  a restart rebuilds it from the same two conversations, so every later window
+  failed the same way until Formation gave up on it. Each history conversation is
+  now its visible text only, at most 32 KiB as rendered: the head of its opening
+  input and its newest messages, with `omitted_messages` counting the ones left out.
+
 ## [0.13.5] — 2026-10-17
 
 On the same KIP `11a82ec` / `cognitive-memory@2.0.0` stack, moved to `anda_core` /
